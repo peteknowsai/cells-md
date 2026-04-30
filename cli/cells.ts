@@ -385,7 +385,7 @@ async function dreamOne(name: string): Promise<boolean> {
       name,
       "--",
       "bash",
-      "-c",
+      "-lc",
       'cd /home/sprite/agent && pi -p "Run the dream tool to consolidate your memory."',
     ],
     {
