@@ -65,13 +65,13 @@ Tools registered by the `self-tools` extension:
 - **`checkpoint_self`** — snapshot your own filesystem (~300ms,
   copy-on-write) before risky ops so you can roll back.
 
-Both are thin wrappers over the on-cell `cell` CLI, which is on your PATH:
+Both are thin wrappers over the on-cell `cells` CLI, which is on your PATH:
 
-- `cell whoami` — your sprite name.
-- `cell list` — list peer cells with status.
-- `cell info [name|self]` — inspect a cell (default: self).
-- `cell checkpoint [self]` — snapshot self (only self; ask Pete for peers).
-- `cell talk <name> <msg>` — send a one-shot message to a peer's Pi and
+- `cells whoami` — your sprite name.
+- `cells list` — list peer cells with status.
+- `cells info [name|self]` — inspect a cell (default: self).
+- `cells checkpoint [self]` — snapshot self (only self; ask Pete for peers).
+- `cells talk <name> <msg>` — send a one-shot message to a peer's Pi and
   capture the reply. Use sparingly — you're interrupting another agent.
 
 Create / destroy and peer-targeted lifecycle ops live with the keeper on

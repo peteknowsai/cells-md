@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 /**
- * cell — slim on-sprite CLI for cells.
+ * cells — slim on-sprite CLI.
  *
  * Lets a cell see its peers, inspect itself, and talk to other cells. Read
  * + talk only — no create/destroy/checkpoint (those stay with the keeper
@@ -104,7 +104,7 @@ async function cmdInfo(arg: string) {
 
 async function cmdCheckpoint(arg: string) {
   const name = arg === "self" || arg === "" ? selfName() : arg;
-  if (name !== selfName()) die("on-cell `cell checkpoint` only operates on self. Ask Pete to checkpoint other cells.");
+  if (name !== selfName()) die("on-cell `cells checkpoint` only operates on self. Ask Pete to checkpoint other cells.");
   // POST /v1/sprites/<name>/checkpoint streams NDJSON events. Walk them
   // and surface the resulting checkpoint id (or error).
   if (!TOKEN) die("SPRITES_TOKEN not set");
@@ -133,8 +133,8 @@ async function cmdCheckpoint(arg: string) {
 }
 
 async function cmdTalk(name: string, message: string) {
-  if (!name || !message) die("usage: cell talk <name> <message>");
-  if (name === selfName()) die("can't talk to self via cell talk — use talk_to_self instead");
+  if (!name || !message) die("usage: cells talk <name> <message>");
+  if (name === selfName()) die("can't talk to self via cells talk — use talk_to_self instead");
 
   // Inject into the peer's tmux session and capture the pane after a short
   // delay. Mirrors what the keeper's talk_to_agent does, but issued from
@@ -184,17 +184,17 @@ switch (sub) {
     await cmdCheckpoint(rest[0] ?? "self");
     break;
   default:
-    console.log("cell — on-sprite CLI (read + talk subset)");
+    console.log("cells— on-sprite CLI (read + talk subset)");
     console.log("");
     console.log("usage:");
-    console.log("  cell whoami              print self name");
-    console.log("  cell list                list peer cells (status, age)");
-    console.log("  cell info [name|self]    show name, status, egress (default: self)");
-    console.log("  cell talk <name> <msg>   send a message to a peer's Pi, capture reply");
-    console.log("  cell checkpoint [self]   snapshot your own filesystem (~300ms)");
+    console.log("  cells whoami              print self name");
+    console.log("  cells list                list peer cells (status, age)");
+    console.log("  cells info [name|self]    show name, status, egress (default: self)");
+    console.log("  cells talk <name> <msg>   send a message to a peer's Pi, capture reply");
+    console.log("  cells checkpoint [self]   snapshot your own filesystem (~300ms)");
     console.log("");
     console.log("not available on cells (keeper-only):");
     console.log("  create, destroy, sleep, wake, dream*");
-    console.log("  (`cell checkpoint` only works on self \u2014 ask Pete for peer checkpoints)");
+    console.log("  (`cells checkpoint` only works on self \u2014 ask Pete for peer checkpoints)");
     process.exit(sub ? 1 : 0);
 }

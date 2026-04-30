@@ -12,7 +12,7 @@ Sprite) is the only exception, and exists to be plumbing for the cell's body.
 ## Phase 0 — Hello, Cell
 
 A minimum-viable cell. No memory, no wiki, no DB, no backup. Just Pi running on
-a Sprite, reachable via `cell talk`. Get the substrate working before we put
+a Sprite, reachable via `cells talk`. Get the substrate working before we put
 anything inside it.
 
 **Includes:**
@@ -30,7 +30,7 @@ anything inside it.
   - take the first checkpoint
 - `.pi/prompts/` — slash commands the CLI invokes (`cell-create`, `cell-destroy`, `cell-checkpoint`)
 
-**Done when:** `cell create Pete` works end-to-end. `cell talk Pete` lands me in
+**Done when:** `cells create Pete` works end-to-end. `cells talk Pete` lands me in
 a Pi TUI on the Sprite. I have a conversation. I disconnect. The Sprite
 hibernates. I come back days later. Conversation is still there. The cell is
 the same cell.
@@ -63,7 +63,7 @@ extensions, skills — readable in Obsidian. Replaces the original
 need a curated knowledge layer; mirroring their existing markdown is
 the actual readable surface Pete wants.
 
-- `cell sync [name]` — pull-only. Mirrors per-cell markdown into a
+- `cells sync [name]` — pull-only. Mirrors per-cell markdown into a
   single vault at `~/Obsidian/cells/<name>/`. Top-level `README.md`
   is a roster across all cells.
 - Per-cell `README.md` is a generated dashboard: live status from the
@@ -99,7 +99,7 @@ Offsite cold backup of the cell's body.
 - HTTP chat shim on port 8080
 - Cell kinds / specializations / overlays
 - Self-modification beyond memory and wiki
-- L2 wiki / Karpathy-style distilled knowledge — earns its keep when a cell has a job; until then `cell sync` (Phase 2) covers the readable-surface need
-- Bidirectional vault sync — pull-only for now; if Pete actually wants to edit in Obsidian, we'll add `cell sync push` with a git-style conflict pre-flight
+- L2 wiki / Karpathy-style distilled knowledge — earns its keep when a cell has a job; until then `cells sync` (Phase 2) covers the readable-surface need
+- Bidirectional vault sync — pull-only for now; if Pete actually wants to edit in Obsidian, we'll add `cells sync push` with a git-style conflict pre-flight
 
 These may come later. For now, we build the singular unit.

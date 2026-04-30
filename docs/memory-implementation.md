@@ -18,7 +18,7 @@ Two sub-phases. Ship 1.0 standalone — useful even without dream.
 
 | Phase | Adds | Done when |
 |---|---|---|
-| **1.0** | Memory dir, MEMORY.md injection, write/remove tools, truncation, yearnings | Agent remembers things across `cell talk` sessions |
+| **1.0** | Memory dir, MEMORY.md injection, write/remove tools, truncation, yearnings | Agent remembers things across `cells talk` sessions |
 | **1.1** | `dream` tool + forked subagent + ritual prose | Calling `dream` produces measurably-cleaner `MEMORY.md` |
 
 ## Memory directory layout
@@ -285,8 +285,8 @@ itself.
 ### Verification (Phase 1.0)
 
 1. `bun build template/.pi/extensions/memory/index.ts --target=node` — clean.
-2. `cell destroy <name> && cell create <name>` — fresh agent.
-3. `cell talk <name>` — agent should mention having a memory directory.
+2. `cells destroy <name> && cells create <name>` — fresh agent.
+3. `cells talk <name>` — agent should mention having a memory directory.
 4. `sprite exec -s <name> -- ls /home/sprite/agent/memory/` — should show MEMORY.md and yearnings/.
 5. Tell agent something durable (e.g. "I'm a solo dev, prefer terse responses").
 6. Verify `feedback_*.md` exists and `MEMORY.md` indexes it.
@@ -406,7 +406,7 @@ network. No identity — you are not the agent itself, you are its consolidator.
 4. Update `template/.pi/agents/self.md` with memory paragraph.
 5. Update `template/.gitignore` to exclude `memory/`.
 6. `bun build` to verify compile.
-7. `cell destroy <name> && cell create <name>` against a clean Sprite.
+7. `cells destroy <name> && cells create <name>` against a clean Sprite.
 8. Run Phase 1.0 verification steps.
 9. Once 1.0 passes: write `dream-ritual.md`.
 10. Add `dream` tool to `index.ts`.

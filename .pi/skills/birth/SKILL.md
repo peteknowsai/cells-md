@@ -104,7 +104,7 @@ Then substitute `__NAME__` with the actual name. Use `sprite_exec`:
 sed -i 's/__NAME__/<NAME>/g' /home/sprite/agent/AGENTS.md /home/sprite/agent/.pi/agents/self.md /home/sprite/agent/package.json
 ```
 
-## 5. Run `bun install`, install Pi globally, install web-access, install `cell` CLI
+## 5. Run `bun install`, install Pi globally, install web-access, install `cells` CLI
 
 `bun install` is mandatory — without `node_modules/`, the identity extension
 fails to load and the agent silently lands on extra-usage billing.
@@ -120,7 +120,7 @@ later.
 
 Use `sprite_exec`:
 
-The template ships with `bin/cell` — a slim on-sprite CLI (read+talk only,
+The template ships with `bin/cells` — a slim on-sprite CLI (read+talk only,
 backed by the Sprites HTTP API). Make it executable and symlink onto PATH
 so both the agent's bash and the `self-tools` extension can call it.
 
@@ -129,9 +129,9 @@ export PATH=$HOME/.bun/bin:$PATH
 cd /home/sprite/agent && bun install
 bun install -g @mariozechner/pi-coding-agent@latest
 pi install -l npm:pi-web-access
-chmod +x /home/sprite/agent/bin/cell
+chmod +x /home/sprite/agent/bin/cells
 mkdir -p /home/sprite/.local/bin
-ln -sf /home/sprite/agent/bin/cell /home/sprite/.local/bin/cell
+ln -sf /home/sprite/agent/bin/cells /home/sprite/.local/bin/cells
 ```
 
 ## 6. Set up the env shim and PATH
@@ -273,7 +273,7 @@ Use `date -u +"%Y-%m-%d %H:%M"` for the timestamp.
 
 After reporting outcome, tell the user one line:
 
-> Agent `<NAME>` is alive. Talk to it with `cell talk <NAME>`.
+> Agent `<NAME>` is alive. Talk to it with `cells talk <NAME>`.
 
 No caveats, no warnings, no future-state notes. Just the success line.
 

@@ -8,12 +8,12 @@ You are the local agent in Pete's `~/Projects/cell` repo. Your job is to
 provision and manage **remote agents** — each one a Pi running on its own
 Sprite VM with persistent storage at `/home/sprite/agent`.
 
-The user's interface is the `cell` CLI. Trivial commands (`cell talk`, `cell
-list`, `cell sync`) bypass you. Stateful commands (`cell create`, `cell destroy`,
-`cell checkpoint`) reach you as `/cell-*` slash messages in print mode — you
+The user's interface is the `cells` CLI. Trivial commands (`cells talk`, `cells
+list`, `cells sync`) bypass you. Stateful commands (`cells create`, `cells destroy`,
+`cells checkpoint`) reach you as `/cell-*` slash messages in print mode — you
 read the relevant skill and execute.
 
-`cell sync` mirrors every cell's markdown (memory, persona, extensions, skills)
+`cells sync` mirrors every cell's markdown (memory, persona, extensions, skills)
 into a single Obsidian vault at `~/Obsidian/cells/`. Pull-only. If Pete asks
 "what's on harry?" or "show me harry's memory", point him at the vault first;
 fall back to `read_agent_memory` only if the vault is stale or he wants live state.
@@ -51,7 +51,7 @@ fall back to `read_agent_memory` only if the vault is stale or he wants live sta
 - **Bash + file system** — for everything else.
 
 Skills live in `.pi/skills/`, slash commands in `.pi/prompts/`, the Bun CLI
-is `cli/cell.ts` (you don't edit it).
+is `cli/cells.ts` (you don't edit it).
 
 ## Cell state
 

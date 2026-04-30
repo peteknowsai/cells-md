@@ -133,7 +133,7 @@ async function cmdList() {
 async function cmdTalk(name: string, message?: string) {
   if (name === "keeper") {
     if (message) {
-      console.error("one-shot talk to keeper not supported. Use `cell pi`.");
+      console.error("one-shot talk to keeper not supported. Use `cells pi`.");
       process.exit(1);
     }
     await launchKeeperTui();
@@ -475,9 +475,9 @@ async function cmdScheduleDreams() {
     process.exit(1);
   }
 
-  console.log(`✓ scheduled: cell dream --all nightly at 4:00am`);
+  console.log(`✓ scheduled: cells dream --all nightly at 4:00am`);
   console.log(`  logs: ${logsDir}/dream.log (stdout), dream.err (stderr)`);
-  console.log(`  unschedule with: cell unschedule-dreams`);
+  console.log(`  unschedule with: cells unschedule-dreams`);
 }
 
 async function cmdUnscheduleDreams() {
@@ -498,7 +498,7 @@ async function cmdUnscheduleDreams() {
 
 async function cmdDream(arg: string) {
   if (!arg) {
-    console.error("usage: cell dream <name>   |   cell dream --all");
+    console.error("usage: cells dream <name>   |   cells dream --all");
     process.exit(1);
   }
   if (arg === "--all") {
@@ -1139,18 +1139,18 @@ switch (sub) {
   case "unschedule-dreams":  await cmdUnscheduleDreams(); break;
   default:
     console.log("usage:");
-    console.log("  cell pi                    open the cell-keeper Pi TUI (alias: cell talk keeper)");
-    console.log("  cell create <name>         provision a new cell on a Sprite");
-    console.log("  cell talk <name> [msg]     attach to a cell's TUI (no msg) or send one-shot (with msg). 'keeper' = local.");
-    console.log("  cell list                  list known cells");
-    console.log("  cell sleep <name>          force-hibernate a Sprite");
-    console.log("  cell wake <name>           force-wake a Sprite");
-    console.log("  cell checkpoint <name>     snapshot a cell's filesystem");
-    console.log("  cell dream <name|--all>    run dream consolidation on a cell or all cells");
-    console.log("  cell stream <name>         interactive multi-turn streaming chat with a cell (Pi RPC)");
-    console.log("  cell sync [name]           pull cell markdown into ~/Obsidian/cells/ (default: all + keeper)");
-    console.log("  cell schedule-dreams       install launchd plist (nightly 4am, all cells)");
-    console.log("  cell unschedule-dreams     remove launchd plist");
-    console.log("  cell destroy <name>        destroy a cell (irreversible)");
+    console.log("  cells pi                    open the cell-keeper Pi TUI (alias: cells talk keeper)");
+    console.log("  cells create <name>         provision a new cell on a Sprite");
+    console.log("  cells talk <name> [msg]     attach to a cell's TUI (no msg) or send one-shot (with msg). 'keeper' = local.");
+    console.log("  cells list                  list known cells");
+    console.log("  cells sleep <name>          force-hibernate a Sprite");
+    console.log("  cells wake <name>           force-wake a Sprite");
+    console.log("  cells checkpoint <name>     snapshot a cell's filesystem");
+    console.log("  cells dream <name|--all>    run dream consolidation on a cell or all cells");
+    console.log("  cells stream <name>         interactive multi-turn streaming chat with a cell (Pi RPC)");
+    console.log("  cells sync [name]           pull cell markdown into ~/Obsidian/cells/ (default: all + keeper)");
+    console.log("  cells schedule-dreams       install launchd plist (nightly 4am, all cells)");
+    console.log("  cells unschedule-dreams     remove launchd plist");
+    console.log("  cells destroy <name>        destroy a cell (irreversible)");
     process.exit(sub ? 1 : 0);
 }

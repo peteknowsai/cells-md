@@ -25,7 +25,7 @@ pi update                              # update everything
 the flag for global install.
 
 After installing, **restart yourself** so Pi loads the new extension:
-- Tell the user to detach and reattach (Ctrl-b d, then `cell talk <NAME>`)
+- Tell the user to detach and reattach (Ctrl-b d, then `cells talk <NAME>`)
 - Or they can run `/reload` inside the TUI
 
 Examples of useful packages: `pi-web-access` (web search + URL fetch — you
