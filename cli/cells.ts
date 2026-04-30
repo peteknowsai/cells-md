@@ -105,15 +105,16 @@ async function runPiWithOutcome(
 // ───── direct (no Pi) ─────
 
 async function launchKeeperTui() {
-  const tmuxConf = join(CELL_REPO, ".tmux.conf");
-  const proc = Bun.spawn(
-    ["tmux", "-f", tmuxConf, "new-session", "-A", "-s", "keeper", "-c", CELL_REPO, "pi"],
-    {
-      stdin: "inherit",
-      stdout: "inherit",
-      stderr: "inherit",
-    },
-  );
+  // Direct pi spawn — no tmux wrapper. Pete runs this on his Mac in his own
+  // terminal; there's no SSH-disconnect / hibernation problem to solve here.
+  // Pi persists sessions to ~/.pi/agent/sessions/ on its own, so closing the
+  // terminal and re-running picks up where you left off.
+  const proc = Bun.spawn(["pi"], {
+    cwd: CELL_REPO,
+    stdin: "inherit",
+    stdout: "inherit",
+    stderr: "inherit",
+  });
   await proc.exited;
 }
 
