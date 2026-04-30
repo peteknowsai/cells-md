@@ -497,25 +497,51 @@ async function cmdUnscheduleDreams() {
   console.log("✓ unscheduled");
 }
 
+async function dreamKeeper(): Promise<boolean> {
+  console.log(`→ dreaming keeper`);
+  const repoDir = dirname(dirname(fileURLToPath(import.meta.url)));
+  const proc = Bun.spawn(
+    [
+      "claude",
+      "-p",
+      "Run the dream tool to consolidate your memory.",
+      "--dangerously-skip-permissions",
+    ],
+    {
+      cwd: repoDir,
+      stdin: "ignore",
+      stdout: "inherit",
+      stderr: "inherit",
+    },
+  );
+  const code = await proc.exited;
+  const ok = code === 0;
+  console.log(ok ? `✓ keeper` : `✗ keeper (exit ${code})`);
+  return ok;
+}
+
 async function cmdDream(arg: string) {
   if (!arg) {
-    console.error("usage: cells dream <name>   |   cells dream --all");
+    console.error("usage: cells dream <name|keeper|--all>");
     process.exit(1);
   }
   if (arg === "--all") {
     const reg = await loadRegistry();
-    if (reg.cells.length === 0) {
-      console.log("no cells");
-      return;
-    }
     let okCount = 0;
     let failCount = 0;
     for (const cell of reg.cells) {
       const ok = await dreamOne(cell.name);
       ok ? okCount++ : failCount++;
     }
+    const ok = await dreamKeeper();
+    ok ? okCount++ : failCount++;
     console.log(`\n${okCount} ok, ${failCount} failed`);
     if (failCount > 0) process.exit(1);
+    return;
+  }
+  if (arg === "keeper" || arg === "self") {
+    const ok = await dreamKeeper();
+    if (!ok) process.exit(1);
     return;
   }
   await requireCell(arg);
@@ -1147,7 +1173,7 @@ switch (sub) {
     console.log("  cells sleep <name>          force-hibernate a Sprite");
     console.log("  cells wake <name>           force-wake a Sprite");
     console.log("  cells checkpoint <name>     snapshot a cell's filesystem");
-    console.log("  cells dream <name|--all>    run dream consolidation on a cell or all cells");
+    console.log("  cells dream <name|keeper|--all>  run dream consolidation on a cell, the keeper, or all");
     console.log("  cells stream <name>         interactive multi-turn streaming chat with a cell (Pi RPC)");
     console.log("  cells sync [name]           pull cell markdown into ~/Obsidian/cells/ (default: all + keeper)");
     console.log("  cells schedule-dreams       install launchd plist (nightly 4am, all cells)");
