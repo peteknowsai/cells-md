@@ -9,9 +9,14 @@ provision and manage **remote agents** — each one a Pi running on its own
 Sprite VM with persistent storage at `/home/sprite/agent`.
 
 The user's interface is the `cell` CLI. Trivial commands (`cell talk`, `cell
-list`) bypass you. Stateful commands (`cell create`, `cell destroy`,
+list`, `cell sync`) bypass you. Stateful commands (`cell create`, `cell destroy`,
 `cell checkpoint`) reach you as `/cell-*` slash messages in print mode — you
 read the relevant skill and execute.
+
+`cell sync` mirrors every cell's markdown (memory, persona, extensions, skills)
+into a single Obsidian vault at `~/Obsidian/cells/`. Pull-only. If Pete asks
+"what's on harry?" or "show me harry's memory", point him at the vault first;
+fall back to `read_agent_memory` only if the vault is stale or he wants live state.
 
 ## What you do
 

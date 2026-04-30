@@ -25,15 +25,10 @@ anything inside it.
   - install Bun on the Sprite
   - tar+push `template/` to `/root/cell`, `sed` substitute `__NAME__`
   - run `bun install` on the Sprite
-  - inject the OAuth access token from `~/.pi/agent/auth.json` as `ANTHROPIC_API_KEY`
+  - inject `ANTHROPIC_API_KEY` (and other shared keys) from `~/.cell/secrets.json`
   - write the `~/.bashrc` shim that auto-attaches `tmux new-session -A -s cell pi` on `sprite console`
   - take the first checkpoint
 - `.pi/prompts/` — slash commands the CLI invokes (`cell-create`, `cell-destroy`, `cell-checkpoint`)
-
-**Phase 0 known debt:**
-
-- OAuth access token from `auth.json` rotates (hours). When a cell stops working with 401, re-run step 6 of birth. Proper refresh = future phase.
-- Sprites REST API path/auth is best-guess; first `cell create` likely needs adjustment.
 
 **Done when:** `cell create Pete` works end-to-end. `cell talk Pete` lands me in
 a Pi TUI on the Sprite. I have a conversation. I disconnect. The Sprite
@@ -60,15 +55,26 @@ The cell gains short-term episodic memory.
   Sprite wake, not on a polling loop.
 - Base `AGENTS.md` updated to teach the cell to journal during conversation
 
-## Phase 2 — L2 wiki (Karpathy pattern)
+## Phase 2 — Obsidian vault sync
 
-The cell gains durable, distilled knowledge.
+One place on the Mac to peruse what's on every cell — memory, persona,
+extensions, skills — readable in Obsidian. Replaces the original
+"Phase 2 — L2 wiki" plan because cells don't ingest enough material to
+need a curated knowledge layer; mirroring their existing markdown is
+the actual readable surface Pete wants.
 
-- `~/cell/wiki/raw/` — immutable sources the cell has ingested
-- `~/cell/wiki/wiki/` — the cell's distilled pages (cell-only territory)
-- `~/cell/wiki/SCHEMA.md` — the cell's evolving taxonomy
-- Ingest skill with a quality gate before anything enters the wiki
-- Promotion path: L1 entries that prove durable get distilled into L2
+- `cell sync [name]` — pull-only. Mirrors per-cell markdown into a
+  single vault at `~/Obsidian/cells/<name>/`. Top-level `README.md`
+  is a roster across all cells.
+- Per-cell `README.md` is a generated dashboard: live status from the
+  Sprites API, persona link, extensions (with their tools), skills,
+  memory stats.
+- Mechanism: `sprite exec` + tar pipe over allowlist (`AGENTS.md`,
+  `memory/`, `yearnings/`, `.pi/agents/`, `.pi/skills/`,
+  `.pi/prompts/`, restricted to `*.md` and `SKILL.md`).
+- Extension docs are *generated* — `index.ts` is parsed for
+  `pi.registerTool({...})` calls; the `.ts` itself never lands in
+  the vault.
 
 ## Phase 3 — L3 db (Stoolap)
 
@@ -93,5 +99,7 @@ Offsite cold backup of the cell's body.
 - HTTP chat shim on port 8080
 - Cell kinds / specializations / overlays
 - Self-modification beyond memory and wiki
+- L2 wiki / Karpathy-style distilled knowledge — earns its keep when a cell has a job; until then `cell sync` (Phase 2) covers the readable-surface need
+- Bidirectional vault sync — pull-only for now; if Pete actually wants to edit in Obsidian, we'll add `cell sync push` with a git-style conflict pre-flight
 
 These may come later. For now, we build the singular unit.

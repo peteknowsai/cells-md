@@ -15,12 +15,12 @@ step matters — if you shortcut, the agent silently lands on extra-usage billin
 Prefer the sprite_* tools for every step that has them — they're cleaner than
 shell-out and surface errors as structured tool results. The `bash` tool is
 still available for local-only operations on the Mac (e.g., reading
-`~/.pi/agent/auth.json` for the OAuth token).
+`~/.cell/secrets.json`).
 
 ## Preconditions
 
 - `sprite` CLI authenticated (verify with `sprite org list`)
-- Local Pi is OAuth-authenticated: `~/.pi/agent/auth.json` has `.anthropic.type == "oauth"`
+- `~/.cell/secrets.json` contains `ANTHROPIC_API_KEY` (must be an `sk-ant-oat` OAuth token for first-party Pro/Max billing)
 - No existing agent with this name (the Bun CLI checks before invoking you)
 
 ## 1. Create the Sprite
@@ -134,40 +134,22 @@ mkdir -p /home/sprite/.local/bin
 ln -sf /home/sprite/agent/bin/cell /home/sprite/.local/bin/cell
 ```
 
-## 6. Inject OAuth token as ANTHROPIC_API_KEY
+## 6. Set up the env shim and PATH
 
-Pi's first-party billing requires the token to contain `sk-ant-oat`. Pull
-Pete's OAuth access token from the local `~/.pi/agent/auth.json` (use the
-local `bash` tool, not `sprite_exec`) and set it as `ANTHROPIC_API_KEY` on
-the Sprite. Don't echo the token value in your reply.
+Sprites' Ubuntu non-interactive login shells (`bash -lc 'cmd'`, used by
+`sprite exec`) bail out of `.bashrc` before reaching the end. So we source
+`~/.bashrc.d/*` from `~/.profile` instead — that runs for *every* login
+shell, interactive or not. Also drop a `bashrc.d/bun` file so Bun is on
+PATH everywhere.
 
-Note: the access token rotates (~hours). When the agent stops working with a
-401, refresh by re-running this step. A proper refresh mechanism is future work.
-
-Local bash:
-
-```bash
-TOKEN=$(jq -r .anthropic.access ~/.pi/agent/auth.json)
-echo "$TOKEN" | head -c 20
-# pass $TOKEN to the next step
-```
-
-Then `sprite_exec` to write it onto the Sprite (substitute the token value
-inline; quote singly so it doesn't expand again):
+Use `sprite_exec`:
 
 ```bash
 mkdir -p /home/sprite/.bashrc.d
-cat > /home/sprite/.bashrc.d/anthropic << 'EOF'
-export ANTHROPIC_API_KEY='<paste the token here>'
-EOF
-chmod 600 /home/sprite/.bashrc.d/anthropic
 
-# Source .bashrc.d from .profile (NOT .bashrc) so it runs for all login
-# shells — including `bash -lc 'cmd'` non-interactive ones, which Ubuntu's
-# .bashrc bails out of before reaching the end. Idempotent via the grep guard.
 grep -q bashrc.d /home/sprite/.profile || cat >> /home/sprite/.profile << 'EOF'
 
-# cell: load env from ~/.bashrc.d/ for all login shells (interactive and non-interactive)
+# agent: load env from ~/.bashrc.d/ for all login shells (interactive and non-interactive)
 for f in /home/sprite/.bashrc.d/*; do [ -r "$f" ] && . "$f"; done
 EOF
 
@@ -176,17 +158,19 @@ export PATH=$HOME/.bun/bin:$PATH
 EOF
 ```
 
-### 6b. Inject shared secrets from `~/.cell/secrets.json`
+## 6b. Inject shared secrets from `~/.cell/secrets.json`
 
-Every cell gets the same shared secrets (Exa, Perplexity, GitHub PAT, R2,
-etc.). Read them from `~/.cell/secrets.json` on the Mac and write each as
-its own file in `/home/sprite/.bashrc.d/` on the Sprite. Don't echo any
-values in your reply.
+Every cell gets the same shared secrets, read from `~/.cell/secrets.json`
+on the Mac and written one-file-per-key into `/home/sprite/.bashrc.d/` on
+the Sprite. **`ANTHROPIC_API_KEY` is one of these keys** — Pi's first-party
+billing requires a token containing `sk-ant-oat` and that's where it lives
+(seeded from `~/.pi/agent/auth.json` once, then sourced from secrets going
+forward). Don't echo any values in your reply.
 
 Local bash to read the file (use `bash`, not `sprite_exec`):
 
 ```bash
-test -f ~/.cell/secrets.json && cat ~/.cell/secrets.json
+test -f ~/.cell/secrets.json && jq -r 'keys[]' ~/.cell/secrets.json
 ```
 
 Then for each `KEY: value` pair, write to the Sprite. Per-key files keep
@@ -201,10 +185,10 @@ chmod 600 /home/sprite/.bashrc.d/exa
 "
 ```
 
-Repeat for every key in `secrets.json`. If the file doesn't exist or is
-empty, skip this step — the cell can still operate, just without those
-specific tools (e.g., `web_search` falls back to Exa MCP free tier without
-the key).
+Repeat for every key. The file must exist and contain `ANTHROPIC_API_KEY`
+at minimum — without it the cell can't reach the Anthropic API. If
+`secrets.json` is missing or `ANTHROPIC_API_KEY` is absent, stop and report
+failure at step 10.
 
 ## 7. Register the `agent` service (auto-start Pi on VM boot)
 

@@ -1,9 +1,9 @@
 #!/usr/bin/env bun
 import { $ } from "bun";
-import { readFile, writeFile, mkdir, unlink } from "node:fs/promises";
+import { readFile, writeFile, mkdir, unlink, symlink, cp, readdir, stat, rm } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
-import { dirname, join } from "node:path";
-import { existsSync } from "node:fs";
+import { dirname, join, basename } from "node:path";
+import { existsSync, statSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import * as readline from "node:readline/promises";
 
@@ -522,6 +522,598 @@ async function cmdDream(arg: string) {
   if (!ok) process.exit(1);
 }
 
+// ───── sync (Obsidian vault) ─────
+
+const VAULT_DIR = join(homedir(), "Obsidian", "cells");
+const SECRETS_PATH = join(homedir(), ".cell", "secrets.json");
+
+async function spritesToken(): Promise<string> {
+  if (process.env.SPRITES_TOKEN) return process.env.SPRITES_TOKEN;
+  if (existsSync(SECRETS_PATH)) {
+    const s = JSON.parse(await readFile(SECRETS_PATH, "utf-8"));
+    if (s.SPRITES_TOKEN) return s.SPRITES_TOKEN;
+  }
+  console.error("SPRITES_TOKEN not set (env or ~/.cell/secrets.json)");
+  process.exit(1);
+}
+
+async function api(path: string): Promise<any> {
+  const token = await spritesToken();
+  const r = await fetch(`https://api.sprites.dev${path}`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  const text = await r.text();
+  if (!r.ok) throw new Error(`api ${path} → ${r.status}: ${text.slice(0, 300)}`);
+  try {
+    return JSON.parse(text);
+  } catch {
+    return text;
+  }
+}
+
+type SpriteInfo = {
+  status: string;
+  url: string | null;
+  created_at: string;
+  last_running_at: string | null;
+  egress: string;
+};
+
+async function getSpriteInfo(name: string): Promise<SpriteInfo> {
+  const [sprite, policy] = await Promise.all([
+    api(`/v1/sprites/${encodeURIComponent(name)}`),
+    api(`/v1/sprites/${encodeURIComponent(name)}/policy/network`).catch(() => null),
+  ]);
+  const egress = policy?.rules
+    ? policy.rules.map((r: any) => `${r.action} ${r.domain}`).join(", ")
+    : "(unknown)";
+  return {
+    status: sprite.status ?? "?",
+    url: sprite.url ?? null,
+    created_at: sprite.created_at,
+    last_running_at: sprite.last_running_at ?? null,
+    egress,
+  };
+}
+
+function fmtAge(iso: string | null): string {
+  if (!iso) return "—";
+  const ms = Date.now() - new Date(iso).getTime();
+  const s = Math.floor(ms / 1000);
+  if (s < 60) return `${s}s ago`;
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m}m ago`;
+  const h = Math.floor(m / 60);
+  if (h < 48) return `${h}h ago`;
+  return `${Math.floor(h / 24)}d ago`;
+}
+
+type ExtensionMeta = {
+  description: string;
+  tools: Array<{ name: string; description: string }>;
+  hooks: string[];
+};
+
+function parseExtensionTs(source: string): ExtensionMeta {
+  // 1. Leading /** ... */ block becomes the extension's description.
+  // Preserve paragraph breaks (blank lines stay blank), strip leading "* ".
+  let description = "";
+  const m = source.match(/^\/\*\*([\s\S]*?)\*\//);
+  if (m) {
+    description = m[1]
+      .split("\n")
+      .map((l) => l.replace(/^\s*\*\s?/, ""))
+      .join("\n")
+      .replace(/^\n+|\n+$/g, "");
+  }
+
+  // 2. Each pi.registerTool({...}) call: extract name + description from a window.
+  const tools: Array<{ name: string; description: string }> = [];
+  const startRe = /pi\.registerTool\s*\(\s*\{/g;
+  let startMatch: RegExpExecArray | null;
+  while ((startMatch = startRe.exec(source)) !== null) {
+    const window = source.slice(startMatch.index, startMatch.index + 4000);
+    const nameM = window.match(/name:\s*"([^"]+)"/);
+    if (!nameM) continue;
+    const descM = window.match(/description:\s*\n?\s*"((?:[^"\\]|\\.)*)"/);
+    tools.push({
+      name: nameM[1],
+      description: descM
+        ? descM[1].replace(/\\"/g, '"').replace(/\s+/g, " ").trim()
+        : "",
+    });
+  }
+
+  // 3. Lifecycle hooks: pi.on("event_name", ...).
+  const hooks: string[] = [];
+  const hookRe = /pi\.on\s*\(\s*["']([^"']+)["']/g;
+  let hookMatch: RegExpExecArray | null;
+  while ((hookMatch = hookRe.exec(source)) !== null) {
+    if (!hooks.includes(hookMatch[1])) hooks.push(hookMatch[1]);
+  }
+
+  return { description, tools, hooks };
+}
+
+function renderExtensionMd(extName: string, meta: ExtensionMeta): string {
+  const lines = [`# ${extName}`, ""];
+  if (meta.description) lines.push(meta.description, "");
+  if (meta.tools.length > 0) {
+    lines.push("## Tools", "");
+    for (const t of meta.tools) {
+      lines.push(t.description ? `- **${t.name}** — ${t.description}` : `- **${t.name}**`);
+    }
+    lines.push("");
+  }
+  if (meta.hooks.length > 0) {
+    lines.push("## Hooks", "");
+    for (const h of meta.hooks) lines.push(`- \`${h}\``);
+    lines.push("");
+  }
+  if (meta.tools.length === 0 && meta.hooks.length === 0) {
+    lines.push("_No tools or hooks registered (or parser missed them)._");
+  }
+  return lines.join("\n");
+}
+
+async function spriteExecCapture(name: string, script: string): Promise<{ ok: boolean; stdout: string; stderr: string }> {
+  const proc = Bun.spawn(["sprite", "exec", "-s", name, "--", "bash", "-lc", script], {
+    stdin: "ignore",
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  const stdout = await new Response(proc.stdout).text();
+  const stderr = await new Response(proc.stderr).text();
+  const code = await proc.exited;
+  return { ok: code === 0, stdout, stderr };
+}
+
+async function pullMarkdown(name: string, vaultPath: string): Promise<{ persona: string | null }> {
+  await mkdir(vaultPath, { recursive: true });
+  const findScript = `cd /home/sprite/agent && find memory yearnings .pi/agents .pi/skills .pi/prompts \\( -name '*.md' -o -name 'SKILL.md' \\) -type f 2>/dev/null | tar czf - -T -`;
+  const send = Bun.spawn(["sprite", "exec", "-s", name, "--", "bash", "-lc", findScript], {
+    stdin: "ignore",
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  const recv = Bun.spawn(["tar", "xzf", "-", "-C", vaultPath], {
+    stdin: send.stdout,
+    stdout: "ignore",
+    stderr: "pipe",
+  });
+  const [sendCode, recvCode] = await Promise.all([send.exited, recv.exited]);
+  if (sendCode !== 0) {
+    const err = await new Response(send.stderr).text();
+    throw new Error(`sprite exec for ${name} failed: ${err.trim() || `exit ${sendCode}`}`);
+  }
+  if (recvCode !== 0) {
+    const err = await new Response(recv.stderr).text();
+    // Empty archive is benign — tar emits a warning but exits non-zero.
+    if (!/empty archive/i.test(err)) throw new Error(`tar extract failed: ${err.trim()}`);
+  }
+  // Reshape the on-cell .pi/ tree into the vault layout (Pi-named dirs at
+  // top level, persona body returned for inlining into AGENTS.md).
+  return await restructureVault(vaultPath);
+}
+
+/**
+ * After pullMarkdown drops files into vaultPath under their on-cell paths
+ * (`.pi/agents/self.md`, `.pi/skills/...`, etc.), restructure to vault shape:
+ *   - `.pi/skills/` → `skills/`        (Pi structure preserved)
+ *   - `.pi/prompts/` → `prompts/`
+ *   - `.pi/agents/self.md` → captured and returned (NOT written; goes inline into AGENTS.md)
+ *   - `.pi/` removed
+ */
+async function restructureVault(vaultPath: string): Promise<{ persona: string | null }> {
+  const piDir = join(vaultPath, ".pi");
+  let persona: string | null = null;
+  const personaSrc = join(piDir, "agents", "self.md");
+  if (existsSync(personaSrc)) persona = await readFile(personaSrc, "utf-8");
+
+  const skillsSrc = join(piDir, "skills");
+  if (existsSync(skillsSrc)) {
+    const skillsDst = join(vaultPath, "skills");
+    if (existsSync(skillsDst)) await rm(skillsDst, { recursive: true, force: true });
+    await cp(skillsSrc, skillsDst, { recursive: true });
+  }
+
+  const promptsSrc = join(piDir, "prompts");
+  if (existsSync(promptsSrc)) {
+    const promptsDst = join(vaultPath, "prompts");
+    if (existsSync(promptsDst)) await rm(promptsDst, { recursive: true, force: true });
+    await cp(promptsSrc, promptsDst, { recursive: true });
+  }
+
+  if (existsSync(piDir)) await rm(piDir, { recursive: true, force: true });
+  return { persona };
+}
+
+async function pullExtensionDocs(name: string, vaultPath: string): Promise<Array<{ name: string; meta: ExtensionMeta }>> {
+  // List extensions, then cat each index.ts.
+  const list = await spriteExecCapture(name, "ls -1 /home/sprite/agent/.pi/extensions/ 2>/dev/null");
+  if (!list.ok) return [];
+  const exts = list.stdout.split("\n").map((s) => s.trim()).filter(Boolean);
+  const extDir = join(vaultPath, "extensions");
+  await mkdir(extDir, { recursive: true });
+  const results: Array<{ name: string; meta: ExtensionMeta }> = [];
+  for (const ext of exts) {
+    const cat = await spriteExecCapture(name, `cat /home/sprite/agent/.pi/extensions/${ext}/index.ts 2>/dev/null`);
+    if (!cat.ok || !cat.stdout) continue;
+    const meta = parseExtensionTs(cat.stdout);
+    await writeFile(join(extDir, `${ext}.md`), renderExtensionMd(ext, meta));
+    results.push({ name: ext, meta });
+  }
+  return results;
+}
+
+async function readLocalExtensionDocs(extensionsDir: string, vaultExtDir: string): Promise<Array<{ name: string; meta: ExtensionMeta }>> {
+  if (!existsSync(extensionsDir)) return [];
+  // Include both directories and symlinks-to-directories. Easiest: just look
+  // for entries that have an index.ts at <name>/index.ts.
+  const entries = await readdir(extensionsDir);
+  await mkdir(vaultExtDir, { recursive: true });
+  const results: Array<{ name: string; meta: ExtensionMeta }> = [];
+  for (const name of entries) {
+    const indexPath = join(extensionsDir, name, "index.ts");
+    if (!existsSync(indexPath)) continue;
+    const source = await readFile(indexPath, "utf-8");
+    const meta = parseExtensionTs(source);
+    await writeFile(join(vaultExtDir, `${name}.md`), renderExtensionMd(name, meta));
+    results.push({ name, meta });
+  }
+  return results;
+}
+
+function splitFrontmatter(md: string): { fm: string; body: string } {
+  const m = md.match(/^---\n([\s\S]*?)\n---\n([\s\S]*)$/);
+  if (!m) return { fm: "", body: md };
+  return { fm: m[1], body: m[2].replace(/^\n+/, "") };
+}
+
+function firstBodyLine(content: string, max = 120): string {
+  const { body } = splitFrontmatter(content);
+  for (const line of body.split("\n")) {
+    const t = line.trim();
+    if (!t) continue;
+    if (t.startsWith("#")) continue; // skip headings
+    if (t.startsWith("```")) continue;
+    let s = t.replace(/^[*_-]\s*/, "").replace(/[*_]/g, "");
+    if (s.length > max) s = s.slice(0, max - 1) + "…";
+    return s;
+  }
+  return "";
+}
+
+function firstHeading(content: string): string {
+  const { body } = splitFrontmatter(content);
+  for (const line of body.split("\n")) {
+    if (line.startsWith("#")) return line.replace(/^#+\s*/, "").trim();
+  }
+  return "";
+}
+
+type MemoryContext = {
+  topicals: Array<{ filename: string; title: string; preview: string }>;
+  yearnings: Array<{ filename: string; title: string; body: string }>;
+  activityTail: string[];
+  lastDream: string | null;
+};
+
+async function gatherMemoryContext(memDir: string): Promise<MemoryContext> {
+  const ctx: MemoryContext = { topicals: [], yearnings: [], activityTail: [], lastDream: null };
+  if (!existsSync(memDir)) return ctx;
+
+  const entries = await readdir(memDir, { withFileTypes: true });
+  for (const e of entries) {
+    if (!e.isFile() || !e.name.endsWith(".md") || e.name === "MEMORY.md") continue;
+    const content = await readFile(join(memDir, e.name), "utf-8");
+    ctx.topicals.push({
+      filename: e.name,
+      title: firstHeading(content) || e.name.replace(/\.md$/, ""),
+      preview: firstBodyLine(content),
+    });
+  }
+  ctx.topicals.sort((a, b) => a.filename.localeCompare(b.filename));
+
+  const yDir = join(memDir, "yearnings");
+  if (existsSync(yDir)) {
+    const ys = await readdir(yDir);
+    for (const f of ys) {
+      if (!f.endsWith(".md")) continue;
+      const content = await readFile(join(yDir, f), "utf-8");
+      const { body } = splitFrontmatter(content);
+      ctx.yearnings.push({
+        filename: f,
+        title: firstHeading(content) || f.replace(/\.md$/, ""),
+        body: body.replace(/^#+.*$/m, "").trim(),
+      });
+    }
+    ctx.yearnings.sort((a, b) => a.filename.localeCompare(b.filename));
+  }
+
+  const activityFile = join(memDir, "project_cells_activity.md");
+  if (existsSync(activityFile)) {
+    const lines = (await readFile(activityFile, "utf-8")).split("\n").filter(Boolean);
+    ctx.activityTail = lines.slice(-10);
+  }
+
+  const dreamMarker = join(memDir, ".last-dream");
+  if (existsSync(dreamMarker)) {
+    const s = await stat(dreamMarker);
+    ctx.lastDream = fmtAge(s.mtime.toISOString());
+  }
+
+  return ctx;
+}
+
+function renderAgents(
+  name: string,
+  info: SpriteInfo | null,
+  persona: string | null,
+  exts: Array<{ name: string; meta: ExtensionMeta }>,
+  skills: string[],
+  mem: MemoryContext,
+): string {
+  // Frontmatter — preserve persona's frontmatter, augment with live state.
+  let personaFm = "";
+  let personaBody = "";
+  if (persona) {
+    const split = splitFrontmatter(persona);
+    personaFm = split.fm;
+    personaBody = split.body;
+  }
+
+  const fmLines: string[] = [];
+  if (personaFm) fmLines.push(personaFm);
+  if (info) {
+    fmLines.push(`status: ${info.status}`);
+    if (info.url) fmLines.push(`url: ${info.url}`);
+    fmLines.push(`last_seen: ${fmtAge(info.last_running_at)}`);
+    fmLines.push(`egress: ${info.egress}`);
+  } else {
+    fmLines.push(`status: local (keeper, runs on Mac)`);
+  }
+
+  const out: string[] = [];
+  out.push("---", fmLines.join("\n"), "---", "");
+
+  // Status header line — always at top, just below frontmatter, before the persona body.
+  if (info) {
+    const parts = [`\`status:\` ${info.status}`, `\`last seen:\` ${fmtAge(info.last_running_at)}`];
+    if (info.url) parts.push(`\`url:\` [${info.url}](${info.url})`);
+    parts.push(`\`egress:\` ${info.egress}`);
+    out.push(parts.join(" · "), "");
+  } else {
+    out.push("`local cell-keeper` · runs on Pete's Mac", "");
+  }
+
+  // Persona body verbatim (it leads with its own H1).
+  if (personaBody) {
+    out.push(personaBody.trimEnd(), "");
+  } else {
+    out.push(`# ${name}`, "", "_(no persona file found)_", "");
+  }
+
+  // Extensions.
+  if (exts.length > 0) {
+    out.push("## Extensions", "");
+    for (const e of exts) {
+      // First paragraph of the JSDoc, with a leading "<name> — " stripped if
+      // present (the convention is for the JSDoc to lead with the ext name,
+      // which would duplicate the link text).
+      let summary = (e.meta.description.split(/\n\s*\n/)[0] ?? "")
+        .replace(/\s+/g, " ")
+        .trim();
+      const prefix = new RegExp(`^${e.name}\\s*[—-]\\s*`, "i");
+      summary = summary.replace(prefix, "");
+      summary = summary.slice(0, 160);
+      const tail = summary ? ` — ${summary}` : "";
+      out.push(`- [${e.name}](extensions/${e.name}.md)${tail}`);
+    }
+    out.push("");
+  }
+
+  // Skills.
+  if (skills.length > 0) {
+    out.push("## Skills", "");
+    for (const s of skills) out.push(`- [${s}](skills/${s}/SKILL.md)`);
+    out.push("");
+  }
+
+  // Memory snapshot.
+  out.push("## Memory", "");
+  const topicalCount = `${mem.topicals.length} topical file${mem.topicals.length === 1 ? "" : "s"}`;
+  const yearningCount = `${mem.yearnings.length} yearning${mem.yearnings.length === 1 ? "" : "s"}`;
+  out.push(`${topicalCount} · ${yearningCount}${mem.lastDream ? ` · last dream ${mem.lastDream}` : ""}`);
+  out.push("→ [MEMORY.md](memory/MEMORY.md)", "");
+
+  if (mem.topicals.length > 0) {
+    for (const t of mem.topicals) {
+      const tail = t.preview ? ` — ${t.preview}` : "";
+      out.push(`- [${t.title}](memory/${t.filename})${tail}`);
+    }
+    out.push("");
+  }
+
+  if (mem.yearnings.length > 0) {
+    out.push("### Open yearnings", "");
+    for (const y of mem.yearnings) {
+      // Trim body to first paragraph; full body lives in the yearning file.
+      const firstPara = (y.body.split(/\n\s*\n/)[0] ?? "")
+        .split("\n")
+        .filter((l) => !l.trim().startsWith("#"))
+        .join(" ")
+        .replace(/\s+/g, " ")
+        .trim();
+      out.push(`- **${y.title}** — [${y.filename}](memory/yearnings/${y.filename})`);
+      if (firstPara) out.push(`  ${firstPara}`);
+    }
+    out.push("");
+  }
+
+  if (mem.activityTail.length > 0) {
+    out.push("### Recent activity", "");
+    out.push("```", ...mem.activityTail, "```", "");
+  }
+
+  return out.join("\n");
+}
+
+async function copyMarkdownTree(srcDir: string, dstDir: string): Promise<void> {
+  // Follows symlinks, copies only *.md files, recreates dir structure.
+  if (!existsSync(srcDir)) return;
+  await mkdir(dstDir, { recursive: true });
+  const entries = await readdir(srcDir);
+  for (const name of entries) {
+    const srcPath = join(srcDir, name);
+    const dstPath = join(dstDir, name);
+    let isDir: boolean;
+    try {
+      isDir = statSync(srcPath).isDirectory(); // follows symlinks
+    } catch {
+      continue;
+    }
+    if (isDir) {
+      await copyMarkdownTree(srcPath, dstPath);
+    } else if (name.toLowerCase().endsWith(".md")) {
+      await cp(srcPath, dstPath);
+    }
+  }
+}
+
+async function listSkills(skillsDir: string): Promise<string[]> {
+  if (!existsSync(skillsDir)) return [];
+  // Include symlinks-to-skill-dirs too. Test for SKILL.md presence.
+  const entries = await readdir(skillsDir);
+  return entries.filter((name) => existsSync(join(skillsDir, name, "SKILL.md")));
+}
+
+async function setupKeeperVault(): Promise<void> {
+  const vault = join(VAULT_DIR, "keeper");
+  await mkdir(vault, { recursive: true });
+
+  // Wipe any prior layout artifacts so renames/migrations land cleanly.
+  for (const f of ["README.md", "AGENTS.md", "persona.md"]) {
+    if (existsSync(join(vault, f))) await rm(join(vault, f));
+  }
+  for (const d of ["extensions", "skills", "prompts", ".pi"]) {
+    if (existsSync(join(vault, d))) await rm(join(vault, d), { recursive: true, force: true });
+  }
+
+  // Symlink memory (always replace to keep current).
+  const memLink = join(vault, "memory");
+  if (existsSync(memLink)) await rm(memLink, { force: true, recursive: false });
+  await symlink(join(CELL_REPO, "memory"), memLink);
+
+  // Skills tree (markdown only — follows symlinks).
+  const skillsSrc = join(CELL_REPO, ".pi", "skills");
+  await copyMarkdownTree(skillsSrc, join(vault, "skills"));
+
+  // Extension docs from local sources.
+  const exts = await readLocalExtensionDocs(
+    join(CELL_REPO, ".pi", "extensions"),
+    join(vault, "extensions"),
+  );
+
+  // Persona body — read directly, inline into AGENTS.md (no separate file).
+  const personaPath = join(CELL_REPO, ".pi", "agents", "self.md");
+  const persona = existsSync(personaPath) ? await readFile(personaPath, "utf-8") : null;
+
+  const skills = await listSkills(join(vault, "skills"));
+  const mem = await gatherMemoryContext(join(CELL_REPO, "memory"));
+  const md = renderAgents("keeper", null, persona, exts, skills, mem);
+  await writeFile(join(vault, "AGENTS.md"), md);
+}
+
+async function syncOneCell(name: string): Promise<{ name: string; status: string; lastRunningAt: string | null } | null> {
+  const vault = join(VAULT_DIR, name);
+  await mkdir(vault, { recursive: true });
+
+  // Wipe everything that gets regenerated. Memory/yearnings/prompts come
+  // from the pull and replace whatever was there.
+  for (const f of ["README.md", "AGENTS.md", "persona.md"]) {
+    if (existsSync(join(vault, f))) await rm(join(vault, f));
+  }
+  for (const d of ["extensions", "skills", "prompts", ".pi", "memory", "yearnings"]) {
+    if (existsSync(join(vault, d))) await rm(join(vault, d), { recursive: true, force: true });
+  }
+
+  const { persona } = await pullMarkdown(name, vault);
+  const exts = await pullExtensionDocs(name, vault);
+  const info = await getSpriteInfo(name).catch((e) => {
+    console.error(`  warn: api failed for ${name}: ${(e as Error).message}`);
+    return null;
+  });
+  const skills = await listSkills(join(vault, "skills"));
+  const mem = await gatherMemoryContext(join(vault, "memory"));
+  const md = renderAgents(name, info, persona, exts, skills, mem);
+  await writeFile(join(vault, "AGENTS.md"), md);
+  return info ? { name, status: info.status, lastRunningAt: info.last_running_at } : { name, status: "?", lastRunningAt: null };
+}
+
+async function writeRoster(rows: Array<{ name: string; status: string; lastRunningAt: string | null }>): Promise<void> {
+  const lines = ["# Cells", "", "| name | status | last seen | dashboard |", "|---|---|---|---|"];
+  lines.push(`| keeper | local | — | [→](keeper/) |`);
+  for (const r of rows) {
+    lines.push(`| ${r.name} | ${r.status} | ${fmtAge(r.lastRunningAt)} | [→](${r.name}/) |`);
+  }
+  await writeFile(join(VAULT_DIR, "README.md"), lines.join("\n") + "\n");
+}
+
+async function cmdSync(name?: string) {
+  await mkdir(VAULT_DIR, { recursive: true });
+
+  if (name === "keeper") {
+    console.log("→ keeper");
+    await setupKeeperVault();
+    console.log("✓ keeper");
+    return;
+  }
+
+  if (name) {
+    await requireCell(name);
+    console.log(`→ ${name}`);
+    const row = await syncOneCell(name);
+    console.log(`✓ ${name}`);
+    // Refresh roster too (so it stays in sync).
+    const reg = await loadRegistry();
+    const rows: typeof row[] = [];
+    for (const c of reg.cells) {
+      if (c.name === name) rows.push(row);
+      else {
+        // Cheap: just probe live status without re-pulling files.
+        const info = await getSpriteInfo(c.name).catch(() => null);
+        rows.push({ name: c.name, status: info?.status ?? "?", lastRunningAt: info?.last_running_at ?? null });
+      }
+    }
+    await setupKeeperVault();
+    await writeRoster(rows.filter((r): r is NonNullable<typeof r> => r !== null));
+    return;
+  }
+
+  // No name — sync everything.
+  console.log("→ keeper");
+  await setupKeeperVault();
+  console.log("✓ keeper");
+
+  const reg = await loadRegistry();
+  const rows = await Promise.all(
+    reg.cells.map(async (c) => {
+      console.log(`→ ${c.name}`);
+      try {
+        const r = await syncOneCell(c.name);
+        console.log(`✓ ${c.name}`);
+        return r;
+      } catch (e) {
+        console.error(`✗ ${c.name}: ${(e as Error).message}`);
+        return { name: c.name, status: "error", lastRunningAt: null };
+      }
+    }),
+  );
+  await writeRoster(rows.filter((r): r is NonNullable<typeof r> => r !== null));
+  console.log(`\nvault: ${VAULT_DIR}`);
+}
+
 // ───── dispatch ─────
 
 const [sub, ...rest] = process.argv.slice(2);
@@ -542,6 +1134,7 @@ switch (sub) {
   case "destroy":    await cmdDestroy(needName(rest, "destroy")); break;
   case "dream":              await cmdDream(rest[0] ?? ""); break;
   case "stream":             await cmdStream(needName(rest, "stream")); break;
+  case "sync":               await cmdSync(rest[0] || undefined); break;
   case "schedule-dreams":    await cmdScheduleDreams(); break;
   case "unschedule-dreams":  await cmdUnscheduleDreams(); break;
   default:
@@ -555,6 +1148,7 @@ switch (sub) {
     console.log("  cell checkpoint <name>     snapshot a cell's filesystem");
     console.log("  cell dream <name|--all>    run dream consolidation on a cell or all cells");
     console.log("  cell stream <name>         interactive multi-turn streaming chat with a cell (Pi RPC)");
+    console.log("  cell sync [name]           pull cell markdown into ~/Obsidian/cells/ (default: all + keeper)");
     console.log("  cell schedule-dreams       install launchd plist (nightly 4am, all cells)");
     console.log("  cell unschedule-dreams     remove launchd plist");
     console.log("  cell destroy <name>        destroy a cell (irreversible)");
