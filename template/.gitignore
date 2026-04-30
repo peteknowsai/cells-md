@@ -1,0 +1,10 @@
+state/
+# anchor to agent-root so we don't accidentally hide e.g. .pi/extensions/memory/ if/when agents add one
+/memory/
+.env
+.env.local
+.envrc
+*.log
+.DS_Store
+node_modules/
+.pi/.cache/

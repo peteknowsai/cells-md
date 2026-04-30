@@ -1,0 +1,13 @@
+{
+  "name": "__NAME__",
+  "module": "index.ts",
+  "type": "module",
+  "private": true,
+  "devDependencies": {
+    "@mariozechner/pi-ai": "^0.70.5",
+    "@mariozechner/pi-coding-agent": "^0.70.5",
+    "@mariozechner/pi-tui": "^0.70.5",
+    "@sinclair/typebox": "^0.34.49",
+    "@types/bun": "latest"
+  }
+}

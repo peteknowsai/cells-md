@@ -1,0 +1,10 @@
+{
+  "extensions": [
+    ".pi/extensions/identity/index.ts",
+    ".pi/extensions/memory/index.ts",
+    ".pi/extensions/self-tools/index.ts"
+  ],
+  "warnings": {
+    "anthropicExtraUsage": false
+  }
+}

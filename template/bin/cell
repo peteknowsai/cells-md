@@ -1,0 +1,200 @@
+#!/usr/bin/env bun
+/**
+ * cell — slim on-sprite CLI for cells.
+ *
+ * Lets a cell see its peers, inspect itself, and talk to other cells. Read
+ * + talk only — no create/destroy/checkpoint (those stay with the keeper
+ * on Pete's Mac).
+ *
+ * Backed by the Sprites HTTP API at https://api.sprites.dev with bearer
+ * auth via $SPRITES_TOKEN. The local `sprite` CLI is bypassed entirely
+ * because (a) it doesn't honor SPRITES_TOKEN env, (b) its surface keeps
+ * shifting between releases.
+ */
+
+const API = "https://api.sprites.dev";
+const TOKEN = process.env.SPRITES_TOKEN;
+
+function die(msg: string, code = 1): never {
+  console.error(msg);
+  process.exit(code);
+}
+
+function selfName(): string {
+  return Bun.spawnSync(["hostname"]).stdout.toString().trim();
+}
+
+async function api(path: string, init?: RequestInit): Promise<any> {
+  if (!TOKEN) die("SPRITES_TOKEN not set in env (check /home/sprite/.bashrc.d/sprites)");
+  const r = await fetch(`${API}${path}`, {
+    ...init,
+    headers: {
+      Authorization: `Bearer ${TOKEN}`,
+      "Content-Type": "application/json",
+      ...(init?.headers ?? {}),
+    },
+  });
+  const text = await r.text();
+  if (!r.ok) die(`api ${path} → ${r.status}: ${text.slice(0, 300)}`);
+  try {
+    return JSON.parse(text);
+  } catch {
+    return text;
+  }
+}
+
+function fmtAge(iso: string | null): string {
+  if (!iso) return "—";
+  const ms = Date.now() - new Date(iso).getTime();
+  const s = Math.floor(ms / 1000);
+  if (s < 60) return `${s}s`;
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m}m`;
+  const h = Math.floor(m / 60);
+  if (h < 48) return `${h}h`;
+  return `${Math.floor(h / 24)}d`;
+}
+
+// ───── commands ─────
+
+async function cmdWhoami() {
+  console.log(selfName());
+}
+
+async function cmdList() {
+  const data = await api("/v1/sprites");
+  const sprites = (data?.sprites ?? []) as Array<{
+    name: string;
+    status: string;
+    created_at: string;
+  }>;
+  if (sprites.length === 0) {
+    console.log("(no cells)");
+    return;
+  }
+  // sort by name; show status + age
+  sprites.sort((a, b) => a.name.localeCompare(b.name));
+  for (const s of sprites) {
+    console.log(
+      `${s.name.padEnd(24)} ${s.status.padEnd(12)} created ${fmtAge(s.created_at)} ago`,
+    );
+  }
+}
+
+async function cmdInfo(arg: string) {
+  const name = arg === "self" || arg === "" ? selfName() : arg;
+  const sprite = await api(`/v1/sprites/${encodeURIComponent(name)}`);
+  let policy: any = null;
+  try {
+    policy = await api(`/v1/sprites/${encodeURIComponent(name)}/policy/network`);
+  } catch {
+    // non-fatal — show "unknown"
+  }
+  const rules = policy?.rules
+    ? policy.rules.map((r: any) => `${r.action} ${r.domain}`).join(", ")
+    : "(unknown)";
+  console.log(`name:           ${sprite.name}`);
+  console.log(`status:         ${sprite.status}`);
+  console.log(`url:            ${sprite.url ?? "—"}`);
+  console.log(`organization:   ${sprite.organization ?? "—"}`);
+  console.log(`created:        ${sprite.created_at}`);
+  console.log(`last running:   ${sprite.last_running_at ?? "—"}`);
+  console.log(`egress:         ${rules}`);
+}
+
+async function cmdCheckpoint(arg: string) {
+  const name = arg === "self" || arg === "" ? selfName() : arg;
+  if (name !== selfName()) die("on-cell `cell checkpoint` only operates on self. Ask Pete to checkpoint other cells.");
+  // POST /v1/sprites/<name>/checkpoint streams NDJSON events. Walk them
+  // and surface the resulting checkpoint id (or error).
+  if (!TOKEN) die("SPRITES_TOKEN not set");
+  const r = await fetch(`${API}/v1/sprites/${encodeURIComponent(name)}/checkpoint`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${TOKEN}`,
+      "Content-Type": "application/json",
+    },
+    body: "{}",
+  });
+  const text = await r.text();
+  if (!r.ok) die(`checkpoint failed (${r.status}): ${text.slice(0, 300)}`);
+  let id: string | null = null;
+  for (const line of text.split("\n")) {
+    if (!line.trim()) continue;
+    try {
+      const ev = JSON.parse(line);
+      const m = typeof ev.data === "string" ? ev.data.match(/ID:\s*(\S+)/) : null;
+      if (m) id = m[1];
+    } catch {
+      // not JSON, skip
+    }
+  }
+  console.log(id ? `checkpoint created: ${id}` : `checkpoint created (id unknown)`);
+}
+
+async function cmdTalk(name: string, message: string) {
+  if (!name || !message) die("usage: cell talk <name> <message>");
+  if (name === selfName()) die("can't talk to self via cell talk — use talk_to_self instead");
+
+  // Inject into the peer's tmux session and capture the pane after a short
+  // delay. Mirrors what the keeper's talk_to_agent does, but issued from
+  // inside a cell via the Sprites API exec endpoint.
+  //
+  // Lazy-start: if the peer has never been visited interactively, no tmux
+  // server is running there — `send-keys` would fail. Start one if missing.
+  const escaped = message.replace(/'/g, "'\\''");
+  const script = [
+    // Env (PATH, secrets) comes from ~/.profile sourcing .bashrc.d/*
+    // for any login shell, including non-interactive `bash -lc`.
+    `tmux has-session -t agent 2>/dev/null || tmux new-session -d -s agent -c /home/sprite/agent pi`,
+    `sleep 1`,
+    `tmux send-keys -t agent '${escaped}' Enter`,
+    `sleep 8`,
+    `tmux capture-pane -t agent -p | tail -40`,
+  ].join(" && ");
+  const r = await api(`/v1/sprites/${encodeURIComponent(name)}/exec`, {
+    method: "POST",
+    body: JSON.stringify({ command: ["bash", "-lc", script] }),
+  });
+  // exec response shape may include stdout/stderr — print whatever we got
+  if (typeof r === "string") console.log(r);
+  else if (r?.stdout) console.log(r.stdout);
+  else console.log(JSON.stringify(r, null, 2));
+}
+
+// ───── dispatch ─────
+
+const [sub, ...rest] = process.argv.slice(2);
+
+switch (sub) {
+  case "whoami":
+    await cmdWhoami();
+    break;
+  case "list":
+  case "ls":
+    await cmdList();
+    break;
+  case "info":
+    await cmdInfo(rest[0] ?? "self");
+    break;
+  case "talk":
+    await cmdTalk(rest[0] ?? "", rest.slice(1).join(" "));
+    break;
+  case "checkpoint":
+    await cmdCheckpoint(rest[0] ?? "self");
+    break;
+  default:
+    console.log("cell — on-sprite CLI (read + talk subset)");
+    console.log("");
+    console.log("usage:");
+    console.log("  cell whoami              print self name");
+    console.log("  cell list                list peer cells (status, age)");
+    console.log("  cell info [name|self]    show name, status, egress (default: self)");
+    console.log("  cell talk <name> <msg>   send a message to a peer's Pi, capture reply");
+    console.log("  cell checkpoint [self]   snapshot your own filesystem (~300ms)");
+    console.log("");
+    console.log("not available on cells (keeper-only):");
+    console.log("  create, destroy, sleep, wake, dream*");
+    console.log("  (`cell checkpoint` only works on self \u2014 ask Pete for peer checkpoints)");
+    process.exit(sub ? 1 : 0);
+}

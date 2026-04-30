@@ -1,0 +1,13 @@
+state/
+.env
+.env.local
+.envrc
+*.log
+.DS_Store
+node_modules/
+dist/
+build/
+.pi/.cache/
+.pi/npm/
+# only the top-level memory dir (cell-keeper's data) — NOT the memory extension code under template/.pi/
+/memory/

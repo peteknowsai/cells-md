@@ -1,0 +1,300 @@
+---
+name: birth
+description: Provision a new agent on a fresh Sprite. Creates the VM, configures egress, installs runtime tools, pushes the recipe-compliant template, runs `bun install`, injects the OAuth token, installs the login shim, and takes the first checkpoint.
+allowed-tools: [bash, sprite_create, sprite_destroy, sprite_exec, sprite_push, sprite_egress_allow, sprite_checkpoint, report_outcome, read]
+---
+
+# Birth Ritual — Phase 0
+
+Bring a new agent into being on a fresh Sprite. The agent's name is in the
+user's message; substitute it for `<NAME>` in every step below.
+
+This ritual follows `~/Projects/cells/PI-FIRST-PARTY-BILLING-RECIPE.md`. Every
+step matters — if you shortcut, the agent silently lands on extra-usage billing.
+
+Prefer the sprite_* tools for every step that has them — they're cleaner than
+shell-out and surface errors as structured tool results. The `bash` tool is
+still available for local-only operations on the Mac (e.g., reading
+`~/.pi/agent/auth.json` for the OAuth token).
+
+## Preconditions
+
+- `sprite` CLI authenticated (verify with `sprite org list`)
+- Local Pi is OAuth-authenticated: `~/.pi/agent/auth.json` has `.anthropic.type == "oauth"`
+- No existing agent with this name (the Bun CLI checks before invoking you)
+
+## 1. Create the Sprite
+
+Use `sprite_create` with `name: <NAME>`. Blocks ~15s until ready.
+
+## 2. Configure egress (allow all)
+
+Use `sprite_egress_allow` with `name: <NAME>` and `domains: ["*"]`. This opens
+outbound to any host so the agent can research, fetch, and install freely.
+
+Don't proceed until this succeeds — every later step depends on egress.
+
+## 3. Install system tools and configure tmux
+
+Bun is not pre-installed on Sprite VMs. tmux often is, but install/upgrade it
+to be safe — Pi runs inside a tmux session, so the agent's continuity depends
+on it. Pi also uses modified-Enter keys (Shift+Enter for newline, plain Enter
+to submit) which require tmux's `extended-keys` to be on.
+
+Also install the `sprite` CLI on the Sprite — the `self-tools` extension
+needs it to let the agent operate on its own sprite (checkpoint, egress,
+inspect). The CLI authenticates from `SPRITES_TOKEN` env var, which gets
+injected from `~/.cell/secrets.json` in step 6b. If that key isn't in the
+secrets file, the API-based self-tools simply return a clear error;
+`talk_to_self` works regardless.
+
+Use `sprite_exec` with this command:
+
+```bash
+curl -fsSL https://bun.sh/install | bash
+curl -fsSL https://sprites.dev/install.sh | sh
+sudo apt-get update -y
+sudo apt-get install -y tmux
+cat > /home/sprite/.tmux.conf << 'EOF'
+# Pi compatibility — modified-Enter keys, csi-u format
+set -g extended-keys on
+set -g extended-keys-format csi-u
+set -g default-terminal "tmux-256color"
+
+# Mouse + scrollback
+set -g mouse on
+set -g history-limit 50000
+
+# Highlight-to-copy: release mouse and selection lands in system clipboard via OSC52
+set -g set-clipboard on
+bind -T copy-mode    MouseDragEnd1Pane send-keys -X copy-pipe-and-cancel
+bind -T copy-mode-vi MouseDragEnd1Pane send-keys -X copy-pipe-and-cancel
+
+# Vi keybindings in copy mode (more familiar than emacs default)
+setw -g mode-keys vi
+
+# Snappy escape (helps Pi UI responsiveness)
+set -sg escape-time 0
+
+# Windows count from 1; renumber when one closes
+set -g base-index 1
+setw -g pane-base-index 1
+set -g renumber-windows on
+
+# Focus events forwarded (for editors that care)
+set -g focus-events on
+EOF
+ls -la /home/sprite/.bun/bin/bun && tmux -V
+```
+
+## 4. Push the agent template
+
+The repo's `template/` directory contains the canonical recipe-compliant
+layout (AGENTS.md stub, .pi/agents/self.md persona, .pi/extensions/identity,
+.pi/settings.json, package.json, .gitignore).
+
+Use `sprite_push` with:
+- `name: <NAME>`
+- `localPath: /Users/pete/Projects/cell/template`
+- `remotePath: /home/sprite/agent`
+
+Then substitute `__NAME__` with the actual name. Use `sprite_exec`:
+
+```bash
+sed -i 's/__NAME__/<NAME>/g' /home/sprite/agent/AGENTS.md /home/sprite/agent/.pi/agents/self.md /home/sprite/agent/package.json
+```
+
+## 5. Run `bun install`, install Pi globally, install web-access, install `cell` CLI
+
+`bun install` is mandatory — without `node_modules/`, the identity extension
+fails to load and the agent silently lands on extra-usage billing.
+
+Pi itself is **not** pre-installed on Sprite VMs. Install it globally via Bun
+so the `pi` command is on PATH for the interactive shell.
+
+Then install `pi-web-access` (project-local) via Pi's own package manager —
+this registers the `web_search`, `fetch_content`, `code_search`, and
+`get_search_content` tools the agent uses to browse the web. Works without
+API keys (uses Exa MCP free tier); for higher rate limits inject an Exa key
+later.
+
+Use `sprite_exec`:
+
+The template ships with `bin/cell` — a slim on-sprite CLI (read+talk only,
+backed by the Sprites HTTP API). Make it executable and symlink onto PATH
+so both the agent's bash and the `self-tools` extension can call it.
+
+```bash
+export PATH=$HOME/.bun/bin:$PATH
+cd /home/sprite/agent && bun install
+bun install -g @mariozechner/pi-coding-agent@latest
+pi install -l npm:pi-web-access
+chmod +x /home/sprite/agent/bin/cell
+mkdir -p /home/sprite/.local/bin
+ln -sf /home/sprite/agent/bin/cell /home/sprite/.local/bin/cell
+```
+
+## 6. Inject OAuth token as ANTHROPIC_API_KEY
+
+Pi's first-party billing requires the token to contain `sk-ant-oat`. Pull
+Pete's OAuth access token from the local `~/.pi/agent/auth.json` (use the
+local `bash` tool, not `sprite_exec`) and set it as `ANTHROPIC_API_KEY` on
+the Sprite. Don't echo the token value in your reply.
+
+Note: the access token rotates (~hours). When the agent stops working with a
+401, refresh by re-running this step. A proper refresh mechanism is future work.
+
+Local bash:
+
+```bash
+TOKEN=$(jq -r .anthropic.access ~/.pi/agent/auth.json)
+echo "$TOKEN" | head -c 20
+# pass $TOKEN to the next step
+```
+
+Then `sprite_exec` to write it onto the Sprite (substitute the token value
+inline; quote singly so it doesn't expand again):
+
+```bash
+mkdir -p /home/sprite/.bashrc.d
+cat > /home/sprite/.bashrc.d/anthropic << 'EOF'
+export ANTHROPIC_API_KEY='<paste the token here>'
+EOF
+chmod 600 /home/sprite/.bashrc.d/anthropic
+
+# Source .bashrc.d from .profile (NOT .bashrc) so it runs for all login
+# shells — including `bash -lc 'cmd'` non-interactive ones, which Ubuntu's
+# .bashrc bails out of before reaching the end. Idempotent via the grep guard.
+grep -q bashrc.d /home/sprite/.profile || cat >> /home/sprite/.profile << 'EOF'
+
+# cell: load env from ~/.bashrc.d/ for all login shells (interactive and non-interactive)
+for f in /home/sprite/.bashrc.d/*; do [ -r "$f" ] && . "$f"; done
+EOF
+
+cat > /home/sprite/.bashrc.d/bun << 'EOF'
+export PATH=$HOME/.bun/bin:$PATH
+EOF
+```
+
+### 6b. Inject shared secrets from `~/.cell/secrets.json`
+
+Every cell gets the same shared secrets (Exa, Perplexity, GitHub PAT, R2,
+etc.). Read them from `~/.cell/secrets.json` on the Mac and write each as
+its own file in `/home/sprite/.bashrc.d/` on the Sprite. Don't echo any
+values in your reply.
+
+Local bash to read the file (use `bash`, not `sprite_exec`):
+
+```bash
+test -f ~/.cell/secrets.json && cat ~/.cell/secrets.json
+```
+
+Then for each `KEY: value` pair, write to the Sprite. Per-key files keep
+rotation granular. Example for `EXA_API_KEY`:
+
+```bash
+sprite exec -s <NAME> -- bash -c "
+cat > /home/sprite/.bashrc.d/exa << 'EOF'
+export EXA_API_KEY='<value>'
+EOF
+chmod 600 /home/sprite/.bashrc.d/exa
+"
+```
+
+Repeat for every key in `secrets.json`. If the file doesn't exist or is
+empty, skip this step — the cell can still operate, just without those
+specific tools (e.g., `web_search` falls back to Exa MCP free tier without
+the key).
+
+## 7. Register the `agent` service (auto-start Pi on VM boot)
+
+Without this, Pi only starts when a human attaches interactively (the
+shell shim in step 8). That breaks any automation that wakes a hibernated
+cell — the VM is up but Pi isn't running.
+
+Register a Sprite *service* named `agent`. Sprites "services" are a
+platform feature: they keep a process running, restart it on crash, and
+auto-start it when the VM boots. They're not exposed by the `sprite` CLI,
+but available via HTTP API.
+
+Use local `bash` (not `sprite_exec` — the call goes from your Mac to the
+Sprites API):
+
+```bash
+scripts/register-agent-service.sh <NAME>
+```
+
+The script reads `SPRITES_TOKEN` from `~/.cell/secrets.json` and PUTs a
+service that runs `tmux new-session -dA -s agent pi` plus a wait loop.
+The loop keeps the service process alive while the tmux session exists,
+so Sprites considers the service "running" and doesn't restart it
+unnecessarily.
+
+## 8. Login shim — auto-attach to Pi TUI
+
+Sprite's interactive shell is **zsh** (despite `/etc/passwd` listing /bin/bash
+as the login shell), so the shim must go in both `.zshrc` and `.bashrc`. zsh
+doesn't auto-source `.bashrc.d`, so we also have to source it explicitly from
+`.zshrc`.
+
+Use `sprite_exec`:
+
+```bash
+cat >> /home/sprite/.bashrc << 'EOF'
+
+# agent: auto-attach to Pi TUI on interactive login
+if [ -z "$TMUX" ] && [ -t 0 ]; then
+  cd /home/sprite/agent
+  exec tmux new-session -A -s agent pi
+fi
+EOF
+
+cat >> /home/sprite/.zshrc << 'EOF'
+
+# agent: source bashrc.d for env (PATH, ANTHROPIC_API_KEY)
+for f in /home/sprite/.bashrc.d/*; do source $f; done
+
+# agent: auto-attach to Pi TUI on interactive login
+if [[ -z "$TMUX" && -t 0 ]]; then
+  cd /home/sprite/agent
+  exec tmux new-session -A -s agent pi
+fi
+EOF
+```
+
+## 9. First checkpoint
+
+Use `sprite_checkpoint` with `name: <NAME>`.
+
+## 10. Report outcome (mandatory)
+
+Call `report_outcome` to tell the Bun CLI whether the birth succeeded.
+
+- On success: `report_outcome(success: true, message: "agent <NAME> alive")`
+- On failure (any earlier step stopped you): `report_outcome(success: false, message: "stopped at step <N>: <what failed>")`
+
+Without this call the CLI assumes failure and won't register the agent.
+
+## 11. Record in memory (success only)
+
+Add `<NAME>` to the roster and log the birth event:
+
+- Append one line to `memory/project_cells_activity.md`:
+  `<UTC date HH:MM>  born        <NAME>      <terse notes>`
+- Add a new row in the table in `memory/project_cells_roster.md`.
+
+Use `date -u +"%Y-%m-%d %H:%M"` for the timestamp.
+
+## 12. Tell the user
+
+After reporting outcome, tell the user one line:
+
+> Agent `<NAME>` is alive. Talk to it with `cell talk <NAME>`.
+
+No caveats, no warnings, no future-state notes. Just the success line.
+
+## On failure
+
+Stop at the first failed step. Skip ahead to step 10 with `success: false`
+and a message describing what broke. Don't record in memory (step 11) on
+failure. Don't try to recover automatically.
