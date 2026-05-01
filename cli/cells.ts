@@ -531,6 +531,78 @@ async function cmdWake(name: string) {
   await $`sprite start -s ${name}`;
 }
 
+// First-line diagnostic for "auth feels broken." See docs/oauth-refresh.md.
+async function cmdDoctor() {
+  const dim = "\x1b[2m";
+  const reset = "\x1b[0m";
+  const red = "\x1b[31m";
+  const green = "\x1b[32m";
+  const yellow = "\x1b[33m";
+
+  // 1. auth.json on disk
+  const authPath = join(homedir(), ".pi/agent/auth.json");
+  if (!existsSync(authPath)) {
+    console.log(`${red}✗ no ${authPath}${reset} — run pi /login`);
+    process.exit(1);
+  }
+  let auth: any;
+  try {
+    auth = JSON.parse(await readFile(authPath, "utf-8"));
+  } catch (e) {
+    console.log(`${red}✗ ${authPath} unreadable: ${e}${reset}`);
+    process.exit(1);
+  }
+  const ant = auth.anthropic;
+  if (!ant?.access || !ant?.refresh) {
+    console.log(`${red}✗ auth.json has no anthropic OAuth tokens${reset} — run pi /login`);
+    process.exit(1);
+  }
+  const remainingMin = Math.round((ant.expires - Date.now()) / 60000);
+  const expColor = remainingMin > 60 ? green : remainingMin > 0 ? yellow : red;
+  console.log(`anthropic access: ${ant.access.slice(0, 20)}…`);
+  console.log(`  expires in:    ${expColor}${remainingMin} min${reset}`);
+  console.log(`refresh token:  ${ant.refresh.slice(0, 20)}…`);
+
+  // 2. Flag file
+  const flagPath = join(homedir(), ".cell/auth-needs-login");
+  if (existsSync(flagPath)) {
+    const ts = (await readFile(flagPath, "utf-8")).trim();
+    console.log(`${red}⚠ auth-needs-login flag set at ${ts}${reset} — refresh token revoked, run pi /login`);
+  }
+
+  // 3. Proxy health
+  const port = process.env.CELLS_PROXY_PORT ?? "8787";
+  try {
+    const res = await fetch(`http://localhost:${port}/_proxy/health`, {
+      signal: AbortSignal.timeout(2000),
+    });
+    if (res.ok) {
+      const data: any = await res.json();
+      console.log(`\nproxy on :${port} — ${green}up${reset}`);
+      console.log(`  expires_in_min: ${data.expires_in_min}`);
+      if (data.last_refresh) {
+        const ago = Math.round((Date.now() - data.last_refresh.at) / 60000);
+        const oc = data.last_refresh.outcome;
+        const color = oc === "ok" ? green : oc === "429" ? yellow : red;
+        console.log(`  last_refresh:   ${color}${oc}${reset} (${ago} min ago)`);
+        if (data.last_refresh.detail) console.log(`    detail: ${dim}${data.last_refresh.detail}${reset}`);
+      } else {
+        console.log(`  last_refresh:   ${dim}none yet${reset}`);
+      }
+      if (data.blocked_until) {
+        console.log(`  ${yellow}blocked_until:  ${data.blocked_until}${reset} (rate-limit backoff)`);
+      }
+      if (data.needs_login) {
+        console.log(`  ${red}needs_login:    true${reset}`);
+      }
+    } else {
+      console.log(`\nproxy on :${port} — ${red}HTTP ${res.status}${reset}`);
+    }
+  } catch (e) {
+    console.log(`\nproxy on :${port} — ${yellow}not reachable${reset} (${dim}${String(e).slice(0, 80)}${reset})`);
+  }
+}
+
 // ───── routed through local Pi ─────
 
 type CreateOpts = {
@@ -1672,6 +1744,7 @@ switch (sub) {
   case "sync":               await cmdSync(rest[0] || undefined); break;
   case "schedule-dreams":    await cmdScheduleDreams(); break;
   case "unschedule-dreams":  await cmdUnscheduleDreams(); break;
+  case "doctor":             await cmdDoctor(); break;
   default:
     console.log("usage:");
     console.log("  cells pi                    open the mother Pi TUI (alias: cells talk mother)");
@@ -1691,6 +1764,7 @@ switch (sub) {
     console.log("  cells dream <name|keeper|--all>  run dream consolidation on a cell, the keeper, or all");
     console.log("  cells stream <name>         interactive multi-turn streaming chat with a cell (Pi RPC)");
     console.log("  cells sync [name]           pull cell markdown into ~/Obsidian/cells/ (default: all + keeper)");
+    console.log("  cells doctor                inspect mother OAuth state + proxy health (run when cells act 401-y)");
     console.log("  cells schedule-dreams       install launchd plist (nightly 4am, all cells)");
     console.log("  cells unschedule-dreams     remove launchd plist");
     console.log("  cells destroy <name>        destroy a cell (irreversible)");

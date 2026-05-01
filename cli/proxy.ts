@@ -21,12 +21,21 @@
 //   - / pages are public reads for now (auth coming later).
 //
 // Token strategy:
-//   - Proxy reads ~/.pi/agent/auth.json on each upstream request.
-//   - Mother's own pi keeps that file fresh (refresh token rotates on use,
-//     so only ONE entity in the fleet may ever refresh — that's the mother).
-//   - Cells never refresh; they have no real OAuth credentials.
+//   - This proxy is the SOLE owner of OAuth refresh in the fleet. A 5-min
+//     timer checks the access expiry; if < 60 min remaining, it refreshes
+//     proactively. A mutex serializes concurrent attempts; a 429 backoff
+//     prevents hammering Anthropic during rate-limit windows.
+//   - Mother pi and cells only READ auth.json. Because this proxy keeps the
+//     access token fresh with > 60 min headroom, neither of them ever
+//     observes an expired token, so pi-ai's per-call refresh stays dormant.
+//   - On upstream 401 we self-heal: force a refresh, retry the original
+//     request once. If refresh ALSO returns 401, the refresh token is
+//     genuinely revoked — we surface a Mac notification + write a flag file
+//     at ~/.cell/auth-needs-login, and Pete /login's pi when convenient.
+//   - See docs/oauth-refresh.md for the full architecture, contract, and
+//     ops playbook.
 
-import { readFile } from "node:fs/promises";
+import { readFile, writeFile, rename } from "node:fs/promises";
 import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -52,6 +61,8 @@ const SHARED_SECRET = readSecret();
 
 type AuthJson = {
   anthropic: { type: "oauth"; refresh: string; access: string; expires: number };
+  // Other providers (openai, deepseek, ...) may live alongside; we don't touch them.
+  [k: string]: unknown;
 };
 
 async function readAccessToken(): Promise<{ access: string; expiresMs: number }> {
@@ -59,6 +70,146 @@ async function readAccessToken(): Promise<{ access: string; expiresMs: number }>
   const parsed = JSON.parse(raw) as AuthJson;
   return { access: parsed.anthropic.access, expiresMs: parsed.anthropic.expires };
 }
+
+// ───────────────────── refresh manager ─────────────────────
+// See docs/oauth-refresh.md for the full design rationale.
+
+const ANTHROPIC_OAUTH_TOKEN_URL = "https://platform.claude.com/v1/oauth/token";
+const ANTHROPIC_OAUTH_CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e";
+
+// Refresh proactively when access has < 60 min left. Pi-ai's own per-call
+// refresh fires only when access is already expired, so 60 min headroom
+// keeps pi from ever observing a stale token in practice.
+const REFRESH_HEADROOM_MS = 60 * 60 * 1000;
+const REFRESH_TICK_MS = 5 * 60 * 1000;
+const RATE_LIMIT_BACKOFF_MS = 10 * 60 * 1000;
+const AUTH_NEEDS_LOGIN_FLAG = join(homedir(), ".cell", "auth-needs-login");
+
+let blockedUntilMs = 0;
+let inFlight: Promise<void> | null = null;
+let lastRefresh: { at: number; outcome: "ok" | "429" | "401" | "error"; detail?: string } | null = null;
+
+async function atomicWriteAuth(json: AuthJson): Promise<void> {
+  const tmp = AUTH_PATH + ".tmp";
+  await writeFile(tmp, JSON.stringify(json, null, 2), { mode: 0o600 });
+  await rename(tmp, AUTH_PATH);
+}
+
+async function performRefresh(): Promise<void> {
+  if (Date.now() < blockedUntilMs) {
+    const wait = Math.round((blockedUntilMs - Date.now()) / 60000);
+    console.log(`[refresh] backoff active, ${wait}m remaining`);
+    return;
+  }
+
+  let auth: AuthJson;
+  try {
+    auth = JSON.parse(await readFile(AUTH_PATH, "utf-8")) as AuthJson;
+  } catch (e) {
+    lastRefresh = { at: Date.now(), outcome: "error", detail: `read auth.json: ${e}` };
+    console.error(`[refresh] cannot read auth.json: ${e}`);
+    return;
+  }
+  const refreshToken = auth.anthropic?.refresh;
+  if (!refreshToken) {
+    lastRefresh = { at: Date.now(), outcome: "error", detail: "no anthropic.refresh in auth.json" };
+    console.error(`[refresh] auth.json has no anthropic.refresh — run /login`);
+    return;
+  }
+
+  const startedAt = Date.now();
+  let res: Response;
+  try {
+    res = await fetch(ANTHROPIC_OAUTH_TOKEN_URL, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        grant_type: "refresh_token",
+        client_id: ANTHROPIC_OAUTH_CLIENT_ID,
+        refresh_token: refreshToken,
+      }),
+    });
+  } catch (e) {
+    lastRefresh = { at: Date.now(), outcome: "error", detail: String(e) };
+    console.error(`[refresh] network error: ${e}`);
+    return;
+  }
+
+  if (res.status === 429) {
+    blockedUntilMs = Date.now() + RATE_LIMIT_BACKOFF_MS;
+    lastRefresh = { at: Date.now(), outcome: "429" };
+    console.warn(`[refresh] rate-limited, backing off until ${new Date(blockedUntilMs).toISOString()}`);
+    return;
+  }
+
+  if (res.status === 401) {
+    lastRefresh = { at: Date.now(), outcome: "401" };
+    notifyHumanForLogin().catch(() => {});
+    console.error(`[refresh] 401 — refresh token rejected. /login required.`);
+    return;
+  }
+
+  if (!res.ok) {
+    const body = await res.text().catch(() => "<unreadable>");
+    lastRefresh = { at: Date.now(), outcome: "error", detail: `${res.status}: ${body.slice(0, 200)}` };
+    console.error(`[refresh] unexpected ${res.status}: ${body.slice(0, 200)}`);
+    return;
+  }
+
+  const data = (await res.json()) as { access_token: string; refresh_token: string; expires_in: number };
+  const newAuth: AuthJson = {
+    ...auth,
+    anthropic: {
+      type: "oauth",
+      access: data.access_token,
+      refresh: data.refresh_token,
+      // Match pi-ai's 5-min skew so we never disagree on freshness.
+      expires: Date.now() + data.expires_in * 1000 - 5 * 60 * 1000,
+    },
+  };
+  await atomicWriteAuth(newAuth);
+  lastRefresh = { at: Date.now(), outcome: "ok" };
+  // Successful refresh clears any stale "needs login" flag.
+  await Bun.file(AUTH_NEEDS_LOGIN_FLAG).exists().then(async (e) => {
+    if (e) await Bun.write(AUTH_NEEDS_LOGIN_FLAG + ".cleared", `${new Date().toISOString()}\n`).catch(() => {});
+  }).catch(() => {});
+  console.log(`[refresh] ok in ${Date.now() - startedAt}ms; access expires ${new Date(newAuth.anthropic.expires).toISOString()}`);
+}
+
+async function refreshIfNeeded(force = false): Promise<void> {
+  if (inFlight) return inFlight; // serialize concurrent callers
+  if (!force) {
+    try {
+      const { expiresMs } = await readAccessToken();
+      if (expiresMs - Date.now() > REFRESH_HEADROOM_MS) return;
+    } catch (e) {
+      console.error(`[refresh] readAccessToken pre-check failed: ${e}`);
+      // Fall through and try a refresh anyway.
+    }
+  }
+  inFlight = performRefresh().finally(() => {
+    inFlight = null;
+  });
+  return inFlight;
+}
+
+async function notifyHumanForLogin(): Promise<void> {
+  const msg = "OAuth refresh token revoked. Run /login in pi to recover.";
+  // Mac notification — best effort; ignore if osascript not available.
+  Bun.spawn(["osascript", "-e", `display notification "${msg}" with title "cells: auth needs attention"`], {
+    stdout: "ignore",
+    stderr: "ignore",
+  }).exited.catch(() => {});
+  // Flag file for cells doctor / status-line checks.
+  await Bun.write(AUTH_NEEDS_LOGIN_FLAG, `${new Date().toISOString()}\n`).catch(() => {});
+}
+
+// Kick off the periodic refresh loop. The first tick runs immediately so
+// startup never starts cold against a near-expired token.
+setInterval(() => {
+  refreshIfNeeded().catch((e) => console.error(`[refresh] tick error: ${e}`));
+}, REFRESH_TICK_MS);
+refreshIfNeeded().catch((e) => console.error(`[refresh] startup error: ${e}`));
 
 // ───────────────────── routing ─────────────────────
 
@@ -99,6 +250,9 @@ async function handleApiProxy(req: Request): Promise<Response> {
         ok: true,
         access_prefix: access.slice(0, 20),
         expires_in_min: Math.round((expiresMs - Date.now()) / 60000),
+        last_refresh: lastRefresh,
+        blocked_until: blockedUntilMs > Date.now() ? new Date(blockedUntilMs).toISOString() : null,
+        needs_login: existsSync(AUTH_NEEDS_LOGIN_FLAG),
       });
     } catch (e) {
       return Response.json({ ok: false, error: String(e) }, { status: 500 });
@@ -116,24 +270,48 @@ async function handleApiProxy(req: Request): Promise<Response> {
   }
 
   const upstreamUrl = UPSTREAM + url.pathname + url.search;
-  const headers = new Headers(req.headers);
-  headers.delete("host");
-  headers.delete("x-cell-name");
-  headers.delete("authorization");
-  headers.set("authorization", `Bearer ${access}`);
-  if (!headers.get("anthropic-beta")?.includes("oauth-2025-04-20")) {
-    const existing = headers.get("anthropic-beta");
-    headers.set("anthropic-beta", existing ? `${existing}, oauth-2025-04-20` : "oauth-2025-04-20");
+  const baseHeaders = new Headers(req.headers);
+  baseHeaders.delete("host");
+  baseHeaders.delete("x-cell-name");
+  baseHeaders.delete("authorization");
+  if (!baseHeaders.get("anthropic-beta")?.includes("oauth-2025-04-20")) {
+    const existing = baseHeaders.get("anthropic-beta");
+    baseHeaders.set("anthropic-beta", existing ? `${existing}, oauth-2025-04-20` : "oauth-2025-04-20");
   }
 
+  // Buffer the body so we can retry on 401. Anthropic message bodies are
+  // small text payloads, so this is fine; streaming responses go back
+  // through `upstream.body` unchanged.
+  const bodyBytes =
+    req.method === "GET" || req.method === "HEAD" ? undefined : new Uint8Array(await req.arrayBuffer());
+
+  const callUpstream = async (bearer: string): Promise<Response> => {
+    const headers = new Headers(baseHeaders);
+    headers.set("authorization", `Bearer ${bearer}`);
+    return fetch(upstreamUrl, {
+      method: req.method,
+      headers,
+      body: bodyBytes,
+    });
+  };
+
   const startedAt = Date.now();
-  const upstream = await fetch(upstreamUrl, {
-    method: req.method,
-    headers,
-    body: req.method === "GET" || req.method === "HEAD" ? undefined : req.body,
-    // @ts-expect-error Bun-specific
-    duplex: "half",
-  });
+  let upstream = await callUpstream(access);
+
+  // Self-heal on 401: this can happen at the boundary of an access-token
+  // expiry that the proactive timer hasn't caught yet. Force a refresh
+  // and retry once.
+  if (upstream.status === 401) {
+    console.warn(`[proxy] upstream 401 for ${auth.cell} — forcing refresh and retrying once`);
+    try {
+      await refreshIfNeeded(true);
+      const fresh = (await readAccessToken()).access;
+      if (fresh !== access) upstream = await callUpstream(fresh);
+    } catch (e) {
+      console.error(`[proxy] retry-after-refresh failed: ${e}`);
+    }
+  }
+
   const elapsed = Date.now() - startedAt;
   console.log(
     `[${new Date().toISOString()}] api ${auth.cell} ${req.method} ${url.pathname} -> ${upstream.status} (${elapsed}ms)`,
