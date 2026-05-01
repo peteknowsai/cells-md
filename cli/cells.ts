@@ -9,7 +9,7 @@ import * as readline from "node:readline/promises";
 
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
 const CELL_REPO = dirname(SCRIPT_DIR);
-const REGISTRY_DIR = join(homedir(), ".cell");
+const REGISTRY_DIR = join(homedir(), ".cells");
 const REGISTRY_PATH = join(REGISTRY_DIR, "cells.json");
 
 // Model registry — short name → { provider, modelId }. Anthropic doesn't
@@ -564,7 +564,7 @@ async function cmdDoctor() {
   console.log(`refresh token:  ${ant.refresh.slice(0, 20)}…`);
 
   // 2. Flag file
-  const flagPath = join(homedir(), ".cell/auth-needs-login");
+  const flagPath = join(homedir(), ".cells/auth-needs-login");
   if (existsSync(flagPath)) {
     const ts = (await readFile(flagPath, "utf-8")).trim();
     console.log(`${red}⚠ auth-needs-login flag set at ${ts}${reset} — refresh token revoked, run pi /login`);
@@ -977,7 +977,7 @@ async function dreamOne(name: string): Promise<boolean> {
   return ok;
 }
 
-const LAUNCHD_LABEL = "com.pete.cell-dream";
+const LAUNCHD_LABEL = "com.pete.cells-dream";
 
 function plistPath(): string {
   return join(homedir(), "Library/LaunchAgents", `${LAUNCHD_LABEL}.plist`);
@@ -986,7 +986,7 @@ function plistPath(): string {
 function buildPlist(): string {
   const cellBin = process.execPath; // bun
   const scriptPath = fileURLToPath(import.meta.url);
-  const logsDir = join(homedir(), ".cell", "logs");
+  const logsDir = join(homedir(), ".cells", "logs");
   const path = "/Users/pete/.bun/bin:/Users/pete/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin";
   return `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -1027,7 +1027,7 @@ function buildPlist(): string {
 }
 
 async function cmdScheduleDreams() {
-  const logsDir = join(homedir(), ".cell", "logs");
+  const logsDir = join(homedir(), ".cells", "logs");
   await mkdir(logsDir, { recursive: true });
   await mkdir(dirname(plistPath()), { recursive: true });
   await writeFile(plistPath(), buildPlist());
@@ -1129,7 +1129,7 @@ async function cmdDream(arg: string) {
 // ───── sync (Obsidian vault) ─────
 
 const VAULT_DIR = join(homedir(), "Obsidian", "cells");
-const SECRETS_PATH = join(homedir(), ".cell", "secrets.json");
+const SECRETS_PATH = join(homedir(), ".cells", "secrets.json");
 
 async function spritesToken(): Promise<string> {
   if (process.env.SPRITES_TOKEN) return process.env.SPRITES_TOKEN;
@@ -1137,7 +1137,7 @@ async function spritesToken(): Promise<string> {
     const s = JSON.parse(await readFile(SECRETS_PATH, "utf-8"));
     if (s.SPRITES_TOKEN) return s.SPRITES_TOKEN;
   }
-  console.error("SPRITES_TOKEN not set (env or ~/.cell/secrets.json)");
+  console.error("SPRITES_TOKEN not set (env or ~/.cells/secrets.json)");
   process.exit(1);
 }
 

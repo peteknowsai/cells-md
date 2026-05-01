@@ -25,7 +25,7 @@ anything inside it.
   - install Bun on the Sprite
   - tar+push `template/` to `/root/cell`, `sed` substitute `__NAME__`
   - run `bun install` on the Sprite
-  - inject shared keys (`CELLS_PROXY_SECRET`, `EXA_API_KEY`, `SPRITES_TOKEN`) from `~/.cell/secrets.json` and patch pi-ai's model registry to route through `mother.cells.md`
+  - inject shared keys (`CELLS_PROXY_SECRET`, `EXA_API_KEY`, `SPRITES_TOKEN`) from `~/.cells/secrets.json` and patch pi-ai's model registry to route through `mother.cells.md`
   - write the `~/.bashrc` shim that auto-attaches `tmux new-session -A -s cell pi` on `sprite console`
   - take the first checkpoint
 - `.pi/prompts/` — slash commands the CLI invokes (`cell-create`, `cell-destroy`, `cell-checkpoint`)

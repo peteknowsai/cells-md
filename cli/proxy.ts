@@ -27,7 +27,7 @@
 //   - On upstream 401 we self-heal: force a refresh, retry the original
 //     request once. If refresh ALSO returns 401, the refresh token is
 //     genuinely revoked — we surface a Mac notification + write a flag file
-//     at ~/.cell/auth-needs-login, and Pete /login's pi when convenient.
+//     at ~/.cells/auth-needs-login, and Pete /login's pi when convenient.
 //   - See docs/oauth-refresh.md for the full architecture, contract, and
 //     ops playbook.
 
@@ -37,10 +37,10 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 
 const AUTH_PATH = join(homedir(), ".pi/agent/auth.json");
-const SECRETS_PATH = join(homedir(), ".cell/secrets.json");
-const CELLS_REGISTRY = join(homedir(), ".cell/cells.json");
-const ROSTER_PATH = join(homedir(), "Projects/cell/memory/project_cells_roster.md");
-const ACTIVITY_PATH = join(homedir(), "Projects/cell/memory/project_cells_activity.md");
+const SECRETS_PATH = join(homedir(), ".cells/secrets.json");
+const CELLS_REGISTRY = join(homedir(), ".cells/cells.json");
+const ROSTER_PATH = join(homedir(), "Projects/cells/memory/project_cells_roster.md");
+const ACTIVITY_PATH = join(homedir(), "Projects/cells/memory/project_cells_activity.md");
 const UPSTREAM = "https://api.anthropic.com";
 const PORT = Number(process.env.CELLS_PROXY_PORT ?? 8787);
 
@@ -50,7 +50,7 @@ function readSecret(): string {
     const s = JSON.parse(readFileSync(SECRETS_PATH, "utf-8"));
     if (s.CELLS_PROXY_SECRET) return s.CELLS_PROXY_SECRET;
   }
-  console.error("CELLS_PROXY_SECRET not set (env or ~/.cell/secrets.json)");
+  console.error("CELLS_PROXY_SECRET not set (env or ~/.cells/secrets.json)");
   process.exit(1);
 }
 const SHARED_SECRET = readSecret();
@@ -79,7 +79,7 @@ const ANTHROPIC_OAUTH_CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e";
 const REFRESH_HEADROOM_MS = 60 * 60 * 1000;
 const REFRESH_TICK_MS = 5 * 60 * 1000;
 const RATE_LIMIT_BACKOFF_MS = 10 * 60 * 1000;
-const AUTH_NEEDS_LOGIN_FLAG = join(homedir(), ".cell", "auth-needs-login");
+const AUTH_NEEDS_LOGIN_FLAG = join(homedir(), ".cells", "auth-needs-login");
 
 let blockedUntilMs = 0;
 let inFlight: Promise<void> | null = null;

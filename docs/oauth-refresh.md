@@ -22,7 +22,7 @@ do when something looks wrong.
   retries the original request once.
 - On refresh-endpoint 401 (genuine revocation, ≈ months apart): a Mac
   notification fires and a flag file lands at
-  `~/.cell/auth-needs-login`. Pete `/login`s pi when convenient.
+  `~/.cells/auth-needs-login`. Pete `/login`s pi when convenient.
 
 ## Background: how Anthropic OAuth works
 
@@ -102,7 +102,7 @@ Timer (every 5 min):
 
   on 200: write new access+refresh atomically to auth.json
   on 429: blocked_until_ms = now + 10m, log
-  on 401: notify human, write ~/.cell/auth-needs-login flag, log
+  on 401: notify human, write ~/.cells/auth-needs-login flag, log
   on other: log; next tick retries
 ```
 
@@ -156,8 +156,8 @@ diagnostic for "cells acting weird."
 | Path | What |
 |---|---|
 | `~/.pi/agent/auth.json` | OAuth access + refresh tokens (managed by proxy) |
-| `~/.cell/secrets.json`  | Shared secret for cells→proxy auth, plus OpenAI/DeepSeek keys |
-| `~/.cell/auth-needs-login` | Flag file: presence means refresh got 401, `/login` needed |
+| `~/.cells/secrets.json`  | Shared secret for cells→proxy auth, plus OpenAI/DeepSeek keys |
+| `~/.cells/auth-needs-login` | Flag file: presence means refresh got 401, `/login` needed |
 | `cli/proxy.ts` | Refresh manager + Anthropic forwarder + dashboard |
 
 ## Operations
@@ -185,7 +185,7 @@ see this often, something is wrong with the backoff logic.
 The refresh token has been genuinely revoked. Run pi `/login`,
 re-authorize Anthropic, fresh tokens land in `auth.json`. The proxy's
 next timer tick will see fresh tokens, succeed, and the flag clears
-on its own (or you can `rm ~/.cell/auth-needs-login`).
+on its own (or you can `rm ~/.cells/auth-needs-login`).
 
 ### Manual refresh probe
 

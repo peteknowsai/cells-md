@@ -5,13 +5,13 @@
 # - Removes any legacy ~/.bashrc.d/anthropic_api_key (would conflict).
 # Idempotent — safe to re-run after `bun install` clobbers the model registry.
 #
-# Reads CELLS_PROXY_SECRET from ~/.cell/secrets.json (host side, before exec).
+# Reads CELLS_PROXY_SECRET from ~/.cells/secrets.json (host side, before exec).
 #
 # Usage: scripts/configure-cell-proxy.sh <cell-name>
 set -euo pipefail
 
 NAME="${1:?usage: $0 <cell-name>}"
-SECRETS="$HOME/.cell/secrets.json"
+SECRETS="$HOME/.cells/secrets.json"
 [ -f "$SECRETS" ] || { echo "missing $SECRETS"; exit 1; }
 SECRET=$(jq -r '.CELLS_PROXY_SECRET // empty' "$SECRETS")
 [ -n "$SECRET" ] || { echo "no CELLS_PROXY_SECRET in $SECRETS"; exit 1; }

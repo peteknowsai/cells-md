@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 # Register the `agent` service on a cell so Pi auto-starts on VM boot.
-# Reads SPRITES_TOKEN from ~/.cell/secrets.json and PUTs the service.
+# Reads SPRITES_TOKEN from ~/.cells/secrets.json and PUTs the service.
 #
 # Usage: scripts/register-agent-service.sh <cell-name>
 set -euo pipefail
 
 NAME="${1:?usage: $0 <cell-name>}"
-SECRETS="$HOME/.cell/secrets.json"
+SECRETS="$HOME/.cells/secrets.json"
 [ -f "$SECRETS" ] || { echo "missing $SECRETS"; exit 1; }
 TOKEN=$(jq -r '.SPRITES_TOKEN // empty' "$SECRETS")
 [ -n "$TOKEN" ] || { echo "no SPRITES_TOKEN in $SECRETS"; exit 1; }

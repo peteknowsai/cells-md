@@ -14,7 +14,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
 
-const REGISTRY_PATH = join(homedir(), ".cell", "cells.json");
+const REGISTRY_PATH = join(homedir(), ".cells", "cells.json");
 const WIDGET_KEY = "mother-roster";
 
 type Cell = { name: string; created_at: string };

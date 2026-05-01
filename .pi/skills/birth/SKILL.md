@@ -15,12 +15,12 @@ step matters — if you shortcut, the agent silently lands on extra-usage billin
 Prefer the sprite_* tools for every step that has them — they're cleaner than
 shell-out and surface errors as structured tool results. The `bash` tool is
 still available for local-only operations on the Mac (e.g., reading
-`~/.cell/secrets.json`).
+`~/.cells/secrets.json`).
 
 ## Preconditions
 
 - `sprite` CLI authenticated (verify with `sprite org list`)
-- `~/.cell/secrets.json` contains `CELLS_PROXY_SECRET` (the bearer token cells use to reach the mother's proxy at `https://mother.cells.md`)
+- `~/.cells/secrets.json` contains `CELLS_PROXY_SECRET` (the bearer token cells use to reach the mother's proxy at `https://mother.cells.md`)
 - No existing agent with this name (the Bun CLI checks before invoking you)
 
 ## 1. Create the Sprite
@@ -44,7 +44,7 @@ to submit) which require tmux's `extended-keys` to be on.
 Also install the `sprite` CLI on the Sprite — the `self` extension
 needs it to let the agent operate on its own sprite (checkpoint, egress,
 inspect). The CLI authenticates from `SPRITES_TOKEN` env var, which gets
-injected from `~/.cell/secrets.json` in step 6b. If that key isn't in the
+injected from `~/.cells/secrets.json` in step 6b. If that key isn't in the
 secrets file, the API-based self tools simply return a clear error;
 `talk_to_self` works regardless.
 
@@ -98,7 +98,7 @@ layout (AGENTS.md stub, .pi/agents/self.md persona, .pi/extensions/identity,
 
 Use `sprite_push` with:
 - `name: <NAME>`
-- `localPath: /Users/pete/Projects/cell/template`
+- `localPath: /Users/pete/Projects/cells/template`
 - `remotePath: /home/sprite/agent`
 
 Then substitute `__NAME__`, `__MODEL__`, `__PROVIDER__`, and `__THINKING__`
@@ -209,16 +209,16 @@ export PATH=$HOME/.bun/bin:$PATH
 EOF
 ```
 
-## 6b. Inject shared secrets from `~/.cell/secrets.json`
+## 6b. Inject shared secrets from `~/.cells/secrets.json`
 
-Every cell gets the same shared secrets, read from `~/.cell/secrets.json`
+Every cell gets the same shared secrets, read from `~/.cells/secrets.json`
 on the Mac and written one-file-per-key into `/home/sprite/.bashrc.d/` on
 the Sprite. Don't echo any values in your reply.
 
 Local bash to read the file (use `bash`, not `sprite_exec`):
 
 ```bash
-test -f ~/.cell/secrets.json && jq -r 'keys[]' ~/.cell/secrets.json
+test -f ~/.cells/secrets.json && jq -r 'keys[]' ~/.cells/secrets.json
 ```
 
 Then for each `KEY: value` pair (other than `CELLS_PROXY_SECRET` — handled
@@ -246,7 +246,7 @@ laptop runs (single OAuth principal for the whole fleet). This step does
 two things:
 
 1. Drops `~/.bashrc.d/anthropic_proxy` with the shared bearer secret
-   (`CELLS_PROXY_SECRET` from `~/.cell/secrets.json`) as `ANTHROPIC_AUTH_TOKEN`.
+   (`CELLS_PROXY_SECRET` from `~/.cells/secrets.json`) as `ANTHROPIC_AUTH_TOKEN`.
 2. Patches the hardcoded `api.anthropic.com` URL in `pi-ai`'s model registry
    to `mother.cells.md`. Pi does NOT respect `ANTHROPIC_BASE_URL` — the URL
    is baked per-model in `models.generated.js`. The patch is idempotent.
@@ -284,7 +284,7 @@ Sprites API):
 scripts/register-agent-service.sh <NAME>
 ```
 
-The script reads `SPRITES_TOKEN` from `~/.cell/secrets.json` and PUTs a
+The script reads `SPRITES_TOKEN` from `~/.cells/secrets.json` and PUTs a
 service that runs `tmux new-session -dA -s agent pi` plus a wait loop.
 The loop keeps the service process alive while the tmux session exists,
 so Sprites considers the service "running" and doesn't restart it
