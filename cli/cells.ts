@@ -19,7 +19,7 @@ const MODEL_IDS = {
   opus:                { provider: "anthropic", modelId: "claude-opus-4-7" },
   sonnet:              { provider: "anthropic", modelId: "claude-sonnet-4-6" },
   haiku:               { provider: "anthropic", modelId: "claude-haiku-4-5" },
-  "gpt-5.5":           { provider: "openai",    modelId: "gpt-5.5" },
+  "gpt-5.5":           { provider: "openai-codex", modelId: "gpt-5.5" },
   "deepseek-v4-flash": { provider: "deepseek",  modelId: "deepseek-v4-flash" },
   "deepseek-v4-pro":   { provider: "deepseek",  modelId: "deepseek-v4-pro" },
 } as const;
