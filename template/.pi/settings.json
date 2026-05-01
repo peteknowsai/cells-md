@@ -4,9 +4,10 @@
     ".pi/extensions/self/index.ts"
   ],
   "packages": [],
-  "enabledModels": ["claude-opus-4-7", "claude-sonnet-4-6", "claude-haiku-4-5"],
-  "defaultProvider": "anthropic",
+  "enabledModels": ["claude-opus-4-7", "claude-sonnet-4-6", "claude-haiku-4-5", "gpt-5.5"],
+  "defaultProvider": "__PROVIDER__",
   "defaultModel": "__MODEL__",
+  "defaultThinkingLevel": "__THINKING__",
   "warnings": {
     "anthropicExtraUsage": false
   }

@@ -12,13 +12,14 @@ const CELL_REPO = dirname(SCRIPT_DIR);
 const REGISTRY_DIR = join(homedir(), ".cell");
 const REGISTRY_PATH = join(REGISTRY_DIR, "cells.json");
 
-// Model registry — short name → Anthropic API alias. Anthropic does not
+// Model registry — short name → { provider, modelId }. Anthropic doesn't
 // provide a floating "claude-opus-latest" alias; the major-version-stamped
 // alias is what they recommend. Bump these when a new minor ships.
 const MODEL_IDS = {
-  opus:   "claude-opus-4-7",
-  sonnet: "claude-sonnet-4-6",
-  haiku:  "claude-haiku-4-5",
+  opus:      { provider: "anthropic", modelId: "claude-opus-4-7" },
+  sonnet:    { provider: "anthropic", modelId: "claude-sonnet-4-6" },
+  haiku:     { provider: "anthropic", modelId: "claude-haiku-4-5" },
+  "gpt-5.5": { provider: "openai",    modelId: "gpt-5.5" },
 } as const;
 type ModelKey = keyof typeof MODEL_IDS;
 
@@ -53,8 +54,22 @@ const MODEL_OPTIONS: SelectOption[] = [
   { value: "opus",    label: "opus" },
   { value: "sonnet",  label: "sonnet" },
   { value: "haiku",   label: "haiku" },
-  { value: "gpt-5.5", label: "gpt-5.5", hint: "(coming soon)", disabled: true },
+  { value: "gpt-5.5", label: "gpt-5.5" },
 ];
+
+// Pi thinking levels — `xhigh` only takes effect on a few codex-max models;
+// it silently downgrades elsewhere. Models that don't support thinking at
+// all just ignore the setting. Pass through whatever the user picks.
+const THINKING_OPTIONS: SelectOption[] = [
+  { value: "off",     label: "off" },
+  { value: "minimal", label: "minimal" },
+  { value: "low",     label: "low" },
+  { value: "medium",  label: "medium" },
+  { value: "high",    label: "high" },
+  { value: "xhigh",   label: "xhigh", hint: "(codex-max only; ignored elsewhere)" },
+];
+const THINKING_VALUES = THINKING_OPTIONS.map((o) => o.value);
+const DEFAULT_THINKING = "medium";
 
 const EXTENSION_OPTIONS: SelectOption[] = OPTIONAL_EXTENSIONS.map((p) => ({
   value: p,
@@ -482,6 +497,7 @@ async function cmdWake(name: string) {
 type CreateOpts = {
   harness?: string;
   model?: ModelKey;
+  thinking?: string;
   extensions?: string[];
   packages?: string[];
 };
@@ -521,6 +537,13 @@ function parseCreateArgs(args: string[]): { name: string; opts: CreateOpts } {
         }
       }
       opts.packages = parts;
+    } else if (a.startsWith("--thinking=")) {
+      const v = a.slice("--thinking=".length);
+      if (!THINKING_VALUES.includes(v)) {
+        console.error(`unknown thinking level: ${v}. choose: ${THINKING_VALUES.join(", ")}`);
+        process.exit(1);
+      }
+      opts.thinking = v;
     } else if (a.startsWith("--")) {
       console.error(`unknown flag: ${a}`);
       process.exit(1);
@@ -533,7 +556,7 @@ function parseCreateArgs(args: string[]): { name: string; opts: CreateOpts } {
   }
   if (!name) {
     console.error(
-      "usage: cells create <name> [--harness=pi] [--model=opus|sonnet|haiku] [--extensions=memory,...] [--packages=pi-web-access,...]",
+      "usage: cells create <name> [--harness=pi] [--model=opus|sonnet|haiku|gpt-5.5] [--thinking=off|minimal|low|medium|high|xhigh] [--extensions=memory,...] [--packages=pi-web-access,...]",
     );
     process.exit(1);
   }
@@ -553,11 +576,13 @@ async function cmdCreate(name: string, opts: CreateOpts) {
   const interactive =
     opts.harness === undefined &&
     opts.model === undefined &&
+    opts.thinking === undefined &&
     opts.extensions === undefined &&
     opts.packages === undefined;
 
   let harness: string;
   let modelKey: ModelKey;
+  let thinking: string;
   let extensions: string[];
   let packages: string[];
 
@@ -566,7 +591,7 @@ async function cmdCreate(name: string, opts: CreateOpts) {
     // Step machine so the user can ←/⌫ back to a previous prompt mid-flow.
     const answers: (string | string[] | undefined)[] = [];
     let i = 0;
-    while (i < 4) {
+    while (i < 5) {
       const canGoBack = i > 0;
       let result: string | string[] | Back;
       if (i === 0) {
@@ -583,10 +608,15 @@ async function cmdCreate(name: string, opts: CreateOpts) {
           canGoBack,
           initialChecked: answers[2] as string[] | undefined,
         });
-      } else {
+      } else if (i === 3) {
         result = await selectMany("Packages?", PACKAGE_OPTIONS, {
           canGoBack,
           initialChecked: (answers[3] as string[] | undefined) ?? PACKAGE_DEFAULTS,
+        });
+      } else {
+        result = await selectOne("Thinking?", THINKING_OPTIONS, {
+          canGoBack,
+          initialValue: (answers[4] as string | undefined) ?? DEFAULT_THINKING,
         });
       }
       if (result === BACK) {
@@ -603,9 +633,11 @@ async function cmdCreate(name: string, opts: CreateOpts) {
     modelKey = answers[1] as ModelKey;
     extensions = answers[2] as string[];
     packages = answers[3] as string[];
+    thinking = answers[4] as string;
   } else {
     harness = opts.harness ?? "pi";
     modelKey = opts.model ?? "opus";
+    thinking = opts.thinking ?? DEFAULT_THINKING;
     extensions = opts.extensions ?? [];
     packages = opts.packages ?? PACKAGE_DEFAULTS;
     if (harness !== "pi") {
@@ -614,9 +646,12 @@ async function cmdCreate(name: string, opts: CreateOpts) {
     }
   }
 
+  const choice = MODEL_IDS[modelKey];
   const payload = {
     harness,
-    model: MODEL_IDS[modelKey],
+    provider: choice.provider,
+    model: choice.modelId,
+    thinking,
     extensions,
     packages,
   };
@@ -1603,7 +1638,8 @@ switch (sub) {
     console.log("usage:");
     console.log("  cells pi                    open the cell-keeper Pi TUI (alias: cells talk keeper)");
     console.log("  cells create <name> [flags] provision a new cell on a Sprite");
-    console.log("                              flags: --harness=pi --model=opus|sonnet|haiku");
+    console.log("                              flags: --harness=pi --model=opus|sonnet|haiku|gpt-5.5");
+    console.log("                                     --thinking=off|minimal|low|medium|high|xhigh");
     console.log("                                     --extensions=memory,mentality,wiki,dream");
     console.log("                                     --packages=pi-web-access");
     console.log("                              no flags = interactive TUI; any flag = non-interactive (defaults fill the rest)");

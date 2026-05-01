@@ -101,12 +101,14 @@ Use `sprite_push` with:
 - `localPath: /Users/pete/Projects/cell/template`
 - `remotePath: /home/sprite/agent`
 
-Then substitute `__NAME__` and `__MODEL__` with their actual values.
-Use `sprite_exec`:
+Then substitute `__NAME__`, `__MODEL__`, `__PROVIDER__`, and `__THINKING__`
+with their actual values. Use `sprite_exec`:
 
 ```bash
 sed -i 's/__NAME__/<NAME>/g' /home/sprite/agent/AGENTS.md /home/sprite/agent/.pi/agents/self.md /home/sprite/agent/package.json
 sed -i 's/__MODEL__/<MODEL>/g' /home/sprite/agent/.pi/agents/self.md /home/sprite/agent/.pi/settings.json
+sed -i 's/__PROVIDER__/<PROVIDER>/g' /home/sprite/agent/.pi/settings.json
+sed -i 's/__THINKING__/<THINKING>/g' /home/sprite/agent/.pi/settings.json
 ```
 
 ## 5. Run `bun install`, install Pi globally, install web-access, install `cells` CLI
