@@ -56,12 +56,13 @@ export default function (pi: any) {
 Then add the path to `.pi/settings.json`:
 
 ```json
-{ "extensions": [".pi/extensions/identity/index.ts", ".pi/extensions/<name>/index.ts"] }
+{ "extensions": [".pi/extensions/use-max/index.ts", ".pi/extensions/<name>/index.ts"] }
 ```
 
 Restart to load. Reference existing extensions in `.pi/extensions/` for
 patterns. Hooks available: `session_start`, `before_agent_start`, `turn_end`,
-`tool_call`, etc. Full surface in the Pi extension docs.
+`tool_call`, etc. **Full extension surface, hook signatures, and tool
+registration API:** see `extensions.md` under "Reference" below.
 
 ## 3. Morph your persona
 
@@ -113,3 +114,27 @@ Don't pre-extend yourself speculatively. Wait for a concrete need.
 
 After any self-modification, save a `feedback_*.md` memory noting what you
 changed and why, so future-you understands the trail.
+
+## Reference — where to read the actual Pi docs
+
+When this skill says "the Pi docs," there are three places to go, in order
+of speed:
+
+1. **Local docs (preferred — no network).** Bundled with every cell at
+   `/home/sprite/agent/node_modules/@mariozechner/pi-coding-agent/docs/`.
+   Read with the `read` tool. Topics worth knowing:
+   - `extensions.md` — hooks, `registerTool`, `registerProvider`, full API surface
+   - `skills.md` — skill format, frontmatter, discovery rules
+   - `settings.md` — every setting key (`defaultProvider`, `thinkingBudgets`, …)
+   - `providers.md` — env vars, auth.json format, every supported provider
+   - `models.md` — provider/model-id rules, custom model registration
+   - `usage.md`, `rpc.md` — CLI flags + RPC surface
+   - Index: `index.md` (table of contents).
+2. **Source.** `https://github.com/badlogic/pi-mono` — canonical, has the
+   actual TypeScript types if a doc is unclear. Use `fetch_content` if
+   `pi-web-access` is installed.
+3. **Landing page.** `https://pi.dev` — mostly marketing; not where the
+   docs live.
+
+When in doubt, grep the local `docs/` directory first. It's faster and
+matches the version of Pi you're actually running.
