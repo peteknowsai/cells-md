@@ -457,24 +457,48 @@ async function cmdTalk(name: string, args: string[]) {
     return;
   }
   await requireCell(name);
-  if (args.length === 0) {
-    // No args → open the agent's TUI via sprite console (attaches to the
-    // live tmux+pi service running on the cell).
+
+  const attach = async () => {
     const proc = Bun.spawn(["sprite", "console", "-s", name], {
       stdin: "inherit",
       stdout: "inherit",
       stderr: "inherit",
     });
     await proc.exited;
+  };
+
+  if (args.length === 0) {
+    // No args → attach to the live tmux+pi service running on the cell.
+    await attach();
     return;
   }
   if (args[0]!.startsWith("-")) {
-    // Cells run a persistent tmux+pi service. Spawning a separate `pi -c|-r`
-    // would race against the live session file. If you want session
-    // inspection on a cell, attach with `cells talk <name>` and use the
-    // `/resume` slash command from inside.
+    // Cells run a single persistent pi inside tmux. We can't spawn a
+    // parallel pi safely — two writers on one session file = corruption.
+    // Instead, drive the LIVE pi via slash commands sent through tmux.
+    const flag = args[0]!;
+    if (flag === "-c" || flag === "--continue") {
+      // Live pi IS the most recent session by definition — just attach.
+      await attach();
+      return;
+    }
+    if (flag === "-r" || flag === "--resume") {
+      // Inject /resume into the agent tmux session so the live pi opens
+      // its session picker. Then attach so the user can interact with it.
+      const inject = Bun.spawn(
+        ["sprite", "exec", "-s", name, "--", "tmux", "send-keys", "-t", "agent", "/resume", "Enter"],
+        { stdin: "ignore", stdout: "ignore", stderr: "inherit" },
+      );
+      const code = await inject.exited;
+      if (code !== 0) {
+        console.error(`failed to inject /resume into ${name}'s tmux session (exit ${code})`);
+        process.exit(1);
+      }
+      await attach();
+      return;
+    }
     console.error(
-      `pi-flag forwarding (${args[0]}) isn't supported for cells — they run a persistent agent. Attach with 'cells talk ${name}' and use /resume from inside.`,
+      `flag '${flag}' isn't supported for cells. Supported: -c|--continue (attach to live), -r|--resume (open picker). For arbitrary --session=<id>, attach with 'cells talk ${name}' and use /resume or /tree from inside.`,
     );
     process.exit(1);
   }
@@ -1658,7 +1682,8 @@ switch (sub) {
     console.log("                                     --packages=pi-web-access");
     console.log("                              no flags = interactive TUI; any flag = non-interactive (defaults fill the rest)");
     console.log("  cells talk <name> [msg]     attach to a cell's TUI (no msg) or send one-shot (with msg).");
-    console.log("                              'mother' = local pi; accepts pi flags (-c continue, -r resume, --session=<id>).");
+    console.log("                              'mother' = local pi; accepts any pi flag (-c, -r, --session=<id>, -p ...).");
+    console.log("                              cells: -c/--continue attaches; -r/--resume opens picker via tmux send-keys.");
     console.log("  cells list                  list known cells");
     console.log("  cells sleep <name>          force-hibernate a Sprite");
     console.log("  cells wake <name>           force-wake a Sprite");
