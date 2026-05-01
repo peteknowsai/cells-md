@@ -127,5 +127,6 @@ Offsite cold backup of the cell's body.
 - Self-modification beyond memory and wiki
 - ~~L2 wiki / Karpathy-style distilled knowledge — earns its keep when a cell has a job; until then `cells sync` (Phase 2) covers the readable-surface need~~ — moved into Phase 2.5 (`pi-cell-wiki`), reframed as conversation-distilled rather than external-corpus-ingested
 - Bidirectional vault sync — pull-only for now; if Pete actually wants to edit in Obsidian, we'll add `cells sync push` with a git-style conflict pre-flight
+- Multiple cell pools per Sprites org (namespace + CLI rename + per-pool domain) — design captured in `docs/namespacing.md`; build when we actually want a second install
 
 These may come later. For now, we build the singular unit.
