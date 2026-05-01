@@ -1,11 +1,19 @@
 {
   "extensions": [
     ".pi/extensions/use-max/index.ts",
+    ".pi/extensions/mother-codex/index.ts",
     ".pi/extensions/self/index.ts",
     ".pi/extensions/thinking/index.ts"
   ],
   "packages": [],
-  "enabledModels": ["claude-opus-4-7", "claude-sonnet-4-6", "claude-haiku-4-5", "gpt-5.5", "deepseek-v4-flash", "deepseek-v4-pro"],
+  "enabledModels": [
+    "claude-opus-4-7",
+    "claude-sonnet-4-6",
+    "claude-haiku-4-5",
+    "openai-codex/gpt-5.5",
+    "deepseek-v4-flash",
+    "deepseek-v4-pro"
+  ],
   "defaultProvider": "__PROVIDER__",
   "defaultModel": "__MODEL__",
   "defaultThinkingLevel": "__THINKING__",

@@ -326,15 +326,22 @@ hours after birth.
 
 ## 6c. Wire the cell to the mother's proxy
 
-Cells reach Anthropic via `https://mother.cells.md`, which the mother
-laptop runs (single OAuth principal for the whole fleet). This step does
-two things:
+Cells reach both Anthropic (Claude Max) and OpenAI Codex (ChatGPT Plus)
+via `https://mother.cells.md`, which the mother laptop runs as the single
+OAuth principal for both subscriptions across the whole fleet. This step
+does four things:
 
 1. Drops `~/.bashrc.d/anthropic_proxy` with the shared bearer secret
    (`CELLS_PROXY_SECRET` from `~/.cells/secrets.json`) as `ANTHROPIC_AUTH_TOKEN`.
-2. Patches the hardcoded `api.anthropic.com` URL in `pi-ai`'s model registry
+2. Drops `~/.bashrc.d/codex_proxy` with the same secret as `OPENAI_CODEX_API_KEY`,
+   read by the `mother-codex` extension at pi startup.
+3. Patches the hardcoded `api.anthropic.com` URL in `pi-ai`'s model registry
    to `mother.cells.md`. Pi does NOT respect `ANTHROPIC_BASE_URL` — the URL
    is baked per-model in `models.generated.js`. The patch is idempotent.
+4. Neutralizes JWT-based `extractAccountId` in `pi-ai`'s codex provider —
+   cells ship the proxy secret as bearer (not a JWT), so the original
+   function would throw. Mother adds the real `chatgpt-account-id` header
+   server-side. Idempotent.
 
 Use local `bash`:
 
@@ -342,11 +349,11 @@ Use local `bash`:
 scripts/configure-cell-proxy.sh <NAME>
 ```
 
-This runs after `bun install` (step 5) so the model file exists. If the
-cell ever runs `bun install` again, this script must be re-run — the model
-registry will be clobbered and the cell will start hitting `api.anthropic.com`
-directly with the proxy secret (which Anthropic rejects). Also re-run if
-you rotate `CELLS_PROXY_SECRET`.
+This runs after `bun install` (step 5) so the model files exist. If the
+cell ever runs `bun install` again, this script must be re-run — both
+patches will be clobbered and the cell will start hitting upstream APIs
+directly with the proxy secret (which both providers reject). Also re-run
+if you rotate `CELLS_PROXY_SECRET`.
 
 Background: see `memory/project_mother_proxy.md` and
 `memory/reference_pi_internals.md` for why this is necessary.
