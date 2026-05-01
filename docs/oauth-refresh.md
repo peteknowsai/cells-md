@@ -124,7 +124,7 @@ new refresh. Set to null in a `finally` after the refresh completes.
 ### Liveness check
 
 ```
-GET https://keeper.cells.md/_proxy/health
+GET https://mother.cells.md/_proxy/health
 ```
 
 Returns:

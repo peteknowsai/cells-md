@@ -1,9 +1,13 @@
 #!/usr/bin/env bash
-# Wire a cell to the keeper proxy at https://keeper.cells.md.
+# Wire a cell to the mother proxy at https://mother.cells.md.
 # - Drops ~/.bashrc.d/anthropic_proxy with the shared secret as OAuth token.
-# - Patches pi-ai's hardcoded api.anthropic.com → keeper.cells.md (both copies).
+# - Patches pi-ai's hardcoded api.anthropic.com → mother.cells.md (both copies).
 # - Removes any legacy ~/.bashrc.d/anthropic_api_key (would conflict).
 # Idempotent — safe to re-run after `bun install` clobbers the model registry.
+#
+# Older cells were patched to the legacy alias keeper.cells.md; that hostname
+# still works (proxy keeps it as a backward-compat alias) so re-running this
+# on an existing cell is fine — it just re-points to the canonical host.
 #
 # Reads CELLS_PROXY_SECRET from ~/.cell/secrets.json (host side, before exec).
 #
@@ -24,11 +28,11 @@ esac
 sprite exec -s "$NAME" -- bash -lc "
 set -euo pipefail
 
-# 1. Env file: route to keeper proxy.
+# 1. Env file: route to mother proxy.
 mkdir -p ~/.bashrc.d
 rm -f ~/.bashrc.d/anthropic_api_key  # legacy, would conflict
 cat > ~/.bashrc.d/anthropic_proxy <<'EOF'
-# Route Anthropic API calls through keeper proxy (cells.md fleet).
+# Route Anthropic API calls through mother proxy (cells.md fleet).
 # Pi treats this as an OAuth token (Bearer auth) thanks to the sk-ant-oat prefix.
 export ANTHROPIC_OAUTH_TOKEN=__SECRET__
 export ANTHROPIC_AUTH_TOKEN=__SECRET__
@@ -37,18 +41,20 @@ EOF
 sed -i 's|__SECRET__|$SECRET|g' ~/.bashrc.d/anthropic_proxy
 chmod 600 ~/.bashrc.d/anthropic_proxy
 
-# 2. Patch pi-ai models registry: api.anthropic.com -> keeper.cells.md
+# 2. Patch pi-ai models registry: api.anthropic.com -> mother.cells.md.
+#    Also rewrite legacy keeper.cells.md → mother.cells.md if a previous
+#    run patched it that way, so existing cells re-converge on the canonical host.
 patched=0
 for F in \\
   /home/sprite/agent/node_modules/@mariozechner/pi-ai/dist/models.generated.js \\
   /home/sprite/.bun/install/global/node_modules/@mariozechner/pi-ai/dist/models.generated.js
 do
   [ -f \"\$F\" ] || continue
-  if grep -q 'api.anthropic.com' \"\$F\"; then
+  if grep -qE 'api.anthropic.com|keeper.cells.md' \"\$F\"; then
     [ -f \"\$F.bak\" ] || cp \"\$F\" \"\$F.bak\"
-    sed -i 's|https://api.anthropic.com|https://keeper.cells.md|g' \"\$F\"
+    sed -i 's|https://api.anthropic.com|https://mother.cells.md|g; s|https://keeper.cells.md|https://mother.cells.md|g' \"\$F\"
     patched=\$((patched+1))
   fi
 done
-echo \"proxy configured on $NAME (patched \$patched model file(s))\"
+echo \"proxy configured on $NAME (patched \$patched model file(s) → mother.cells.md)\"
 "

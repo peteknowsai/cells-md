@@ -20,7 +20,7 @@ still available for local-only operations on the Mac (e.g., reading
 ## Preconditions
 
 - `sprite` CLI authenticated (verify with `sprite org list`)
-- `~/.cell/secrets.json` contains `CELLS_PROXY_SECRET` (the bearer token cells use to reach the mother's proxy at `https://keeper.cells.md`)
+- `~/.cell/secrets.json` contains `CELLS_PROXY_SECRET` (the bearer token cells use to reach the mother's proxy at `https://mother.cells.md`)
 - No existing agent with this name (the Bun CLI checks before invoking you)
 
 ## 1. Create the Sprite
@@ -241,15 +241,16 @@ hours after birth.
 
 ## 6c. Wire the cell to the mother's proxy
 
-Cells reach Anthropic via `https://keeper.cells.md`, which the mother
+Cells reach Anthropic via `https://mother.cells.md`, which the mother
 laptop runs (single OAuth principal for the whole fleet). This step does
 two things:
 
 1. Drops `~/.bashrc.d/anthropic_proxy` with the shared bearer secret
    (`CELLS_PROXY_SECRET` from `~/.cell/secrets.json`) as `ANTHROPIC_AUTH_TOKEN`.
 2. Patches the hardcoded `api.anthropic.com` URL in `pi-ai`'s model registry
-   to `keeper.cells.md`. Pi does NOT respect `ANTHROPIC_BASE_URL` — the URL
-   is baked per-model in `models.generated.js`. The patch is idempotent.
+   to `mother.cells.md`. Pi does NOT respect `ANTHROPIC_BASE_URL` — the URL
+   is baked per-model in `models.generated.js`. The patch is idempotent and
+   also rewrites legacy `keeper.cells.md` patches in place.
 
 Use local `bash`:
 
