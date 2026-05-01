@@ -106,7 +106,7 @@ Use `sprite_exec`:
 
 ```bash
 sed -i 's/__NAME__/<NAME>/g' /home/sprite/agent/AGENTS.md /home/sprite/agent/.pi/agents/self.md /home/sprite/agent/package.json
-sed -i 's/__MODEL__/<MODEL>/g' /home/sprite/agent/.pi/agents/self.md
+sed -i 's/__MODEL__/<MODEL>/g' /home/sprite/agent/.pi/agents/self.md /home/sprite/agent/.pi/settings.json
 ```
 
 ## 5. Run `bun install`, install Pi globally, install web-access, install `cells` CLI

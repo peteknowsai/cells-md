@@ -4,6 +4,7 @@
     ".pi/extensions/self/index.ts"
   ],
   "packages": [],
+  "enabledModels": ["__MODEL__"],
   "warnings": {
     "anthropicExtraUsage": false
   }
