@@ -85,6 +85,12 @@ const THINKING_OPTIONS: SelectOption[] = [
 const THINKING_VALUES = THINKING_OPTIONS.map((o) => o.value);
 const DEFAULT_THINKING = "medium";
 
+// Models that reject low-effort thinking levels server-side. gpt-5.5-pro
+// returns 400 if you give it off/minimal/low. Grow this set as new
+// reasoning-only models surface.
+const MIN_MEDIUM_THINKING_MODELS = new Set<ModelKey>(["gpt-5.5-pro"]);
+const SUB_MEDIUM_THINKING = new Set<string>(["off", "minimal", "low"]);
+
 const EXTENSION_OPTIONS: SelectOption[] = OPTIONAL_EXTENSIONS.map((p) => ({
   value: p,
   label: p,
@@ -801,6 +807,14 @@ async function cmdCreate(name: string, opts: CreateOpts) {
       console.error(`harness '${harness}' not yet supported (only 'pi' for v1)`);
       process.exit(1);
     }
+  }
+
+  // Some models reject low-effort thinking levels server-side. Auto-bump
+  // rather than birth a cell that 400s on its first message. Warn either
+  // way so Pete knows what changed.
+  if (MIN_MEDIUM_THINKING_MODELS.has(modelKey) && SUB_MEDIUM_THINKING.has(thinking)) {
+    console.warn(`note: ${modelKey} requires thinking ≥ medium; bumping '${thinking}' → 'medium'`);
+    thinking = "medium";
   }
 
   const choice = MODEL_IDS[modelKey];
