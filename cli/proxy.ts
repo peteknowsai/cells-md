@@ -39,7 +39,6 @@ import { join } from "node:path";
 const AUTH_PATH = join(homedir(), ".pi/agent/auth.json");
 const SECRETS_PATH = join(homedir(), ".cells/secrets.json");
 const CELLS_REGISTRY = join(homedir(), ".cells/cells.json");
-const ROSTER_PATH = join(homedir(), "Projects/cells/memory/project_cells_roster.md");
 const ACTIVITY_PATH = join(homedir(), "Projects/cells/memory/project_cells_activity.md");
 const UPSTREAM = "https://api.anthropic.com";
 const PORT = Number(process.env.CELLS_PROXY_PORT ?? 8787);
@@ -322,34 +321,25 @@ async function handleApiProxy(req: Request): Promise<Response> {
 
 type CellInfo = {
   name: string;
-  born?: string;
-  notes?: string;
-  registry?: { spriteUrl?: string };
+  born: string;
 };
 
-function readRoster(): CellInfo[] {
-  if (!existsSync(ROSTER_PATH)) return [];
-  const text = readFileSync(ROSTER_PATH, "utf-8");
-  const out: CellInfo[] = [];
-  for (const line of text.split("\n")) {
-    // | pete   | 2026-04-30 05:29  | clean birth |
-    const m = line.match(/^\|\s*([a-z0-9-]+)\s*\|\s*([0-9-: ]+?)\s*\|\s*(.*?)\s*\|$/i);
-    if (!m) continue;
-    if (m[1].toLowerCase() === "cell") continue; // header row
-    out.push({ name: m[1], born: m[2], notes: m[3] });
-  }
-  return out;
+// 2026-04-30T05:29:45.393Z → 2026-04-30 05:29
+function formatBorn(iso?: string): string {
+  if (!iso) return "?";
+  return `${iso.slice(0, 10)} ${iso.slice(11, 16)}`;
 }
 
-function readRegistry(): Record<string, any> {
-  if (!existsSync(CELLS_REGISTRY)) return {};
+function readCells(): CellInfo[] {
+  if (!existsSync(CELLS_REGISTRY)) return [];
   try {
     const r = JSON.parse(readFileSync(CELLS_REGISTRY, "utf-8"));
-    const map: Record<string, any> = {};
-    for (const c of r.cells ?? []) map[c.name] = c;
-    return map;
+    return (r.cells ?? []).map((c: { name: string; created_at?: string }) => ({
+      name: c.name,
+      born: formatBorn(c.created_at),
+    }));
   } catch {
-    return {};
+    return [];
   }
 }
 
@@ -400,17 +390,13 @@ ${body}
 }
 
 function dashboardHtml(): Response {
-  const cells = readRoster();
-  const registry = readRegistry();
+  const cells = readCells();
   const rows = cells
     .map((c) => {
-      const reg = registry[c.name] ?? {};
       const url = `https://${c.name}.cells.md/`;
       return `<tr>
         <td><a href="${url}"><strong>${c.name}</strong></a></td>
-        <td>${c.born ?? ""}</td>
-        <td>${c.notes ?? ""}</td>
-        <td>${reg.spriteUrl ? `<a href="${reg.spriteUrl}"><code>sprite</code></a>` : ""}</td>
+        <td>${c.born}</td>
       </tr>`;
     })
     .join("\n");
@@ -422,8 +408,8 @@ function dashboardHtml(): Response {
     `<h1>cells</h1>
     <p class="sub">Living cells in the fleet. Routed via <code>*.cells.md</code> through the mother.</p>
     <table>
-      <thead><tr><th>Cell</th><th>Born</th><th>Notes</th><th>Sprite</th></tr></thead>
-      <tbody>${rows || `<tr><td colspan="4"><em>no cells</em></td></tr>`}</tbody>
+      <thead><tr><th>Cell</th><th>Born</th></tr></thead>
+      <tbody>${rows || `<tr><td colspan="2"><em>no cells</em></td></tr>`}</tbody>
     </table>
     <h2>Recent activity</h2>
     <ul class="activity">${activity || "<li><em>no activity</em></li>"}</ul>
@@ -432,28 +418,20 @@ function dashboardHtml(): Response {
 }
 
 function cellPageHtml(name: string): Response {
-  const cells = readRoster();
-  const cell = cells.find((c) => c.name === name);
+  const cell = readCells().find((c) => c.name === name);
   if (!cell) {
     return htmlPage(
       `${name} \u2014 unknown`,
       `<h1>${name}</h1>
-      <p class="sub">No cell by that name in the roster.</p>
+      <p class="sub">No cell by that name in the registry.</p>
       <p><a href="https://mother.cells.md/">\u2190 fleet</a></p>`,
     );
   }
-  const registry = readRegistry();
-  const reg = registry[name] ?? {};
   const activity = readActivity(name, 30).map((l) => `<li>${l}</li>`).join("\n");
   return htmlPage(
     `${name} \u00b7 cells`,
     `<h1>${name}</h1>
-    <p class="sub">Born ${cell.born ?? "?"} \u00b7 ${cell.notes ?? ""}</p>
-    <table>
-      <tr><th>Sprite URL</th><td>${reg.spriteUrl ? `<a href="${reg.spriteUrl}"><code>${reg.spriteUrl}</code></a>` : "<em>unknown</em>"}</td></tr>
-      <tr><th>Born</th><td>${cell.born ?? ""}</td></tr>
-      <tr><th>Notes</th><td>${cell.notes ?? ""}</td></tr>
-    </table>
+    <p class="sub">Born ${cell.born}</p>
     <h2>Activity</h2>
     <ul class="activity">${activity || "<li><em>no entries</em></li>"}</ul>
     <p><a href="https://mother.cells.md/">\u2190 fleet</a></p>`,
