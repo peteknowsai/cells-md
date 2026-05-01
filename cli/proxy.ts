@@ -1,13 +1,9 @@
 // Mother proxy for the cells fleet — single Bun.serve that handles:
 //
-//   mother.cells.md       (canonical host)
+//   mother.cells.md
 //     /                   → fleet dashboard (HTML)
 //     /v1/*               → Anthropic API proxy (Bearer auth required)
 //     /_proxy/health      → JSON health
-//
-//   keeper.cells.md       (legacy alias for cells born before the rename;
-//                          their pi-ai patch points here. Same API routes
-//                          as mother.cells.md; root 302s to mother.)
 //
 //   <cell>.cells.md
 //     /                   → per-cell info page (HTML, rendered by mother)
@@ -16,9 +12,8 @@
 // tunnel sends every Host here; we route by Host header.
 //
 // Auth model:
-//   - /v1/* on mother.cells.md (or legacy keeper.cells.md) requires
-//     Authorization: Bearer <CELLS_PROXY_SECRET>. Pi clients send this via
-//     ANTHROPIC_AUTH_TOKEN.
+//   - /v1/* requires Authorization: Bearer <CELLS_PROXY_SECRET>. Pi clients
+//     send this via ANTHROPIC_AUTH_TOKEN.
 //   - / pages are public reads for now (auth coming later).
 //
 // Token strategy:
@@ -220,13 +215,12 @@ function hostOf(req: Request): string {
 }
 
 function cellNameFromHost(host: string): string | null {
-  // keeper.cells.md → null (legacy API host, handled separately)
-  // mother.cells.md → null (dashboard host, handled separately)
+  // mother.cells.md → null (mother host, handled separately)
   // pete.cells.md   → "pete"
   // localhost:8787  → null (dev/health checks)
   const m = host.match(/^([a-z0-9-]+)\.cells\.md$/);
   if (!m) return null;
-  if (m[1] === "keeper" || m[1] === "mother") return null;
+  if (m[1] === "mother") return null;
   return m[1];
 }
 
@@ -474,23 +468,10 @@ const server = Bun.serve({
     const host = hostOf(req);
     const url = new URL(req.url);
 
-    // mother.cells.md → canonical host. Dashboard at /, Anthropic API at
-    // /v1/*, health at /_proxy/health.
-    if (host.startsWith("mother.cells.md")) {
+    // mother.cells.md → dashboard at /, Anthropic API at /v1/*, health at
+    // /_proxy/health. localhost:PORT serves the same routes for local dev.
+    if (host.startsWith("mother.cells.md") || host.startsWith(`localhost:${PORT}`)) {
       if (url.pathname === "/" || url.pathname === "") {
-        return dashboardHtml();
-      }
-      return handleApiProxy(req);
-    }
-
-    // keeper.cells.md → legacy hostname. Older cells have it baked into
-    // their pi-ai patch; we keep API routing here for backward compat.
-    // Future cells get patched to mother.cells.md directly.
-    if (host.startsWith("keeper.cells.md") || host.startsWith(`localhost:${PORT}`)) {
-      if (url.pathname === "/" || url.pathname === "") {
-        if (host.startsWith("keeper.cells.md")) {
-          return Response.redirect("https://mother.cells.md/", 302);
-        }
         return dashboardHtml();
       }
       return handleApiProxy(req);
@@ -514,7 +495,6 @@ console.log(`  routes:`);
 console.log(`    mother.cells.md/             → dashboard`);
 console.log(`    mother.cells.md/v1/*         → Anthropic proxy (Bearer auth)`);
 console.log(`    mother.cells.md/_proxy/health`);
-console.log(`    keeper.cells.md/*            → legacy alias (same API; root 302s to mother)`);
 console.log(`    <cell>.cells.md/             → cell page`);
 console.log(`  upstream: ${UPSTREAM}`);
 console.log(`  auth file: ${AUTH_PATH}`);

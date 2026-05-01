@@ -96,5 +96,5 @@ export default function (pi: any) {
   });
 
   // create/destroy and peer-targeted ops are intentionally NOT exposed —
-  // they live with the keeper on Pete's Mac.
+  // they live with the mother on Pete's Mac.
 }

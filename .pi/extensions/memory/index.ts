@@ -35,7 +35,7 @@ import { tmpdir } from "node:os";
  * Where memory lives depends on context:
  *   - On a Sprite (where the agent runs in /home/sprite/agent): use the
  *     sprite-side memory dir.
- *   - On Pete's Mac (cell-keeper running in ~/Projects/cell): use a hidden
+ *   - On Pete's Mac (mother running in ~/Projects/cell): use a hidden
  *     dir alongside the repo. Same shape, same naming.
  *   - Override via env var CELL_MEMORY_DIR.
  *

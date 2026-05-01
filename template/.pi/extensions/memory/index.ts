@@ -31,7 +31,7 @@ import { fileURLToPath } from "node:url";
  * Where memory lives depends on context:
  *   - On a Sprite (where the agent runs in /home/sprite/agent): use the
  *     sprite-side memory dir.
- *   - Otherwise: cwd/memory (e.g. local dev, keeper).
+ *   - Otherwise: cwd/memory (e.g. local dev, mother).
  *   - Override via env var CELL_MEMORY_DIR.
  *
  * Both contexts get identical structure: MEMORY.md + topical files +

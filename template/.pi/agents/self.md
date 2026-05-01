@@ -51,7 +51,7 @@ Full instructions are in your system prompt.
 ## Self-tools and the `cell` CLI
 
 You can inspect yourself and reach peers, but you can't mutate cell
-lifecycle (create / destroy / checkpoint live with the keeper on Pete's
+lifecycle (create / destroy / checkpoint live with the mother on Pete's
 Mac — ask him).
 
 Tools registered by the `self` extension:
@@ -74,7 +74,7 @@ Both are thin wrappers over the on-cell `cells` CLI, which is on your PATH:
 - `cells talk <name> <msg>` — send a one-shot message to a peer's Pi and
   capture the reply. Use sparingly — you're interrupting another agent.
 
-Create / destroy and peer-targeted lifecycle ops live with the keeper on
+Create / destroy and peer-targeted lifecycle ops live with the mother on
 Pete's Mac. Ask him.
 
 If you hit a DNS-blocked outbound call you can't work around, tell Pete the

@@ -5,10 +5,6 @@
 # - Removes any legacy ~/.bashrc.d/anthropic_api_key (would conflict).
 # Idempotent — safe to re-run after `bun install` clobbers the model registry.
 #
-# Older cells were patched to the legacy alias keeper.cells.md; that hostname
-# still works (proxy keeps it as a backward-compat alias) so re-running this
-# on an existing cell is fine — it just re-points to the canonical host.
-#
 # Reads CELLS_PROXY_SECRET from ~/.cell/secrets.json (host side, before exec).
 #
 # Usage: scripts/configure-cell-proxy.sh <cell-name>
@@ -41,18 +37,16 @@ EOF
 sed -i 's|__SECRET__|$SECRET|g' ~/.bashrc.d/anthropic_proxy
 chmod 600 ~/.bashrc.d/anthropic_proxy
 
-# 2. Patch pi-ai models registry: api.anthropic.com -> mother.cells.md.
-#    Also rewrite legacy keeper.cells.md → mother.cells.md if a previous
-#    run patched it that way, so existing cells re-converge on the canonical host.
+# 2. Patch pi-ai models registry: api.anthropic.com -> mother.cells.md
 patched=0
 for F in \\
   /home/sprite/agent/node_modules/@mariozechner/pi-ai/dist/models.generated.js \\
   /home/sprite/.bun/install/global/node_modules/@mariozechner/pi-ai/dist/models.generated.js
 do
   [ -f \"\$F\" ] || continue
-  if grep -qE 'api.anthropic.com|keeper.cells.md' \"\$F\"; then
+  if grep -q 'api.anthropic.com' \"\$F\"; then
     [ -f \"\$F.bak\" ] || cp \"\$F\" \"\$F.bak\"
-    sed -i 's|https://api.anthropic.com|https://mother.cells.md|g; s|https://keeper.cells.md|https://mother.cells.md|g' \"\$F\"
+    sed -i 's|https://api.anthropic.com|https://mother.cells.md|g' \"\$F\"
     patched=\$((patched+1))
   fi
 done

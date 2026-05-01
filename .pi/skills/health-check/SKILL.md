@@ -58,7 +58,7 @@ Pass criteria:
 - `node_modules` exists; `identity`, `memory`, `self-tools` in `agent/.pi/extensions/`; `pi-web-access` present at `agent/.pi/npm/node_modules/pi-web-access`
 - `sprite` CLI installed
 - `anthropic_proxy` env file exists and contains a `CELLS_PROXY_SECRET` of expected length (~64 chars). Cells route through `https://mother.cells.md`; they don't hold real Anthropic credentials.
-- Model URL is `https://mother.cells.md` (NOT `https://api.anthropic.com`) — if it's the latter, run `scripts/configure-cell-proxy.sh <NAME>` from the mother to re-patch. Legacy `keeper.cells.md` URLs still work but should be re-patched to mother.cells.md (the script does this idempotently).
+- Model URL is `https://mother.cells.md` (NOT `https://api.anthropic.com`) — if it's the latter, run `scripts/configure-cell-proxy.sh <NAME>` from the mother to re-patch.
 - Both shimss have at least one match for `tmux new-session`
 - `MEMORY.md` exists
 

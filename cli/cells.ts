@@ -37,7 +37,7 @@ const OPTIONAL_PACKAGES = [
   { value: "pi-web-access", label: "pi-web-access", hint: "web search · fetch · code search", defaultChecked: true },
 ] as const;
 
-const RESERVED_NAMES = new Set(["keeper", "mother"]);
+const RESERVED_NAMES = new Set(["mother"]);
 
 type SelectOption = {
   value: string;
@@ -421,7 +421,7 @@ async function runPiWithOutcome(
 
 // ───── direct (no Pi) ─────
 
-async function launchKeeperTui(extraArgs: string[] = []) {
+async function launchMotherTui(extraArgs: string[] = []) {
   // Direct pi spawn — no tmux wrapper. Pete runs this on his Mac in his own
   // terminal; there's no SSH-disconnect / hibernation problem to solve here.
   // Pi persists sessions to ~/.pi/agent/sessions/ on its own, so closing the
@@ -436,7 +436,7 @@ async function launchKeeperTui(extraArgs: string[] = []) {
 }
 
 async function cmdPi() {
-  await launchKeeperTui();
+  await launchMotherTui();
 }
 
 async function cmdList() {
@@ -449,11 +449,11 @@ async function cmdList() {
 }
 
 async function cmdTalk(name: string, args: string[]) {
-  if (name === "keeper" || name === "mother") {
+  if (name === "mother") {
     // Mother accepts any pi flags through (e.g. `-c`, `-r`, `--session=<id>`,
     // even `-p "msg"` for a one-shot). We don't try to interpret them; pi
     // handles its own argv.
-    await launchKeeperTui(args);
+    await launchMotherTui(args);
     return;
   }
   await requireCell(name);
@@ -1074,8 +1074,8 @@ async function cmdUnscheduleDreams() {
   console.log("✓ unscheduled");
 }
 
-async function dreamKeeper(): Promise<boolean> {
-  console.log(`→ dreaming keeper`);
+async function dreamMother(): Promise<boolean> {
+  console.log(`→ dreaming mother`);
   const repoDir = dirname(dirname(fileURLToPath(import.meta.url)));
   const proc = Bun.spawn(
     [
@@ -1093,13 +1093,13 @@ async function dreamKeeper(): Promise<boolean> {
   );
   const code = await proc.exited;
   const ok = code === 0;
-  console.log(ok ? `✓ keeper` : `✗ keeper (exit ${code})`);
+  console.log(ok ? `✓ mother` : `✗ mother (exit ${code})`);
   return ok;
 }
 
 async function cmdDream(arg: string) {
   if (!arg) {
-    console.error("usage: cells dream <name|keeper|--all>");
+    console.error("usage: cells dream <name|mother|--all>");
     process.exit(1);
   }
   if (arg === "--all") {
@@ -1110,14 +1110,14 @@ async function cmdDream(arg: string) {
       const ok = await dreamOne(cell.name);
       ok ? okCount++ : failCount++;
     }
-    const ok = await dreamKeeper();
+    const ok = await dreamMother();
     ok ? okCount++ : failCount++;
     console.log(`\n${okCount} ok, ${failCount} failed`);
     if (failCount > 0) process.exit(1);
     return;
   }
-  if (arg === "keeper" || arg === "self") {
-    const ok = await dreamKeeper();
+  if (arg === "mother" || arg === "self") {
+    const ok = await dreamMother();
     if (!ok) process.exit(1);
     return;
   }
@@ -1475,7 +1475,7 @@ function renderAgents(
     fmLines.push(`last_seen: ${fmtAge(info.last_running_at)}`);
     fmLines.push(`egress: ${info.egress}`);
   } else {
-    fmLines.push(`status: local (keeper, runs on Mac)`);
+    fmLines.push(`status: local (mother, runs on Mac)`);
   }
 
   const out: string[] = [];
@@ -1488,7 +1488,7 @@ function renderAgents(
     parts.push(`\`egress:\` ${info.egress}`);
     out.push(parts.join(" · "), "");
   } else {
-    out.push("`local cell-keeper` · runs on Pete's Mac", "");
+    out.push("`local mother` · runs on Pete's Mac", "");
   }
 
   // Persona body verbatim (it leads with its own H1).
@@ -1592,8 +1592,8 @@ async function listSkills(skillsDir: string): Promise<string[]> {
   return entries.filter((name) => existsSync(join(skillsDir, name, "SKILL.md")));
 }
 
-async function setupKeeperVault(): Promise<void> {
-  const vault = join(VAULT_DIR, "keeper");
+async function setupMotherVault(): Promise<void> {
+  const vault = join(VAULT_DIR, "mother");
   await mkdir(vault, { recursive: true });
 
   // Wipe any prior layout artifacts so renames/migrations land cleanly.
@@ -1625,7 +1625,7 @@ async function setupKeeperVault(): Promise<void> {
 
   const skills = await listSkills(join(vault, "skills"));
   const mem = await gatherMemoryContext(join(CELL_REPO, "memory"));
-  const md = renderAgents("keeper", null, persona, exts, skills, mem);
+  const md = renderAgents("mother", null, persona, exts, skills, mem);
   await writeFile(join(vault, "AGENTS.md"), md);
 }
 
@@ -1657,7 +1657,7 @@ async function syncOneCell(name: string): Promise<{ name: string; status: string
 
 async function writeRoster(rows: Array<{ name: string; status: string; lastRunningAt: string | null }>): Promise<void> {
   const lines = ["# Cells", "", "| name | status | last seen | dashboard |", "|---|---|---|---|"];
-  lines.push(`| keeper | local | — | [→](keeper/) |`);
+  lines.push(`| mother | local | — | [→](mother/) |`);
   for (const r of rows) {
     lines.push(`| ${r.name} | ${r.status} | ${fmtAge(r.lastRunningAt)} | [→](${r.name}/) |`);
   }
@@ -1667,10 +1667,10 @@ async function writeRoster(rows: Array<{ name: string; status: string; lastRunni
 async function cmdSync(name?: string) {
   await mkdir(VAULT_DIR, { recursive: true });
 
-  if (name === "keeper") {
-    console.log("→ keeper");
-    await setupKeeperVault();
-    console.log("✓ keeper");
+  if (name === "mother") {
+    console.log("→ mother");
+    await setupMotherVault();
+    console.log("✓ mother");
     return;
   }
 
@@ -1690,15 +1690,15 @@ async function cmdSync(name?: string) {
         rows.push({ name: c.name, status: info?.status ?? "?", lastRunningAt: info?.last_running_at ?? null });
       }
     }
-    await setupKeeperVault();
+    await setupMotherVault();
     await writeRoster(rows.filter((r): r is NonNullable<typeof r> => r !== null));
     return;
   }
 
   // No name — sync everything.
-  console.log("→ keeper");
-  await setupKeeperVault();
-  console.log("✓ keeper");
+  console.log("→ mother");
+  await setupMotherVault();
+  console.log("✓ mother");
 
   const reg = await loadRegistry();
   const rows = await Promise.all(
@@ -1761,9 +1761,9 @@ switch (sub) {
     console.log("  cells sleep <name>          force-hibernate a Sprite");
     console.log("  cells wake <name>           force-wake a Sprite");
     console.log("  cells checkpoint <name>     snapshot a cell's filesystem");
-    console.log("  cells dream <name|keeper|--all>  run dream consolidation on a cell, the keeper, or all");
+    console.log("  cells dream <name|mother|--all>  run dream consolidation on a cell, the mother, or all");
     console.log("  cells stream <name>         interactive multi-turn streaming chat with a cell (Pi RPC)");
-    console.log("  cells sync [name]           pull cell markdown into ~/Obsidian/cells/ (default: all + keeper)");
+    console.log("  cells sync [name]           pull cell markdown into ~/Obsidian/cells/ (default: all + mother)");
     console.log("  cells doctor                inspect mother OAuth state + proxy health (run when cells act 401-y)");
     console.log("  cells schedule-dreams       install launchd plist (nightly 4am, all cells)");
     console.log("  cells unschedule-dreams     remove launchd plist");

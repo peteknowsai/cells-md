@@ -18,9 +18,9 @@ anything inside it.
 **Includes:**
 
 - `cell` CLI: `pi`, `create`, `talk`, `list`, `sleep`, `wake`, `checkpoint`, `destroy`
-- Local cell-keeper Pi project (`.pi/agents/self.md` + identity extension + `package.json`) so it bills against Pro/Max via the [first-party billing recipe](~/Projects/cells/PI-FIRST-PARTY-BILLING-RECIPE.md)
+- Local mother Pi project (`.pi/agents/self.md` + use-max extension + `package.json`) so it bills against Pro/Max via the [first-party billing recipe](~/Projects/cells/PI-FIRST-PARTY-BILLING-RECIPE.md)
 - `template/` — recipe-compliant cell-on-Sprite layout that birth pushes onto each Sprite
-- `.pi/skills/birth/SKILL.md` — birth ritual the cell-keeper follows:
+- `.pi/skills/birth/SKILL.md` — birth ritual the mother follows:
   - create the Sprite + configure egress (anthropic, bun.sh, npm, github)
   - install Bun on the Sprite
   - tar+push `template/` to `/root/cell`, `sed` substitute `__NAME__`

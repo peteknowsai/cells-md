@@ -249,8 +249,7 @@ two things:
    (`CELLS_PROXY_SECRET` from `~/.cell/secrets.json`) as `ANTHROPIC_AUTH_TOKEN`.
 2. Patches the hardcoded `api.anthropic.com` URL in `pi-ai`'s model registry
    to `mother.cells.md`. Pi does NOT respect `ANTHROPIC_BASE_URL` — the URL
-   is baked per-model in `models.generated.js`. The patch is idempotent and
-   also rewrites legacy `keeper.cells.md` patches in place.
+   is baked per-model in `models.generated.js`. The patch is idempotent.
 
 Use local `bash`:
 

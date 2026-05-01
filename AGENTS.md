@@ -18,6 +18,6 @@ misconfigured — check that the identity extension is loading correctly
 
 ## Project notes for humans
 
-This repo is the **cell-keeper**: a local Pi agent + Bun CLI that provisions
+This repo is the **mother**: a local Pi agent + Bun CLI that provisions
 and manages Cells (each cell = a Pi agent on its own Sprite). See `ROADMAP.md`
-for what we're building. Operations run via the `cell` CLI (`cli/cell.ts`).
+for what we're building. Operations run via the `cells` CLI (`cli/cells.ts`).
