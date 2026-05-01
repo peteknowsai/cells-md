@@ -41,6 +41,12 @@ to be safe — Pi runs inside a tmux session, so the agent's continuity depends
 on it. Pi also uses modified-Enter keys (Shift+Enter for newline, plain Enter
 to submit) which require tmux's `extended-keys` to be on.
 
+Also install the standard terminal-editing toolkit (`micro`, `fzf`,
+`ripgrep`, `bat`) — see `docs/terminal-setup.md`. These power the `mf` /
+`mft` shell helpers wired up in step 6 and make it easy for a human (or
+the agent) to navigate and edit files on the cell. On Ubuntu `bat` ships
+as `batcat` due to a binary-name conflict, so we symlink it to `bat`.
+
 Also install the `sprite` CLI on the Sprite — the `self` extension
 needs it to let the agent operate on its own sprite (checkpoint, egress,
 inspect). The CLI authenticates from `SPRITES_TOKEN` env var, which gets
@@ -54,19 +60,30 @@ Use `sprite_exec` with this command:
 curl -fsSL https://bun.sh/install | bash
 curl -fsSL https://sprites.dev/install.sh | sh
 sudo apt-get update -y
-sudo apt-get install -y tmux
+sudo apt-get install -y tmux micro fzf ripgrep bat
+mkdir -p /home/sprite/.local/bin
+ln -sf /usr/bin/batcat /home/sprite/.local/bin/bat
 cat > /home/sprite/.tmux.conf << 'EOF'
 # Pi compatibility — modified-Enter keys, csi-u format
 set -g extended-keys on
 set -g extended-keys-format csi-u
 set -g default-terminal "tmux-256color"
+set -ag terminal-overrides ",xterm-256color:RGB"
+
+# Prefix: Ctrl+Space (avoids C-b's collision with readline back-char)
+unbind C-b
+set -g prefix C-Space
+bind C-Space send-prefix
 
 # Mouse + scrollback
 set -g mouse on
 set -g history-limit 50000
 
 # Highlight-to-copy: release mouse and selection lands in system clipboard via OSC52.
-# Default copy mode is emacs (vanilla, no vi keys).
+# Lock mode-keys to emacs — tmux otherwise picks vi when $EDITOR=vim, which
+# silently breaks scroll/copy-mode keybinds (e.g. `i` does nothing). Exit
+# copy-mode with `q` or Esc.
+setw -g mode-keys emacs
 set -g set-clipboard on
 bind -T copy-mode MouseDragEnd1Pane send-keys -X copy-pipe-and-cancel
 
@@ -86,6 +103,47 @@ set -g renumber-windows on
 
 # Focus events forwarded (for editors that care)
 set -g focus-events on
+
+# Auto-rename windows to the basename of the pane's cwd
+set -g automatic-rename on
+set -g automatic-rename-format '#{b:pane_current_path}'
+
+# Splits inherit cwd and run a login zsh (same env as `cells shell`).
+# Directional: `prefix Right` = split right, `prefix Down` = split down.
+# Symbolic: `prefix |` and `prefix -` do the same.
+# `prefix x` (default) closes a pane with confirmation.
+# (Rebinding arrows means losing default prefix-arrow pane navigation;
+# use the mouse, or `prefix o` to cycle panes.)
+bind Right split-window -h -c "#{pane_current_path}" "zsh -l"
+bind Down  split-window -v -c "#{pane_current_path}" "zsh -l"
+bind '|'   split-window -h -c "#{pane_current_path}" "zsh -l"
+bind '-'   split-window -v -c "#{pane_current_path}" "zsh -l"
+
+# Status line — cell name on the left (#S = session name = cell name)
+set -g status-position bottom
+set -g status-justify left
+set -g status-style 'bg=default'
+set -g status-left ' #S '
+set -g status-left-style 'fg=#1F1F28,bg=#957FB8,bold'
+set -g status-left-length 20
+set -g status-right ''
+
+set -g pane-border-lines single
+set -g pane-border-style 'fg=#54546D'
+set -g pane-active-border-style 'fg=#957FB8'
+
+setw -g window-status-separator ''
+setw -g window-status-format '  #I:#W #F  '
+setw -g window-status-style 'bg=default,fg=#C8C093'
+setw -g window-status-current-format '  #I:#W #F  '
+setw -g window-status-current-style 'bg=default,fg=#957FB8,bold'
+setw -g mode-style 'fg=#1F1F28,bg=#7E9CD8'
+
+# Bell notifications: Pi rings the terminal bell when a response is ready.
+# bell-action other = flash only when the window isn't currently focused.
+setw -g monitor-bell on
+set -g bell-action other
+setw -g window-status-bell-style 'fg=#C8C093,dotted-underscore'
 EOF
 ls -la /home/sprite/.bun/bin/bun && tmux -V
 ```
@@ -205,7 +263,34 @@ for f in /home/sprite/.bashrc.d/*; do [ -r "$f" ] && . "$f"; done
 EOF
 
 cat > /home/sprite/.bashrc.d/bun << 'EOF'
-export PATH=$HOME/.bun/bin:$PATH
+export PATH=$HOME/.local/bin:$HOME/.bun/bin:$PATH
+EOF
+
+cat > /home/sprite/.bashrc.d/terminal << 'EOF'
+# Standard terminal-editing setup (see docs/terminal-setup.md):
+# fzf is gitignore-aware via ripgrep; preview pane uses bat.
+export FZF_DEFAULT_COMMAND='rg --files --hidden --glob "!.git"'
+export FZF_DEFAULT_OPTS='--height 80% --reverse --border --preview "bat --style=numbers --color=always --line-range=:300 {} 2>/dev/null || ls -la {}" --preview-window=right:60%'
+
+# mf: fuzzy-pick a file anywhere in the tree, open in micro.
+alias mf='f=$(fzf) && [ -n "$f" ] && micro "$f"'
+
+# mft: browse mode — descend folders, open files, .. to go up.
+mft() {
+  local cur="$PWD"
+  while true; do
+    local pick
+    pick=$( { echo ".."; ls -A1 "$cur"; } | fzf --prompt="$cur > " ) || return
+    if [ "$pick" = ".." ]; then
+      cur=$(dirname "$cur")
+    elif [ -d "$cur/$pick" ]; then
+      cur="$cur/$pick"
+    else
+      micro "$cur/$pick"
+      return
+    fi
+  done
+}
 EOF
 ```
 
