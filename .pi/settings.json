@@ -9,6 +9,9 @@
   "packages": [
     "npm:pi-web-access"
   ],
+  "enabledModels": ["claude-opus-4-7", "claude-sonnet-4-6", "claude-haiku-4-5", "gpt-5.5", "deepseek-v4-flash", "deepseek-v4-pro"],
+  "defaultProvider": "anthropic",
+  "defaultModel": "claude-opus-4-7",
   "warnings": {
     "anthropicExtraUsage": false
   }
