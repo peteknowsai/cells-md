@@ -4,11 +4,7 @@
     ".pi/extensions/self-tools/index.ts"
   ],
   "packages": [
-    "npm:pi-web-access",
-    "git:github.com/peteknowsai/pi-cell-memory@main",
-    "git:github.com/peteknowsai/pi-cell-mentality@main",
-    "git:github.com/peteknowsai/pi-cell-wiki@main",
-    "git:github.com/peteknowsai/pi-cell-dream@main"
+    "npm:pi-web-access"
   ],
   "warnings": {
     "anthropicExtraUsage": false
