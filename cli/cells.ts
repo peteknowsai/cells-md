@@ -421,12 +421,12 @@ async function runPiWithOutcome(
 
 // ───── direct (no Pi) ─────
 
-async function launchKeeperTui() {
+async function launchKeeperTui(extraArgs: string[] = []) {
   // Direct pi spawn — no tmux wrapper. Pete runs this on his Mac in his own
   // terminal; there's no SSH-disconnect / hibernation problem to solve here.
   // Pi persists sessions to ~/.pi/agent/sessions/ on its own, so closing the
   // terminal and re-running picks up where you left off.
-  const proc = Bun.spawn(["pi"], {
+  const proc = Bun.spawn(["pi", ...extraArgs], {
     cwd: CELL_REPO,
     stdin: "inherit",
     stdout: "inherit",
@@ -448,18 +448,18 @@ async function cmdList() {
   for (const c of reg.cells) console.log(`${c.name.padEnd(20)} ${c.created_at}`);
 }
 
-async function cmdTalk(name: string, message?: string) {
-  if (name === "keeper") {
-    if (message) {
-      console.error("one-shot talk to keeper not supported. Use `cells pi`.");
-      process.exit(1);
-    }
-    await launchKeeperTui();
+async function cmdTalk(name: string, args: string[]) {
+  if (name === "keeper" || name === "mother") {
+    // Mother accepts any pi flags through (e.g. `-c`, `-r`, `--session=<id>`,
+    // even `-p "msg"` for a one-shot). We don't try to interpret them; pi
+    // handles its own argv.
+    await launchKeeperTui(args);
     return;
   }
   await requireCell(name);
-  if (!message) {
-    // No message → open the agent's TUI via sprite console.
+  if (args.length === 0) {
+    // No args → open the agent's TUI via sprite console (attaches to the
+    // live tmux+pi service running on the cell).
     const proc = Bun.spawn(["sprite", "console", "-s", name], {
       stdin: "inherit",
       stdout: "inherit",
@@ -468,6 +468,17 @@ async function cmdTalk(name: string, message?: string) {
     await proc.exited;
     return;
   }
+  if (args[0]!.startsWith("-")) {
+    // Cells run a persistent tmux+pi service. Spawning a separate `pi -c|-r`
+    // would race against the live session file. If you want session
+    // inspection on a cell, attach with `cells talk <name>` and use the
+    // `/resume` slash command from inside.
+    console.error(
+      `pi-flag forwarding (${args[0]}) isn't supported for cells — they run a persistent agent. Attach with 'cells talk ${name}' and use /resume from inside.`,
+    );
+    process.exit(1);
+  }
+  const message = args.join(" ");
   // One-shot: spawn a fresh `pi -p` on the peer. Clean stdout (just the
   // reply), no TUI chrome, no main-session pollution. The fresh pi loads
   // the agent's persona + memory + tools via extensions, so it's still
@@ -1624,8 +1635,7 @@ switch (sub) {
   }
   case "talk": {
     const targetName = needName(rest, "talk");
-    const msg = rest.slice(1).join(" ");
-    await cmdTalk(targetName, msg || undefined);
+    await cmdTalk(targetName, rest.slice(1));
     break;
   }
   case "list":       await cmdList(); break;
@@ -1640,14 +1650,15 @@ switch (sub) {
   case "unschedule-dreams":  await cmdUnscheduleDreams(); break;
   default:
     console.log("usage:");
-    console.log("  cells pi                    open the cell-keeper Pi TUI (alias: cells talk keeper)");
+    console.log("  cells pi                    open the mother Pi TUI (alias: cells talk mother)");
     console.log("  cells create <name> [flags] provision a new cell on a Sprite");
     console.log("                              flags: --harness=pi --model=opus|sonnet|haiku|gpt-5.5|deepseek-v4-flash|deepseek-v4-pro");
     console.log("                                     --thinking=off|minimal|low|medium|high|xhigh");
     console.log("                                     --extensions=memory,mentality,wiki,dream");
     console.log("                                     --packages=pi-web-access");
     console.log("                              no flags = interactive TUI; any flag = non-interactive (defaults fill the rest)");
-    console.log("  cells talk <name> [msg]     attach to a cell's TUI (no msg) or send one-shot (with msg). 'keeper' = local.");
+    console.log("  cells talk <name> [msg]     attach to a cell's TUI (no msg) or send one-shot (with msg).");
+    console.log("                              'mother' = local pi; accepts pi flags (-c continue, -r resume, --session=<id>).");
     console.log("  cells list                  list known cells");
     console.log("  cells sleep <name>          force-hibernate a Sprite");
     console.log("  cells wake <name>           force-wake a Sprite");
