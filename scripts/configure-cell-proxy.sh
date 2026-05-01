@@ -91,6 +91,26 @@ for F in \$(find /home/sprite/agent/node_modules/@mariozechner /home/sprite/.bun
   patched_anthropic_adaptive=\$((patched_anthropic_adaptive+1))
 done
 
+# 3b. Patch pi-coding-agent's level enums to include 'adaptive'. Without
+# this, setThinkingLevel('adaptive') gets clamped to 'off' before pi-ai
+# ever sees it.
+patched_levels=0
+for F in \$(find /home/sprite/agent/node_modules/@mariozechner /home/sprite/.bun/install/global/node_modules/@mariozechner -name agent-session.js -path '*core*' 2>/dev/null); do
+  [ -f \"\$F\" ] || continue
+  if grep -q 'THINKING_LEVELS.*\"adaptive\"' \"\$F\"; then
+    continue
+  fi
+  if ! grep -q 'THINKING_LEVELS_WITH_XHIGH' \"\$F\"; then
+    continue
+  fi
+  [ -f \"\$F.bak\" ] || cp \"\$F\" \"\$F.bak\"
+  sed -i \\
+    -e 's|const THINKING_LEVELS = \\[\"off\", \"minimal\", \"low\", \"medium\", \"high\"\\];|const THINKING_LEVELS = [\"off\", \"minimal\", \"low\", \"medium\", \"high\", \"adaptive\"];|' \\
+    -e 's|const THINKING_LEVELS_WITH_XHIGH = \\[\"off\", \"minimal\", \"low\", \"medium\", \"high\", \"xhigh\"\\];|const THINKING_LEVELS_WITH_XHIGH = [\"off\", \"minimal\", \"low\", \"medium\", \"high\", \"xhigh\", \"adaptive\"];|' \\
+    \"\$F\"
+  patched_levels=\$((patched_levels+1))
+done
+
 # 4. Patch pi-ai codex provider: neutralize JWT-based extractAccountId.
 # Cells ship the proxy secret as the codex apiKey; it isn't a JWT, so the
 # original extractAccountId would throw. Mother adds the real
@@ -124,5 +144,5 @@ for F in \$(find /home/sprite/agent/node_modules/@mariozechner /home/sprite/.bun
   patched_codex=\$((patched_codex+1))
 done
 
-echo \"proxy configured on $NAME (anthropic url patches: \$patched_anthropic, anthropic adaptive patches: \$patched_anthropic_adaptive, codex patches: \$patched_codex)\"
+echo \"proxy configured on $NAME (anthropic url: \$patched_anthropic, anthropic adaptive: \$patched_anthropic_adaptive, level enum: \$patched_levels, codex: \$patched_codex)\"
 "
