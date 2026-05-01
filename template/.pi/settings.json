@@ -5,10 +5,10 @@
   ],
   "packages": [
     "npm:pi-web-access",
-    "npm:pi-cell-memory",
-    "npm:pi-cell-mentality",
-    "npm:pi-cell-wiki",
-    "npm:pi-cell-dream"
+    "git:github.com/peteknowsai/pi-cell-memory@main",
+    "git:github.com/peteknowsai/pi-cell-mentality@main",
+    "git:github.com/peteknowsai/pi-cell-wiki@main",
+    "git:github.com/peteknowsai/pi-cell-dream@main"
   ],
   "warnings": {
     "anthropicExtraUsage": false

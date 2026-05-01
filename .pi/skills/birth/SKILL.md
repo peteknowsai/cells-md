@@ -132,10 +132,10 @@ export PATH=$HOME/.bun/bin:$PATH
 cd /home/sprite/agent && bun install
 bun install -g @mariozechner/pi-coding-agent@latest
 pi install -l npm:pi-web-access
-pi install -l npm:pi-cell-memory
-pi install -l npm:pi-cell-mentality
-pi install -l npm:pi-cell-wiki
-pi install -l npm:pi-cell-dream
+pi install -l git:github.com/peteknowsai/pi-cell-memory@main
+pi install -l git:github.com/peteknowsai/pi-cell-mentality@main
+pi install -l git:github.com/peteknowsai/pi-cell-wiki@main
+pi install -l git:github.com/peteknowsai/pi-cell-dream@main
 chmod +x /home/sprite/agent/bin/cells
 mkdir -p /home/sprite/.local/bin
 ln -sf /home/sprite/agent/bin/cells /home/sprite/.local/bin/cells
