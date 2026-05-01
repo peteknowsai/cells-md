@@ -25,7 +25,7 @@ anything inside it.
   - install Bun on the Sprite
   - tar+push `template/` to `/root/cell`, `sed` substitute `__NAME__`
   - run `bun install` on the Sprite
-  - inject `ANTHROPIC_API_KEY` (and other shared keys) from `~/.cell/secrets.json`
+  - inject shared keys (`CELLS_PROXY_SECRET`, `EXA_API_KEY`, `SPRITES_TOKEN`) from `~/.cell/secrets.json` and patch pi-ai's model registry to route through `keeper.cells.md`
   - write the `~/.bashrc` shim that auto-attaches `tmux new-session -A -s cell pi` on `sprite console`
   - take the first checkpoint
 - `.pi/prompts/` — slash commands the CLI invokes (`cell-create`, `cell-destroy`, `cell-checkpoint`)
@@ -76,6 +76,32 @@ the actual readable surface Pete wants.
   `pi.registerTool({...})` calls; the `.ts` itself never lands in
   the vault.
 
+## Phase 2.5 — Memory architecture as Pi packages
+
+Decompose the cell's memory layer into four independent npm packages
+(`pi-cell-memory`, `pi-cell-mentality`, `pi-cell-wiki`,
+`pi-cell-dream`). Each owns one cognitive function with a clear cutoff:
+
+| Package | What | In system prompt? |
+|---|---|---|
+| `pi-cell-memory` | atoms + yearnings (`write_memory`, MEMORY.md) | Yes — MEMORY.md always loaded |
+| `pi-cell-mentality` | single `mentality.md` synthesis | Yes — full body always loaded |
+| `pi-cell-wiki` | Karpathy-style network of topic pages | No — lazy-queried |
+| `pi-cell-dream` | async learner, four-phase consolidation | n/a — it writes |
+
+Storage packages (memory / mentality / wiki) function standalone.
+Dream is the optional accelerant — reads past session JSONLs
+surgically (targeted grep) and distills signal into whichever
+storage packages are installed.
+
+Cells can mix and match. New cells born after Phase 2.5 install all
+four; existing cells keep their bundled memory extension (the
+"don't update already-born cells" rule).
+
+This revives the original Phase 2 wiki idea but with a smarter
+problem framing: not external-corpus ingest, but
+conversation-distilled knowledge from the agent's own past sessions.
+
 ## Phase 3 — L3 db (Stoolap)
 
 Structured records + semantic search.
@@ -99,7 +125,7 @@ Offsite cold backup of the cell's body.
 - HTTP chat shim on port 8080
 - Cell kinds / specializations / overlays
 - Self-modification beyond memory and wiki
-- L2 wiki / Karpathy-style distilled knowledge — earns its keep when a cell has a job; until then `cells sync` (Phase 2) covers the readable-surface need
+- ~~L2 wiki / Karpathy-style distilled knowledge — earns its keep when a cell has a job; until then `cells sync` (Phase 2) covers the readable-surface need~~ — moved into Phase 2.5 (`pi-cell-wiki`), reframed as conversation-distilled rather than external-corpus-ingested
 - Bidirectional vault sync — pull-only for now; if Pete actually wants to edit in Obsidian, we'll add `cells sync push` with a git-style conflict pre-flight
 
 These may come later. For now, we build the singular unit.

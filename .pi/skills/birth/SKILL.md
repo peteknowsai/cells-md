@@ -20,7 +20,7 @@ still available for local-only operations on the Mac (e.g., reading
 ## Preconditions
 
 - `sprite` CLI authenticated (verify with `sprite org list`)
-- `~/.cell/secrets.json` contains `ANTHROPIC_API_KEY` (must be an `sk-ant-oat` OAuth token for first-party Pro/Max billing)
+- `~/.cell/secrets.json` contains `CELLS_PROXY_SECRET` (the bearer token cells use to reach the keeper proxy at `https://keeper.cells.md`)
 - No existing agent with this name (the Bun CLI checks before invoking you)
 
 ## 1. Create the Sprite
@@ -132,10 +132,24 @@ export PATH=$HOME/.bun/bin:$PATH
 cd /home/sprite/agent && bun install
 bun install -g @mariozechner/pi-coding-agent@latest
 pi install -l npm:pi-web-access
+pi install -l npm:pi-cell-memory
+pi install -l npm:pi-cell-mentality
+pi install -l npm:pi-cell-wiki
+pi install -l npm:pi-cell-dream
 chmod +x /home/sprite/agent/bin/cells
 mkdir -p /home/sprite/.local/bin
 ln -sf /home/sprite/agent/bin/cells /home/sprite/.local/bin/cells
 ```
+
+The four `pi-cell-*` packages are the Cell memory architecture:
+
+- `pi-cell-memory` — atoms + yearnings, `write_memory` / `write_yearning` tools, MEMORY.md always-loaded
+- `pi-cell-mentality` — single `mentality.md` synthesis, always-loaded
+- `pi-cell-wiki` — deep narrative knowledge, lazy-queried
+- `pi-cell-dream` — async learner, four-phase consolidation from past sessions
+
+Storage packages (memory / mentality / wiki) function standalone. Dream is
+the optional accelerant. They auto-register via Pi's package discovery.
 
 ## 6. Set up the env shim and PATH
 
@@ -165,10 +179,7 @@ EOF
 
 Every cell gets the same shared secrets, read from `~/.cell/secrets.json`
 on the Mac and written one-file-per-key into `/home/sprite/.bashrc.d/` on
-the Sprite. **`ANTHROPIC_API_KEY` is one of these keys** — Pi's first-party
-billing requires a token containing `sk-ant-oat` and that's where it lives
-(seeded from `~/.pi/agent/auth.json` once, then sourced from secrets going
-forward). Don't echo any values in your reply.
+the Sprite. Don't echo any values in your reply.
 
 Local bash to read the file (use `bash`, not `sprite_exec`):
 
@@ -176,8 +187,9 @@ Local bash to read the file (use `bash`, not `sprite_exec`):
 test -f ~/.cell/secrets.json && jq -r 'keys[]' ~/.cell/secrets.json
 ```
 
-Then for each `KEY: value` pair, write to the Sprite. Per-key files keep
-rotation granular. Example for `EXA_API_KEY`:
+Then for each `KEY: value` pair (other than `CELLS_PROXY_SECRET` — handled
+in step 6c), write to the Sprite. Per-key files keep rotation granular.
+Example for `EXA_API_KEY`:
 
 ```bash
 sprite exec -s <NAME> -- bash -c "
@@ -188,10 +200,37 @@ chmod 600 /home/sprite/.bashrc.d/exa
 "
 ```
 
-Repeat for every key. The file must exist and contain `ANTHROPIC_API_KEY`
-at minimum — without it the cell can't reach the Anthropic API. If
-`secrets.json` is missing or `ANTHROPIC_API_KEY` is absent, stop and report
-failure at step 10.
+`ANTHROPIC_API_KEY` is intentionally absent from `secrets.json` — cells
+route through the keeper proxy and don't hold real Anthropic credentials.
+The legacy approach was to push a frozen OAuth access token; it expired
+hours after birth.
+
+## 6c. Wire the cell to the keeper proxy
+
+Cells reach Anthropic via `https://keeper.cells.md`, which the keeper
+laptop runs (single OAuth principal for the whole fleet). This step does
+two things:
+
+1. Drops `~/.bashrc.d/anthropic_proxy` with the shared bearer secret
+   (`CELLS_PROXY_SECRET` from `~/.cell/secrets.json`) as `ANTHROPIC_AUTH_TOKEN`.
+2. Patches the hardcoded `api.anthropic.com` URL in `pi-ai`'s model registry
+   to `keeper.cells.md`. Pi does NOT respect `ANTHROPIC_BASE_URL` — the URL
+   is baked per-model in `models.generated.js`. The patch is idempotent.
+
+Use local `bash`:
+
+```bash
+scripts/configure-cell-proxy.sh <NAME>
+```
+
+This runs after `bun install` (step 5) so the model file exists. If the
+cell ever runs `bun install` again, this script must be re-run — the model
+registry will be clobbered and the cell will start hitting `api.anthropic.com`
+directly with the proxy secret (which Anthropic rejects). Also re-run if
+you rotate `CELLS_PROXY_SECRET`.
+
+Background: see `memory/project_keeper_proxy.md` and
+`memory/reference_pi_internals.md` for why this is necessary.
 
 ## 7. Register the `agent` service (auto-start Pi on VM boot)
 
@@ -238,7 +277,7 @@ EOF
 
 cat >> /home/sprite/.zshrc << 'EOF'
 
-# agent: source bashrc.d for env (PATH, ANTHROPIC_API_KEY)
+# agent: source bashrc.d for env (PATH, ANTHROPIC_AUTH_TOKEN, etc)
 for f in /home/sprite/.bashrc.d/*; do source $f; done
 
 # agent: auto-attach to Pi TUI on interactive login

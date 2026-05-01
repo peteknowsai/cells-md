@@ -1,8 +1,14 @@
 {
   "extensions": [
     ".pi/extensions/identity/index.ts",
-    ".pi/extensions/memory/index.ts",
     ".pi/extensions/self-tools/index.ts"
+  ],
+  "packages": [
+    "npm:pi-web-access",
+    "npm:pi-cell-memory",
+    "npm:pi-cell-mentality",
+    "npm:pi-cell-wiki",
+    "npm:pi-cell-dream"
   ],
   "warnings": {
     "anthropicExtraUsage": false
