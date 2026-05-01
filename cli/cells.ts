@@ -12,6 +12,46 @@ const CELL_REPO = dirname(SCRIPT_DIR);
 const REGISTRY_DIR = join(homedir(), ".cell");
 const REGISTRY_PATH = join(REGISTRY_DIR, "cells.json");
 
+// Model registry — short name → Anthropic API alias. Anthropic does not
+// provide a floating "claude-opus-latest" alias; the major-version-stamped
+// alias is what they recommend. Bump these when a new minor ships.
+const MODEL_IDS = {
+  opus:   "claude-opus-4-7",
+  sonnet: "claude-sonnet-4-6",
+  haiku:  "claude-haiku-4-5",
+} as const;
+type ModelKey = keyof typeof MODEL_IDS;
+
+const MEMORY_PACKAGES = ["memory", "mentality", "wiki", "dream"] as const;
+type MemoryPackage = (typeof MEMORY_PACKAGES)[number];
+
+const RESERVED_NAMES = new Set(["keeper", "mother"]);
+
+type SelectOption = {
+  value: string;
+  label: string;
+  hint?: string;       // dim text after label, e.g. "(coming soon)"
+  disabled?: boolean;
+};
+
+const HARNESS_OPTIONS: SelectOption[] = [
+  { value: "pi",          label: "pi" },
+  { value: "claude-code", label: "claude-code", hint: "(coming soon)", disabled: true },
+  { value: "codex",       label: "codex",       hint: "(coming soon)", disabled: true },
+];
+
+const MODEL_OPTIONS: SelectOption[] = [
+  { value: "opus",    label: "opus" },
+  { value: "sonnet",  label: "sonnet" },
+  { value: "haiku",   label: "haiku" },
+  { value: "gpt-5.5", label: "gpt-5.5", hint: "(coming soon)", disabled: true },
+];
+
+const PACKAGE_OPTIONS: SelectOption[] = MEMORY_PACKAGES.map((p) => ({
+  value: p,
+  label: p,
+}));
+
 type Cell = { name: string; created_at: string };
 type Registry = { cells: Cell[] };
 
@@ -52,6 +92,179 @@ async function ask(q: string): Promise<string> {
   const a = await rl.question(q);
   rl.close();
   return a.trim();
+}
+
+// ───── TUI primitives (raw stdin, no deps) ─────
+
+function tuiBegin() {
+  if (!process.stdin.isTTY) throw new Error("TUI requires a TTY");
+  process.stdin.setRawMode(true);
+  process.stdin.resume();
+  process.stdout.write("\x1b[?25l"); // hide cursor
+}
+
+function tuiEnd() {
+  process.stdout.write("\x1b[?25h"); // show cursor
+  if (process.stdin.isTTY) process.stdin.setRawMode(false);
+  process.stdin.pause();
+}
+
+function clearFrame(height: number) {
+  if (height > 0) process.stdout.write(`\x1b[${height}A\x1b[J`);
+}
+
+function renderOption(
+  opt: SelectOption,
+  isCursor: boolean,
+  prefix: string, // pointer + (optional) checkbox glyph
+): string {
+  const dim = "\x1b[2m";
+  const reset = "\x1b[0m";
+  const cyan = "\x1b[36m";
+  const hint = opt.hint ? ` ${dim}${opt.hint}${reset}` : "";
+  if (opt.disabled) return `${prefix} ${dim}${opt.label}${reset}${hint}`;
+  if (isCursor) return `${cyan}${prefix} ${opt.label}${reset}${hint}`;
+  return `${prefix} ${opt.label}${hint}`;
+}
+
+async function selectOne(prompt: string, options: SelectOption[]): Promise<string> {
+  const enabled = options
+    .map((o, i) => (o.disabled ? -1 : i))
+    .filter((i) => i >= 0);
+  if (enabled.length === 0) throw new Error("no enabled options");
+
+  let cursor = enabled[0]!;
+  let lastHeight = 0;
+
+  const draw = (final: boolean): string => {
+    const lines: string[] = [`\x1b[1m${prompt}\x1b[0m`];
+    for (let i = 0; i < options.length; i++) {
+      const isCursor = i === cursor;
+      const pointer = isCursor ? "❯" : " ";
+      lines.push(renderOption(options[i]!, isCursor, pointer));
+    }
+    if (!final) lines.push(`\x1b[2m  ↑↓ move · enter select\x1b[0m`);
+    return lines.join("\n");
+  };
+
+  const writeFrame = (final = false) => {
+    clearFrame(lastHeight);
+    const frame = draw(final);
+    process.stdout.write(frame + "\n");
+    lastHeight = frame.split("\n").length;
+  };
+
+  tuiBegin();
+  return new Promise<string>((resolve) => {
+    writeFrame();
+    const onData = (chunk: Buffer) => {
+      const s = chunk.toString();
+      if (s === "\x03") {
+        process.stdin.off("data", onData);
+        tuiEnd();
+        process.stdout.write("\n");
+        process.exit(130);
+      }
+      if (s === "\r" || s === "\n") {
+        process.stdin.off("data", onData);
+        writeFrame(true);
+        tuiEnd();
+        resolve(options[cursor]!.value);
+        return;
+      }
+      let move: -1 | 0 | 1 = 0;
+      if (s === "\x1b[A" || s === "k") move = -1;
+      else if (s === "\x1b[B" || s === "j") move = 1;
+      if (move !== 0) {
+        const idx = enabled.indexOf(cursor);
+        const next = (idx + move + enabled.length) % enabled.length;
+        cursor = enabled[next]!;
+        writeFrame();
+      }
+    };
+    process.stdin.on("data", onData);
+  });
+}
+
+async function selectMany(
+  prompt: string,
+  options: SelectOption[],
+  defaultsChecked: string[] = [],
+): Promise<string[]> {
+  const enabled = options
+    .map((o, i) => (o.disabled ? -1 : i))
+    .filter((i) => i >= 0);
+  if (enabled.length === 0) throw new Error("no enabled options");
+
+  let cursor = enabled[0]!;
+  const checked = new Set<number>(
+    defaultsChecked
+      .map((v) => options.findIndex((o) => o.value === v))
+      .filter((i) => i >= 0 && !options[i]!.disabled),
+  );
+  let lastHeight = 0;
+
+  const draw = (final: boolean): string => {
+    const lines: string[] = [`\x1b[1m${prompt}\x1b[0m`];
+    for (let i = 0; i < options.length; i++) {
+      const isCursor = i === cursor;
+      const isChecked = checked.has(i);
+      const pointer = isCursor ? "❯" : " ";
+      const box = isChecked ? "[\x1b[36mx\x1b[0m]" : "[ ]";
+      lines.push(renderOption(options[i]!, isCursor, `${pointer} ${box}`));
+    }
+    if (!final) lines.push(`\x1b[2m  ↑↓ move · space toggle · enter confirm\x1b[0m`);
+    return lines.join("\n");
+  };
+
+  const writeFrame = (final = false) => {
+    clearFrame(lastHeight);
+    const frame = draw(final);
+    process.stdout.write(frame + "\n");
+    lastHeight = frame.split("\n").length;
+  };
+
+  tuiBegin();
+  return new Promise<string[]>((resolve) => {
+    writeFrame();
+    const onData = (chunk: Buffer) => {
+      const s = chunk.toString();
+      if (s === "\x03") {
+        process.stdin.off("data", onData);
+        tuiEnd();
+        process.stdout.write("\n");
+        process.exit(130);
+      }
+      if (s === "\r" || s === "\n") {
+        process.stdin.off("data", onData);
+        writeFrame(true);
+        tuiEnd();
+        const picked = Array.from(checked)
+          .sort((a, b) => a - b)
+          .map((i) => options[i]!.value);
+        resolve(picked);
+        return;
+      }
+      if (s === " ") {
+        if (!options[cursor]!.disabled) {
+          if (checked.has(cursor)) checked.delete(cursor);
+          else checked.add(cursor);
+          writeFrame();
+        }
+        return;
+      }
+      let move: -1 | 0 | 1 = 0;
+      if (s === "\x1b[A" || s === "k") move = -1;
+      else if (s === "\x1b[B" || s === "j") move = 1;
+      if (move !== 0) {
+        const idx = enabled.indexOf(cursor);
+        const next = (idx + move + enabled.length) % enabled.length;
+        cursor = enabled[next]!;
+        writeFrame();
+      }
+    };
+    process.stdin.on("data", onData);
+  });
 }
 
 function spawnInRepo(cmd: string[], env?: Record<string, string>) {
@@ -181,16 +394,93 @@ async function cmdWake(name: string) {
 
 // ───── routed through local Pi ─────
 
-async function cmdCreate(name: string) {
-  if (name === "keeper") {
-    console.error(`'keeper' is reserved for the local cell-keeper. Pick another name.`);
+type CreateOpts = {
+  harness?: string;
+  model?: ModelKey;
+  packages?: string[];
+};
+
+function parseCreateArgs(args: string[]): { name: string; opts: CreateOpts } {
+  let name: string | undefined;
+  const opts: CreateOpts = {};
+  for (const a of args) {
+    if (a.startsWith("--harness=")) {
+      opts.harness = a.slice("--harness=".length);
+    } else if (a.startsWith("--model=")) {
+      const v = a.slice("--model=".length);
+      if (!(v in MODEL_IDS)) {
+        console.error(`unknown model: ${v}. choose: ${Object.keys(MODEL_IDS).join(", ")}`);
+        process.exit(1);
+      }
+      opts.model = v as ModelKey;
+    } else if (a.startsWith("--packages=")) {
+      const v = a.slice("--packages=".length);
+      const parts = v ? v.split(",").map((s) => s.trim()).filter(Boolean) : [];
+      for (const p of parts) {
+        if (!(MEMORY_PACKAGES as readonly string[]).includes(p)) {
+          console.error(`unknown package: ${p}. choose from: ${MEMORY_PACKAGES.join(", ")}`);
+          process.exit(1);
+        }
+      }
+      opts.packages = parts;
+    } else if (a.startsWith("--")) {
+      console.error(`unknown flag: ${a}`);
+      process.exit(1);
+    } else if (!name) {
+      name = a;
+    } else {
+      console.error(`unexpected arg: ${a}`);
+      process.exit(1);
+    }
+  }
+  if (!name) {
+    console.error(
+      "usage: cells create <name> [--harness=pi] [--model=opus|sonnet|haiku] [--packages=memory,mentality,wiki,dream]",
+    );
+    process.exit(1);
+  }
+  return { name, opts };
+}
+
+async function cmdCreate(name: string, opts: CreateOpts) {
+  if (RESERVED_NAMES.has(name)) {
+    console.error(`'${name}' is reserved. Pick another name.`);
     process.exit(1);
   }
   if (await findCell(name)) {
     console.error(`cell '${name}' already exists in registry`);
     process.exit(1);
   }
-  const { outcome } = await runPiWithOutcome("cell-create", [name]);
+
+  const interactive =
+    opts.harness === undefined && opts.model === undefined && opts.packages === undefined;
+
+  let harness: string;
+  let modelKey: ModelKey;
+  let packages: string[];
+
+  if (interactive) {
+    console.log(`\nbirthing cell '${name}'\n`);
+    harness = await selectOne("Harness?", HARNESS_OPTIONS);
+    modelKey = (await selectOne("Model?", MODEL_OPTIONS)) as ModelKey;
+    packages = await selectMany("Memory packages?", PACKAGE_OPTIONS);
+  } else {
+    harness = opts.harness ?? "pi";
+    modelKey = opts.model ?? "opus";
+    packages = opts.packages ?? [];
+    if (harness !== "pi") {
+      console.error(`harness '${harness}' not yet supported (only 'pi' for v1)`);
+      process.exit(1);
+    }
+  }
+
+  const payload = {
+    harness,
+    model: MODEL_IDS[modelKey],
+    packages,
+  };
+
+  const { outcome } = await runPiWithOutcome("cell-create", [name, JSON.stringify(payload)]);
   if (!outcome) {
     console.error("agent did not report outcome — registry not updated");
     process.exit(1);
@@ -1147,7 +1437,11 @@ const [sub, ...rest] = process.argv.slice(2);
 
 switch (sub) {
   case "pi":         await cmdPi(); break;
-  case "create":     await cmdCreate(needName(rest, "create")); break;
+  case "create": {
+    const { name, opts } = parseCreateArgs(rest);
+    await cmdCreate(name, opts);
+    break;
+  }
   case "talk": {
     const targetName = needName(rest, "talk");
     const msg = rest.slice(1).join(" ");
@@ -1167,7 +1461,9 @@ switch (sub) {
   default:
     console.log("usage:");
     console.log("  cells pi                    open the cell-keeper Pi TUI (alias: cells talk keeper)");
-    console.log("  cells create <name>         provision a new cell on a Sprite");
+    console.log("  cells create <name> [flags] provision a new cell on a Sprite");
+    console.log("                              flags: --harness=pi --model=opus|sonnet|haiku --packages=memory,mentality,wiki,dream");
+    console.log("                              no flags = interactive TUI; any flag = non-interactive (defaults fill the rest)");
     console.log("  cells talk <name> [msg]     attach to a cell's TUI (no msg) or send one-shot (with msg). 'keeper' = local.");
     console.log("  cells list                  list known cells");
     console.log("  cells sleep <name>          force-hibernate a Sprite");
