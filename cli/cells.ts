@@ -74,7 +74,12 @@ const MODEL_OPTIONS: SelectOption[] = [
 // Pi thinking levels — `xhigh` only takes effect on a few codex-max models;
 // it silently downgrades elsewhere. Models that don't support thinking at
 // all just ignore the setting. Pass through whatever the user picks.
-const THINKING_OPTIONS: SelectOption[] = [
+//
+// `adaptive` is opus-only sugar: pi-ai already sends `type: "adaptive"` for
+// every opus thinking level, so the levels tune the effort knob inside
+// adaptive mode. This shortcut means "let the model decide depth, balanced
+// effort" — submit-time it's translated to "medium" for pi-ai consumption.
+const THINKING_OPTIONS_BASE: SelectOption[] = [
   { value: "off",     label: "off" },
   { value: "minimal", label: "minimal" },
   { value: "low",     label: "low" },
@@ -82,14 +87,27 @@ const THINKING_OPTIONS: SelectOption[] = [
   { value: "high",    label: "high" },
   { value: "xhigh",   label: "xhigh", hint: "(codex-max only; ignored elsewhere)" },
 ];
-const THINKING_VALUES = THINKING_OPTIONS.map((o) => o.value);
+const ADAPTIVE_OPTION: SelectOption = {
+  value: "adaptive",
+  label: "adaptive",
+  hint: "(opus only — model decides depth, medium effort)",
+};
+const THINKING_OPTIONS = THINKING_OPTIONS_BASE;
+const THINKING_VALUES = [...THINKING_OPTIONS_BASE.map((o) => o.value), "adaptive"];
 const DEFAULT_THINKING = "medium";
+
+function thinkingOptionsFor(modelKey: ModelKey): SelectOption[] {
+  return modelKey === "opus" ? [...THINKING_OPTIONS_BASE, ADAPTIVE_OPTION] : THINKING_OPTIONS_BASE;
+}
 
 // Models that reject low-effort thinking levels server-side. gpt-5.5-pro
 // returns 400 if you give it off/minimal/low. Grow this set as new
 // reasoning-only models surface.
 const MIN_MEDIUM_THINKING_MODELS = new Set<ModelKey>(["gpt-5.5-pro"]);
 const SUB_MEDIUM_THINKING = new Set<string>(["off", "minimal", "low"]);
+
+// Models that accept "adaptive" — only opus today.
+const ADAPTIVE_THINKING_MODELS = new Set<ModelKey>(["opus"]);
 
 const EXTENSION_OPTIONS: SelectOption[] = OPTIONAL_EXTENSIONS.map((p) => ({
   value: p,
@@ -719,7 +737,7 @@ function parseCreateArgs(args: string[]): { name: string; opts: CreateOpts } {
   }
   if (!name) {
     console.error(
-      "usage: cells birth <name> [--harness=pi] [--model=opus|sonnet|haiku|gpt-5.5|gpt-5.5-pro|deepseek-v4-flash|deepseek-v4-pro] [--thinking=off|minimal|low|medium|high|xhigh] [--extensions=memory,...] [--packages=pi-web-access,...]",
+      "usage: cells birth <name> [--harness=pi] [--model=opus|sonnet|haiku|gpt-5.5|gpt-5.5-pro|deepseek-v4-flash|deepseek-v4-pro] [--thinking=off|minimal|low|medium|high|xhigh|adaptive] [--extensions=memory,...] [--packages=pi-web-access,...]",
     );
     process.exit(1);
   }
@@ -777,7 +795,7 @@ async function cmdCreate(name: string, opts: CreateOpts) {
           initialChecked: (answers[3] as string[] | undefined) ?? PACKAGE_DEFAULTS,
         });
       } else {
-        result = await selectOne("Thinking?", THINKING_OPTIONS, {
+        result = await selectOne("Thinking?", thinkingOptionsFor(answers[1] as ModelKey), {
           canGoBack,
           initialValue: (answers[4] as string | undefined) ?? DEFAULT_THINKING,
         });
@@ -807,6 +825,18 @@ async function cmdCreate(name: string, opts: CreateOpts) {
       console.error(`harness '${harness}' not yet supported (only 'pi' for v1)`);
       process.exit(1);
     }
+  }
+
+  // 'adaptive' is opus-only. Reject elsewhere; on opus, translate to
+  // 'medium' — pi-ai's wire format is already `type: "adaptive"` for every
+  // opus level, so this is just a balanced-effort shortcut.
+  if (thinking === "adaptive") {
+    if (!ADAPTIVE_THINKING_MODELS.has(modelKey)) {
+      console.error(`thinking 'adaptive' is only available for --model=opus`);
+      process.exit(1);
+    }
+    console.log(`note: 'adaptive' on opus → effort 'medium' (pi-ai always uses adaptive mode for opus)`);
+    thinking = "medium";
   }
 
   // Some models reject low-effort thinking levels server-side. Auto-bump
@@ -1863,7 +1893,7 @@ switch (sub) {
     console.log("  cells pi                    open the mother Pi TUI (alias: cells talk mother)");
     console.log("  cells birth <name> [flags]  provision a new cell on a Sprite (alias: create)");
     console.log("                              flags: --harness=pi --model=opus|sonnet|haiku|gpt-5.5|gpt-5.5-pro|deepseek-v4-flash|deepseek-v4-pro");
-    console.log("                                     --thinking=off|minimal|low|medium|high|xhigh");
+    console.log("                                     --thinking=off|minimal|low|medium|high|xhigh|adaptive");
     console.log("                                     --extensions=memory,mentality,wiki,dream");
     console.log("                                     --packages=pi-web-access");
     console.log("                              no flags = interactive TUI; any flag = non-interactive (defaults fill the rest)");
