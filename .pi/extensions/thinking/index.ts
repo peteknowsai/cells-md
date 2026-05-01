@@ -7,7 +7,12 @@
  * — we surface the clamp so the caller knows what they actually got.
  */
 
-const LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh"] as const;
+// `adaptive` is opus-only and requires the cell-side anthropic.js patch
+// (configure-cell-proxy.sh step 3): mapThinkingLevelToEffort returns
+// undefined for "adaptive", producing pure adaptive wire format with no
+// effort hint. On non-opus models pi-ai's switch hits the default branch
+// (returns "high"), so picking it there silently behaves like "high".
+const LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "adaptive"] as const;
 
 export default function (pi: any) {
   pi.registerCommand("thinking", {

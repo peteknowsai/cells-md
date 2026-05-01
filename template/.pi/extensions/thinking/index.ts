@@ -7,11 +7,15 @@
  * — we surface the clamp so the caller knows what they actually got.
  */
 
-const LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh"] as const;
+// `adaptive` requires the cell-side anthropic.js patch from
+// configure-cell-proxy.sh step 3 to behave correctly (effort: undefined
+// in the adaptive wire format). On non-opus models it silently behaves
+// like "high" via pi-ai's default branch.
+const LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "adaptive"] as const;
 
 export default function (pi: any) {
   pi.registerCommand("thinking", {
-    description: "Show or set thinking level (off|minimal|low|medium|high|xhigh)",
+    description: "Show or set thinking level (off|minimal|low|medium|high|xhigh|adaptive)",
     getArgumentCompletions: (prefix: string) =>
       LEVELS.filter((l) => l.startsWith(prefix.toLowerCase())).map((l) => ({
         value: l,

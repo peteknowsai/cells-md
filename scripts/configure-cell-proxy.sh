@@ -71,7 +71,27 @@ do
   fi
 done
 
-# 3. Patch pi-ai codex provider: neutralize JWT-based extractAccountId.
+# 3. Patch pi-ai anthropic provider: route thinking='adaptive' to pure
+# adaptive mode (no effort hint). Stock pi-ai always sends an effort
+# string for opus, which makes 'adaptive' meaningless. With this patch,
+# 'adaptive' returns undefined from mapThinkingLevelToEffort, so the
+# provider sends {thinking:{type:'adaptive'}} without output_config.effort
+# — the model fully decides per-turn.
+patched_anthropic_adaptive=0
+for F in \$(find /home/sprite/agent/node_modules/@mariozechner /home/sprite/.bun/install/global/node_modules/@mariozechner -name anthropic.js -path '*providers*' 2>/dev/null); do
+  [ -f \"\$F\" ] || continue
+  if grep -q 'level === \"adaptive\"' \"\$F\"; then
+    continue
+  fi
+  if ! grep -q 'function mapThinkingLevelToEffort' \"\$F\"; then
+    continue
+  fi
+  [ -f \"\$F.bak\" ] || cp \"\$F\" \"\$F.bak\"
+  sed -i 's|function mapThinkingLevelToEffort(level, modelId) {|&\\n    if (level === \"adaptive\") return undefined;|' \"\$F\"
+  patched_anthropic_adaptive=\$((patched_anthropic_adaptive+1))
+done
+
+# 4. Patch pi-ai codex provider: neutralize JWT-based extractAccountId.
 # Cells ship the proxy secret as the codex apiKey; it isn't a JWT, so the
 # original extractAccountId would throw. Mother adds the real
 # chatgpt-account-id header server-side regardless of what the cell sends.
@@ -104,5 +124,5 @@ for F in \$(find /home/sprite/agent/node_modules/@mariozechner /home/sprite/.bun
   patched_codex=\$((patched_codex+1))
 done
 
-echo \"proxy configured on $NAME (anthropic patches: \$patched_anthropic, codex patches: \$patched_codex)\"
+echo \"proxy configured on $NAME (anthropic url patches: \$patched_anthropic, anthropic adaptive patches: \$patched_anthropic_adaptive, codex patches: \$patched_codex)\"
 "

@@ -90,7 +90,7 @@ const THINKING_OPTIONS_BASE: SelectOption[] = [
 const ADAPTIVE_OPTION: SelectOption = {
   value: "adaptive",
   label: "adaptive",
-  hint: "(opus only — model decides depth, medium effort)",
+  hint: "(opus only — model decides depth, no effort hint)",
 };
 const THINKING_OPTIONS = THINKING_OPTIONS_BASE;
 const THINKING_VALUES = [...THINKING_OPTIONS_BASE.map((o) => o.value), "adaptive"];
@@ -827,16 +827,13 @@ async function cmdCreate(name: string, opts: CreateOpts) {
     }
   }
 
-  // 'adaptive' is opus-only. Reject elsewhere; on opus, translate to
-  // 'medium' — pi-ai's wire format is already `type: "adaptive"` for every
-  // opus level, so this is just a balanced-effort shortcut.
-  if (thinking === "adaptive") {
-    if (!ADAPTIVE_THINKING_MODELS.has(modelKey)) {
-      console.error(`thinking 'adaptive' is only available for --model=opus`);
-      process.exit(1);
-    }
-    console.log(`note: 'adaptive' on opus → effort 'medium' (pi-ai always uses adaptive mode for opus)`);
-    thinking = "medium";
+  // 'adaptive' is opus-only and means "pure adaptive, no effort hint —
+  // model decides depth per-turn." Cell-side configure-cell-proxy.sh
+  // patches pi-ai's mapThinkingLevelToEffort to return undefined for
+  // this level, which makes the anthropic provider omit output_config.effort.
+  if (thinking === "adaptive" && !ADAPTIVE_THINKING_MODELS.has(modelKey)) {
+    console.error(`thinking 'adaptive' is only available for --model=opus`);
+    process.exit(1);
   }
 
   // Some models reject low-effort thinking levels server-side. Auto-bump
