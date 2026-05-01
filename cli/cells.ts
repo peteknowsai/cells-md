@@ -176,10 +176,8 @@ async function selectOne(
       const pointer = isCursor ? "❯" : " ";
       lines.push(renderOption(options[i]!, isCursor, pointer));
     }
-    const hint = canGoBack
-      ? `\x1b[2m  ↑↓ move · enter select · ←/⌫ back\x1b[0m`
-      : `\x1b[2m  ↑↓ move · enter select\x1b[0m`;
-    lines.push(hint);
+    const back = canGoBack ? " · ←/⌫ back" : "";
+    lines.push(`\x1b[2m  ↑↓ move · enter select${back} · esc cancel\x1b[0m`);
     return lines.join("\n");
   };
 
@@ -198,10 +196,14 @@ async function selectOne(
     writeMenu();
     const onData = (chunk: Buffer) => {
       const s = chunk.toString();
-      if (s === "\x03") {
+      if (s === "\x03" || s === "\x1b") {
+        // Ctrl-C or bare ESC → cancel cleanly. (Arrow keys arrive as
+        // multi-byte escape sequences like "\x1b[A", so a single-byte
+        // "\x1b" is unambiguously ESC.)
         process.stdin.off("data", onData);
+        clearFrame(lastHeight);
         tuiEnd();
-        process.stdout.write("\n");
+        process.stdout.write("\x1b[2mcancelled\x1b[0m\n");
         process.exit(130);
       }
       if (s === "\r" || s === "\n") {
@@ -262,10 +264,8 @@ async function selectMany(
       const box = isChecked ? "[\x1b[36mx\x1b[0m]" : "[ ]";
       lines.push(renderOption(options[i]!, isCursor, `${pointer} ${box}`));
     }
-    const hint = canGoBack
-      ? `\x1b[2m  ↑↓ move · space toggle · enter confirm · ←/⌫ back\x1b[0m`
-      : `\x1b[2m  ↑↓ move · space toggle · enter confirm\x1b[0m`;
-    lines.push(hint);
+    const back = canGoBack ? " · ←/⌫ back" : "";
+    lines.push(`\x1b[2m  ↑↓ move · space toggle · enter confirm${back} · esc cancel\x1b[0m`);
     return lines.join("\n");
   };
 
@@ -289,10 +289,14 @@ async function selectMany(
     writeMenu();
     const onData = (chunk: Buffer) => {
       const s = chunk.toString();
-      if (s === "\x03") {
+      if (s === "\x03" || s === "\x1b") {
+        // Ctrl-C or bare ESC → cancel cleanly. (Arrow keys arrive as
+        // multi-byte escape sequences like "\x1b[A", so a single-byte
+        // "\x1b" is unambiguously ESC.)
         process.stdin.off("data", onData);
+        clearFrame(lastHeight);
         tuiEnd();
-        process.stdout.write("\n");
+        process.stdout.write("\x1b[2mcancelled\x1b[0m\n");
         process.exit(130);
       }
       if (s === "\r" || s === "\n") {
