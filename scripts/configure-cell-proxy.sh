@@ -1,19 +1,14 @@
 #!/usr/bin/env bash
 # Wire a cell to the mother proxy at https://mother.cells.md.
 #
-# Anthropic side:
-# - Drops ~/.bashrc.d/anthropic_proxy with the shared secret as OAuth token.
-# - Patches pi-ai's hardcoded api.anthropic.com → mother.cells.md (both copies).
-# - Removes any legacy ~/.bashrc.d/anthropic_api_key (would conflict).
+# Drops two ~/.bashrc.d/ env files (the only piece that needs the shared
+# secret), then triggers the cell-side apply-pi-patches.sh which does the
+# JS-file surgery on pi-ai / pi-coding-agent. The patches script is also
+# wired as the cell's bun-install postinstall hook, so future `bun install`
+# runs in ~/agent re-apply automatically — adding a dep doesn't silently
+# break anthropic/codex/adaptive routing.
 #
-# Codex side:
-# - Drops ~/.bashrc.d/codex_proxy with the shared secret as OPENAI_CODEX_API_KEY,
-#   read by the mother-codex extension (pi-ai has no codex env-var fallback).
-# - Patches pi-ai's openai-codex-responses.js to neutralize JWT-based
-#   extractAccountId: cells ship the proxy secret, not a JWT, and mother
-#   injects chatgpt-account-id server-side.
-#
-# Idempotent — safe to re-run after `bun install` clobbers pi-ai files.
+# Idempotent — safe to re-run any time.
 #
 # Reads CELLS_PROXY_SECRET from ~/.cells/secrets.json (host side, before exec).
 #
@@ -30,7 +25,6 @@ case "$SECRET" in
   *) echo "CELLS_PROXY_SECRET must start with 'sk-ant-oat' (pi auth dispatch); refusing"; exit 1 ;;
 esac
 
-# Push a small remote script that does the work, then run it on the cell.
 sprite exec -s "$NAME" -- bash -lc "
 set -euo pipefail
 
@@ -57,92 +51,14 @@ EOF
 sed -i 's|__SECRET__|$SECRET|g' ~/.bashrc.d/codex_proxy
 chmod 600 ~/.bashrc.d/codex_proxy
 
-# 2. Patch pi-ai models registry: api.anthropic.com -> mother.cells.md
-patched_anthropic=0
-for F in \\
-  /home/sprite/agent/node_modules/@mariozechner/pi-ai/dist/models.generated.js \\
-  /home/sprite/.bun/install/global/node_modules/@mariozechner/pi-ai/dist/models.generated.js
-do
-  [ -f \"\$F\" ] || continue
-  if grep -q 'api.anthropic.com' \"\$F\"; then
-    [ -f \"\$F.bak\" ] || cp \"\$F\" \"\$F.bak\"
-    sed -i 's|https://api.anthropic.com|https://mother.cells.md|g' \"\$F\"
-    patched_anthropic=\$((patched_anthropic+1))
-  fi
-done
+# 2. Run the cell's idempotent JS-patch script. It also fires automatically
+# as bun-install's postinstall hook (see template/package.json), so this
+# direct call is mainly for retrofits and re-runs after rotating secrets.
+if [ -x ~/agent/scripts/apply-pi-patches.sh ]; then
+  bash ~/agent/scripts/apply-pi-patches.sh
+else
+  echo 'warning: ~/agent/scripts/apply-pi-patches.sh missing — pi patches not applied'
+fi
 
-# 3. Patch pi-ai anthropic provider: route thinking='adaptive' to pure
-# adaptive mode (no effort hint). Stock pi-ai always sends an effort
-# string for opus, which makes 'adaptive' meaningless. With this patch,
-# 'adaptive' returns undefined from mapThinkingLevelToEffort, so the
-# provider sends {thinking:{type:'adaptive'}} without output_config.effort
-# — the model fully decides per-turn.
-patched_anthropic_adaptive=0
-for F in \$(find /home/sprite/agent/node_modules/@mariozechner /home/sprite/.bun/install/global/node_modules/@mariozechner -name anthropic.js -path '*providers*' 2>/dev/null); do
-  [ -f \"\$F\" ] || continue
-  if grep -q 'level === \"adaptive\"' \"\$F\"; then
-    continue
-  fi
-  if ! grep -q 'function mapThinkingLevelToEffort' \"\$F\"; then
-    continue
-  fi
-  [ -f \"\$F.bak\" ] || cp \"\$F\" \"\$F.bak\"
-  sed -i 's|function mapThinkingLevelToEffort(level, modelId) {|&\\n    if (level === \"adaptive\") return undefined;|' \"\$F\"
-  patched_anthropic_adaptive=\$((patched_anthropic_adaptive+1))
-done
-
-# 3b. Patch pi-coding-agent's level enums to include 'adaptive'. Without
-# this, setThinkingLevel('adaptive') gets clamped to 'off' before pi-ai
-# ever sees it.
-patched_levels=0
-for F in \$(find /home/sprite/agent/node_modules/@mariozechner /home/sprite/.bun/install/global/node_modules/@mariozechner -name agent-session.js -path '*core*' 2>/dev/null); do
-  [ -f \"\$F\" ] || continue
-  if grep -q 'THINKING_LEVELS.*\"adaptive\"' \"\$F\"; then
-    continue
-  fi
-  if ! grep -q 'THINKING_LEVELS_WITH_XHIGH' \"\$F\"; then
-    continue
-  fi
-  [ -f \"\$F.bak\" ] || cp \"\$F\" \"\$F.bak\"
-  sed -i \\
-    -e 's|const THINKING_LEVELS = \\[\"off\", \"minimal\", \"low\", \"medium\", \"high\"\\];|const THINKING_LEVELS = [\"off\", \"minimal\", \"low\", \"medium\", \"high\", \"adaptive\"];|' \\
-    -e 's|const THINKING_LEVELS_WITH_XHIGH = \\[\"off\", \"minimal\", \"low\", \"medium\", \"high\", \"xhigh\"\\];|const THINKING_LEVELS_WITH_XHIGH = [\"off\", \"minimal\", \"low\", \"medium\", \"high\", \"xhigh\", \"adaptive\"];|' \\
-    \"\$F\"
-  patched_levels=\$((patched_levels+1))
-done
-
-# 4. Patch pi-ai codex provider: neutralize JWT-based extractAccountId.
-# Cells ship the proxy secret as the codex apiKey; it isn't a JWT, so the
-# original extractAccountId would throw. Mother adds the real
-# chatgpt-account-id header server-side regardless of what the cell sends.
-patched_codex=0
-for F in \$(find /home/sprite/agent/node_modules/@mariozechner /home/sprite/.bun/install/global/node_modules/@mariozechner -name openai-codex-responses.js 2>/dev/null); do
-  [ -f \"\$F\" ] || continue
-  # Skip if already patched (the stub form contains 'return \"\"; }' on the trigger line).
-  if grep -q 'function extractAccountId(token) { return \"\"' \"\$F\"; then
-    continue
-  fi
-  if ! grep -q 'function extractAccountId' \"\$F\"; then
-    continue
-  fi
-  [ -f \"\$F.bak\" ] || cp \"\$F\" \"\$F.bak\"
-  awk '
-    BEGIN { skip=0 }
-    /function extractAccountId\\(token\\) \\{/ {
-      print \"function extractAccountId(token) { return \\\"\\\"; }\"
-      skip=1; depth=1; next
-    }
-    skip {
-      n_open  = gsub(/\\{/, \"{\")
-      n_close = gsub(/\\}/, \"}\")
-      depth += n_open - n_close
-      if (depth <= 0) { skip=0 }
-      next
-    }
-    { print }
-  ' \"\$F\" > \"\$F.tmp\" && mv \"\$F.tmp\" \"\$F\"
-  patched_codex=\$((patched_codex+1))
-done
-
-echo \"proxy configured on $NAME (anthropic url: \$patched_anthropic, anthropic adaptive: \$patched_anthropic_adaptive, level enum: \$patched_levels, codex: \$patched_codex)\"
+echo \"proxy configured on $NAME\"
 "

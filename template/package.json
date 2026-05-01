@@ -3,6 +3,9 @@
   "module": "index.ts",
   "type": "module",
   "private": true,
+  "scripts": {
+    "postinstall": "bash scripts/apply-pi-patches.sh"
+  },
   "devDependencies": {
     "@mariozechner/pi-ai": "^0.70.5",
     "@mariozechner/pi-coding-agent": "^0.70.5",
