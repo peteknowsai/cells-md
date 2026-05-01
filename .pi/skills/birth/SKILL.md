@@ -337,11 +337,9 @@ Without this call the CLI assumes failure and won't register the agent.
 
 ## 11. Record in memory (success only)
 
-Add `<NAME>` to the roster and log the birth event:
+Log the birth event by appending one line to `memory/project_cells_activity.md`:
 
-- Append one line to `memory/project_cells_activity.md`:
-  `<UTC date HH:MM>  born        <NAME>      <terse notes>`
-- Add a new row in the table in `memory/project_cells_roster.md`.
+`<UTC date HH:MM>  born        <NAME>      <terse notes>`
 
 Use `date -u +"%Y-%m-%d %H:%M"` for the timestamp.
 

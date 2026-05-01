@@ -33,10 +33,10 @@ Parse the JSON. It has six fields:
    - `<EXTENSIONS>` = the parsed `extensions` array (may be empty)
    - `<PACKAGES>` = the parsed `packages` array (may be empty)
 
-2. **After the birth ritual reports success**, record the event in memory:
-   - Append one line to `memory/project_cells_activity.md`:
-     `<UTC date HH:MM>  born        $1          <one-line notes>`
-   - Add `$1` as a new row in the table inside `memory/project_cells_roster.md`.
+2. **After the birth ritual reports success**, append one line to
+   `memory/project_cells_activity.md`:
 
-   Use `date -u +"%Y-%m-%d %H:%M"` for the timestamp. Don't touch these
-   files if the birth failed.
+   `<UTC date HH:MM>  born        $1          <one-line notes>`
+
+   Use `date -u +"%Y-%m-%d %H:%M"` for the timestamp. Don't touch this
+   file if the birth failed.
