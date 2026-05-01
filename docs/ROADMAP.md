@@ -30,7 +30,7 @@ anything inside it.
   - take the first checkpoint
 - `.pi/prompts/` — slash commands the CLI invokes (`cell-create`, `cell-destroy`, `cell-checkpoint`)
 
-**Done when:** `cells create Pete` works end-to-end. `cells talk Pete` lands me in
+**Done when:** `cells birth Pete` works end-to-end. `cells talk Pete` lands me in
 a Pi TUI on the Sprite. I have a conversation. I disconnect. The Sprite
 hibernates. I come back days later. Conversation is still there. The cell is
 the same cell.

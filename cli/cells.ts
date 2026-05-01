@@ -37,7 +37,15 @@ const OPTIONAL_PACKAGES = [
   { value: "pi-web-access", label: "pi-web-access", hint: "web search · fetch · code search", defaultChecked: true },
 ] as const;
 
-const RESERVED_NAMES = new Set(["mother"]);
+const RESERVED_NAMES = new Set([
+  "mother", "keeper",
+  // Names that collide with tmux/sprite plumbing.
+  "tmux", "shell", "agent", "pi", "sprite", "localhost",
+  // Names that collide with cells subcommands.
+  "create", "birth", "talk", "list", "sleep", "wake",
+  "checkpoint", "destroy", "kill", "dream", "stream", "sync", "doctor",
+  "schedule-dreams", "unschedule-dreams",
+]);
 
 type SelectOption = {
   value: string;
@@ -521,6 +529,42 @@ async function cmdTalk(name: string, args: string[]) {
   if (code !== 0) process.exit(code);
 }
 
+async function cmdShell(name: string) {
+  if (name === "mother") {
+    // Mother lives on this Mac. Just print where; user cd's themselves.
+    // (Future: when mother might run on a dedicated host, dispatch via
+    // ~/.cells/mother.json — see docs/namespacing.md for the broader plan.)
+    console.log(`mother lives on this Mac. its body:`);
+    console.log(`  persona:    ${CELL_REPO}/.pi/agents/self.md`);
+    console.log(`  config:     ${CELL_REPO}/.pi/settings.json`);
+    console.log(`  extensions: ${CELL_REPO}/.pi/extensions/`);
+    console.log(`  skills:     ${CELL_REPO}/.pi/skills/`);
+    console.log(`  memory:     ${CELL_REPO}/memory/`);
+    console.log(`  charter:    ${CELL_REPO}/AGENTS.md`);
+    console.log(`  pi data:    ${process.env.HOME}/.pi/agent/  (sessions, auth.json — shared with the proxy)`);
+    console.log(`  runs from:  ${CELL_REPO}  (project root; pi auto-discovers .pi/ here)`);
+    return;
+  }
+  await requireCell(name);
+  // Spawn tmux directly under sprite exec --tty. Bypasses the login-shell
+  // auto-attach shim (which would dump us into pi); inside tmux, the
+  // shim's `[ -z "$TMUX" ]` guard is false, so it no-ops on subsequent
+  // shell invocations.
+  // -A on new-session: attach if "shell" exists, create if not.
+  // bash -l inside tmux loads .profile → .bashrc.d (PATH, mf/mft, env).
+  // Ctrl+D exits bash, ends the tmux session, drops us back to the Mac.
+  const proc = Bun.spawn(
+    [
+      "sprite", "exec", "-s", name, "--tty", "--",
+      "tmux", "new-session", "-A", "-s", "shell",
+      "-c", "/home/sprite/agent",
+      "bash", "-l",
+    ],
+    { stdin: "inherit", stdout: "inherit", stderr: "inherit" },
+  );
+  await proc.exited;
+}
+
 async function cmdSleep(name: string) {
   await requireCell(name);
   await $`sprite stop -s ${name}`;
@@ -667,7 +711,7 @@ function parseCreateArgs(args: string[]): { name: string; opts: CreateOpts } {
   }
   if (!name) {
     console.error(
-      "usage: cells create <name> [--harness=pi] [--model=opus|sonnet|haiku|gpt-5.5|deepseek-v4-flash|deepseek-v4-pro] [--thinking=off|minimal|low|medium|high|xhigh] [--extensions=memory,...] [--packages=pi-web-access,...]",
+      "usage: cells birth <name> [--harness=pi] [--model=opus|sonnet|haiku|gpt-5.5|deepseek-v4-flash|deepseek-v4-pro] [--thinking=off|minimal|low|medium|high|xhigh] [--extensions=memory,...] [--packages=pi-web-access,...]",
     );
     process.exit(1);
   }
@@ -781,21 +825,71 @@ async function cmdCreate(name: string, opts: CreateOpts) {
   await saveRegistry(reg);
 }
 
-async function cmdDestroy(name: string) {
-  await requireCell(name);
-  const confirm = await ask(`destroying '${name}' is irreversible. type the name to confirm: `);
-  if (confirm !== name) {
-    console.error("name did not match — aborted");
-    process.exit(1);
-  }
+async function cmdDestroyOne(name: string): Promise<boolean> {
   const { outcome } = await runPiWithOutcome("cell-destroy", [name]);
   if (!outcome || !outcome.success) {
-    console.error(`destroy failed: ${outcome?.message ?? "no outcome reported"}`);
-    process.exit(1);
+    console.error(`destroy '${name}' failed: ${outcome?.message ?? "no outcome reported"}`);
+    return false;
   }
   const reg = await loadRegistry();
   reg.cells = reg.cells.filter((c) => c.name !== name);
   await saveRegistry(reg);
+  return true;
+}
+
+async function cmdDestroy(args: string[]) {
+  // Flags: --yes/-y skip per-name confirmation. --all-but <name...> kill
+  // every cell except the listed ones (and 'pete' is NOT special — list it
+  // explicitly if you want to keep it).
+  let yes = false;
+  let allBut = false;
+  const names: string[] = [];
+  for (const a of args) {
+    if (a === "--yes" || a === "-y") yes = true;
+    else if (a === "--all-but" || a === "--except") allBut = true;
+    else if (a.startsWith("-")) {
+      console.error(`unknown flag: ${a}`);
+      process.exit(1);
+    } else names.push(a);
+  }
+
+  let targets: string[];
+  if (allBut) {
+    const reg = await loadRegistry();
+    const keep = new Set(names);
+    targets = reg.cells.map((c) => c.name).filter((n) => !keep.has(n));
+    if (targets.length === 0) {
+      console.log("nothing to destroy");
+      return;
+    }
+  } else {
+    if (names.length === 0) {
+      console.error("usage: cells kill <name>... [--yes]  |  cells kill --all-but <name>... [--yes]");
+      process.exit(1);
+    }
+    for (const n of names) await requireCell(n);
+    targets = names;
+  }
+
+  if (!yes) {
+    const list = targets.join(", ");
+    const prompt = targets.length === 1
+      ? `destroying '${targets[0]}' is irreversible. type the name to confirm: `
+      : `destroying ${targets.length} cells (${list}) is irreversible. type 'yes' to confirm: `;
+    const confirm = await ask(prompt);
+    const expected = targets.length === 1 ? targets[0] : "yes";
+    if (confirm !== expected) {
+      console.error("confirmation did not match — aborted");
+      process.exit(1);
+    }
+  }
+
+  let failures = 0;
+  for (const n of targets) {
+    const ok = await cmdDestroyOne(n);
+    if (!ok) failures++;
+  }
+  if (failures > 0) process.exit(1);
 }
 
 async function cmdCheckpoint(name: string) {
@@ -1724,6 +1818,7 @@ const [sub, ...rest] = process.argv.slice(2);
 
 switch (sub) {
   case "pi":         await cmdPi(); break;
+  case "birth":
   case "create": {
     const { name, opts } = parseCreateArgs(rest);
     await cmdCreate(name, opts);
@@ -1738,17 +1833,19 @@ switch (sub) {
   case "sleep":      await cmdSleep(needName(rest, "sleep")); break;
   case "wake":       await cmdWake(needName(rest, "wake")); break;
   case "checkpoint": await cmdCheckpoint(needName(rest, "checkpoint")); break;
-  case "destroy":    await cmdDestroy(needName(rest, "destroy")); break;
+  case "kill":
+  case "destroy":    await cmdDestroy(rest); break;
   case "dream":              await cmdDream(rest[0] ?? ""); break;
   case "stream":             await cmdStream(needName(rest, "stream")); break;
   case "sync":               await cmdSync(rest[0] || undefined); break;
   case "schedule-dreams":    await cmdScheduleDreams(); break;
   case "unschedule-dreams":  await cmdUnscheduleDreams(); break;
   case "doctor":             await cmdDoctor(); break;
+  case "shell":              await cmdShell(needName(rest, "shell")); break;
   default:
     console.log("usage:");
     console.log("  cells pi                    open the mother Pi TUI (alias: cells talk mother)");
-    console.log("  cells create <name> [flags] provision a new cell on a Sprite");
+    console.log("  cells birth <name> [flags]  provision a new cell on a Sprite (alias: create)");
     console.log("                              flags: --harness=pi --model=opus|sonnet|haiku|gpt-5.5|deepseek-v4-flash|deepseek-v4-pro");
     console.log("                                     --thinking=off|minimal|low|medium|high|xhigh");
     console.log("                                     --extensions=memory,mentality,wiki,dream");
@@ -1765,8 +1862,11 @@ switch (sub) {
     console.log("  cells stream <name>         interactive multi-turn streaming chat with a cell (Pi RPC)");
     console.log("  cells sync [name]           pull cell markdown into ~/Obsidian/cells/ (default: all + mother)");
     console.log("  cells doctor                inspect mother OAuth state + proxy health (run when cells act 401-y)");
+    console.log("  cells shell <name>          drop into a bash shell on a cell (separate tmux from the agent; Ctrl+D exits)");
     console.log("  cells schedule-dreams       install launchd plist (nightly 4am, all cells)");
     console.log("  cells unschedule-dreams     remove launchd plist");
-    console.log("  cells destroy <name>        destroy a cell (irreversible)");
+    console.log("  cells kill <name>... [-y]   destroy one or more cells (irreversible) (alias: destroy)");
+    console.log("                              --all-but <name>... kill every cell except the listed ones");
+    console.log("                              -y/--yes skip the confirmation prompt");
     process.exit(sub ? 1 : 0);
 }

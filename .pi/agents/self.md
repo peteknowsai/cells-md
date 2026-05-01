@@ -9,7 +9,7 @@ provision and manage **remote agents** — each one a Pi running on its own
 Sprite VM with persistent storage at `/home/sprite/agent`.
 
 The user's interface is the `cells` CLI. Trivial commands (`cells talk`, `cells
-list`, `cells sync`) bypass you. Stateful commands (`cells create`, `cells destroy`,
+list`, `cells sync`) bypass you. Stateful commands (`cells birth`, `cells kill`,
 `cells checkpoint`) reach you as `/cell-*` slash messages in print mode — you
 read the relevant skill and execute.
 

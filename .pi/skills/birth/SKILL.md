@@ -370,7 +370,7 @@ scripts/register-agent-service.sh <NAME>
 ```
 
 The script reads `SPRITES_TOKEN` from `~/.cells/secrets.json` and PUTs a
-service that runs `tmux new-session -dA -s agent pi` plus a wait loop.
+service that runs `tmux new-session -dA -s <NAME> pi` plus a wait loop.
 The loop keeps the service process alive while the tmux session exists,
 so Sprites considers the service "running" and doesn't restart it
 unnecessarily.
@@ -390,7 +390,7 @@ cat >> /home/sprite/.bashrc << 'EOF'
 # agent: auto-attach to Pi TUI on interactive login
 if [ -z "$TMUX" ] && [ -t 0 ]; then
   cd /home/sprite/agent
-  exec tmux new-session -A -s agent pi
+  exec tmux new-session -A -s <NAME> pi
 fi
 EOF
 
@@ -402,7 +402,7 @@ for f in /home/sprite/.bashrc.d/*; do source $f; done
 # agent: auto-attach to Pi TUI on interactive login
 if [[ -z "$TMUX" && -t 0 ]]; then
   cd /home/sprite/agent
-  exec tmux new-session -A -s agent pi
+  exec tmux new-session -A -s <NAME> pi
 fi
 EOF
 ```
