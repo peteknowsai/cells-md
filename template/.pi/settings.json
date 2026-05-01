@@ -4,7 +4,9 @@
     ".pi/extensions/self/index.ts"
   ],
   "packages": [],
-  "enabledModels": ["__MODEL__"],
+  "enabledModels": ["claude-opus-4-7", "claude-sonnet-4-6", "claude-haiku-4-5"],
+  "defaultProvider": "anthropic",
+  "defaultModel": "__MODEL__",
   "warnings": {
     "anthropicExtraUsage": false
   }
