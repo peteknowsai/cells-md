@@ -1,7 +1,7 @@
 ---
 name: __NAME__
 description: An agent persisting on its own Sprite VM.
-model: claude-opus-4-7
+model: __MODEL__
 ---
 
 # Your name is __NAME__

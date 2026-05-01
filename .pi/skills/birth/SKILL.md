@@ -101,10 +101,12 @@ Use `sprite_push` with:
 - `localPath: /Users/pete/Projects/cell/template`
 - `remotePath: /home/sprite/agent`
 
-Then substitute `__NAME__` with the actual name. Use `sprite_exec`:
+Then substitute `__NAME__` and `__MODEL__` with their actual values.
+Use `sprite_exec`:
 
 ```bash
 sed -i 's/__NAME__/<NAME>/g' /home/sprite/agent/AGENTS.md /home/sprite/agent/.pi/agents/self.md /home/sprite/agent/package.json
+sed -i 's/__MODEL__/<MODEL>/g' /home/sprite/agent/.pi/agents/self.md
 ```
 
 ## 5. Run `bun install`, install Pi globally, install web-access, install `cells` CLI
@@ -127,18 +129,35 @@ The template ships with `bin/cells` — a slim on-sprite CLI (read+talk only,
 backed by the Sprites HTTP API). Make it executable and symlink onto PATH
 so both the agent's bash and the `self-tools` extension can call it.
 
+First, run the baseline install (every cell gets these — no choice):
+
 ```bash
 export PATH=$HOME/.bun/bin:$PATH
 cd /home/sprite/agent && bun install
 bun install -g @mariozechner/pi-coding-agent@latest
 pi install -l npm:pi-web-access
-pi install -l git:github.com/peteknowsai/pi-cell-memory@main
-pi install -l git:github.com/peteknowsai/pi-cell-mentality@main
-pi install -l git:github.com/peteknowsai/pi-cell-wiki@main
-pi install -l git:github.com/peteknowsai/pi-cell-dream@main
 chmod +x /home/sprite/agent/bin/cells
 mkdir -p /home/sprite/.local/bin
 ln -sf /home/sprite/agent/bin/cells /home/sprite/.local/bin/cells
+```
+
+Then install the optional memory packages — only those listed in
+`<PACKAGES>`. If `<PACKAGES>` is empty, skip the memory installs entirely.
+
+For each entry in `<PACKAGES>`, run the matching `pi install`:
+
+| package    | install spec                                         |
+|------------|------------------------------------------------------|
+| memory     | `git:github.com/peteknowsai/pi-cell-memory@main`     |
+| mentality  | `git:github.com/peteknowsai/pi-cell-mentality@main`  |
+| wiki       | `git:github.com/peteknowsai/pi-cell-wiki@main`       |
+| dream      | `git:github.com/peteknowsai/pi-cell-dream@main`      |
+
+Example: if `<PACKAGES>` is `["memory", "wiki"]`, run via `sprite_exec`:
+
+```bash
+pi install -l git:github.com/peteknowsai/pi-cell-memory@main
+pi install -l git:github.com/peteknowsai/pi-cell-wiki@main
 ```
 
 The four `pi-cell-*` packages are the Cell memory architecture:
