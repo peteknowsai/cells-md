@@ -1,11 +1,9 @@
 {
   "extensions": [
-    ".pi/extensions/identity/index.ts",
-    ".pi/extensions/self-tools/index.ts"
+    ".pi/extensions/use-max/index.ts",
+    ".pi/extensions/self/index.ts"
   ],
-  "packages": [
-    "npm:pi-web-access"
-  ],
+  "packages": [],
   "warnings": {
     "anthropicExtraUsage": false
   }

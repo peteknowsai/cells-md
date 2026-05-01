@@ -54,7 +54,7 @@ You can inspect yourself and reach peers, but you can't mutate cell
 lifecycle (create / destroy / checkpoint live with the keeper on Pete's
 Mac — ask him).
 
-Tools registered by the `self-tools` extension:
+Tools registered by the `self` extension:
 
 - **`talk_to_self`** — fork a fresh Pi with your same persona, memory, and
   tools. Ask it a question or hand it a task. Returns its reply. Use for

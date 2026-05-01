@@ -22,8 +22,17 @@ const MODEL_IDS = {
 } as const;
 type ModelKey = keyof typeof MODEL_IDS;
 
-const MEMORY_PACKAGES = ["memory", "mentality", "wiki", "dream"] as const;
-type MemoryPackage = (typeof MEMORY_PACKAGES)[number];
+// In-tree extensions a user can opt into at create time. Each lives at
+// template/.pi/extensions/<name>/ — birth pushes the whole template, then
+// deletes the unselected ones from the cell.
+const OPTIONAL_EXTENSIONS = ["memory", "mentality", "wiki", "dream"] as const;
+type OptionalExtension = (typeof OPTIONAL_EXTENSIONS)[number];
+
+// Curated list of npm/git packages a cell can install via `pi install`.
+// Default-checked entries are pre-selected when the user enters the TUI.
+const OPTIONAL_PACKAGES = [
+  { value: "pi-web-access", label: "pi-web-access", hint: "web search · fetch · code search", defaultChecked: true },
+] as const;
 
 const RESERVED_NAMES = new Set(["keeper", "mother"]);
 
@@ -47,10 +56,18 @@ const MODEL_OPTIONS: SelectOption[] = [
   { value: "gpt-5.5", label: "gpt-5.5", hint: "(coming soon)", disabled: true },
 ];
 
-const PACKAGE_OPTIONS: SelectOption[] = MEMORY_PACKAGES.map((p) => ({
+const EXTENSION_OPTIONS: SelectOption[] = OPTIONAL_EXTENSIONS.map((p) => ({
   value: p,
   label: p,
 }));
+
+const PACKAGE_OPTIONS: SelectOption[] = OPTIONAL_PACKAGES.map((p) => ({
+  value: p.value,
+  label: p.label,
+  hint: p.hint,
+}));
+
+const PACKAGE_DEFAULTS: string[] = OPTIONAL_PACKAGES.filter((p) => p.defaultChecked).map((p) => p.value);
 
 type Cell = { name: string; created_at: string };
 type Registry = { cells: Cell[] };
@@ -397,8 +414,11 @@ async function cmdWake(name: string) {
 type CreateOpts = {
   harness?: string;
   model?: ModelKey;
+  extensions?: string[];
   packages?: string[];
 };
+
+const PACKAGE_VALUES = OPTIONAL_PACKAGES.map((p) => p.value);
 
 function parseCreateArgs(args: string[]): { name: string; opts: CreateOpts } {
   let name: string | undefined;
@@ -413,12 +433,22 @@ function parseCreateArgs(args: string[]): { name: string; opts: CreateOpts } {
         process.exit(1);
       }
       opts.model = v as ModelKey;
+    } else if (a.startsWith("--extensions=")) {
+      const v = a.slice("--extensions=".length);
+      const parts = v ? v.split(",").map((s) => s.trim()).filter(Boolean) : [];
+      for (const p of parts) {
+        if (!(OPTIONAL_EXTENSIONS as readonly string[]).includes(p)) {
+          console.error(`unknown extension: ${p}. choose from: ${OPTIONAL_EXTENSIONS.join(", ")}`);
+          process.exit(1);
+        }
+      }
+      opts.extensions = parts;
     } else if (a.startsWith("--packages=")) {
       const v = a.slice("--packages=".length);
       const parts = v ? v.split(",").map((s) => s.trim()).filter(Boolean) : [];
       for (const p of parts) {
-        if (!(MEMORY_PACKAGES as readonly string[]).includes(p)) {
-          console.error(`unknown package: ${p}. choose from: ${MEMORY_PACKAGES.join(", ")}`);
+        if (!PACKAGE_VALUES.includes(p as (typeof PACKAGE_VALUES)[number])) {
+          console.error(`unknown package: ${p}. choose from: ${PACKAGE_VALUES.join(", ")}`);
           process.exit(1);
         }
       }
@@ -435,7 +465,7 @@ function parseCreateArgs(args: string[]): { name: string; opts: CreateOpts } {
   }
   if (!name) {
     console.error(
-      "usage: cells create <name> [--harness=pi] [--model=opus|sonnet|haiku] [--packages=memory,mentality,wiki,dream]",
+      "usage: cells create <name> [--harness=pi] [--model=opus|sonnet|haiku] [--extensions=memory,...] [--packages=pi-web-access,...]",
     );
     process.exit(1);
   }
@@ -453,21 +483,27 @@ async function cmdCreate(name: string, opts: CreateOpts) {
   }
 
   const interactive =
-    opts.harness === undefined && opts.model === undefined && opts.packages === undefined;
+    opts.harness === undefined &&
+    opts.model === undefined &&
+    opts.extensions === undefined &&
+    opts.packages === undefined;
 
   let harness: string;
   let modelKey: ModelKey;
+  let extensions: string[];
   let packages: string[];
 
   if (interactive) {
     console.log(`\nbirthing cell '${name}'\n`);
     harness = await selectOne("Harness?", HARNESS_OPTIONS);
     modelKey = (await selectOne("Model?", MODEL_OPTIONS)) as ModelKey;
-    packages = await selectMany("Memory packages?", PACKAGE_OPTIONS);
+    extensions = await selectMany("Extensions?", EXTENSION_OPTIONS);
+    packages = await selectMany("Packages?", PACKAGE_OPTIONS, PACKAGE_DEFAULTS);
   } else {
     harness = opts.harness ?? "pi";
     modelKey = opts.model ?? "opus";
-    packages = opts.packages ?? [];
+    extensions = opts.extensions ?? [];
+    packages = opts.packages ?? PACKAGE_DEFAULTS;
     if (harness !== "pi") {
       console.error(`harness '${harness}' not yet supported (only 'pi' for v1)`);
       process.exit(1);
@@ -477,6 +513,7 @@ async function cmdCreate(name: string, opts: CreateOpts) {
   const payload = {
     harness,
     model: MODEL_IDS[modelKey],
+    extensions,
     packages,
   };
 
@@ -1462,7 +1499,9 @@ switch (sub) {
     console.log("usage:");
     console.log("  cells pi                    open the cell-keeper Pi TUI (alias: cells talk keeper)");
     console.log("  cells create <name> [flags] provision a new cell on a Sprite");
-    console.log("                              flags: --harness=pi --model=opus|sonnet|haiku --packages=memory,mentality,wiki,dream");
+    console.log("                              flags: --harness=pi --model=opus|sonnet|haiku");
+    console.log("                                     --extensions=memory,mentality,wiki,dream");
+    console.log("                                     --packages=pi-web-access");
     console.log("                              no flags = interactive TUI; any flag = non-interactive (defaults fill the rest)");
     console.log("  cells talk <name> [msg]     attach to a cell's TUI (no msg) or send one-shot (with msg). 'keeper' = local.");
     console.log("  cells list                  list known cells");

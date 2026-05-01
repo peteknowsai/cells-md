@@ -1,6 +1,10 @@
 /**
- * Identity extension — the canonical "first-party billing trigger" pattern.
- * See ~/Projects/cells/PI-FIRST-PARTY-BILLING-RECIPE.md for the full rationale.
+ * use-max — first-party billing trigger.
+ *
+ * Routes the cell's API calls to Pete's Claude Max subscription instead of
+ * extra-usage metered billing. Reads the persona at .pi/agents/self.md and
+ * returns its body via a before_agent_start hook — which is what trips the
+ * Anthropic first-party-billing gate. See PI-FIRST-PARTY-BILLING-RECIPE.md.
  */
 
 import * as fs from "node:fs";

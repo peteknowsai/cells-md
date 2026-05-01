@@ -1,5 +1,5 @@
 /**
- * self-tools — operate on your own Sprite from inside the agent.
+ * self — operate on your own Sprite from inside the agent.
  *
  * Scoped intentionally:
  *   - `talk_to_self` forks a fresh Pi locally (no API needed).

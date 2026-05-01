@@ -41,11 +41,11 @@ to be safe — Pi runs inside a tmux session, so the agent's continuity depends
 on it. Pi also uses modified-Enter keys (Shift+Enter for newline, plain Enter
 to submit) which require tmux's `extended-keys` to be on.
 
-Also install the `sprite` CLI on the Sprite — the `self-tools` extension
+Also install the `sprite` CLI on the Sprite — the `self` extension
 needs it to let the agent operate on its own sprite (checkpoint, egress,
 inspect). The CLI authenticates from `SPRITES_TOKEN` env var, which gets
 injected from `~/.cell/secrets.json` in step 6b. If that key isn't in the
-secrets file, the API-based self-tools simply return a clear error;
+secrets file, the API-based self tools simply return a clear error;
 `talk_to_self` works regardless.
 
 Use `sprite_exec` with this command:
@@ -127,48 +127,61 @@ Use `sprite_exec`:
 
 The template ships with `bin/cells` — a slim on-sprite CLI (read+talk only,
 backed by the Sprites HTTP API). Make it executable and symlink onto PATH
-so both the agent's bash and the `self-tools` extension can call it.
+so both the agent's bash and the `self` extension can call it.
 
-First, run the baseline install (every cell gets these — no choice):
+First, prune the in-tree optional extensions the user did NOT pick. The
+template ships with all four (`memory`, `mentality`, `wiki`, `dream`) under
+`/home/sprite/agent/.pi/extensions/`; we keep only those listed in
+`<EXTENSIONS>` and delete the rest.
+
+The always-installed extensions (`use-max`, `self`) stay regardless.
+
+For each name in `["memory", "mentality", "wiki", "dream"]` that is NOT in
+`<EXTENSIONS>`, delete the directory via `sprite_exec`:
+
+```bash
+rm -rf /home/sprite/agent/.pi/extensions/<name>
+```
+
+If `<EXTENSIONS>` is `["memory", "wiki"]`, delete `mentality` and `dream`.
+If `<EXTENSIONS>` is empty, delete all four.
+
+Then run the baseline install:
 
 ```bash
 export PATH=$HOME/.bun/bin:$PATH
 cd /home/sprite/agent && bun install
 bun install -g @mariozechner/pi-coding-agent@latest
-pi install -l npm:pi-web-access
 chmod +x /home/sprite/agent/bin/cells
 mkdir -p /home/sprite/.local/bin
 ln -sf /home/sprite/agent/bin/cells /home/sprite/.local/bin/cells
 ```
 
-Then install the optional memory packages — only those listed in
-`<PACKAGES>`. If `<PACKAGES>` is empty, skip the memory installs entirely.
+Then install the optional packages — only those listed in `<PACKAGES>`. If
+`<PACKAGES>` is empty, skip this block entirely.
 
 For each entry in `<PACKAGES>`, run the matching `pi install`:
 
-| package    | install spec                                         |
-|------------|------------------------------------------------------|
-| memory     | `git:github.com/peteknowsai/pi-cell-memory@main`     |
-| mentality  | `git:github.com/peteknowsai/pi-cell-mentality@main`  |
-| wiki       | `git:github.com/peteknowsai/pi-cell-wiki@main`       |
-| dream      | `git:github.com/peteknowsai/pi-cell-dream@main`      |
+| package        | install spec        |
+|----------------|---------------------|
+| pi-web-access  | `npm:pi-web-access` |
 
-Example: if `<PACKAGES>` is `["memory", "wiki"]`, run via `sprite_exec`:
+Example: if `<PACKAGES>` is `["pi-web-access"]`, run via `sprite_exec`:
 
 ```bash
-pi install -l git:github.com/peteknowsai/pi-cell-memory@main
-pi install -l git:github.com/peteknowsai/pi-cell-wiki@main
+pi install -l npm:pi-web-access
 ```
 
-The four `pi-cell-*` packages are the Cell memory architecture:
+The optional in-tree extensions are the Cell memory architecture:
 
-- `pi-cell-memory` — atoms + yearnings, `write_memory` / `write_yearning` tools, MEMORY.md always-loaded
-- `pi-cell-mentality` — single `mentality.md` synthesis, always-loaded
-- `pi-cell-wiki` — deep narrative knowledge, lazy-queried
-- `pi-cell-dream` — async learner, four-phase consolidation from past sessions
+- `memory` — atoms + yearnings, `write_memory` / `write_yearning` tools, MEMORY.md always-loaded
+- `mentality` — single `mentality.md` synthesis, always-loaded
+- `wiki` — deep narrative knowledge, lazy-queried
+- `dream` — async learner, four-phase consolidation from past sessions
 
-Storage packages (memory / mentality / wiki) function standalone. Dream is
-the optional accelerant. They auto-register via Pi's package discovery.
+Storage extensions (memory / mentality / wiki) function standalone. Dream is
+the optional accelerant. Pi auto-discovers extensions in `.pi/extensions/`
+on session start.
 
 ## 6. Set up the env shim and PATH
 
