@@ -16,10 +16,12 @@ const REGISTRY_PATH = join(REGISTRY_DIR, "cells.json");
 // provide a floating "claude-opus-latest" alias; the major-version-stamped
 // alias is what they recommend. Bump these when a new minor ships.
 const MODEL_IDS = {
-  opus:      { provider: "anthropic", modelId: "claude-opus-4-7" },
-  sonnet:    { provider: "anthropic", modelId: "claude-sonnet-4-6" },
-  haiku:     { provider: "anthropic", modelId: "claude-haiku-4-5" },
-  "gpt-5.5": { provider: "openai",    modelId: "gpt-5.5" },
+  opus:                { provider: "anthropic", modelId: "claude-opus-4-7" },
+  sonnet:              { provider: "anthropic", modelId: "claude-sonnet-4-6" },
+  haiku:               { provider: "anthropic", modelId: "claude-haiku-4-5" },
+  "gpt-5.5":           { provider: "openai",    modelId: "gpt-5.5" },
+  "deepseek-v4-flash": { provider: "deepseek",  modelId: "deepseek-v4-flash" },
+  "deepseek-v4-pro":   { provider: "deepseek",  modelId: "deepseek-v4-pro" },
 } as const;
 type ModelKey = keyof typeof MODEL_IDS;
 
@@ -51,10 +53,12 @@ const HARNESS_OPTIONS: SelectOption[] = [
 ];
 
 const MODEL_OPTIONS: SelectOption[] = [
-  { value: "opus",    label: "opus" },
-  { value: "sonnet",  label: "sonnet" },
-  { value: "haiku",   label: "haiku" },
-  { value: "gpt-5.5", label: "gpt-5.5" },
+  { value: "opus",              label: "opus" },
+  { value: "sonnet",            label: "sonnet" },
+  { value: "haiku",             label: "haiku" },
+  { value: "gpt-5.5",           label: "gpt-5.5" },
+  { value: "deepseek-v4-flash", label: "deepseek-v4-flash" },
+  { value: "deepseek-v4-pro",   label: "deepseek-v4-pro" },
 ];
 
 // Pi thinking levels — `xhigh` only takes effect on a few codex-max models;
@@ -556,7 +560,7 @@ function parseCreateArgs(args: string[]): { name: string; opts: CreateOpts } {
   }
   if (!name) {
     console.error(
-      "usage: cells create <name> [--harness=pi] [--model=opus|sonnet|haiku|gpt-5.5] [--thinking=off|minimal|low|medium|high|xhigh] [--extensions=memory,...] [--packages=pi-web-access,...]",
+      "usage: cells create <name> [--harness=pi] [--model=opus|sonnet|haiku|gpt-5.5|deepseek-v4-flash|deepseek-v4-pro] [--thinking=off|minimal|low|medium|high|xhigh] [--extensions=memory,...] [--packages=pi-web-access,...]",
     );
     process.exit(1);
   }
@@ -1638,7 +1642,7 @@ switch (sub) {
     console.log("usage:");
     console.log("  cells pi                    open the cell-keeper Pi TUI (alias: cells talk keeper)");
     console.log("  cells create <name> [flags] provision a new cell on a Sprite");
-    console.log("                              flags: --harness=pi --model=opus|sonnet|haiku|gpt-5.5");
+    console.log("                              flags: --harness=pi --model=opus|sonnet|haiku|gpt-5.5|deepseek-v4-flash|deepseek-v4-pro");
     console.log("                                     --thinking=off|minimal|low|medium|high|xhigh");
     console.log("                                     --extensions=memory,mentality,wiki,dream");
     console.log("                                     --packages=pi-web-access");
