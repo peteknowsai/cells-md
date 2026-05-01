@@ -144,36 +144,58 @@ function renderOption(
   return `${prefix} ${opt.label}${hint}`;
 }
 
-async function selectOne(prompt: string, options: SelectOption[]): Promise<string> {
+// Sentinel returned from selectOne/selectMany when the user hits the back
+// key (Left arrow / Backspace) and `canGoBack` was true. The caller is then
+// responsible for clearing the previous prompt's summary and re-running it.
+const BACK = Symbol("back");
+type Back = typeof BACK;
+
+const BACK_KEYS = new Set(["\x1b[D", "\x7f", "\x08"]); // ←, DEL, BS
+
+async function selectOne(
+  prompt: string,
+  options: SelectOption[],
+  opts: { initialValue?: string; canGoBack?: boolean } = {},
+): Promise<string | Back> {
   const enabled = options
     .map((o, i) => (o.disabled ? -1 : i))
     .filter((i) => i >= 0);
   if (enabled.length === 0) throw new Error("no enabled options");
 
-  let cursor = enabled[0]!;
+  const initialIdx = opts.initialValue
+    ? options.findIndex((o) => o.value === opts.initialValue && !o.disabled)
+    : -1;
+  let cursor = initialIdx >= 0 ? initialIdx : enabled[0]!;
   let lastHeight = 0;
+  const canGoBack = opts.canGoBack ?? false;
 
-  const draw = (final: boolean): string => {
+  const drawMenu = (): string => {
     const lines: string[] = [`\x1b[1m${prompt}\x1b[0m`];
     for (let i = 0; i < options.length; i++) {
       const isCursor = i === cursor;
       const pointer = isCursor ? "❯" : " ";
       lines.push(renderOption(options[i]!, isCursor, pointer));
     }
-    if (!final) lines.push(`\x1b[2m  ↑↓ move · enter select\x1b[0m`);
+    const hint = canGoBack
+      ? `\x1b[2m  ↑↓ move · enter select · ←/⌫ back\x1b[0m`
+      : `\x1b[2m  ↑↓ move · enter select\x1b[0m`;
+    lines.push(hint);
     return lines.join("\n");
   };
 
-  const writeFrame = (final = false) => {
+  const drawSummary = (): string =>
+    `\x1b[1m${prompt}\x1b[0m \x1b[36m${options[cursor]!.value}\x1b[0m`;
+
+  const writeMenu = () => {
     clearFrame(lastHeight);
-    const frame = draw(final);
+    const frame = drawMenu();
     process.stdout.write(frame + "\n");
     lastHeight = frame.split("\n").length;
   };
 
   tuiBegin();
-  return new Promise<string>((resolve) => {
-    writeFrame();
+  return new Promise<string | Back>((resolve) => {
+    writeMenu();
     const onData = (chunk: Buffer) => {
       const s = chunk.toString();
       if (s === "\x03") {
@@ -184,9 +206,17 @@ async function selectOne(prompt: string, options: SelectOption[]): Promise<strin
       }
       if (s === "\r" || s === "\n") {
         process.stdin.off("data", onData);
-        writeFrame(true);
+        clearFrame(lastHeight);
+        process.stdout.write(drawSummary() + "\n");
         tuiEnd();
         resolve(options[cursor]!.value);
+        return;
+      }
+      if (canGoBack && BACK_KEYS.has(s)) {
+        process.stdin.off("data", onData);
+        clearFrame(lastHeight);
+        tuiEnd();
+        resolve(BACK);
         return;
       }
       let move: -1 | 0 | 1 = 0;
@@ -196,7 +226,7 @@ async function selectOne(prompt: string, options: SelectOption[]): Promise<strin
         const idx = enabled.indexOf(cursor);
         const next = (idx + move + enabled.length) % enabled.length;
         cursor = enabled[next]!;
-        writeFrame();
+        writeMenu();
       }
     };
     process.stdin.on("data", onData);
@@ -206,22 +236,24 @@ async function selectOne(prompt: string, options: SelectOption[]): Promise<strin
 async function selectMany(
   prompt: string,
   options: SelectOption[],
-  defaultsChecked: string[] = [],
-): Promise<string[]> {
+  opts: { initialChecked?: string[]; canGoBack?: boolean } = {},
+): Promise<string[] | Back> {
   const enabled = options
     .map((o, i) => (o.disabled ? -1 : i))
     .filter((i) => i >= 0);
   if (enabled.length === 0) throw new Error("no enabled options");
 
   let cursor = enabled[0]!;
+  const initialChecked = opts.initialChecked ?? [];
   const checked = new Set<number>(
-    defaultsChecked
+    initialChecked
       .map((v) => options.findIndex((o) => o.value === v))
       .filter((i) => i >= 0 && !options[i]!.disabled),
   );
   let lastHeight = 0;
+  const canGoBack = opts.canGoBack ?? false;
 
-  const draw = (final: boolean): string => {
+  const drawMenu = (): string => {
     const lines: string[] = [`\x1b[1m${prompt}\x1b[0m`];
     for (let i = 0; i < options.length; i++) {
       const isCursor = i === cursor;
@@ -230,20 +262,31 @@ async function selectMany(
       const box = isChecked ? "[\x1b[36mx\x1b[0m]" : "[ ]";
       lines.push(renderOption(options[i]!, isCursor, `${pointer} ${box}`));
     }
-    if (!final) lines.push(`\x1b[2m  ↑↓ move · space toggle · enter confirm\x1b[0m`);
+    const hint = canGoBack
+      ? `\x1b[2m  ↑↓ move · space toggle · enter confirm · ←/⌫ back\x1b[0m`
+      : `\x1b[2m  ↑↓ move · space toggle · enter confirm\x1b[0m`;
+    lines.push(hint);
     return lines.join("\n");
   };
 
-  const writeFrame = (final = false) => {
+  const drawSummary = (): string => {
+    const picked = Array.from(checked)
+      .sort((a, b) => a - b)
+      .map((i) => options[i]!.value);
+    const list = picked.length === 0 ? "\x1b[2m(none)\x1b[0m" : `\x1b[36m${picked.join(", ")}\x1b[0m`;
+    return `\x1b[1m${prompt}\x1b[0m ${list}`;
+  };
+
+  const writeMenu = () => {
     clearFrame(lastHeight);
-    const frame = draw(final);
+    const frame = drawMenu();
     process.stdout.write(frame + "\n");
     lastHeight = frame.split("\n").length;
   };
 
   tuiBegin();
-  return new Promise<string[]>((resolve) => {
-    writeFrame();
+  return new Promise<string[] | Back>((resolve) => {
+    writeMenu();
     const onData = (chunk: Buffer) => {
       const s = chunk.toString();
       if (s === "\x03") {
@@ -254,7 +297,8 @@ async function selectMany(
       }
       if (s === "\r" || s === "\n") {
         process.stdin.off("data", onData);
-        writeFrame(true);
+        clearFrame(lastHeight);
+        process.stdout.write(drawSummary() + "\n");
         tuiEnd();
         const picked = Array.from(checked)
           .sort((a, b) => a - b)
@@ -266,8 +310,15 @@ async function selectMany(
         if (!options[cursor]!.disabled) {
           if (checked.has(cursor)) checked.delete(cursor);
           else checked.add(cursor);
-          writeFrame();
+          writeMenu();
         }
+        return;
+      }
+      if (canGoBack && BACK_KEYS.has(s)) {
+        process.stdin.off("data", onData);
+        clearFrame(lastHeight);
+        tuiEnd();
+        resolve(BACK);
         return;
       }
       let move: -1 | 0 | 1 = 0;
@@ -277,7 +328,7 @@ async function selectMany(
         const idx = enabled.indexOf(cursor);
         const next = (idx + move + enabled.length) % enabled.length;
         cursor = enabled[next]!;
-        writeFrame();
+        writeMenu();
       }
     };
     process.stdin.on("data", onData);
@@ -495,10 +546,46 @@ async function cmdCreate(name: string, opts: CreateOpts) {
 
   if (interactive) {
     console.log(`\nbirthing cell '${name}'\n`);
-    harness = await selectOne("Harness?", HARNESS_OPTIONS);
-    modelKey = (await selectOne("Model?", MODEL_OPTIONS)) as ModelKey;
-    extensions = await selectMany("Extensions?", EXTENSION_OPTIONS);
-    packages = await selectMany("Packages?", PACKAGE_OPTIONS, PACKAGE_DEFAULTS);
+    // Step machine so the user can ←/⌫ back to a previous prompt mid-flow.
+    const answers: (string | string[] | undefined)[] = [];
+    let i = 0;
+    while (i < 4) {
+      const canGoBack = i > 0;
+      let result: string | string[] | Back;
+      if (i === 0) {
+        result = await selectOne("Harness?", HARNESS_OPTIONS, {
+          initialValue: answers[0] as string | undefined,
+        });
+      } else if (i === 1) {
+        result = await selectOne("Model?", MODEL_OPTIONS, {
+          canGoBack,
+          initialValue: answers[1] as string | undefined,
+        });
+      } else if (i === 2) {
+        result = await selectMany("Extensions?", EXTENSION_OPTIONS, {
+          canGoBack,
+          initialChecked: answers[2] as string[] | undefined,
+        });
+      } else {
+        result = await selectMany("Packages?", PACKAGE_OPTIONS, {
+          canGoBack,
+          initialChecked: (answers[3] as string[] | undefined) ?? PACKAGE_DEFAULTS,
+        });
+      }
+      if (result === BACK) {
+        // selectOne/Many cleared its own menu; rewind one more line to wipe
+        // the previous prompt's summary so it can be re-rendered fresh.
+        process.stdout.write("\x1b[1A\x1b[2K");
+        i--;
+      } else {
+        answers[i] = result;
+        i++;
+      }
+    }
+    harness = answers[0] as string;
+    modelKey = answers[1] as ModelKey;
+    extensions = answers[2] as string[];
+    packages = answers[3] as string[];
   } else {
     harness = opts.harness ?? "pi";
     modelKey = opts.model ?? "opus";
