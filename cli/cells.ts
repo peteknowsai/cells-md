@@ -130,6 +130,19 @@ function clearFrame(height: number) {
   if (height > 0) process.stdout.write(`\x1b[${height}A\x1b[J`);
 }
 
+// Number of visual rows a frame occupies, accounting for line wrapping in the
+// terminal. `frame.split("\n").length` undercounts when any line is wider than
+// the terminal — that miscount causes ghost headers to accumulate on redraw.
+function visualHeight(frame: string): number {
+  const cols = Math.max(1, process.stdout.columns ?? 80);
+  let rows = 0;
+  for (const line of frame.split("\n")) {
+    const stripped = line.replace(/\x1b\[[0-9;]*m/g, "");
+    rows += Math.max(1, Math.ceil(stripped.length / cols));
+  }
+  return rows;
+}
+
 function renderOption(
   opt: SelectOption,
   isCursor: boolean,
@@ -188,7 +201,7 @@ async function selectOne(
     clearFrame(lastHeight);
     const frame = drawMenu();
     process.stdout.write(frame + "\n");
-    lastHeight = frame.split("\n").length;
+    lastHeight = visualHeight(frame);
   };
 
   tuiBegin();
@@ -281,7 +294,7 @@ async function selectMany(
     clearFrame(lastHeight);
     const frame = drawMenu();
     process.stdout.write(frame + "\n");
-    lastHeight = frame.split("\n").length;
+    lastHeight = visualHeight(frame);
   };
 
   tuiBegin();
