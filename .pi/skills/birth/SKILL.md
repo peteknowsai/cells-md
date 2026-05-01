@@ -20,7 +20,7 @@ still available for local-only operations on the Mac (e.g., reading
 ## Preconditions
 
 - `sprite` CLI authenticated (verify with `sprite org list`)
-- `~/.cell/secrets.json` contains `CELLS_PROXY_SECRET` (the bearer token cells use to reach the keeper proxy at `https://keeper.cells.md`)
+- `~/.cell/secrets.json` contains `CELLS_PROXY_SECRET` (the bearer token cells use to reach the mother's proxy at `https://keeper.cells.md`)
 - No existing agent with this name (the Bun CLI checks before invoking you)
 
 ## 1. Create the Sprite
@@ -201,13 +201,13 @@ chmod 600 /home/sprite/.bashrc.d/exa
 ```
 
 `ANTHROPIC_API_KEY` is intentionally absent from `secrets.json` — cells
-route through the keeper proxy and don't hold real Anthropic credentials.
+route through the mother's proxy and don't hold real Anthropic credentials.
 The legacy approach was to push a frozen OAuth access token; it expired
 hours after birth.
 
-## 6c. Wire the cell to the keeper proxy
+## 6c. Wire the cell to the mother's proxy
 
-Cells reach Anthropic via `https://keeper.cells.md`, which the keeper
+Cells reach Anthropic via `https://keeper.cells.md`, which the mother
 laptop runs (single OAuth principal for the whole fleet). This step does
 two things:
 
@@ -229,7 +229,7 @@ registry will be clobbered and the cell will start hitting `api.anthropic.com`
 directly with the proxy secret (which Anthropic rejects). Also re-run if
 you rotate `CELLS_PROXY_SECRET`.
 
-Background: see `memory/project_keeper_proxy.md` and
+Background: see `memory/project_mother_proxy.md` and
 `memory/reference_pi_internals.md` for why this is necessary.
 
 ## 7. Register the `agent` service (auto-start Pi on VM boot)

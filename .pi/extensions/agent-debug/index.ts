@@ -1,7 +1,7 @@
 /**
- * agent-debug — keeper-only tools for interacting with remote agents.
+ * agent-debug — mother-only tools for interacting with remote agents.
  *
- * Lets the cell-keeper poke a running agent's Pi TUI from the outside:
+ * Lets the mother poke a running agent's Pi TUI from the outside:
  * inject messages, read the screen, fetch memory. Useful for diagnosing
  * stuck agents, chatting on Pete's behalf, or watching what they're doing.
  *

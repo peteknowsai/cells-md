@@ -1,6 +1,6 @@
 /**
  * sprite-tools — Pi extension that exposes Sprite VM operations as LLM-callable
- * tools for the cell-keeper agent.
+ * tools for the mother agent.
  *
  * Wraps the local `sprite` CLI via node:child_process. The CLI handles auth
  * via the macOS keyring, so we don't manage tokens here.

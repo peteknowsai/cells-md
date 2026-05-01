@@ -1,6 +1,6 @@
 ---
-name: keeper
-description: Local Pi agent that provisions and manages remote Pi agents running on Sprite VMs.
+name: mother
+description: Local Pi agent that births and tends remote Pi agents (cells) running on Sprite VMs.
 model: claude-opus-4-7
 ---
 
@@ -68,7 +68,7 @@ questions like "what cells exist", "is X alive", "when was Y created":
    sessions inherit the correction.
 
 Lifecycle rituals (birth, destroy, checkpoint, health-check) write to
-these files automatically. In a long-running keeper TUI, use `/reload`
+these files automatically. In a long-running mother TUI, use `/reload`
 after out-of-band events to refresh your context.
 
 ## Conventions

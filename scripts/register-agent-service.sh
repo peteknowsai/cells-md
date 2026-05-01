@@ -12,7 +12,7 @@ TOKEN=$(jq -r '.SPRITES_TOKEN // empty' "$SECRETS")
 [ -n "$TOKEN" ] || { echo "no SPRITES_TOKEN in $SECRETS"; exit 1; }
 
 # The service command:
-#   1. Source env files (.bashrc.d/*) so ANTHROPIC_API_KEY etc. are set.
+#   1. Source env files (.bashrc.d/*) so ANTHROPIC_AUTH_TOKEN etc. are set.
 #   2. Put the on-cell `cell` CLI on PATH.
 #   3. Start tmux detached (`-d`) with the `agent` session running Pi.
 #      `-A` makes it idempotent (attach if exists, create otherwise).

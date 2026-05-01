@@ -3,7 +3,7 @@
     ".pi/extensions/identity/index.ts",
     ".pi/extensions/memory/index.ts",
     ".pi/extensions/sprite-tools/index.ts",
-    ".pi/extensions/keeper-widgets/index.ts",
+    ".pi/extensions/mother-widgets/index.ts",
     ".pi/extensions/agent-debug/index.ts"
   ],
   "packages": [

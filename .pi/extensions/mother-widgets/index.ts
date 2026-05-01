@@ -1,9 +1,9 @@
 /**
- * keeper-widgets — UI widgets only the cell-keeper has.
+ * mother-widgets — UI widgets only the mother has.
  *
- * Lives in the cell-keeper's local `.pi/extensions/` (NOT the template, so
+ * Lives in the mother's local `.pi/extensions/` (NOT the template, so
  * remote agents don't get it). Registers ambient UI elements that give the
- * keeper at-a-glance awareness of the cells it manages.
+ * mother at-a-glance awareness of the cells she manages.
  *
  * v1: a roster footer showing every cell's name + age. Refreshed on
  * session_start and turn_end so it stays current as you create/destroy.
@@ -15,7 +15,7 @@ import { join } from "node:path";
 import { homedir } from "node:os";
 
 const REGISTRY_PATH = join(homedir(), ".cell", "cells.json");
-const WIDGET_KEY = "keeper-roster";
+const WIDGET_KEY = "mother-roster";
 
 type Cell = { name: string; created_at: string };
 type Registry = { cells?: Cell[] };

@@ -45,7 +45,8 @@ echo "== EXTENSIONS =="; ls /home/sprite/agent/.pi/extensions/ 2>&1
 echo "== PI-WEB-ACCESS =="; test -d /home/sprite/agent/.pi/npm/node_modules/pi-web-access && echo ok || echo MISSING
 echo "== SPRITE CLI =="; which sprite 2>&1
 echo "== ENV FILES =="; ls -la /home/sprite/.bashrc.d/ 2>&1
-echo "== ANTHROPIC KEY PREFIX =="; awk -F"'" '/ANTHROPIC_API_KEY/{print substr($2,1,13)"...("length($2)" chars)"}' /home/sprite/.bashrc.d/anthropic 2>/dev/null || echo "MISSING"
+echo "== PROXY TOKEN =="; awk -F"'" '/ANTHROPIC_AUTH_TOKEN/{print substr($2,1,12)"...("length($2)" chars)"}' /home/sprite/.bashrc.d/anthropic_proxy 2>/dev/null || echo "MISSING"
+echo "== MODEL URL =="; grep -o 'https://[a-z.]*\.anthropic\.com\|https://keeper\.cells\.md' /home/sprite/agent/node_modules/@mariozechner/pi-ai/dist/models.generated.js 2>/dev/null | sort -u | head -3
 echo "== SHELL SHIM (bashrc) =="; grep -c "tmux new-session" /home/sprite/.bashrc 2>/dev/null
 echo "== SHELL SHIM (zshrc) =="; grep -c "tmux new-session" /home/sprite/.zshrc 2>/dev/null
 echo "== MEMORY INDEX =="; head -3 /home/sprite/agent/memory/MEMORY.md 2>&1
@@ -56,7 +57,8 @@ Pass criteria:
 - bun version prints, pi binary exists
 - `node_modules` exists; `identity`, `memory`, `self-tools` in `agent/.pi/extensions/`; `pi-web-access` present at `agent/.pi/npm/node_modules/pi-web-access`
 - `sprite` CLI installed
-- `anthropic` env file exists and prefix is `sk-ant-oat` (OAuth = first-party billing). If it's `sk-ant-api`, the cell is on extra-usage billing — flag as ⚠️.
+- `anthropic_proxy` env file exists and contains a `CELLS_PROXY_SECRET` of expected length (~64 chars). Cells route through `https://keeper.cells.md`; they don't hold real Anthropic credentials.
+- Model URL is `https://keeper.cells.md` (NOT `https://api.anthropic.com`) — if it's the latter, run `scripts/configure-cell-proxy.sh <NAME>` from the mother to re-patch.
 - Both shimss have at least one match for `tmux new-session`
 - `MEMORY.md` exists
 
