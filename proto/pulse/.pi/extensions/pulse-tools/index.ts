@@ -2,17 +2,17 @@
  * pulse-tools — the deterministic guts of pulse.
  *
  * Pulse runs in print mode (`pi -p /pulse`) every 60s under launchd. Each
- * tick is a fresh process; nothing persists in pi context. All durable state
+ * pulse is a fresh process; nothing persists in pi context. All durable state
  * is on disk under ~/.cells/:
  *
- *   pulse.json              runtime state (lastTick, currentTick, lastFire, log[])
+ *   pulse.json              runtime state (lastPulse, currentPulse, lastFire, log[])
  *   pulse-inbox/            files dropped by mother proxy when cells push HEARTBEAT.md
  *   pulse-inbox/processed/  archive of drained inbox files
  *   pulse-cache/<cell>.json parsed schedule per cell ({items: [{id, cron, message}]})
  *
  * Vault-readable surfaces (under proto/pulse/state/, mirrored by `cells sync pulse`):
  *
- *   heartbeats.md    table of every cell's schedule + last/next fire (rendered each tick)
+ *   heartbeats.md    table of every cell's schedule + last/next fire (rendered each pulse)
  *   log.md           LLM-written daily narrative (one entry per 24h, prepended)
  *
  * Tool boundary: the LLM only handles two things —
@@ -20,7 +20,7 @@
  *   2. writing a one-paragraph daily log entry (rare; once per 24h).
  *
  * Everything else (cron eval, firing, state mutation, digest rendering) is
- * pure compute behind a tool boundary. Cheap ticks cost ~no tokens.
+ * pure compute behind a tool boundary. Cheap pulses cost ~no tokens.
  */
 
 import { Type } from "@sinclair/typebox";
@@ -56,8 +56,8 @@ type Schedule = { items: ScheduleItem[]; updatedAt: string };
 type LogEntry = { ts: string; cell: string; id: string; message: string; result: "ok" | "fail"; exit?: number };
 
 type State = {
-  lastTick: string | null;
-  currentTick: string | null;
+  lastPulse: string | null;
+  currentPulse: string | null;
   lastFire: Record<string, string>; // key = "<cell>:<id>", value = ISO
   log: LogEntry[];
 };
@@ -72,18 +72,18 @@ function ensureDirs(): void {
 
 function readState(): State {
   if (!fs.existsSync(STATE_PATH)) {
-    return { lastTick: null, currentTick: null, lastFire: {}, log: [] };
+    return { lastPulse: null, currentPulse: null, lastFire: {}, log: [] };
   }
   try {
     const raw = JSON.parse(fs.readFileSync(STATE_PATH, "utf-8"));
     return {
-      lastTick: raw.lastTick ?? null,
-      currentTick: raw.currentTick ?? null,
+      lastPulse: raw.lastPulse ?? null,
+      currentPulse: raw.currentPulse ?? null,
       lastFire: raw.lastFire ?? {},
       log: Array.isArray(raw.log) ? raw.log : [],
     };
   } catch {
-    return { lastTick: null, currentTick: null, lastFire: {}, log: [] };
+    return { lastPulse: null, currentPulse: null, lastFire: {}, log: [] };
   }
 }
 
@@ -133,12 +133,12 @@ function txt(text: string) {
 // ---------- extension ----------
 
 export default function (pi: any) {
-  // tick_begin — concurrency check + state snapshot.
+  // pulse_begin — concurrency check + state snapshot.
   pi.registerTool({
-    name: "tick_begin",
-    label: "Begin pulse tick",
+    name: "pulse_begin",
+    label: "Begin pulse",
     description:
-      "Start a pulse tick. Acquires the currentTick sentinel (5-minute staleness window). Returns {skip, reason, isFirstRun, now}. If skip=true, stop immediately — a prior tick is in flight.",
+      "Start a pulse. Acquires the currentPulse sentinel (5-minute staleness window). Returns {skip, reason, isFirstRun, now}. If skip=true, stop immediately — a prior pulse is in flight.",
     parameters: Type.Object({}),
     async execute() {
       ensureDirs();
@@ -146,34 +146,34 @@ export default function (pi: any) {
       const now = new Date();
       const nowIso = now.toISOString();
 
-      if (state.currentTick) {
-        const ageMs = now.getTime() - new Date(state.currentTick).getTime();
+      if (state.currentPulse) {
+        const ageMs = now.getTime() - new Date(state.currentPulse).getTime();
         if (ageMs < 5 * 60_000) {
-          return txt(JSON.stringify({ skip: true, reason: `prior tick in flight since ${state.currentTick}`, isFirstRun: false, now: nowIso }));
+          return txt(JSON.stringify({ skip: true, reason: `prior pulse in flight since ${state.currentPulse}`, isFirstRun: false, now: nowIso }));
         }
-        // Stale sentinel — prior tick crashed. Take over.
+        // Stale sentinel — prior pulse crashed. Take over.
       }
 
       const isFirstRun = !fs.existsSync(CACHE_DIR) || fs.readdirSync(CACHE_DIR).length === 0;
-      state.currentTick = nowIso;
+      state.currentPulse = nowIso;
       writeState(state);
       return txt(JSON.stringify({ skip: false, isFirstRun, now: nowIso }));
     },
   });
 
-  // tick_end — clear sentinel, update lastTick.
+  // pulse_end — clear sentinel, update lastPulse.
   pi.registerTool({
-    name: "tick_end",
-    label: "End pulse tick",
+    name: "pulse_end",
+    label: "End pulse",
     description:
-      "Finalize a pulse tick. Clears the currentTick sentinel and stamps lastTick. Always call this last, even if earlier steps no-oped.",
+      "Finalize a pulse. Clears the currentPulse sentinel and stamps lastPulse. Always call this last, even if earlier steps no-oped.",
     parameters: Type.Object({}),
     async execute() {
       const state = readState();
-      state.currentTick = null;
-      state.lastTick = new Date().toISOString();
+      state.currentPulse = null;
+      state.lastPulse = new Date().toISOString();
       writeState(state);
-      return txt("tick ended");
+      return txt("pulse ended");
     },
   });
 
@@ -364,7 +364,7 @@ export default function (pi: any) {
     name: "render_digest",
     label: "Render heartbeats digest",
     description:
-      "Write proto/pulse/state/heartbeats.md — a markdown table of every cell's schedule, last-fire, next-fire. Pure compute over pulse-cache/ + state. Call at the end of each tick.",
+      "Write proto/pulse/state/heartbeats.md — a markdown table of every cell's schedule, last-fire, next-fire. Pure compute over pulse-cache/ + state. Call at the end of each pulse.",
     parameters: Type.Object({}),
     async execute() {
       ensureDirs();

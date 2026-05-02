@@ -1,7 +1,7 @@
 # Pulse
 
 > **Status:** shipped. Pulse is the family scheduler — a print-mode pi
-> agent that ticks every 60s under launchd, reads each cell's
+> agent that pulses every 60s under launchd, reads each cell's
 > `HEARTBEAT.md`, and fires wake-ups via `cells talk`.
 
 ## Layout
@@ -9,10 +9,10 @@
 | What | Where |
 |---|---|
 | Pulse agent root | `proto/pulse/` |
-| Slash command (the tick body) | `proto/pulse/.pi/prompts/pulse.md` |
+| Slash command (the pulse body) | `proto/pulse/.pi/prompts/pulse.md` |
 | Tools (state, inbox, cron, fire, digest, daily-log) | `proto/pulse/.pi/extensions/pulse-tools/index.ts` |
 | Codex routing + anatomy composer | `proto/pulse/.pi/extensions/use-codex/index.ts` |
-| Launcher (loads secrets, isolates pi auth) | `proto/pulse/bin/pulse-tick` |
+| Launcher (loads secrets, isolates pi auth) | `proto/pulse/bin/pulse-run` |
 | Inbox push extension (ships in cell DNA) | `proto/mother/dna/.pi/extensions/heartbeat-watch/index.ts` |
 | Inbox endpoint (mother proxy host route) | `cli/proxy.ts` (`pulse.cells.md/heartbeat-changed`) |
 
@@ -20,11 +20,11 @@
 
 | Path | Purpose |
 |---|---|
-| `~/.cells/pulse.json` | `lastTick`, `currentTick`, `lastFire` per `<cell>:<id>`, `log[]` (capped 500) |
-| `~/.cells/pulse-inbox/` | HEARTBEAT.md pushes from cells, drained each tick |
+| `~/.cells/pulse.json` | `lastPulse`, `currentPulse`, `lastFire` per `<cell>:<id>`, `log[]` (capped 500) |
+| `~/.cells/pulse-inbox/` | HEARTBEAT.md pushes from cells, drained each pulse |
 | `~/.cells/pulse-inbox/processed/` | Archive of drained inbox files |
 | `~/.cells/pulse-cache/<cell>.json` | Parsed schedule per cell (`{id, cron, message}[]`) |
-| `~/.cells/logs/pulse.{log,err}` | launchd-captured stdout/stderr per tick |
+| `~/.cells/logs/pulse.{log,err}` | launchd-captured stdout/stderr per pulse |
 | `~/.cells/pulse-agent/` | Isolated `PI_CODING_AGENT_DIR` so pulse's auth doesn't collide with mother's |
 
 ## Vault-readable surfaces
@@ -33,32 +33,32 @@
 
 | File | Updated by | Contents |
 |---|---|---|
-| `state/heartbeats.md` | `render_digest` (every tick) | Markdown table: every cell's schedule + last/next fire + recent 20 fires |
+| `state/heartbeats.md` | `render_digest` (every pulse) | Markdown table: every cell's schedule + last/next fire + recent 20 fires |
 | `state/log.md` | `write_log_entry` (once per UTC day) | LLM-written narrative summarizing the prior 24h, prepended |
 
 Inspect from terminal: `cells heartbeat`, `cells heartbeat <cell>`, `cells heartbeat --tail`.
 
-## Tick semantics
+## Pulse semantics
 
-Each tick is a fresh `pi -p /pulse` invocation; nothing persists in pi
-context across ticks. The slash command is deterministic:
+Each pulse is a fresh `pi -p /pulse` invocation; nothing persists in pi
+context across pulses. The slash command is deterministic:
 
-1. `tick_begin` — acquires the 5-min `currentTick` sentinel (concurrency
+1. `pulse_begin` — acquires the 5-min `currentPulse` sentinel (concurrency
    guard for crash + overlap recovery). On first run with empty cache,
    calls `bootstrap_inbox` to synthesize inbox entries from each cell's
    vault `HEARTBEAT.md`.
 2. `drain_inbox` — for each pushed HEARTBEAT.md, the LLM parses prose into
    `[{id, cron, message}]` and `save_schedule` writes the cache + moves
-   the source to `processed/`. (Only LLM step on most ticks.)
+   the source to `processed/`. (Only LLM step on most pulses.)
 3. `fire_due` — pure compute: cron-eval against the last 60s window and
    shell out `cells talk <cell> "<message>"` for each due item not
    already fired this minute. Records to `log[]` and `lastFire`.
 4. `daily_log_due` → `write_log_entry` — once per UTC day, LLM writes a
    3-5 sentence narrative of the prior 24h's fires. (Other LLM step.)
 5. `render_digest` — rewrites `state/heartbeats.md` from cache + state.
-6. `tick_end` — clears the sentinel, stamps `lastTick`.
+6. `pulse_end` — clears the sentinel, stamps `lastPulse`.
 
-Cheap ticks (no inbox, no daily-log due) cost no LLM tokens — every tool
+Cheap pulses (no inbox, no daily-log due) cost no LLM tokens — every tool
 above except parse-prose-into-cron and write-daily-log is deterministic.
 
 ## Push, not poll
@@ -68,7 +68,7 @@ extension shipped in their DNA. The extension `fs.watch`es the file with
 a 2s debounce and POSTs the new content to `pulse.cells.md/heartbeat-changed`,
 which the mother proxy authenticates (`MOTHER_SECRET` bearer) and writes
 to `~/.cells/pulse-inbox/<cell>-<ts>.md`. Pulse drains the inbox each
-tick. No `sprite exec` reads — hibernating cells stay hibernating.
+pulse. No `sprite exec` reads — hibernating cells stay hibernating.
 
 To retrofit existing cells with the extension: `cells refresh-extensions <name|--all>`.
 

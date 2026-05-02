@@ -1,15 +1,15 @@
 #!/usr/bin/env bash
-# pulse-tick — one tick of pulse, run by launchd every 60s.
+# pulse-run — one pulse, run by launchd every 60s.
 #
 # Loads CELLS_PROXY_SECRET from ~/.cells/secrets.json, sets the env vars pi
 # needs, isolates pulse's pi auth dir from mother's, then runs `pi -p /pulse`
 # in print mode. Each invocation is a fresh process — nothing persists in
-# memory across ticks; all state lives on disk under ~/.cells/.
+# memory across pulses; all state lives on disk under ~/.cells/.
 set -euo pipefail
 
 SECRETS="${HOME}/.cells/secrets.json"
 if [[ ! -f "$SECRETS" ]]; then
-  echo "pulse-tick: missing $SECRETS" >&2
+  echo "pulse-run: missing $SECRETS" >&2
   exit 1
 fi
 
@@ -17,7 +17,7 @@ fi
 # pulse doesn't gain a system dep just to read one key.
 SECRET="$(/usr/bin/env bun -e 'console.log(JSON.parse(require("fs").readFileSync(process.argv[1],"utf-8")).CELLS_PROXY_SECRET||"")' "$SECRETS")"
 if [[ -z "$SECRET" ]]; then
-  echo "pulse-tick: CELLS_PROXY_SECRET not in $SECRETS" >&2
+  echo "pulse-run: CELLS_PROXY_SECRET not in $SECRETS" >&2
   exit 1
 fi
 

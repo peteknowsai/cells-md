@@ -1,14 +1,14 @@
 ---
 name: pulse
-description: One pulse tick. Drain inbox, fire due wakes, maybe write daily log, render digest.
+description: One pulse. Drain inbox, fire due wakes, maybe write daily log, render digest.
 ---
 
-This is one pulse tick. Be terse. No prose, no narration — just tool calls and one-line summaries.
+This is one pulse. Be terse. No prose, no narration — just tool calls and one-line summaries.
 
 ## Steps
 
-1. **Begin.** Call `tick_begin`.
-   - If `skip=true`, log one line ("skip — prior tick in flight") and STOP. Do not call `tick_end`; the prior tick will.
+1. **Begin.** Call `pulse_begin`.
+   - If `skip=true`, log one line ("skip — prior pulse in flight") and STOP. Do not call `pulse_end`; the prior pulse will.
    - If `isFirstRun=true`, call `bootstrap_inbox` before step 2.
 
 2. **Drain inbox.** Call `drain_inbox`.
@@ -36,7 +36,7 @@ This is one pulse tick. Be terse. No prose, no narration — just tool calls and
 
 5. **Digest.** Call `render_digest` to refresh `state/heartbeats.md`.
 
-6. **End.** Call `tick_end`.
+6. **End.** Call `pulse_end`.
 
-End the response after `tick_end` returns. Don't summarize. Don't echo the schedule. The vault
+End the response after `pulse_end` returns. Don't summarize. Don't echo the schedule. The vault
 files (`heartbeats.md`, `log.md`) are the surface; the JSON state is the truth.

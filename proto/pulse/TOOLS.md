@@ -3,12 +3,12 @@
 Your capabilities, grouped by purpose. The `pulse-tools` extension provides
 the deterministic guts; everything else is plain shell.
 
-## Tick lifecycle
+## Pulse lifecycle
 
-- **`tick_begin`** — concurrency check (5-min `currentTick` sentinel) and
-  state load. Returns `{skip, isFirstRun, now}`. If `skip`, stop the tick
+- **`pulse_begin`** — concurrency check (5-min `currentPulse` sentinel) and
+  state load. Returns `{skip, isFirstRun, now}`. If `skip`, stop the pulse
   immediately; another instance is in flight.
-- **`tick_end`** — clear the sentinel and stamp `lastTick`. Always last.
+- **`pulse_end`** — clear the sentinel and stamp `lastPulse`. Always last.
 
 ## Inbox
 
@@ -33,7 +33,7 @@ the deterministic guts; everything else is plain shell.
 
 - **`render_digest`** — write `state/heartbeats.md` (a markdown table of
   every cell's schedule + last/next fire, plus the most recent 20 fires).
-  Called once per tick. Vault-mirrored by `cells sync pulse`.
+  Called once per pulse. Vault-mirrored by `cells sync pulse`.
 - **`daily_log_due`** — returns `{needed, today, fires}`. If `log.md`
   already has a `## YYYY-MM-DD` heading for today (UTC), `needed=false`.
   Otherwise hands you the last 24h of fires for narrative summarization.
@@ -44,12 +44,12 @@ the deterministic guts; everything else is plain shell.
 ## State
 
 - **`~/.cells/pulse.json`** — runtime state (LLM does not read directly;
-  `tick_begin` and other tools manage it). Fields: `lastTick`,
-  `currentTick`, `lastFire` (per `<cell>:<id>`), `log[]` (capped at 500).
+  `pulse_begin` and other tools manage it). Fields: `lastPulse`,
+  `currentPulse`, `lastFire` (per `<cell>:<id>`), `log[]` (capped at 500).
 - **`~/.cells/pulse-inbox/`** — incoming HEARTBEAT.md pushes from cells.
-  Drained each tick; processed files move to `pulse-inbox/processed/`.
+  Drained each pulse; processed files move to `pulse-inbox/processed/`.
 - **`~/.cells/pulse-cache/<cell>.json`** — parsed schedules. Persisted
-  across ticks; only re-written when the inbox carries a new prose schedule.
+  across pulses; only re-written when the inbox carries a new prose schedule.
 
 ## Boundaries
 

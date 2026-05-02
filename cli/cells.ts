@@ -1279,7 +1279,7 @@ function pulsePlistPath(): string {
 }
 
 function buildPulsePlist(): string {
-  const launcher = join(PULSE_ROOT, "bin", "pulse-tick");
+  const launcher = join(PULSE_ROOT, "bin", "pulse-run");
   const logsDir = join(homedir(), ".cells", "logs");
   const path = "/Users/pete/.bun/bin:/Users/pete/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin";
   return `<?xml version="1.0" encoding="UTF-8"?>
@@ -1313,7 +1313,7 @@ function buildPulsePlist(): string {
 }
 
 async function cmdSchedulePulse() {
-  const launcher = join(PULSE_ROOT, "bin", "pulse-tick");
+  const launcher = join(PULSE_ROOT, "bin", "pulse-run");
   if (!existsSync(launcher)) {
     console.error(`✗ launcher missing: ${launcher}`);
     process.exit(1);
