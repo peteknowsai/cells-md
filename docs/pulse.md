@@ -1,266 +1,96 @@
 # Pulse
 
-> **Status:** plan, not yet implemented. Phase 1 of HEARTBEAT.md (declarative
-> file at agent root) shipped on `4ba1952`. This doc covers the next phase:
-> the agent that reads those files and triggers wake-ups.
->
-> **Design has evolved since this was first drafted.** Originally pictured as
-> a standalone Bun daemon. Pulse is now a real Pi agent — second proto
-> alongside mother, lives at `proto/pulse/`. It reads each cell's HEARTBEAT.md
-> from the **vault mirror** (already populated by `cells sync`), not via
-> `sprite exec`. The daemon shape below is preserved for reference but the
-> "Not a pi instance" claim is obsolete.
+> **Status:** shipped. Pulse is the family scheduler — a print-mode pi
+> agent that ticks every 60s under launchd, reads each cell's
+> `HEARTBEAT.md`, and fires wake-ups via `cells talk`.
 
-## Context
+## Layout
 
-Each cell now ships with a `HEARTBEAT.md` at its agent root declaring its
-desired wake-up schedule (default for newborns: nightly 4am dream). The
-file is currently documentation-only — the existing
-`cells schedule-dreams` launchd plist still drives the actual nightly
-dreams, identically for every cell, with no per-cell variation.
+| What | Where |
+|---|---|
+| Pulse agent root | `proto/pulse/` |
+| Slash command (the tick body) | `proto/pulse/.pi/prompts/pulse.md` |
+| Tools (state, inbox, cron, fire, digest, daily-log) | `proto/pulse/.pi/extensions/pulse-tools/index.ts` |
+| Codex routing + anatomy composer | `proto/pulse/.pi/extensions/use-codex/index.ts` |
+| Launcher (loads secrets, isolates pi auth) | `proto/pulse/bin/pulse-tick` |
+| Inbox push extension (ships in cell DNA) | `proto/mother/dna/.pi/extensions/heartbeat-watch/index.ts` |
+| Inbox endpoint (mother proxy host route) | `cli/proxy.ts` (`pulse.cells.md/heartbeat-changed`) |
 
-The next step is a **pulse**: a long-running process on Pete's
-Mac that reads each cell's `HEARTBEAT.md`, interprets it, and triggers
-the declared wake-ups via `cells talk <name> "<wake message>"`. Replaces
-the launchd-cron-for-dreams with one declarative system that scales to
-arbitrary per-cell cadences.
-
-This doc is the implementation plan. Pick it up after fresh context.
-
-## Why a separate agent
-
-- **Cells can't self-wake.** Sprites hibernate when idle; they have no
-  cron, no scheduler. Schedules have to be enforced from outside.
-- **Mother can't do it either.** Mother is print-mode-invoked per `cells`
-  command; she doesn't run continuously. A scheduler needs an
-  always-running process.
-- **Schedules belong with the cell, enforcement belongs centralized.**
-  Each cell declares what it wants in its own `HEARTBEAT.md` (browsable,
-  editable, version-controlled in the vault). One central agent reads
-  them all and fires them.
-- **HEARTBEAT.md is interpretive, not strict cron.** Pete wants to write
-  things like "every weekday at 8am, summarize the news" without
-  reaching for cron syntax. The pulse is itself an LLM agent —
-  it interprets prose schedules into structured fire times.
-
-## Vision: end state
-
-```
-┌───────────────────────────────────────────────────────┐
-│ Pete's Mac                                            │
-│                                                       │
-│  ┌───────────────────────────────────────────────┐   │
-│  │ pulse daemon (launchd, always-on)         │   │
-│  │  • tick loop (every ~60s)                     │   │
-│  │  • cache: schedules parsed from HEARTBEAT.md  │   │
-│  │  • state: ~/.cells/heartbeat.json             │   │
-│  │    (last-fire time per (cell, schedule item)) │   │
-│  └────┬─────────────────────────────────────┬────┘   │
-│       │ reads HEARTBEAT.md                  │ fires  │
-│       │ (sprite exec, ~once per change)     │        │
-│       ▼                                     ▼        │
-│   each cell                           cells talk     │
-│                                                       │
-└────────────┬──────────────────────────────────────────┘
-             │ sprite exec / cells CLI
-             ▼
-        cells (remote Sprites)
-        ├─ pete: HEARTBEAT.md (4am dream, weekdays 8am news)
-        ├─ scott: HEARTBEAT.md (4am dream, hourly poll)
-        └─ ...
-```
-
-Pete edits a cell's `HEARTBEAT.md` (directly via shell, or by asking the
-cell during conversation, or via the vault). Within ~minute the heartbeat
-agent notices and updates its schedule cache. The cell wakes when its
-declared time arrives.
-
-## Architecture
-
-### Shape
-
-A standalone TypeScript daemon under launchd. **Not** a pi instance —
-there's no need for it to be a long-lived agent with its own persona.
-It's a scheduler with an LLM call as one of its tools. Most of its
-time is spent sleeping; LLM calls are rare.
-
-Lives at `cli/heartbeat.ts` (sibling to `cli/cells.ts` and `cli/proxy.ts`).
-Bun runtime, same toolchain.
-
-### Tick loop
-
-```
-every 60 seconds:
-  registry = read ~/.cells/cells.json
-  for cell in registry.cells:
-    raw = read ~/.cells/heartbeat-cache/<cell>.md (last-known content)
-    fresh = sprite exec <cell> -- cat /home/sprite/agent/HEARTBEAT.md
-    if hash(fresh) != hash(raw):
-      schedule = interpretViaLLM(fresh, cell)  // pi -p with a parser prompt
-      save schedule to ~/.cells/heartbeat-cache/<cell>.json
-      save fresh to ~/.cells/heartbeat-cache/<cell>.md
-    schedule = read ~/.cells/heartbeat-cache/<cell>.json
-    state = read ~/.cells/heartbeat.json
-    for item in schedule:
-      if item is due now AND state.lastFire[(cell, item.id)] < item.dueAt:
-        cells talk <cell> "<wake message from item>"
-        state.lastFire[(cell, item.id)] = now
-    save state
-```
-
-Polling cells via sprite exec is cheap (~100ms; doesn't wake the cell
-because sprite exec runs against persistent storage, not the Pi
-process). With 60s ticks and ~10 cells, that's ~600 short reads/min —
-trivial.
-
-### LLM interpretation
-
-The tick loop only invokes the LLM when a `HEARTBEAT.md` actually
-changes (hash compare). The prompt:
-
-> Given this `HEARTBEAT.md`, return a JSON array of schedule items.
-> Each item: `{id, cron, message}` where `cron` is a five-field crontab
-> string and `message` is what to send via `cells talk` when the item
-> fires.
-
-Returned schedule gets cached. Tick-time becomes pure compute (cron-eval +
-state-compare). Re-interpretation only on file change → low API cost.
-
-Use `pi -p` for the call so it goes through use-max → Pete's Max sub.
-No extra-usage charges.
-
-### Firing
-
-Heartbeat daemon shells out to `cells talk <name> "<msg>"`. The on-Mac
-`cells` CLI is on PATH. Same path mother uses; no new mechanism.
-
-The `<msg>` is the natural-language phrase from the schedule item. Cell
-receives it via its main Pi session (visible to Pete in his tmux), responds
-or executes. Treats it the same as if Pete typed it.
-
-### State
-
-`~/.cells/heartbeat.json`:
-
-```json
-{
-  "lastFire": {
-    "pete:nightly-dream": "2026-05-02T04:00:12Z",
-    "pete:weekday-news": "2026-05-01T08:00:08Z",
-    "scott:nightly-dream": "2026-05-02T04:00:18Z"
-  },
-  "lastTick": "2026-05-02T11:23:00Z"
-}
-```
-
-Schedule cache: `~/.cells/heartbeat-cache/<cell>.{md,json}` — raw + parsed.
-
-State files survive daemon restart so a launchd cycle doesn't replay.
-
-### launchd
-
-`cells schedule-heartbeat` installs a launchd plist that runs the daemon
-under `KeepAlive=true`. Replaces (eventually) `cells schedule-dreams`,
-which becomes redundant.
-
-Migration: keep `schedule-dreams` plist functional through Phase 2; only
-remove it in Phase 3 once the pulse is proven for nightly dreams.
-
-## Phases
-
-### Phase 1 — minimum viable daemon
-
-- `cli/heartbeat.ts`: tick loop, cron eval, state file, launchd plist
-- Hardcoded schedule per cell: nightly 4am dream (matches today's
-  `cells schedule-dreams` behavior)
-- No HEARTBEAT.md interpretation yet — proves the daemon shape works
-- `cells schedule-heartbeat` and `cells unschedule-heartbeat` commands
-- Run alongside existing `schedule-dreams` for a week; compare logs
-
-### Phase 2 — HEARTBEAT.md interpretation
-
-- Polling loop reads each cell's HEARTBEAT.md, hash-compares
-- LLM interpretation on change → cached schedule
-- Fire from cached schedule
-- Retire `schedule-dreams` once Phase 2 proves stable
-
-### Phase 3 — nice-to-haves
-
-- Web UI / status page (extends mother proxy at `mother.cells.md/heartbeat`)
-- Per-cell logs viewable via `cells heartbeat status [<name>]`
-- Push notifications via the existing mother proxy when an item fires
-- Mac notifications (osascript `display notification`) when an item fails
-
-## Critical files (for the implementer)
+## Runtime state (on Pete's Mac)
 
 | Path | Purpose |
 |---|---|
-| `cli/heartbeat.ts` | NEW — the daemon |
-| `cli/cells.ts` | extend with `schedule-heartbeat` / `unschedule-heartbeat` commands; mirror the pattern in `cmdScheduleDreams` (around line 1171) |
-| `~/.cells/heartbeat.json` | runtime state (lastFire per item) |
-| `~/.cells/heartbeat-cache/<cell>.{md,json}` | schedule interpretation cache |
-| `~/Library/LaunchAgents/com.pete.cells-heartbeat.plist` | launchd config |
-| `cli/proxy.ts` | optional Phase 3: `/heartbeat` endpoint for status |
+| `~/.cells/pulse.json` | `lastTick`, `currentTick`, `lastFire` per `<cell>:<id>`, `log[]` (capped 500) |
+| `~/.cells/pulse-inbox/` | HEARTBEAT.md pushes from cells, drained each tick |
+| `~/.cells/pulse-inbox/processed/` | Archive of drained inbox files |
+| `~/.cells/pulse-cache/<cell>.json` | Parsed schedule per cell (`{id, cron, message}[]`) |
+| `~/.cells/logs/pulse.{log,err}` | launchd-captured stdout/stderr per tick |
+| `~/.cells/pulse-agent/` | Isolated `PI_CODING_AGENT_DIR` so pulse's auth doesn't collide with mother's |
 
-Reuse:
-- `loadRegistry()` and `cells.json` shape — already in `cli/cells.ts`
-- `spriteExecCapture()` — for reading remote HEARTBEAT.md
-- `plistPath()` and `buildPlist()` patterns — copy and adapt for heartbeat plist
-- `cells talk` — invoke via `Bun.spawn` for firing
+## Vault-readable surfaces
 
-Key dependencies for cron eval: a small library like
-[`cron-parser`](https://www.npmjs.com/package/cron-parser) handles
-"is this cron string due in [now-60s, now]?" cleanly. Don't roll your own.
+`cells sync pulse` mirrors `proto/pulse/state/` to `~/Obsidian/cells/pulse/state/`:
 
-## Detection of HEARTBEAT.md changes
+| File | Updated by | Contents |
+|---|---|---|
+| `state/heartbeats.md` | `render_digest` (every tick) | Markdown table: every cell's schedule + last/next fire + recent 20 fires |
+| `state/log.md` | `write_log_entry` (once per UTC day) | LLM-written narrative summarizing the prior 24h, prepended |
 
-Phase 2 uses **polling** — every 60s the daemon reads each cell's file
-and hash-compares. Considered alternatives:
+Inspect from terminal: `cells heartbeat`, `cells heartbeat <cell>`, `cells heartbeat --tail`.
 
-- **Push via mother proxy.** Cell hits `mother.cells.md/heartbeat` on
-  HEARTBEAT.md write, daemon reads file off shared Mac filesystem.
-  Lower latency but requires cell-side coordination (a hook or wrapper
-  around the file write). Defer to Phase 3 if polling latency hurts.
-- **Sync-driven.** Watch the vault for HEARTBEAT.md changes (fs.watch).
-  But sync is on-demand, not continuous — bad fit.
-- **No detection at all.** Reinterpret HEARTBEAT.md on every tick.
-  Burns API calls; rejected.
+## Tick semantics
 
-Polling is cheap at the tick cadence we need (~60s) and on the cell
-count we have (~handful). Pete edits HEARTBEAT.md rarely; ~minute
-latency on schedule changes is fine.
+Each tick is a fresh `pi -p /pulse` invocation; nothing persists in pi
+context across ticks. The slash command is deterministic:
 
-## Open questions
+1. `tick_begin` — acquires the 5-min `currentTick` sentinel (concurrency
+   guard for crash + overlap recovery). On first run with empty cache,
+   calls `bootstrap_inbox` to synthesize inbox entries from each cell's
+   vault `HEARTBEAT.md`.
+2. `drain_inbox` — for each pushed HEARTBEAT.md, the LLM parses prose into
+   `[{id, cron, message}]` and `save_schedule` writes the cache + moves
+   the source to `processed/`. (Only LLM step on most ticks.)
+3. `fire_due` — pure compute: cron-eval against the last 60s window and
+   shell out `cells talk <cell> "<message>"` for each due item not
+   already fired this minute. Records to `log[]` and `lastFire`.
+4. `daily_log_due` → `write_log_entry` — once per UTC day, LLM writes a
+   3-5 sentence narrative of the prior 24h's fires. (Other LLM step.)
+5. `render_digest` — rewrites `state/heartbeats.md` from cache + state.
+6. `tick_end` — clears the sentinel, stamps `lastTick`.
 
-- **Concurrency.** If a previous tick is still running (slow LLM
-  call during cache miss), should the next tick skip or queue?
-  Lean: skip. State file records lastTick; if too recent, skip.
-- **Failures.** When `cells talk` fails (cell unreachable, sprite
-  asleep + slow wake), what happens? Lean: log to
-  `~/.cells/logs/heartbeat.log`, retry next tick (cron eval gives a
-  small window where the item is still "due").
-- **Time zones.** HEARTBEAT.md says "8am" — local Mac time? UTC?
-  Lean: local Mac time (where pulse daemon runs). Document this
-  in the default HEARTBEAT.md template.
-- **What to do on cell destroy?** Clear cached schedule + lastFire
-  entries for that cell. Plumb into `cmdKill`.
-- **Do we want HEARTBEAT.md content in the agent's systemPrompt?**
-  Currently no — it's pure observability for the pulse.
-  The cell doesn't need to know its own schedule unless it's going to
-  reason about it. Keep out of use-max composer for now.
+Cheap ticks (no inbox, no daily-log due) cost no LLM tokens — every tool
+above except parse-prose-into-cron and write-daily-log is deterministic.
 
-## Backstop / fallback
+## Push, not poll
 
-If the pulse breaks, cells still wake when Pete uses them
-manually (cells talk / cells stream). The only thing missed is
-scheduled wake-ups. Failure is recoverable. Worst case for Phase 2:
-revert to `schedule-dreams` plist while debugging.
+Cells notify pulse on HEARTBEAT.md edits via the `heartbeat-watch`
+extension shipped in their DNA. The extension `fs.watch`es the file with
+a 2s debounce and POSTs the new content to `pulse.cells.md/heartbeat-changed`,
+which the mother proxy authenticates (`MOTHER_SECRET` bearer) and writes
+to `~/.cells/pulse-inbox/<cell>-<ts>.md`. Pulse drains the inbox each
+tick. No `sprite exec` reads — hibernating cells stay hibernating.
 
-## References
+To retrofit existing cells with the extension: `cells refresh-extensions <name|--all>`.
 
-- HEARTBEAT.md split commit: `4ba1952`
-- Existing dream cron: `cli/cells.ts:1171` (`cmdScheduleDreams`)
-- OpenClaw HEARTBEAT.md inspiration:
-  https://docs.openclaw.ai/reference/templates/AGENTS (their version is
-  active polling by an always-running agent; ours is reactive +
-  externally enforced — see `CELLS.md` discussion in the squash commit).
+## Operations
+
+| Command | Effect |
+|---|---|
+| `cells schedule-pulse` | Install launchd plist (`com.pete.cells-pulse`, `StartInterval=60`, `RunAtLoad=true`) |
+| `cells unschedule-pulse` | Remove plist |
+| `cells refresh-extensions <name\|--all>` | Push DNA extension(s) onto existing cell(s); idempotent |
+| `cells heartbeat` | Print digest |
+| `cells heartbeat <cell>` | Print one cell's schedule rows |
+| `cells heartbeat --tail` | Recent fires (newest first) |
+
+## Why an LLM at all
+
+Cron is the IR; HEARTBEAT.md is prose. Pete writes *"every weekday at
+8am, summarize the news"* and pulse turns that into `0 8 * * 1-5` plus
+the wake message. Same prose → same id (stable hash) so re-parses don't
+churn `lastFire` and miss-fire.
+
+Pulse runs on `gpt-5.5` medium via Pete's ChatGPT subscription, routed
+through mother proxy at `mother.cells.md/codex` — same path cells use for
+codex requests. Cheap because the LLM only fires on inbox events (rare)
+and the daily-log step (once per UTC day).

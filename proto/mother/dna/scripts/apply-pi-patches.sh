@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Re-apply cell-side pi-ai / pi-coding-agent patches.
+# Re-apply pi-ai / pi-coding-agent patches.
 #
 # These keep four behaviors working that stock pi packages don't give us:
 #
@@ -16,9 +16,17 @@
 # install at birth AND on every subsequent bun install, so adding a dep
 # doesn't silently break anthropic/codex/adaptive routing.
 #
-# Idempotent. Patches both the cell's local node_modules and the global
-# install (where the `pi` binary lives).
+# Idempotent. Cross-platform (macOS + Linux). Patches both project
+# node_modules and the global install (where the `pi` binary lives).
 set -euo pipefail
+
+# BSD sed (macOS) requires a backup-suffix arg with -i; GNU sed (Linux) does
+# not accept one. Detect once and use the right form.
+if sed --version >/dev/null 2>&1; then
+  SED_INPLACE=(sed -i)
+else
+  SED_INPLACE=(sed -i "")
+fi
 
 # Search both the project node_modules (this script's $PWD when run via
 # bun postinstall is the project root) and the user's global bun cache.
@@ -36,7 +44,7 @@ patched_levels=0
 for F in $(find "${SEARCH_ROOTS[@]}" -name models.generated.js 2>/dev/null); do
   if grep -q 'api.anthropic.com' "$F"; then
     [ -f "$F.bak" ] || cp "$F" "$F.bak"
-    sed -i 's|https://api.anthropic.com|https://mother.cells.md|g' "$F"
+    "${SED_INPLACE[@]}" 's|https://api.anthropic.com|https://mother.cells.md|g' "$F"
     patched_url=$((patched_url+1))
   fi
 done
@@ -69,7 +77,8 @@ for F in $(find "${SEARCH_ROOTS[@]}" -name anthropic.js -path '*providers*' 2>/d
   if grep -q 'level === "adaptive"' "$F"; then continue; fi
   if ! grep -q 'function mapThinkingLevelToEffort' "$F"; then continue; fi
   [ -f "$F.bak" ] || cp "$F" "$F.bak"
-  sed -i 's|function mapThinkingLevelToEffort(level, modelId) {|&\n    if (level === "adaptive") return undefined;|' "$F"
+  "${SED_INPLACE[@]}" 's|function mapThinkingLevelToEffort(level, modelId) {|&\
+    if (level === "adaptive") return undefined;|' "$F"
   patched_anthropic_adaptive=$((patched_anthropic_adaptive+1))
 done
 
@@ -79,7 +88,7 @@ for F in $(find "${SEARCH_ROOTS[@]}" -name agent-session.js -path '*core*' 2>/de
   if grep -q 'THINKING_LEVELS.*"adaptive"' "$F"; then continue; fi
   if ! grep -q 'const THINKING_LEVELS' "$F"; then continue; fi
   [ -f "$F.bak" ] || cp "$F" "$F.bak"
-  sed -i \
+  "${SED_INPLACE[@]}" \
     -e 's|const THINKING_LEVELS = \["off", "minimal", "low", "medium", "high"\];|const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "adaptive"];|' \
     -e 's|const THINKING_LEVELS_WITH_XHIGH = \["off", "minimal", "low", "medium", "high", "xhigh"\];|const THINKING_LEVELS_WITH_XHIGH = ["off", "minimal", "low", "medium", "high", "xhigh", "adaptive"];|' \
     "$F"

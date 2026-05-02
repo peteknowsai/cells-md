@@ -49,7 +49,9 @@ const RESERVED_NAMES = new Set([
   // Names that collide with cells subcommands.
   "create", "birth", "talk", "list", "sleep", "wake",
   "checkpoint", "destroy", "kill", "dream", "stream", "sync", "doctor",
-  "schedule-dreams", "unschedule-dreams",
+  "schedule-pi-patches", "unschedule-pi-patches",
+  "schedule-pulse", "unschedule-pulse",
+  "refresh-extensions", "heartbeat", "pulse",
 ]);
 
 type SelectOption = {
@@ -680,6 +682,49 @@ async function cmdDoctor() {
   } catch (e) {
     console.log(`\nproxy on :${port} — ${yellow}not reachable${reset} (${dim}${String(e).slice(0, 80)}${reset})`);
   }
+
+  // 4. pi-ai patches on the global install (mother + pulse both read these).
+  // If pi gets reinstalled/updated, the patches blow away.
+  const piPatchesOk = await checkPiPatches();
+  console.log("");
+  if (piPatchesOk.ok) {
+    console.log(`pi patches:    ${green}applied${reset} (${piPatchesOk.detail})`);
+  } else {
+    console.log(`pi patches:    ${red}missing${reset} — ${piPatchesOk.detail}`);
+    console.log(`  fix:         bash ${join(MOTHER_ROOT, "dna/scripts/apply-pi-patches.sh")}`);
+  }
+
+  // 5. The launchd watcher that re-applies patches when pi-ai is reinstalled.
+  // Without it, every pi update silently breaks pulse + cells until next doctor run.
+  const watcherInstalled = existsSync(piPatchesPlistPath());
+  if (watcherInstalled) {
+    console.log(`pi watcher:    ${green}installed${reset} (auto-reapplies on pi-ai update)`);
+  } else {
+    console.log(`pi watcher:    ${yellow}not installed${reset}`);
+    console.log(`  fix:         cells schedule-pi-patches`);
+  }
+}
+
+async function checkPiPatches(): Promise<{ ok: boolean; detail: string }> {
+  // Check the codex extractAccountId stub — single most-load-bearing patch
+  // and easy to detect (one-liner present or full JWT-decoder body).
+  const candidates = [
+    join(homedir(), ".bun/install/global/node_modules/@mariozechner/pi-ai/dist/providers/openai-codex-responses.js"),
+    join(homedir(), ".bun/install/global/node_modules/@mariozechner/pi-coding-agent/node_modules/@mariozechner/pi-ai/dist/providers/openai-codex-responses.js"),
+    join(homedir(), ".bun/install/global/node_modules/@mariozechner/pi-agent-core/node_modules/@mariozechner/pi-ai/dist/providers/openai-codex-responses.js"),
+  ];
+  const found = candidates.filter((p) => existsSync(p));
+  if (found.length === 0) return { ok: false, detail: "no pi-ai install found in ~/.bun/install/global" };
+  const stubMarker = 'function extractAccountId(token) { return ""';
+  const unpatched: string[] = [];
+  for (const f of found) {
+    const body = await readFile(f, "utf-8");
+    if (!body.includes(stubMarker)) unpatched.push(f);
+  }
+  if (unpatched.length > 0) {
+    return { ok: false, detail: `${unpatched.length}/${found.length} pi-ai copies unpatched (codex extractAccountId)` };
+  }
+  return { ok: true, detail: `${found.length}/${found.length} pi-ai copies stubbed` };
 }
 
 // ───── routed through local Pi ─────
@@ -1123,29 +1168,40 @@ async function dreamOne(name: string): Promise<boolean> {
   return ok;
 }
 
-const LAUNCHD_LABEL = "com.pete.cells-dream";
+const PI_PATCHES_LABEL = "com.pete.cells-pi-patches";
 
-function plistPath(): string {
-  return join(homedir(), "Library/LaunchAgents", `${LAUNCHD_LABEL}.plist`);
+function piPatchesPlistPath(): string {
+  return join(homedir(), "Library/LaunchAgents", `${PI_PATCHES_LABEL}.plist`);
 }
 
-function buildPlist(): string {
-  const cellBin = process.execPath; // bun
-  const scriptPath = fileURLToPath(import.meta.url);
+function piPatchesWatchPaths(): string[] {
+  // Watch each pi-ai package.json. When pi gets `bun install -g`'d, these
+  // mtimes change; launchd fires the patch script.
+  const roots = [
+    "@mariozechner/pi-ai/package.json",
+    "@mariozechner/pi-coding-agent/node_modules/@mariozechner/pi-ai/package.json",
+    "@mariozechner/pi-agent-core/node_modules/@mariozechner/pi-ai/package.json",
+  ];
+  return roots.map((r) => join(homedir(), ".bun/install/global/node_modules", r));
+}
+
+function buildPiPatchesPlist(): string {
+  const scriptPath = join(MOTHER_ROOT, "dna/scripts/apply-pi-patches.sh");
   const logsDir = join(homedir(), ".cells", "logs");
   const path = "/Users/pete/.bun/bin:/Users/pete/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin";
+  const watchPaths = piPatchesWatchPaths()
+    .map((p) => `    <string>${p}</string>`)
+    .join("\n");
   return `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
   <key>Label</key>
-  <string>${LAUNCHD_LABEL}</string>
+  <string>${PI_PATCHES_LABEL}</string>
   <key>ProgramArguments</key>
   <array>
-    <string>${cellBin}</string>
+    <string>/bin/bash</string>
     <string>${scriptPath}</string>
-    <string>dream</string>
-    <string>--all</string>
   </array>
   <key>EnvironmentVariables</key>
   <dict>
@@ -1154,41 +1210,37 @@ function buildPlist(): string {
     <key>HOME</key>
     <string>${homedir()}</string>
   </dict>
-  <key>StartCalendarInterval</key>
-  <dict>
-    <key>Hour</key>
-    <integer>4</integer>
-    <key>Minute</key>
-    <integer>0</integer>
-  </dict>
+  <key>WatchPaths</key>
+  <array>
+${watchPaths}
+  </array>
   <key>StandardOutPath</key>
-  <string>${logsDir}/dream.log</string>
+  <string>${logsDir}/pi-patches.log</string>
   <key>StandardErrorPath</key>
-  <string>${logsDir}/dream.err</string>
+  <string>${logsDir}/pi-patches.err</string>
   <key>RunAtLoad</key>
-  <false/>
+  <true/>
 </dict>
 </plist>
 `;
 }
 
-async function cmdScheduleDreams() {
+async function cmdSchedulePiPatches() {
   const logsDir = join(homedir(), ".cells", "logs");
   await mkdir(logsDir, { recursive: true });
-  await mkdir(dirname(plistPath()), { recursive: true });
-  await writeFile(plistPath(), buildPlist());
-  console.log(`✓ wrote plist: ${plistPath()}`);
+  await mkdir(dirname(piPatchesPlistPath()), { recursive: true });
+  await writeFile(piPatchesPlistPath(), buildPiPatchesPlist());
+  console.log(`✓ wrote plist: ${piPatchesPlistPath()}`);
 
   const uid = process.getuid?.() ?? 501;
 
-  // Unload existing first so bootstrap is idempotent.
-  await Bun.spawn(["launchctl", "bootout", `gui/${uid}/${LAUNCHD_LABEL}`], {
+  await Bun.spawn(["launchctl", "bootout", `gui/${uid}/${PI_PATCHES_LABEL}`], {
     stdin: "ignore",
     stdout: "ignore",
     stderr: "ignore",
   }).exited;
 
-  const proc = Bun.spawn(["launchctl", "bootstrap", `gui/${uid}`, plistPath()], {
+  const proc = Bun.spawn(["launchctl", "bootstrap", `gui/${uid}`, piPatchesPlistPath()], {
     stdin: "ignore",
     stdout: "inherit",
     stderr: "inherit",
@@ -1199,25 +1251,283 @@ async function cmdScheduleDreams() {
     process.exit(1);
   }
 
-  console.log(`✓ scheduled: cells dream --all nightly at 4:00am`);
-  console.log(`  logs: ${logsDir}/dream.log (stdout), dream.err (stderr)`);
-  console.log(`  unschedule with: cells unschedule-dreams`);
+  console.log(`✓ scheduled: pi-ai patches re-apply on global pi-ai updates`);
+  console.log(`  logs: ${logsDir}/pi-patches.log (stdout), pi-patches.err (stderr)`);
+  console.log(`  unschedule with: cells unschedule-pi-patches`);
 }
 
-async function cmdUnscheduleDreams() {
+async function cmdUnschedulePiPatches() {
   const uid = process.getuid?.() ?? 501;
-  await Bun.spawn(["launchctl", "bootout", `gui/${uid}/${LAUNCHD_LABEL}`], {
+  await Bun.spawn(["launchctl", "bootout", `gui/${uid}/${PI_PATCHES_LABEL}`], {
     stdin: "ignore",
     stdout: "inherit",
     stderr: "inherit",
   }).exited;
-  if (existsSync(plistPath())) {
-    await unlink(plistPath());
-    console.log(`✓ removed ${plistPath()}`);
+  if (existsSync(piPatchesPlistPath())) {
+    await unlink(piPatchesPlistPath());
+    console.log(`✓ removed ${piPatchesPlistPath()}`);
   } else {
     console.log("(no plist found)");
   }
   console.log("✓ unscheduled");
+}
+
+const PULSE_LABEL = "com.pete.cells-pulse";
+
+function pulsePlistPath(): string {
+  return join(homedir(), "Library/LaunchAgents", `${PULSE_LABEL}.plist`);
+}
+
+function buildPulsePlist(): string {
+  const launcher = join(PULSE_ROOT, "bin", "pulse-tick");
+  const logsDir = join(homedir(), ".cells", "logs");
+  const path = "/Users/pete/.bun/bin:/Users/pete/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin";
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>${PULSE_LABEL}</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>${launcher}</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>${path}</string>
+    <key>HOME</key>
+    <string>${homedir()}</string>
+  </dict>
+  <key>StartInterval</key>
+  <integer>60</integer>
+  <key>StandardOutPath</key>
+  <string>${logsDir}/pulse.log</string>
+  <key>StandardErrorPath</key>
+  <string>${logsDir}/pulse.err</string>
+  <key>RunAtLoad</key>
+  <true/>
+</dict>
+</plist>
+`;
+}
+
+async function cmdSchedulePulse() {
+  const launcher = join(PULSE_ROOT, "bin", "pulse-tick");
+  if (!existsSync(launcher)) {
+    console.error(`✗ launcher missing: ${launcher}`);
+    process.exit(1);
+  }
+  const logsDir = join(homedir(), ".cells", "logs");
+  await mkdir(logsDir, { recursive: true });
+  await mkdir(dirname(pulsePlistPath()), { recursive: true });
+  await writeFile(pulsePlistPath(), buildPulsePlist());
+  console.log(`✓ wrote plist: ${pulsePlistPath()}`);
+
+  const uid = process.getuid?.() ?? 501;
+
+  await Bun.spawn(["launchctl", "bootout", `gui/${uid}/${PULSE_LABEL}`], {
+    stdin: "ignore",
+    stdout: "ignore",
+    stderr: "ignore",
+  }).exited;
+
+  const proc = Bun.spawn(["launchctl", "bootstrap", `gui/${uid}`, pulsePlistPath()], {
+    stdin: "ignore",
+    stdout: "inherit",
+    stderr: "inherit",
+  });
+  const code = await proc.exited;
+  if (code !== 0) {
+    console.error("✗ launchctl bootstrap failed");
+    process.exit(1);
+  }
+
+  console.log(`✓ scheduled: pulse ticks every 60s (print mode)`);
+  console.log(`  logs: ${logsDir}/pulse.log (stdout), pulse.err (stderr)`);
+  console.log(`  unschedule with: cells unschedule-pulse`);
+}
+
+async function cmdUnschedulePulse() {
+  const uid = process.getuid?.() ?? 501;
+  await Bun.spawn(["launchctl", "bootout", `gui/${uid}/${PULSE_LABEL}`], {
+    stdin: "ignore",
+    stdout: "inherit",
+    stderr: "inherit",
+  }).exited;
+  if (existsSync(pulsePlistPath())) {
+    await unlink(pulsePlistPath());
+    console.log(`✓ removed ${pulsePlistPath()}`);
+  } else {
+    console.log("(no plist found)");
+  }
+  console.log("✓ unscheduled");
+}
+
+/**
+ * refresh-extensions — push the latest copy of one DNA extension onto an
+ * existing cell, and ensure it's listed in the cell's .pi/settings.json.
+ *
+ * Used to retrofit cells born before an extension shipped (e.g. heartbeat-watch).
+ * Surgical: doesn't touch the agent's pi session, doesn't talk(), doesn't
+ * disturb other extensions. Next time pi reloads on the cell (or on next
+ * agent start), the new extension is picked up.
+ *
+ * Idempotent. Safe to run on a cell that already has the extension — files
+ * get overwritten with current content; settings.json entry is added only
+ * if missing.
+ */
+async function refreshExtensionOnCell(cellName: string, extName: string): Promise<boolean> {
+  const localExtDir = join(DNA_DIR, ".pi", "extensions", extName);
+  if (!existsSync(localExtDir)) {
+    console.error(`✗ ${cellName}: dna extension ${extName} missing at ${localExtDir}`);
+    return false;
+  }
+
+  // Push the extension dir via tar pipe.
+  const remoteExtDir = `/home/sprite/agent/.pi/extensions/${extName}`;
+  const tar = Bun.spawn(["tar", "czf", "-", "-C", join(DNA_DIR, ".pi", "extensions"), extName], {
+    stdin: "ignore",
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  const remoteCmd = `mkdir -p /home/sprite/agent/.pi/extensions && rm -rf ${remoteExtDir} && cd /home/sprite/agent/.pi/extensions && tar xzf -`;
+  const recv = Bun.spawn(["sprite", "exec", "-s", cellName, "--", "bash", "-c", remoteCmd], {
+    stdin: tar.stdout,
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  const code = await recv.exited;
+  if (code !== 0) {
+    const err = await new Response(recv.stderr).text();
+    console.error(`✗ ${cellName}: push failed — ${err.trim() || `exit ${code}`}`);
+    return false;
+  }
+
+  // Idempotent settings.json update — read JSON, add the extension entry if
+  // missing, write back. No `jq` dep on the sprite (busybox base).
+  const entry = `.pi/extensions/${extName}/index.ts`;
+  const updateScript = `
+set -e
+cd /home/sprite/agent
+node -e '
+  const fs = require("fs");
+  const p = ".pi/settings.json";
+  const s = JSON.parse(fs.readFileSync(p, "utf-8"));
+  s.extensions = s.extensions || [];
+  if (!s.extensions.includes("${entry}")) {
+    s.extensions.push("${entry}");
+    fs.writeFileSync(p, JSON.stringify(s, null, 2) + "\\n");
+    console.log("added");
+  } else {
+    console.log("already-present");
+  }
+'
+`.trim();
+  const settings = await spriteExecCapture(cellName, updateScript);
+  if (!settings.ok) {
+    console.error(`✗ ${cellName}: settings.json update failed — ${settings.stderr.trim()}`);
+    return false;
+  }
+  const status = settings.stdout.trim();
+  console.log(`✓ ${cellName}: ${extName} pushed (${status})`);
+  return true;
+}
+
+async function cmdRefreshExtensions(args: string[]) {
+  // Parse: <cell|--all> [extName...]. If no extName, default to heartbeat-watch
+  // (the one Phase E exists for). Future use: pass any DNA extension name.
+  let target = args[0];
+  let extNames = args.slice(1);
+  if (!target) {
+    console.error("usage: cells refresh-extensions <name|--all> [extension...]");
+    console.error("       defaults to heartbeat-watch when no extension is named");
+    process.exit(1);
+  }
+  if (extNames.length === 0) extNames = ["heartbeat-watch"];
+
+  const reg = await loadRegistry();
+  const targets = target === "--all" ? reg.cells.map((c) => c.name) : [target];
+  if (target !== "--all") await requireCell(target);
+
+  let okCount = 0;
+  let failCount = 0;
+  for (const cell of targets) {
+    for (const ext of extNames) {
+      console.log(`→ ${cell} ← ${ext}`);
+      const ok = await refreshExtensionOnCell(cell, ext);
+      ok ? okCount++ : failCount++;
+    }
+  }
+  console.log(`\n${okCount} ok, ${failCount} failed`);
+  if (failCount > 0) process.exit(1);
+}
+
+/**
+ * heartbeat — read-only inspection of pulse's state from Pete's terminal.
+ *
+ *   cells heartbeat              print state/heartbeats.md (the digest)
+ *   cells heartbeat <cell>       print just one cell's schedule rows
+ *   cells heartbeat --tail       stream pulse.json log[] (latest fires first)
+ */
+async function cmdHeartbeat(args: string[]) {
+  const heartbeatsMd = join(PULSE_ROOT, "state", "heartbeats.md");
+  const stateJson = join(homedir(), ".cells", "pulse.json");
+
+  if (args[0] === "--tail") {
+    if (!existsSync(stateJson)) {
+      console.error("(no pulse state — has pulse run yet? `cells schedule-pulse`)");
+      return;
+    }
+    const state = JSON.parse(await readFile(stateJson, "utf-8"));
+    const log: Array<{ ts: string; cell: string; id: string; result: string; exit?: number }> = state.log ?? [];
+    if (log.length === 0) {
+      console.log("(no fires logged yet)");
+      return;
+    }
+    // Newest first.
+    for (const e of [...log].reverse()) {
+      const tail = e.result === "ok" ? "ok" : `fail (exit ${e.exit ?? "?"})`;
+      console.log(`${e.ts}  ${e.cell.padEnd(12)} ${e.id.padEnd(20)} ${tail}`);
+    }
+    return;
+  }
+
+  if (!existsSync(heartbeatsMd)) {
+    console.error("(no digest yet — has pulse run? try `cells schedule-pulse`)");
+    return;
+  }
+
+  const md = await readFile(heartbeatsMd, "utf-8");
+  if (args[0]) {
+    // Filter to rows mentioning the named cell. Header survives.
+    const lines = md.split("\n");
+    const filtered: string[] = [];
+    let inTable = false;
+    for (const line of lines) {
+      if (line.startsWith("| cell |") || line.startsWith("|---|")) {
+        filtered.push(line);
+        inTable = true;
+        continue;
+      }
+      if (!inTable) {
+        filtered.push(line);
+        continue;
+      }
+      if (line.startsWith("|") && line.includes(`| ${args[0]} |`)) {
+        filtered.push(line);
+        continue;
+      }
+      if (!line.startsWith("|")) {
+        filtered.push(line);
+        inTable = false;
+      }
+    }
+    console.log(filtered.join("\n"));
+    return;
+  }
+
+  console.log(md);
 }
 
 async function dreamMother(): Promise<boolean> {
@@ -1838,6 +2148,56 @@ async function setupMotherVault(): Promise<void> {
   await writeFile(join(vault, "AGENTS.md"), md);
 }
 
+async function setupPulseVault(): Promise<void> {
+  const vault = join(VAULT_DIR, "pulse");
+  await mkdir(vault, { recursive: true });
+
+  // Wipe regenerated surfaces; preserve nothing — pulse is fully reproducible
+  // from proto/pulse/ + ~/.cells/pulse.json.
+  for (const f of ["README.md", "AGENTS.md", "persona.md", ...ANATOMY_FILES]) {
+    if (existsSync(join(vault, f))) await rm(join(vault, f));
+  }
+  for (const d of [".pi", "pi", "state", "bin"]) {
+    if (existsSync(join(vault, d))) await rm(join(vault, d), { recursive: true, force: true });
+  }
+
+  // Anatomy files verbatim.
+  for (const f of ANATOMY_FILES) {
+    const src = join(PULSE_ROOT, f);
+    if (existsSync(src)) await cp(src, join(vault, f));
+  }
+
+  // .pi/prompts and .pi/extensions docs — same shape as mother.
+  const promptsSrc = join(PULSE_ROOT, ".pi", "prompts");
+  if (existsSync(promptsSrc)) {
+    await copyMarkdownTree(promptsSrc, join(vault, "pi", "prompts"));
+  }
+  const exts = await readLocalExtensionDocs(
+    join(PULSE_ROOT, ".pi", "extensions"),
+    join(vault, "pi", "extensions"),
+  );
+  const settingsSrc = join(PULSE_ROOT, ".pi", "settings.json");
+  if (existsSync(settingsSrc)) {
+    await cp(settingsSrc, join(vault, "pi", "settings.json"));
+  }
+
+  // state/ — pulse's vault-readable surfaces (heartbeats.md, log.md). Symlink
+  // so changes show up live in Obsidian without re-running sync.
+  const stateLink = join(vault, "state");
+  try { await unlink(stateLink); } catch { /* not present */ }
+  if (existsSync(join(PULSE_ROOT, "state"))) {
+    await symlink(join(PULSE_ROOT, "state"), stateLink);
+  }
+
+  // Synthesized AGENTS.md dashboard. Pulse has no memory subsystem and no
+  // skills directory — pass empty contexts.
+  const soulPath = join(PULSE_ROOT, "SOUL.md");
+  const persona = existsSync(soulPath) ? await readFile(soulPath, "utf-8") : null;
+  const emptyMem: MemoryContext = { topicals: [], yearnings: [], activityTail: [], lastDream: null };
+  const md = renderAgents("pulse", null, persona, exts, [], emptyMem);
+  await writeFile(join(vault, "AGENTS.md"), md);
+}
+
 async function syncOneCell(name: string): Promise<{ name: string; status: string; lastRunningAt: string | null } | null> {
   const vault = join(VAULT_DIR, name);
   await mkdir(vault, { recursive: true });
@@ -1887,6 +2247,13 @@ async function cmdSync(name?: string) {
     return;
   }
 
+  if (name === "pulse") {
+    console.log("→ pulse");
+    await setupPulseVault();
+    console.log("✓ pulse");
+    return;
+  }
+
   if (name) {
     await requireCell(name);
     console.log(`→ ${name}`);
@@ -1913,6 +2280,10 @@ async function cmdSync(name?: string) {
   await setupMotherVault();
   console.log("✓ mother");
 
+  console.log("→ pulse");
+  await setupPulseVault();
+  console.log("✓ pulse");
+
   const reg = await loadRegistry();
   const rows = await Promise.all(
     reg.cells.map(async (c) => {
@@ -1928,10 +2299,10 @@ async function cmdSync(name?: string) {
     }),
   );
 
-  // Prune vault dirs for cells that no longer exist. Mother is always kept;
-  // the registry tracks every other live cell. Anything else is debris from
-  // a previous sync of a now-destroyed cell.
-  const keep = new Set<string>(["mother", ...reg.cells.map((c) => c.name)]);
+  // Prune vault dirs for cells that no longer exist. Mother and pulse are
+  // always kept; the registry tracks every other live cell. Anything else is
+  // debris from a previous sync of a now-destroyed cell.
+  const keep = new Set<string>(["mother", "pulse", ...reg.cells.map((c) => c.name)]);
   const entries = await readdir(VAULT_DIR, { withFileTypes: true });
   for (const entry of entries) {
     if (!entry.isDirectory()) continue;
@@ -1971,8 +2342,12 @@ switch (sub) {
   case "dream":              await cmdDream(rest[0] ?? ""); break;
   case "stream":             await cmdStream(needName(rest, "stream")); break;
   case "sync":               await cmdSync(rest[0] || undefined); break;
-  case "schedule-dreams":    await cmdScheduleDreams(); break;
-  case "unschedule-dreams":  await cmdUnscheduleDreams(); break;
+  case "schedule-pi-patches":   await cmdSchedulePiPatches(); break;
+  case "unschedule-pi-patches": await cmdUnschedulePiPatches(); break;
+  case "schedule-pulse":        await cmdSchedulePulse(); break;
+  case "unschedule-pulse":      await cmdUnschedulePulse(); break;
+  case "refresh-extensions":    await cmdRefreshExtensions(rest); break;
+  case "heartbeat":             await cmdHeartbeat(rest); break;
   case "doctor":             await cmdDoctor(); break;
   case "shell":              await cmdShell(needName(rest, "shell")); break;
   case "see":                await cmdSee(needName(rest, "see")); break;
@@ -1998,8 +2373,12 @@ switch (sub) {
     console.log("  cells doctor                inspect mother OAuth state + proxy health (run when cells act 401-y)");
     console.log("  cells shell <name>          drop into a bash shell on a cell (separate tmux from the agent; Ctrl+D exits)");
     console.log("  cells see <name>            open https://<name>.cells.md in the browser");
-    console.log("  cells schedule-dreams       install launchd plist (nightly 4am, all cells)");
-    console.log("  cells unschedule-dreams     remove launchd plist");
+    console.log("  cells schedule-pi-patches   install launchd watcher (re-applies pi patches when pi-ai is reinstalled)");
+    console.log("  cells unschedule-pi-patches remove launchd watcher");
+    console.log("  cells schedule-pulse        install launchd plist (pulse ticks every 60s)");
+    console.log("  cells unschedule-pulse      remove pulse launchd plist");
+    console.log("  cells refresh-extensions <name|--all> [ext...]  push DNA extension(s) onto existing cell(s) (default: heartbeat-watch)");
+    console.log("  cells heartbeat [name|--tail]  show pulse digest, one cell's schedule, or recent fires");
     console.log("  cells kill <name>... [-y]   destroy one or more cells (irreversible) (alias: destroy)");
     console.log("                              --all-but <name>... kill every cell except the listed ones");
     console.log("                              -y/--yes skip the confirmation prompt");

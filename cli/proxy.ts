@@ -6,6 +6,11 @@
 //     /codex/*            → OpenAI Codex (ChatGPT sub) proxy (Bearer auth required)
 //     /_proxy/health      → JSON health
 //
+//   pulse.cells.md
+//     /                   → pulse status page (HTML)
+//     /heartbeat-changed  → cell HEARTBEAT.md change events written to
+//                           ~/.cells/pulse-inbox/ (Bearer auth required)
+//
 //   <cell>.cells.md
 //     /                   → per-cell info page (HTML, rendered by mother)
 //
@@ -36,7 +41,7 @@
 //   - See docs/oauth-refresh.md for the full architecture, contract, and
 //     ops playbook.
 
-import { readFile, writeFile, rename } from "node:fs/promises";
+import { readFile, writeFile, rename, mkdir } from "node:fs/promises";
 import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
@@ -48,6 +53,7 @@ const MOTHER_ROOT = join(REPO_ROOT, "proto", "mother");
 
 const AUTH_PATH = join(homedir(), ".pi/agent/auth.json");
 const SECRETS_PATH = join(homedir(), ".cells/secrets.json");
+const PULSE_INBOX_DIR = join(homedir(), ".cells/pulse-inbox");
 const CELLS_REGISTRY = join(homedir(), ".cells/cells.json");
 const ACTIVITY_PATH = join(MOTHER_ROOT, "state/memory/project_cells_activity.md");
 const UPSTREAM = "https://api.anthropic.com";
@@ -401,11 +407,12 @@ function hostOf(req: Request): string {
 
 function cellNameFromHost(host: string): string | null {
   // mother.cells.md → null (mother host, handled separately)
+  // pulse.cells.md  → null (pulse host, handled separately)
   // pete.cells.md   → "pete"
   // localhost:8787  → null (dev/health checks)
   const m = host.match(/^([a-z0-9-]+)\.cells\.md$/);
   if (!m) return null;
-  if (m[1] === "mother") return null;
+  if (m[1] === "mother" || m[1] === "pulse") return null;
   return m[1];
 }
 
@@ -603,6 +610,56 @@ async function handleCodexProxy(req: Request): Promise<Response> {
     statusText: upstream.statusText,
     headers: upstream.headers,
   });
+}
+
+// ───────────────────── pulse.cells.md ─────────────────────
+
+// pulse.cells.md is the front door for events the pulse agent cares about.
+// Mother proxy receives, validates the bearer, and writes payloads to a
+// directory pulse owns. File system is the IPC — pulse drains the inbox
+// each tick.
+
+async function handlePulseProxy(req: Request): Promise<Response> {
+  const url = new URL(req.url);
+
+  if (req.method === "GET" && (url.pathname === "/" || url.pathname === "")) {
+    return htmlPage(
+      "pulse · cells",
+      `<h1>pulse</h1>
+       <p class="sub">timekeeper · reads HEARTBEAT.md, fires scheduled wake-ups</p>
+       <p>This is the inbox endpoint pulse listens to. Cells POST schedule
+       changes here; pulse drains them on its next tick. See
+       <a href="https://mother.cells.md/">mother</a> for the dashboard.</p>`,
+    );
+  }
+
+  if (req.method === "POST" && url.pathname === "/heartbeat-changed") {
+    const auth = checkClientAuth(req);
+    if (!auth.ok) return new Response(`unauthorized: ${auth.reason}`, { status: 401 });
+
+    let payload: { cell?: string; content?: string; ts?: string };
+    try {
+      payload = await req.json();
+    } catch {
+      return new Response("bad json", { status: 400 });
+    }
+    const cell = (payload.cell ?? "").trim();
+    const content = payload.content ?? "";
+    if (!cell || !/^[a-z0-9-]+$/.test(cell)) return new Response("missing or bad cell", { status: 400 });
+    if (typeof content !== "string") return new Response("bad content", { status: 400 });
+
+    await mkdir(PULSE_INBOX_DIR, { recursive: true });
+    const tsMs = Date.now();
+    const filename = `${cell}-${tsMs}.md`;
+    await writeFile(join(PULSE_INBOX_DIR, filename), content);
+
+    console.log(
+      `[${new Date().toISOString()}] pulse ${cell} heartbeat-changed -> ${filename} (${content.length}B)`,
+    );
+    return new Response(null, { status: 204 });
+  }
+
+  return new Response("not found", { status: 404 });
 }
 
 // ───────────────────── dashboard / cell page data ─────────────────────
@@ -870,6 +927,11 @@ const server = Bun.serve({
       return handleApiProxy(req);
     }
 
+    // pulse.cells.md → pulse's inbox (POST /heartbeat-changed) + status page
+    if (host.startsWith("pulse.cells.md")) {
+      return handlePulseProxy(req);
+    }
+
     // <cell>.cells.md → forward to the cell's own site server
     const cell = cellNameFromHost(host);
     if (cell) {
@@ -886,6 +948,7 @@ console.log(`    mother.cells.md/             → dashboard`);
 console.log(`    mother.cells.md/v1/*         → Anthropic proxy (Bearer auth)`);
 console.log(`    mother.cells.md/codex/*      → OpenAI Codex proxy (Bearer auth)`);
 console.log(`    mother.cells.md/_proxy/health`);
+console.log(`    pulse.cells.md/heartbeat-changed → pulse inbox (Bearer auth)`);
 console.log(`    <cell>.cells.md/             → cell page`);
 console.log(`  upstreams: ${UPSTREAM}, ${CODEX_UPSTREAM}`);
 console.log(`  auth file: ${AUTH_PATH}`);

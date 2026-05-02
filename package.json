@@ -9,5 +9,8 @@
     "@mariozechner/pi-tui": "^0.70.5",
     "@sinclair/typebox": "^0.34.49",
     "@types/bun": "latest"
+  },
+  "dependencies": {
+    "cron-parser": "^5.5.0"
   }
 }
