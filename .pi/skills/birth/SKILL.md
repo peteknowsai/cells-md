@@ -151,8 +151,20 @@ ls -la /home/sprite/.bun/bin/bun && tmux -V
 ## 4. Push the agent template
 
 The repo's `template/` directory contains the canonical recipe-compliant
-layout (AGENTS.md persona, .pi/extensions/use-max, .pi/settings.json,
-package.json, .gitignore).
+layout. The agent's "anatomy" is sharded into single-purpose markdown files
+at the agent root, each independently editable:
+
+- `AGENTS.md` — thin entrypoint (cross-harness convention)
+- `SOUL.md` — identity + behavior (the use-max systemPrompt source)
+- `CELLS.md` — what it means to be a cell (substrate awareness)
+- `TOOLS.md` — capability inventory
+- `CONTACTS.md` — who the cell interacts with
+- `MEMORY.md` — pointer to `state/memory/`
+- `HEARTBEAT.md` — declared schedule (future heartbeat agent enforces)
+- `IDENTITY.md` — metadata for tooling
+
+Plus `.pi/extensions/use-max`, `.pi/settings.json`, `package.json`,
+`.gitignore`, `bin/`, `scripts/`, `site/`.
 
 Use `sprite_push` with:
 - `name: <NAME>`
@@ -163,9 +175,24 @@ Then substitute `__NAME__`, `__MODEL__`, `__PROVIDER__`, and `__THINKING__`
 with their actual values. Use `sprite_exec`:
 
 ```bash
-sed -i 's/__NAME__/<NAME>/g' /home/sprite/agent/AGENTS.md /home/sprite/agent/package.json
-sed -i 's/__MODEL__/<MODEL>/g' /home/sprite/agent/AGENTS.md /home/sprite/agent/.pi/settings.json
-sed -i 's/__PROVIDER__/<PROVIDER>/g' /home/sprite/agent/.pi/settings.json
+sed -i 's/__NAME__/<NAME>/g' \
+  /home/sprite/agent/AGENTS.md \
+  /home/sprite/agent/SOUL.md \
+  /home/sprite/agent/IDENTITY.md \
+  /home/sprite/agent/CELLS.md \
+  /home/sprite/agent/CONTACTS.md \
+  /home/sprite/agent/HEARTBEAT.md \
+  /home/sprite/agent/package.json
+
+sed -i 's/__MODEL__/<MODEL>/g' \
+  /home/sprite/agent/SOUL.md \
+  /home/sprite/agent/IDENTITY.md \
+  /home/sprite/agent/.pi/settings.json
+
+sed -i 's/__PROVIDER__/<PROVIDER>/g' \
+  /home/sprite/agent/IDENTITY.md \
+  /home/sprite/agent/.pi/settings.json
+
 sed -i 's/__THINKING__/<THINKING>/g' /home/sprite/agent/.pi/settings.json
 ```
 

@@ -560,8 +560,14 @@ async function cmdShell(name: string) {
     // Mother lives on this Mac. Just print where; user cd's themselves.
     // (Future: when mother might run on a dedicated host, dispatch via
     // ~/.cells/mother.json — see docs/namespacing.md for the broader plan.)
-    console.log(`mother lives on this Mac. its body:`);
-    console.log(`  persona:    ${CELL_REPO}/AGENTS.md`);
+    console.log(`mother lives on this Mac. her anatomy:`);
+    console.log(`  entrypoint: ${CELL_REPO}/AGENTS.md         (cross-harness contract)`);
+    console.log(`  soul:       ${CELL_REPO}/SOUL.md           (persona — read by use-max into systemPrompt)`);
+    console.log(`  identity:   ${CELL_REPO}/IDENTITY.md       (metadata: name, model, provider)`);
+    console.log(`  tools:      ${CELL_REPO}/TOOLS.md          (capability inventory)`);
+    console.log(`  contacts:   ${CELL_REPO}/CONTACTS.md       (who she interacts with)`);
+    console.log(`  memory ptr: ${CELL_REPO}/MEMORY.md         (root-level pointer to state/memory/)`);
+    console.log(`  heartbeat:  ${CELL_REPO}/HEARTBEAT.md      (declared schedule)`);
     console.log(`  config:     ${CELL_REPO}/.pi/settings.json`);
     console.log(`  extensions: ${CELL_REPO}/.pi/extensions/`);
     console.log(`  skills:     ${CELL_REPO}/.pi/skills/`);
@@ -1416,7 +1422,11 @@ async function spriteExecCapture(name: string, script: string): Promise<{ ok: bo
 
 async function pullMarkdown(name: string, vaultPath: string): Promise<{ persona: string | null }> {
   await mkdir(vaultPath, { recursive: true });
-  const findScript = `cd /home/sprite/agent && find AGENTS.md state/memory state/wiki .pi/skills .pi/prompts \\( -name '*.md' -o -name 'SKILL.md' \\) -type f 2>/dev/null | tar czf - -T -`;
+  // Pull the agent's anatomy files at the root (AGENTS.md is the entrypoint;
+  // SOUL/IDENTITY/TOOLS/CELLS/CONTACTS/MEMORY/HEARTBEAT are the sharded
+  // OpenClaw-style files that compose into systemPrompt or live as pure
+  // observability), plus state/ and the .pi/ markdown trees.
+  const findScript = `cd /home/sprite/agent && find AGENTS.md SOUL.md IDENTITY.md TOOLS.md CELLS.md CONTACTS.md MEMORY.md HEARTBEAT.md state/memory state/wiki .pi/skills .pi/prompts \\( -name '*.md' -o -name 'SKILL.md' \\) -type f 2>/dev/null | tar czf - -T -`;
   // Post-extract we collapse state/memory -> memory and state/wiki -> wiki so
   // the vault stays flat. Pete reads it in Obsidian; one fewer level to click.
   const send = Bun.spawn(["sprite", "exec", "-s", name, "--", "bash", "-lc", findScript], {
@@ -1462,20 +1472,30 @@ async function flattenStateDir(vaultPath: string): Promise<void> {
 
 /**
  * After pullMarkdown drops files into vaultPath under their on-cell paths
- * (`AGENTS.md`, `.pi/skills/...`, etc.), restructure to vault shape:
- *   - `AGENTS.md` → captured as persona and removed (the synthesized vault
- *     AGENTS.md gets written by renderAgents over the top later)
+ * (`AGENTS.md`, `SOUL.md`, ..., `.pi/skills/...`, etc.), restructure to vault
+ * shape:
+ *   - `SOUL.md` → captured as persona (the use-max systemPrompt source) and
+ *     left in place for browsing.
+ *   - `AGENTS.md` (the cell's thin entrypoint) → removed; renderAgents
+ *     writes a richer dashboard AGENTS.md in its place.
+ *   - The other anatomy files (IDENTITY/TOOLS/CELLS/CONTACTS/MEMORY/
+ *     HEARTBEAT) → left in vault verbatim for browsing.
  *   - `.pi/skills/` → `skills/`
  *   - `.pi/prompts/` → `prompts/`
  *   - `.pi/` removed
  */
 async function restructureVault(vaultPath: string): Promise<{ persona: string | null }> {
   let persona: string | null = null;
-  const personaSrc = join(vaultPath, "AGENTS.md");
-  if (existsSync(personaSrc)) {
-    persona = await readFile(personaSrc, "utf-8");
-    await rm(personaSrc);
+  const soulSrc = join(vaultPath, "SOUL.md");
+  if (existsSync(soulSrc)) {
+    persona = await readFile(soulSrc, "utf-8");
   }
+
+  // The cell's AGENTS.md is the thin cross-harness entrypoint, not the persona.
+  // renderAgents writes a richer vault dashboard over the top, so drop the
+  // pulled one to avoid leaving stale content behind during a partial run.
+  const agentsSrc = join(vaultPath, "AGENTS.md");
+  if (existsSync(agentsSrc)) await rm(agentsSrc);
 
   const piDir = join(vaultPath, ".pi");
   const skillsSrc = join(piDir, "skills");
@@ -1756,12 +1776,27 @@ async function listSkills(skillsDir: string): Promise<string[]> {
   return entries.filter((name) => existsSync(join(skillsDir, name, "SKILL.md")));
 }
 
+// Sharded anatomy files at the agent root. SOUL is the persona body; the
+// rest are observability files browsable next to it. CELLS.md is cell-only;
+// mother doesn't have one. Kept in declaration order for the use-max composer.
+const ANATOMY_FILES = [
+  "SOUL.md",
+  "CELLS.md",
+  "IDENTITY.md",
+  "TOOLS.md",
+  "CONTACTS.md",
+  "MEMORY.md",
+  "HEARTBEAT.md",
+];
+
 async function setupMotherVault(): Promise<void> {
   const vault = join(VAULT_DIR, "mother");
   await mkdir(vault, { recursive: true });
 
   // Wipe any prior layout artifacts so renames/migrations land cleanly.
-  for (const f of ["README.md", "AGENTS.md", "persona.md"]) {
+  // Includes the anatomy files so a re-sync after one is removed leaves
+  // no stale copy behind.
+  for (const f of ["README.md", "AGENTS.md", "persona.md", ...ANATOMY_FILES]) {
     if (existsSync(join(vault, f))) await rm(join(vault, f));
   }
   for (const d of ["extensions", "skills", "prompts", ".pi"]) {
@@ -1785,10 +1820,19 @@ async function setupMotherVault(): Promise<void> {
     join(vault, "extensions"),
   );
 
-  // Persona body — read mother's AGENTS.md directly, then renderAgents
-  // synthesizes the vault's combined AGENTS.md (persona + extensions + skills + memory).
-  const personaPath = join(CELL_REPO, "AGENTS.md");
-  const persona = existsSync(personaPath) ? await readFile(personaPath, "utf-8") : null;
+  // Copy the anatomy files into the vault verbatim so Pete can browse them
+  // alongside the synthesized AGENTS.md dashboard. Skip ones that don't
+  // exist (e.g. CELLS.md on mother).
+  for (const f of ANATOMY_FILES) {
+    const src = join(CELL_REPO, f);
+    if (existsSync(src)) await cp(src, join(vault, f));
+  }
+
+  // Persona body for renderAgents — SOUL.md is the canonical source. The
+  // synthesized vault AGENTS.md interleaves persona + extensions + skills
+  // + memory snapshot; the raw anatomy files live alongside for direct browsing.
+  const soulPath = join(CELL_REPO, "SOUL.md");
+  const persona = existsSync(soulPath) ? await readFile(soulPath, "utf-8") : null;
 
   const skills = await listSkills(join(vault, "skills"));
   const mem = await gatherMemoryContext(join(CELL_REPO, "state", "memory"));
@@ -1801,8 +1845,9 @@ async function syncOneCell(name: string): Promise<{ name: string; status: string
   await mkdir(vault, { recursive: true });
 
   // Wipe everything that gets regenerated. Memory/yearnings/prompts come
-  // from the pull and replace whatever was there.
-  for (const f of ["README.md", "AGENTS.md", "persona.md"]) {
+  // from the pull and replace whatever was there. Anatomy files (SOUL,
+  // CELLS, etc.) get pulled fresh by pullMarkdown.
+  for (const f of ["README.md", "AGENTS.md", "persona.md", ...ANATOMY_FILES]) {
     if (existsSync(join(vault, f))) await rm(join(vault, f));
   }
   for (const d of ["extensions", "skills", "prompts", ".pi", "state", "memory", "yearnings"]) {

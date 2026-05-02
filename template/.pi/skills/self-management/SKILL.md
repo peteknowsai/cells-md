@@ -66,15 +66,30 @@ registration API:** see `extensions.md` under "Reference" below.
 
 ## 3. Morph your persona
 
-Your identity lives at `AGENTS.md` in your agent root. The body (after
-frontmatter) is your system prompt. When the user asks for a durable
-behavioral change — "be more terse," "always confirm before X," "you
-specialize in Y" — edit `AGENTS.md` in place.
+Your anatomy lives at the agent root, sharded into single-purpose files.
+Each one composes into your system prompt at session start (via the
+`use-max` extension). Edit the file that matches the change:
+
+- `SOUL.md` — identity, behavior, tone. Edit when the user asks for a
+  durable behavioral change ("be more terse", "always confirm before X",
+  "you specialize in Y").
+- `CELLS.md` — what it means to be a cell. Rarely changes; touch only if
+  your relationship to the substrate changes.
+- `TOOLS.md` — capability inventory. Edit when you gain or lose a tool
+  (after installing a package, writing a new extension).
+- `CONTACTS.md` — who you interact with. Edit when a new collaborator
+  enters your world (e.g. "from now on you also coordinate with cell X").
+- `MEMORY.md` — pointer to your memory subsystem. Rarely needs editing.
+- `HEARTBEAT.md` — your declared schedule. Edit when the user asks you
+  to wake up at a new cadence ("every weekday at 8am, summarize the news").
+- `IDENTITY.md` — metadata (name, model, provider). Tooling reads this;
+  don't edit unless the user explicitly changes one of those fields.
 
 Rules:
-- Keep it short. Every token loads on every conversation.
+- Keep each file short. Every token loads on every conversation.
 - Don't restate things already in skills or extensions.
-- Frontmatter (`name`, `description`, `model`) stays as-is unless asked.
+- Frontmatter (`name`, `description`, `model`) in `SOUL.md` and
+  `IDENTITY.md` stays as-is unless asked.
 - After editing, the change is live next session start. To pick it up
   immediately, tell the user to detach and reattach.
 
@@ -102,10 +117,10 @@ intent, or the user types `/skill:<name>`.
 
 ## When to use this skill
 
-- User asks you to "remember how to X" → write a skill or update AGENTS.md
+- User asks you to "remember how to X" → write a skill or update SOUL.md
 - User asks for a capability you don't have → install a package or write
   an extension
-- User asks for a behavioral change ("from now on...") → update AGENTS.md
+- User asks for a behavioral change ("from now on...") → update SOUL.md
 - You learn a procedure worth keeping → write a skill
 
 Don't pre-extend yourself speculatively. Wait for a concrete need.
