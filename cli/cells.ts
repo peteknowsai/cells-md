@@ -1895,6 +1895,20 @@ async function cmdSync(name?: string) {
       }
     }),
   );
+
+  // Prune vault dirs for cells that no longer exist. Mother is always kept;
+  // the registry tracks every other live cell. Anything else is debris from
+  // a previous sync of a now-destroyed cell.
+  const keep = new Set<string>(["mother", ...reg.cells.map((c) => c.name)]);
+  const entries = await readdir(VAULT_DIR, { withFileTypes: true });
+  for (const entry of entries) {
+    if (!entry.isDirectory()) continue;
+    if (entry.name.startsWith(".")) continue; // .obsidian, etc.
+    if (keep.has(entry.name)) continue;
+    console.log(`✗ pruning dead cell: ${entry.name}`);
+    await rm(join(VAULT_DIR, entry.name), { recursive: true, force: true });
+  }
+
   await writeRoster(rows.filter((r): r is NonNullable<typeof r> => r !== null));
   console.log(`\nvault: ${VAULT_DIR}`);
 }
