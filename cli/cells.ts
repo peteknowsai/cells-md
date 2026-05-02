@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 import { $ } from "bun";
-import { readFile, writeFile, mkdir, unlink, symlink, cp, readdir, stat, rm } from "node:fs/promises";
+import { readFile, writeFile, mkdir, unlink, symlink, cp, readdir, stat, rm, rename, rmdir } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { dirname, join, basename } from "node:path";
 import { existsSync, statSync } from "node:fs";
@@ -565,7 +565,7 @@ async function cmdShell(name: string) {
     console.log(`  config:     ${CELL_REPO}/.pi/settings.json`);
     console.log(`  extensions: ${CELL_REPO}/.pi/extensions/`);
     console.log(`  skills:     ${CELL_REPO}/.pi/skills/`);
-    console.log(`  memory:     ${CELL_REPO}/memory/`);
+    console.log(`  memory:     ${CELL_REPO}/state/memory/`);
     console.log(`  charter:    ${CELL_REPO}/AGENTS.md`);
     console.log(`  pi data:    ${process.env.HOME}/.pi/agent/  (sessions, auth.json — shared with the proxy)`);
     console.log(`  runs from:  ${CELL_REPO}  (project root; pi auto-discovers .pi/ here)`);
@@ -1417,7 +1417,9 @@ async function spriteExecCapture(name: string, script: string): Promise<{ ok: bo
 
 async function pullMarkdown(name: string, vaultPath: string): Promise<{ persona: string | null }> {
   await mkdir(vaultPath, { recursive: true });
-  const findScript = `cd /home/sprite/agent && find memory yearnings .pi/agents .pi/skills .pi/prompts \\( -name '*.md' -o -name 'SKILL.md' \\) -type f 2>/dev/null | tar czf - -T -`;
+  const findScript = `cd /home/sprite/agent && find state/memory state/wiki .pi/agents .pi/skills .pi/prompts \\( -name '*.md' -o -name 'SKILL.md' \\) -type f 2>/dev/null | tar czf - -T -`;
+  // Post-extract we collapse state/memory -> memory and state/wiki -> wiki so
+  // the vault stays flat. Pete reads it in Obsidian; one fewer level to click.
   const send = Bun.spawn(["sprite", "exec", "-s", name, "--", "bash", "-lc", findScript], {
     stdin: "ignore",
     stdout: "pipe",
@@ -1438,9 +1440,25 @@ async function pullMarkdown(name: string, vaultPath: string): Promise<{ persona:
     // Empty archive is benign — tar emits a warning but exits non-zero.
     if (!/empty archive/i.test(err)) throw new Error(`tar extract failed: ${err.trim()}`);
   }
+  // Flatten state/memory -> memory and state/wiki -> wiki in the vault.
+  await flattenStateDir(vaultPath);
   // Reshape the on-cell .pi/ tree into the vault layout (Pi-named dirs at
   // top level, persona body returned for inlining into AGENTS.md).
   return await restructureVault(vaultPath);
+}
+
+async function flattenStateDir(vaultPath: string): Promise<void> {
+  const stateDir = join(vaultPath, "state");
+  if (!existsSync(stateDir)) return;
+  for (const sub of ["memory", "wiki"]) {
+    const src = join(stateDir, sub);
+    const dst = join(vaultPath, sub);
+    if (!existsSync(src)) continue;
+    if (existsSync(dst)) await rm(dst, { recursive: true, force: true });
+    await rename(src, dst);
+  }
+  // Remove state/ if empty after flatten.
+  try { await rmdir(stateDir); } catch { /* not empty, leave it */ }
 }
 
 /**
@@ -1747,10 +1765,12 @@ async function setupMotherVault(): Promise<void> {
     if (existsSync(join(vault, d))) await rm(join(vault, d), { recursive: true, force: true });
   }
 
-  // Symlink memory (always replace to keep current).
+  // Symlink memory (always replace to keep current). existsSync follows
+  // symlinks, so a stale link to a no-longer-existing target reports
+  // false — use unlink directly and ignore ENOENT.
   const memLink = join(vault, "memory");
-  if (existsSync(memLink)) await rm(memLink, { force: true, recursive: false });
-  await symlink(join(CELL_REPO, "memory"), memLink);
+  try { await unlink(memLink); } catch { /* not present */ }
+  await symlink(join(CELL_REPO, "state", "memory"), memLink);
 
   // Skills tree (markdown only — follows symlinks).
   const skillsSrc = join(CELL_REPO, ".pi", "skills");
@@ -1767,7 +1787,7 @@ async function setupMotherVault(): Promise<void> {
   const persona = existsSync(personaPath) ? await readFile(personaPath, "utf-8") : null;
 
   const skills = await listSkills(join(vault, "skills"));
-  const mem = await gatherMemoryContext(join(CELL_REPO, "memory"));
+  const mem = await gatherMemoryContext(join(CELL_REPO, "state", "memory"));
   const md = renderAgents("mother", null, persona, exts, skills, mem);
   await writeFile(join(vault, "AGENTS.md"), md);
 }
@@ -1781,7 +1801,7 @@ async function syncOneCell(name: string): Promise<{ name: string; status: string
   for (const f of ["README.md", "AGENTS.md", "persona.md"]) {
     if (existsSync(join(vault, f))) await rm(join(vault, f));
   }
-  for (const d of ["extensions", "skills", "prompts", ".pi", "memory", "yearnings"]) {
+  for (const d of ["extensions", "skills", "prompts", ".pi", "state", "memory", "yearnings"]) {
     if (existsSync(join(vault, d))) await rm(join(vault, d), { recursive: true, force: true });
   }
 

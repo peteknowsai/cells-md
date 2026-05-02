@@ -51,6 +51,19 @@ EOF
 sed -i 's|__SECRET__|$SECRET|g' ~/.bashrc.d/codex_proxy
 chmod 600 ~/.bashrc.d/codex_proxy
 
+# 1c. Site env file: read by ~/agent/site/server.ts. The site server gates
+# on x-mother-secret matching MOTHER_SECRET, so even though the sprite URL
+# is set to --auth=public (so mother can reach it without org-token auth),
+# only requests carrying the shared secret reach the cell.
+cat > ~/.bashrc.d/site_proxy <<'EOF'
+# Authenticates incoming requests to the cell's site server (~/agent/site/).
+# Mother proxy attaches x-mother-secret = this value when forwarding
+# <cell>.cells.md → <sprite-host>.
+export MOTHER_SECRET=__SECRET__
+EOF
+sed -i 's|__SECRET__|$SECRET|g' ~/.bashrc.d/site_proxy
+chmod 600 ~/.bashrc.d/site_proxy
+
 # 2. Run the cell's idempotent JS-patch script. It also fires automatically
 # as bun-install's postinstall hook (see template/package.json), so this
 # direct call is mainly for retrofits and re-runs after rotating secrets.

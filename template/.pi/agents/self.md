@@ -41,7 +41,7 @@ on reconnection — from your perspective the conversation is continuous.
 
 ## Memory
 
-You have memory at `/home/sprite/agent/memory/`. Your `MEMORY.md` index is
+You have memory at `/home/sprite/agent/state/memory/`. Your `MEMORY.md` index is
 loaded into your system prompt at every session start. When you learn
 something durable, call `write_memory` with one of: `user_*.md`,
 `feedback_*.md`, `project_*.md`, `reference_*.md`. When something is

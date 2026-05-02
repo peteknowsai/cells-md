@@ -34,18 +34,17 @@ import { tmpdir } from "node:os";
 /**
  * Where memory lives depends on context:
  *   - On a Sprite (where the agent runs in /home/sprite/agent): use the
- *     sprite-side memory dir.
- *   - On Pete's Mac (mother running in ~/Projects/cells): use a hidden
- *     dir alongside the repo. Same shape, same naming.
+ *     sprite-side state dir.
+ *   - On Pete's Mac (mother running in ~/Projects/cells): cwd/state/memory.
  *   - Override via env var CELL_MEMORY_DIR.
  *
  * Both contexts get identical structure: MEMORY.md + topical files +
- * yearnings/ subdir.
+ * yearnings/ subdir, all under <agent>/state/memory/.
  */
 function resolveMemoryDir(): string {
   if (process.env.CELL_MEMORY_DIR) return process.env.CELL_MEMORY_DIR;
-  if (existsSync("/home/sprite/agent")) return "/home/sprite/agent/memory";
-  return join(process.cwd(), "memory");
+  if (existsSync("/home/sprite/agent")) return "/home/sprite/agent/state/memory";
+  return join(process.cwd(), "state", "memory");
 }
 
 const MEMORY_DIR = resolveMemoryDir();

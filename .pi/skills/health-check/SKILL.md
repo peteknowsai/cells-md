@@ -49,7 +49,7 @@ echo "== PROXY TOKEN =="; awk -F"'" '/ANTHROPIC_AUTH_TOKEN/{print substr($2,1,12
 echo "== MODEL URL =="; grep -o 'https://[a-z.]*\.anthropic\.com\|https://keeper\.cells\.md' /home/sprite/agent/node_modules/@mariozechner/pi-ai/dist/models.generated.js 2>/dev/null | sort -u | head -3
 echo "== SHELL SHIM (bashrc) =="; grep -c "tmux new-session" /home/sprite/.bashrc 2>/dev/null
 echo "== SHELL SHIM (zshrc) =="; grep -c "tmux new-session" /home/sprite/.zshrc 2>/dev/null
-echo "== MEMORY INDEX =="; head -3 /home/sprite/agent/memory/MEMORY.md 2>&1
+echo "== MEMORY INDEX =="; head -3 /home/sprite/agent/state/memory/MEMORY.md 2>&1
 ```
 
 Pass criteria:
@@ -85,7 +85,7 @@ Pass criteria:
 Verify the memory write actually hit disk + clean up with one `sprite_exec`:
 
 ```bash
-cat /home/sprite/agent/memory/reference_health_probe.md && rm /home/sprite/agent/memory/reference_health_probe.md && echo cleaned
+cat /home/sprite/agent/state/memory/reference_health_probe.md && rm /home/sprite/agent/state/memory/reference_health_probe.md && echo cleaned
 ```
 
 File should contain `ok` and `cleaned` should print.

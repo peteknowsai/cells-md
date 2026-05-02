@@ -329,16 +329,20 @@ hours after birth.
 Cells reach both Anthropic (Claude Max) and OpenAI Codex (ChatGPT Plus)
 via `https://mother.cells.md`, which the mother laptop runs as the single
 OAuth principal for both subscriptions across the whole fleet. This step
-does four things:
+does five things:
 
 1. Drops `~/.bashrc.d/anthropic_proxy` with the shared bearer secret
    (`CELLS_PROXY_SECRET` from `~/.cells/secrets.json`) as `ANTHROPIC_AUTH_TOKEN`.
 2. Drops `~/.bashrc.d/codex_proxy` with the same secret as `OPENAI_CODEX_API_KEY`,
    read by the `mother-codex` extension at pi startup.
-3. Patches the hardcoded `api.anthropic.com` URL in `pi-ai`'s model registry
+3. Drops `~/.bashrc.d/site_proxy` with the same secret as `MOTHER_SECRET`,
+   read by the cell's site server (`~/agent/site/server.ts`). The site
+   server gates incoming requests on `x-mother-secret` matching this; only
+   mother (which adds the header on forward) can reach the cell.
+4. Patches the hardcoded `api.anthropic.com` URL in `pi-ai`'s model registry
    to `mother.cells.md`. Pi does NOT respect `ANTHROPIC_BASE_URL` — the URL
    is baked per-model in `models.generated.js`. The patch is idempotent.
-4. Neutralizes JWT-based `extractAccountId` in `pi-ai`'s codex provider —
+5. Neutralizes JWT-based `extractAccountId` in `pi-ai`'s codex provider —
    cells ship the proxy secret as bearer (not a JWT), so the original
    function would throw. Mother adds the real `chatgpt-account-id` header
    server-side. Idempotent.
@@ -355,8 +359,8 @@ patches will be clobbered and the cell will start hitting upstream APIs
 directly with the proxy secret (which both providers reject). Also re-run
 if you rotate `CELLS_PROXY_SECRET`.
 
-Background: see `memory/project_mother_proxy.md` and
-`memory/reference_pi_internals.md` for why this is necessary.
+Background: see `state/memory/project_mother_proxy.md` and
+`state/memory/reference_pi_internals.md` for why this is necessary.
 
 ## 7. Register the `agent` service (auto-start Pi on VM boot)
 
@@ -381,6 +385,36 @@ service that runs `tmux new-session -dA -s <NAME> pi` plus a wait loop.
 The loop keeps the service process alive while the tmux session exists,
 so Sprites considers the service "running" and doesn't restart it
 unnecessarily.
+
+## 7b. Register the `site` service + open the cell URL to mother
+
+The cell's public face at `<NAME>.cells.md` is served by the cell itself,
+not mother — `~/agent/site/server.ts` is a tiny Bun web server that the
+cell owns and can morph (drop `public/index.html`, add routes, swap the
+whole thing for a different framework). Mother just reverse-proxies.
+
+Two pieces:
+
+1. **Flip the sprite URL to `--auth=public`.** By default the sprite URL
+   `<name>-XXX.sprites.app` redirects unauthenticated traffic to a
+   sprites.dev login. Mother can't carry the org-token cookie through a
+   reverse proxy, so we open the URL. Security still holds because the
+   site server requires `x-mother-secret` (set in step 6c), and mother
+   is the only thing that knows it.
+
+   ```bash
+   sprite url update --auth public -s <NAME>
+   ```
+
+2. **Register the `site` service.** Same shape as `agent` in step 7;
+   supervises `bun run server.ts` with `CELL_NAME` and `PORT=8080` set:
+
+   ```bash
+   scripts/register-site-service.sh <NAME>
+   ```
+
+After both, `cells see <NAME>` should open `<NAME>.cells.md` in the
+browser and render the cell's homepage.
 
 ## 8. Login shim — auto-attach to Pi TUI
 
@@ -429,7 +463,7 @@ Without this call the CLI assumes failure and won't register the agent.
 
 ## 11. Record in memory (success only)
 
-Log the birth event by appending one line to `memory/project_cells_activity.md`:
+Log the birth event by appending one line to `state/memory/project_cells_activity.md`:
 
 `<UTC date HH:MM>  born        <NAME>      <terse notes>`
 

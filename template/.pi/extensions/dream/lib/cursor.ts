@@ -19,7 +19,7 @@ function resolveAgentRoot(): string {
 }
 
 const AGENT_ROOT = resolveAgentRoot();
-const DREAM_DIR = join(AGENT_ROOT, ".dream");
+const DREAM_DIR = join(AGENT_ROOT, "state", ".dream");
 const CURSOR_FILE = join(DREAM_DIR, "cursor");
 
 export function readCursor(): Date | null {

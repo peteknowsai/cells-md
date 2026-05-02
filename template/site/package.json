@@ -1,0 +1,8 @@
+{
+  "name": "cell-site",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "start": "bun run server.ts"
+  }
+}

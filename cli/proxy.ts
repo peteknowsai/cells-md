@@ -44,7 +44,7 @@ import { join } from "node:path";
 const AUTH_PATH = join(homedir(), ".pi/agent/auth.json");
 const SECRETS_PATH = join(homedir(), ".cells/secrets.json");
 const CELLS_REGISTRY = join(homedir(), ".cells/cells.json");
-const ACTIVITY_PATH = join(homedir(), "Projects/cells/memory/project_cells_activity.md");
+const ACTIVITY_PATH = join(homedir(), "Projects/cells/state/memory/project_cells_activity.md");
 const UPSTREAM = "https://api.anthropic.com";
 const CODEX_UPSTREAM = "https://chatgpt.com/backend-api";
 const PORT = Number(process.env.CELLS_PROXY_PORT ?? 8787);
@@ -747,25 +747,101 @@ async function dashboardHtml(): Promise<Response> {
   );
 }
 
-function cellPageHtml(name: string): Response {
-  const cell = readCells().find((c) => c.name === name);
-  if (!cell) {
-    return htmlPage(
-      name,
-      `<h1>${name}</h1>
-      <p class="sub">No cell by that name in the registry.</p>
-      <p><a href="https://mother.cells.md/">\u2190 fleet</a></p>`,
-    );
+// \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500 cell forwarding \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+
+// Cell name \u2192 sprites.app hostname. Populated lazily on first request via
+// `sprite info -s <name>`. Cleared on registry mutation (birth/destroy
+// rewrite cells.json \u2014 we just take the easy path and never invalidate;
+// a stale entry only matters if a cell is recreated under the same name).
+const spriteHostCache = new Map<string, string>();
+
+async function spriteHostFor(name: string): Promise<string | null> {
+  const cached = spriteHostCache.get(name);
+  if (cached) return cached;
+  try {
+    const proc = Bun.spawn(["sprite", "info", "-s", name], {
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    const out = await new Response(proc.stdout).text();
+    await proc.exited;
+    // `URL: https://pete-bas32.sprites.app` \u2014 extract the host part.
+    const m = out.match(/URL:\s*https?:\/\/([^\s/]+)/i);
+    if (!m) return null;
+    spriteHostCache.set(name, m[1]);
+    return m[1];
+  } catch {
+    return null;
   }
-  const activity = readActivity(name, 30).map((l) => `<li>${l}</li>`).join("\n");
+}
+
+function cellNotFoundHtml(name: string): Response {
   return htmlPage(
     name,
     `<h1>${name}</h1>
-    <p class="sub">Born ${cell.born}</p>
-    <h2>Activity</h2>
-    <ul class="activity">${activity || "<li><em>no entries</em></li>"}</ul>
+    <p class="sub">No cell by that name in the registry.</p>
     <p><a href="https://mother.cells.md/">\u2190 fleet</a></p>`,
   );
+}
+
+function cellSleepingHtml(name: string, why: string): Response {
+  return htmlPage(
+    name,
+    `<h1>${name} <span class="pill">sleeping</span></h1>
+    <p class="sub">Couldn't reach ${name}'s site server: ${why}.
+       It may be hibernated. Try <code>cells wake ${name}</code>.</p>
+    <p><a href="https://mother.cells.md/">\u2190 fleet</a></p>`,
+  );
+}
+
+// Forward <cell>.cells.md/<path> to https://<sprite-host>/<path>. Cell's
+// site server (~/agent/site/server.ts) gates on x-mother-secret which we
+// attach here \u2014 so even though the sprite URL is set to --auth=public,
+// only requests carrying our shared secret reach the cell.
+async function forwardToCell(req: Request, name: string): Promise<Response> {
+  const inRegistry = readCells().some((c) => c.name === name);
+  if (!inRegistry) return cellNotFoundHtml(name);
+
+  const spriteHost = await spriteHostFor(name);
+  if (!spriteHost) return cellSleepingHtml(name, "sprite info lookup failed");
+
+  const url = new URL(req.url);
+  const upstream = `https://${spriteHost}${url.pathname}${url.search}`;
+
+  const headers = new Headers(req.headers);
+  // Strip CF / forwarding headers \u2014 chatgpt.com taught us forwarding these
+  // to another CF-fronted host triggers anti-loop 403s. sprites.app is on
+  // Fly so the immediate risk differs, but symmetric hygiene is safer.
+  for (const h of [
+    "host",
+    "cdn-loop",
+    "x-real-ip",
+  ]) headers.delete(h);
+  for (const k of [...headers.keys()]) {
+    if (k.startsWith("cf-") || k.startsWith("x-forwarded-")) headers.delete(k);
+  }
+  headers.set("host", spriteHost);
+  headers.set("x-mother-secret", SHARED_SECRET);
+
+  let resp: Response;
+  try {
+    resp = await fetch(upstream, {
+      method: req.method,
+      headers,
+      body: req.body,
+      redirect: "manual",
+    });
+  } catch (e) {
+    return cellSleepingHtml(name, `${(e as Error).message}`);
+  }
+
+  // Pass response through (streaming). Strip hop-by-hop headers fetch
+  // already handles, but propagate everything else verbatim.
+  return new Response(resp.body, {
+    status: resp.status,
+    statusText: resp.statusText,
+    headers: resp.headers,
+  });
 }
 
 // ───────────────────── server ─────────────────────
@@ -789,13 +865,10 @@ const server = Bun.serve({
       return handleApiProxy(req);
     }
 
-    // <cell>.cells.md
+    // <cell>.cells.md → forward to the cell's own site server
     const cell = cellNameFromHost(host);
     if (cell) {
-      if (url.pathname === "/" || url.pathname === "") {
-        return cellPageHtml(cell);
-      }
-      return new Response("not found", { status: 404 });
+      return forwardToCell(req, cell);
     }
 
     return new Response("unknown host", { status: 404 });

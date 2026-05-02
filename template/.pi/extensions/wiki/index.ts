@@ -29,14 +29,14 @@ import { fileURLToPath } from "node:url";
 
 /**
  * Where the wiki lives:
- *   - On a Sprite: /home/sprite/agent/wiki/
- *   - Otherwise: cwd/wiki/
+ *   - On a Sprite: /home/sprite/agent/state/wiki/
+ *   - Otherwise: cwd/state/wiki/
  *   - Override via env var CELL_WIKI_DIR.
  */
 function resolveWikiDir(): string {
   if (process.env.CELL_WIKI_DIR) return process.env.CELL_WIKI_DIR;
-  if (existsSync("/home/sprite/agent")) return "/home/sprite/agent/wiki";
-  return join(process.cwd(), "wiki");
+  if (existsSync("/home/sprite/agent")) return "/home/sprite/agent/state/wiki";
+  return join(process.cwd(), "state", "wiki");
 }
 
 const WIKI_DIR = resolveWikiDir();

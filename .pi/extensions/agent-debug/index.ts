@@ -179,7 +179,7 @@ export default function (pi: any) {
     name: "read_agent_memory",
     label: "Read agent's memory",
     description:
-      "Read a file from a remote agent's memory directory (/home/sprite/agent/memory/). Pass a filename like 'MEMORY.md' or 'feedback_response_style.md', or omit to list the directory.",
+      "Read a file from a remote agent's memory directory (/home/sprite/agent/state/memory/). Pass a filename like 'MEMORY.md' or 'feedback_response_style.md', or omit to list the directory.",
     parameters: Type.Object({
       name: Type.String({ description: "Remote agent name." }),
       file: Type.Optional(
@@ -197,7 +197,7 @@ export default function (pi: any) {
           "--",
           "ls",
           "-la",
-          "/home/sprite/agent/memory/",
+          "/home/sprite/agent/state/memory/",
         ]);
         return {
           content: [
@@ -218,7 +218,7 @@ export default function (pi: any) {
         params.name,
         "--",
         "cat",
-        `/home/sprite/agent/memory/${params.file}`,
+        `/home/sprite/agent/state/memory/${params.file}`,
       ]);
       return {
         content: [

@@ -27,14 +27,14 @@ import { fileURLToPath } from "node:url";
 
 /**
  * Where mentality lives:
- *   - On a Sprite: /home/sprite/agent/mentality.md
- *   - Otherwise: cwd/mentality.md
+ *   - On a Sprite: /home/sprite/agent/state/mentality.md
+ *   - Otherwise: cwd/state/mentality.md
  *   - Override via env var CELL_MENTALITY_FILE.
  */
 function resolveMentalityFile(): string {
   if (process.env.CELL_MENTALITY_FILE) return process.env.CELL_MENTALITY_FILE;
-  if (existsSync("/home/sprite/agent")) return "/home/sprite/agent/mentality.md";
-  return join(process.cwd(), "mentality.md");
+  if (existsSync("/home/sprite/agent")) return "/home/sprite/agent/state/mentality.md";
+  return join(process.cwd(), "state", "mentality.md");
 }
 
 const MENTALITY_FILE = resolveMentalityFile();
