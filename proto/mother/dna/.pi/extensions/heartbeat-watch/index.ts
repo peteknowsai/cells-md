@@ -19,6 +19,7 @@
  */
 
 import * as fs from "node:fs";
+import * as os from "node:os";
 import * as path from "node:path";
 
 const PULSE_URL = "https://pulse.cells.md/heartbeat-changed";
@@ -27,12 +28,8 @@ const HEARTBEAT_FILENAME = "HEARTBEAT.md";
 
 function readSelfName(): string {
   // hostname matches the cell name by convention (set at sprite-create).
-  // Fall back to env if hostname is unavailable for any reason.
-  try {
-    return Bun.spawnSync(["hostname"]).stdout.toString().trim() || process.env.CELL_NAME || "unknown";
-  } catch {
-    return process.env.CELL_NAME || "unknown";
-  }
+  // os.hostname() works under Node and Bun. Fall back to env, then "unknown".
+  return os.hostname() || process.env.CELL_NAME || "unknown";
 }
 
 async function postHeartbeat(cell: string, content: string, secret: string): Promise<void> {
@@ -58,7 +55,7 @@ async function postHeartbeat(cell: string, content: string, secret: string): Pro
 }
 
 export default function (pi: any) {
-  pi.on("after_agent_start", async (_event: any, ctx: any) => {
+  pi.on("session_start", async (_event: any, ctx: any) => {
     const heartbeatPath = path.join(ctx.cwd, HEARTBEAT_FILENAME);
     if (!fs.existsSync(heartbeatPath)) {
       console.error(`[heartbeat-watch] no ${heartbeatPath} — extension idle`);
