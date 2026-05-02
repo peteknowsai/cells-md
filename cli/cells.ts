@@ -561,12 +561,11 @@ async function cmdShell(name: string) {
     // (Future: when mother might run on a dedicated host, dispatch via
     // ~/.cells/mother.json — see docs/namespacing.md for the broader plan.)
     console.log(`mother lives on this Mac. its body:`);
-    console.log(`  persona:    ${CELL_REPO}/.pi/agents/self.md`);
+    console.log(`  persona:    ${CELL_REPO}/AGENTS.md`);
     console.log(`  config:     ${CELL_REPO}/.pi/settings.json`);
     console.log(`  extensions: ${CELL_REPO}/.pi/extensions/`);
     console.log(`  skills:     ${CELL_REPO}/.pi/skills/`);
     console.log(`  memory:     ${CELL_REPO}/state/memory/`);
-    console.log(`  charter:    ${CELL_REPO}/AGENTS.md`);
     console.log(`  pi data:    ${process.env.HOME}/.pi/agent/  (sessions, auth.json — shared with the proxy)`);
     console.log(`  runs from:  ${CELL_REPO}  (project root; pi auto-discovers .pi/ here)`);
     return;
@@ -1417,7 +1416,7 @@ async function spriteExecCapture(name: string, script: string): Promise<{ ok: bo
 
 async function pullMarkdown(name: string, vaultPath: string): Promise<{ persona: string | null }> {
   await mkdir(vaultPath, { recursive: true });
-  const findScript = `cd /home/sprite/agent && find state/memory state/wiki .pi/agents .pi/skills .pi/prompts \\( -name '*.md' -o -name 'SKILL.md' \\) -type f 2>/dev/null | tar czf - -T -`;
+  const findScript = `cd /home/sprite/agent && find AGENTS.md state/memory state/wiki .pi/skills .pi/prompts \\( -name '*.md' -o -name 'SKILL.md' \\) -type f 2>/dev/null | tar czf - -T -`;
   // Post-extract we collapse state/memory -> memory and state/wiki -> wiki so
   // the vault stays flat. Pete reads it in Obsidian; one fewer level to click.
   const send = Bun.spawn(["sprite", "exec", "-s", name, "--", "bash", "-lc", findScript], {
@@ -1463,18 +1462,22 @@ async function flattenStateDir(vaultPath: string): Promise<void> {
 
 /**
  * After pullMarkdown drops files into vaultPath under their on-cell paths
- * (`.pi/agents/self.md`, `.pi/skills/...`, etc.), restructure to vault shape:
- *   - `.pi/skills/` → `skills/`        (Pi structure preserved)
+ * (`AGENTS.md`, `.pi/skills/...`, etc.), restructure to vault shape:
+ *   - `AGENTS.md` → captured as persona and removed (the synthesized vault
+ *     AGENTS.md gets written by renderAgents over the top later)
+ *   - `.pi/skills/` → `skills/`
  *   - `.pi/prompts/` → `prompts/`
- *   - `.pi/agents/self.md` → captured and returned (NOT written; goes inline into AGENTS.md)
  *   - `.pi/` removed
  */
 async function restructureVault(vaultPath: string): Promise<{ persona: string | null }> {
-  const piDir = join(vaultPath, ".pi");
   let persona: string | null = null;
-  const personaSrc = join(piDir, "agents", "self.md");
-  if (existsSync(personaSrc)) persona = await readFile(personaSrc, "utf-8");
+  const personaSrc = join(vaultPath, "AGENTS.md");
+  if (existsSync(personaSrc)) {
+    persona = await readFile(personaSrc, "utf-8");
+    await rm(personaSrc);
+  }
 
+  const piDir = join(vaultPath, ".pi");
   const skillsSrc = join(piDir, "skills");
   if (existsSync(skillsSrc)) {
     const skillsDst = join(vaultPath, "skills");
@@ -1782,8 +1785,9 @@ async function setupMotherVault(): Promise<void> {
     join(vault, "extensions"),
   );
 
-  // Persona body — read directly, inline into AGENTS.md (no separate file).
-  const personaPath = join(CELL_REPO, ".pi", "agents", "self.md");
+  // Persona body — read mother's AGENTS.md directly, then renderAgents
+  // synthesizes the vault's combined AGENTS.md (persona + extensions + skills + memory).
+  const personaPath = join(CELL_REPO, "AGENTS.md");
   const persona = existsSync(personaPath) ? await readFile(personaPath, "utf-8") : null;
 
   const skills = await listSkills(join(vault, "skills"));

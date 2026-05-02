@@ -151,8 +151,8 @@ ls -la /home/sprite/.bun/bin/bun && tmux -V
 ## 4. Push the agent template
 
 The repo's `template/` directory contains the canonical recipe-compliant
-layout (AGENTS.md stub, .pi/agents/self.md persona, .pi/extensions/identity,
-.pi/settings.json, package.json, .gitignore).
+layout (AGENTS.md persona, .pi/extensions/use-max, .pi/settings.json,
+package.json, .gitignore).
 
 Use `sprite_push` with:
 - `name: <NAME>`
@@ -163,15 +163,15 @@ Then substitute `__NAME__`, `__MODEL__`, `__PROVIDER__`, and `__THINKING__`
 with their actual values. Use `sprite_exec`:
 
 ```bash
-sed -i 's/__NAME__/<NAME>/g' /home/sprite/agent/AGENTS.md /home/sprite/agent/.pi/agents/self.md /home/sprite/agent/package.json
-sed -i 's/__MODEL__/<MODEL>/g' /home/sprite/agent/.pi/agents/self.md /home/sprite/agent/.pi/settings.json
+sed -i 's/__NAME__/<NAME>/g' /home/sprite/agent/AGENTS.md /home/sprite/agent/package.json
+sed -i 's/__MODEL__/<MODEL>/g' /home/sprite/agent/AGENTS.md /home/sprite/agent/.pi/settings.json
 sed -i 's/__PROVIDER__/<PROVIDER>/g' /home/sprite/agent/.pi/settings.json
 sed -i 's/__THINKING__/<THINKING>/g' /home/sprite/agent/.pi/settings.json
 ```
 
 ## 5. Run `bun install`, install Pi globally, install web-access, install `cells` CLI
 
-`bun install` is mandatory — without `node_modules/`, the identity extension
+`bun install` is mandatory — without `node_modules/`, the use-max extension
 fails to load and the agent silently lands on extra-usage billing.
 
 Pi itself is **not** pre-installed on Sprite VMs. Install it globally via Bun

@@ -12,7 +12,7 @@
  * complements it. The two compose cleanly when both are installed.
  *
  * Composes via `ctx.getSystemPrompt()` so it stacks with persona /
- * identity extensions: <prior prompt>\n\n<memory section>.
+ * use-max extensions: <prior prompt>\n\n<memory section>.
  */
 
 import { Type } from "@sinclair/typebox";

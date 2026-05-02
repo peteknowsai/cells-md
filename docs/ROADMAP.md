@@ -18,7 +18,7 @@ anything inside it.
 **Includes:**
 
 - `cell` CLI: `pi`, `create`, `talk`, `list`, `sleep`, `wake`, `checkpoint`, `destroy`
-- Local mother Pi project (`.pi/agents/self.md` + use-max extension + `package.json`) so it bills against Pro/Max via the [first-party billing recipe](~/Projects/cells/PI-FIRST-PARTY-BILLING-RECIPE.md)
+- Local mother Pi project (`AGENTS.md` + use-max extension + `package.json`) so it bills against Pro/Max via the [first-party billing recipe](~/Projects/cells/PI-FIRST-PARTY-BILLING-RECIPE.md)
 - `template/` — recipe-compliant cell-on-Sprite layout that birth pushes onto each Sprite
 - `.pi/skills/birth/SKILL.md` — birth ritual the mother follows:
   - create the Sprite + configure egress (anthropic, bun.sh, npm, github)
@@ -70,7 +70,7 @@ the actual readable surface Pete wants.
   Sprites API, persona link, extensions (with their tools), skills,
   memory stats.
 - Mechanism: `sprite exec` + tar pipe over allowlist (`AGENTS.md`,
-  `memory/`, `yearnings/`, `.pi/agents/`, `.pi/skills/`,
+  `state/memory/`, `state/wiki/`, `.pi/skills/`,
   `.pi/prompts/`, restricted to `*.md` and `SKILL.md`).
 - Extension docs are *generated* — `index.ts` is parsed for
   `pi.registerTool({...})` calls; the `.ts` itself never lands in

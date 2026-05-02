@@ -9,9 +9,9 @@
  *
  * Phase 1.0 — no dream tool yet. The dream subagent comes in Phase 1.1.
  *
- * Loads after the identity extension (settings.json order). Composes with
- * identity's systemPrompt via ctx.getSystemPrompt() so the agent sees:
- *   <persona from identity>
+ * Loads after the use-max extension (settings.json order). Composes with
+ * use-max's systemPrompt via ctx.getSystemPrompt() so the agent sees:
+ *   <persona from use-max>
  *   ----
  *   <memory section from this extension>
  */

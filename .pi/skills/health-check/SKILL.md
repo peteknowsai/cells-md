@@ -75,7 +75,7 @@ Probe:
 
 Pass criteria:
 - agent responds at all (no 401, no timeout) — **critical**
-- `NAME` equals `<NAME>` (identity extension working)
+- `NAME` equals `<NAME>` (use-max extension working)
 - `WEB=` line has content (web_search + egress + Anthropic API all work)
 - `MEMORY_OK=done` (memory extension working)
 - `EGRESS=` line is non-empty — if `(unavailable)`, that means `SPRITES_TOKEN`

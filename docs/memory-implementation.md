@@ -96,7 +96,7 @@ template/.pi/extensions/memory/
 | File | Change |
 |---|---|
 | `template/.pi/settings.json` | Add `".pi/extensions/memory/index.ts"` after identity |
-| `template/.pi/agents/self.md` | Brief one-paragraph pointer to memory section |
+| `template/AGENTS.md` | Brief one-paragraph pointer to memory section |
 | `template/.gitignore` | Add `memory/` |
 | `ROADMAP.md` | Mark Phase 1.0 in progress, link this doc |
 
@@ -259,7 +259,7 @@ export default function (pi: any) {
 ```json
 {
   "extensions": [
-    ".pi/extensions/identity/index.ts",
+    ".pi/extensions/use-max/index.ts",
     ".pi/extensions/memory/index.ts"
   ]
 }
@@ -268,9 +268,9 @@ export default function (pi: any) {
 Order matters — memory must run after identity so `ctx.getSystemPrompt()`
 returns identity's persona output.
 
-### Self.md addition
+### AGENTS.md addition
 
-Append a one-paragraph section to `template/.pi/agents/self.md`:
+Append a one-paragraph section to `template/AGENTS.md`:
 
 ```markdown
 ## Memory
@@ -403,7 +403,7 @@ network. No identity — you are not the agent itself, you are its consolidator.
 1. Write `template/.pi/extensions/memory/auto-memory-prompt.md`.
 2. Write `template/.pi/extensions/memory/index.ts` (Phase 1.0 only — skip dream tool).
 3. Update `template/.pi/settings.json` to load the extension.
-4. Update `template/.pi/agents/self.md` with memory paragraph.
+4. Update `template/AGENTS.md` with memory paragraph.
 5. Update `template/.gitignore` to exclude `memory/`.
 6. `bun build` to verify compile.
 7. `cells kill <name> && cells birth <name>` against a clean Sprite.

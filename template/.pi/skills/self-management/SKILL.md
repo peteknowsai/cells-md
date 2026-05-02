@@ -66,10 +66,10 @@ registration API:** see `extensions.md` under "Reference" below.
 
 ## 3. Morph your persona
 
-Your identity lives at `.pi/agents/self.md`. The body (after frontmatter) is
-your system prompt. When the user asks for a durable behavioral change —
-"be more terse," "always confirm before X," "you specialize in Y" — edit
-`self.md` in place.
+Your identity lives at `AGENTS.md` in your agent root. The body (after
+frontmatter) is your system prompt. When the user asks for a durable
+behavioral change — "be more terse," "always confirm before X," "you
+specialize in Y" — edit `AGENTS.md` in place.
 
 Rules:
 - Keep it short. Every token loads on every conversation.
@@ -102,10 +102,10 @@ intent, or the user types `/skill:<name>`.
 
 ## When to use this skill
 
-- User asks you to "remember how to X" → write a skill or update self.md
+- User asks you to "remember how to X" → write a skill or update AGENTS.md
 - User asks for a capability you don't have → install a package or write
   an extension
-- User asks for a behavioral change ("from now on...") → update self.md
+- User asks for a behavioral change ("from now on...") → update AGENTS.md
 - You learn a procedure worth keeping → write a skill
 
 Don't pre-extend yourself speculatively. Wait for a concrete need.
