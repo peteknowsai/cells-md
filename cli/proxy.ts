@@ -658,12 +658,17 @@ const STYLE = `
           font-size: 0.8em; background: #8882; }
 `;
 
+// SVG emoji favicon — 🧬 (DNA). Inline data URL avoids a separate request.
+const FAVICON =
+  `data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E%F0%9F%A7%AC%3C/text%3E%3C/svg%3E`;
+
 function htmlPage(title: string, body: string): Response {
   const html = `<!doctype html>
 <html lang="en">
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>${title}</title>
+<link rel="icon" href="${FAVICON}">
 <style>${STYLE}</style>
 <body>
 ${body}
@@ -724,7 +729,7 @@ async function dashboardHtml(): Promise<Response> {
     .join("\n");
   const auth = await authRows();
   return htmlPage(
-    "cells",
+    "mother",
     `<h1>cells</h1>
     <p class="sub">Living cells in the fleet. Routed via <code>*.cells.md</code> through the mother.</p>
     <table>
@@ -746,7 +751,7 @@ function cellPageHtml(name: string): Response {
   const cell = readCells().find((c) => c.name === name);
   if (!cell) {
     return htmlPage(
-      `${name} \u2014 unknown`,
+      name,
       `<h1>${name}</h1>
       <p class="sub">No cell by that name in the registry.</p>
       <p><a href="https://mother.cells.md/">\u2190 fleet</a></p>`,
@@ -754,7 +759,7 @@ function cellPageHtml(name: string): Response {
   }
   const activity = readActivity(name, 30).map((l) => `<li>${l}</li>`).join("\n");
   return htmlPage(
-    `${name} \u00b7 cells`,
+    name,
     `<h1>${name}</h1>
     <p class="sub">Born ${cell.born}</p>
     <h2>Activity</h2>

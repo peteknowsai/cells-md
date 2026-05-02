@@ -1234,6 +1234,12 @@ async function dreamMother(): Promise<boolean> {
   return ok;
 }
 
+async function cmdSee(name: string) {
+  const url = `https://${name}.cells.md`;
+  console.log(`opening ${url}`);
+  Bun.spawn(["open", url], { stdout: "inherit", stderr: "inherit" });
+}
+
 async function cmdDream(arg: string) {
   if (!arg) {
     console.error("usage: cells dream <name|mother|--all>");
@@ -1885,6 +1891,7 @@ switch (sub) {
   case "unschedule-dreams":  await cmdUnscheduleDreams(); break;
   case "doctor":             await cmdDoctor(); break;
   case "shell":              await cmdShell(needName(rest, "shell")); break;
+  case "see":                await cmdSee(needName(rest, "see")); break;
   default:
     console.log("usage:");
     console.log("  cells pi                    open the mother Pi TUI (alias: cells talk mother)");
@@ -1906,6 +1913,7 @@ switch (sub) {
     console.log("  cells sync [name]           pull cell markdown into ~/Obsidian/cells/ (default: all + mother)");
     console.log("  cells doctor                inspect mother OAuth state + proxy health (run when cells act 401-y)");
     console.log("  cells shell <name>          drop into a bash shell on a cell (separate tmux from the agent; Ctrl+D exits)");
+    console.log("  cells see <name>            open https://<name>.cells.md in the browser");
     console.log("  cells schedule-dreams       install launchd plist (nightly 4am, all cells)");
     console.log("  cells unschedule-dreams     remove launchd plist");
     console.log("  cells kill <name>... [-y]   destroy one or more cells (irreversible) (alias: destroy)");
