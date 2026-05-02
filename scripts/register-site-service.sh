@@ -25,6 +25,12 @@ SCRIPT="cd /home/sprite/agent/site && for f in /home/sprite/.bashrc.d/*; do . \$
 
 PAYLOAD=$(jq -n --arg s "$SCRIPT" '{cmd:"bash",args:["-lc",$s],workdir:"/home/sprite/agent/site"}')
 
+# Delete first — the sprites API treats PUT as create-only and silently
+# no-ops on an existing service, leaving stale config in place.
+curl -fsS -X DELETE \
+  -H "Authorization: Bearer $TOKEN" \
+  "https://api.sprites.dev/v1/sprites/$NAME/services/site" > /dev/null 2>&1 || true
+
 curl -fsS -X PUT \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
