@@ -2310,6 +2310,7 @@ async function syncOneCell(name: string): Promise<{ name: string; status: string
 async function writeRoster(rows: Array<{ name: string; status: string; lastRunningAt: string | null }>): Promise<void> {
   const lines = ["# Cells", "", "| name | status | last seen | dashboard |", "|---|---|---|---|"];
   lines.push(`| mother | local | — | [→](mother/) |`);
+  lines.push(`| pulse  | local | — | [→](pulse/) |`);
   for (const r of rows) {
     lines.push(`| ${r.name} | ${r.status} | ${fmtAge(r.lastRunningAt)} | [→](${r.name}/) |`);
   }

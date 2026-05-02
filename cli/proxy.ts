@@ -142,10 +142,29 @@ let blockedUntilMs = 0;
 let inFlight: Promise<void> | null = null;
 let lastRefresh: { at: number; outcome: "ok" | "429" | "401" | "error"; detail?: string } | null = null;
 
+// Cache of valid client bearers. Always includes SHARED_SECRET (cells use this
+// via ANTHROPIC_AUTH_TOKEN). Also includes the *current* anthropic OAuth access
+// token so mother's local pi — which reads auth.json directly and sends that
+// OAuth token as Bearer — can authenticate to its own proxy. Updated on every
+// successful refresh + on startup.
+const validBearers = new Set<string>([SHARED_SECRET]);
+
+async function refreshValidBearers(): Promise<void> {
+  try {
+    const { access } = await readAccessToken();
+    validBearers.clear();
+    validBearers.add(SHARED_SECRET);
+    validBearers.add(access);
+  } catch { /* auth.json missing/corrupt — fall back to SHARED_SECRET only */ }
+}
+
 async function atomicWriteAuth(json: AuthJson): Promise<void> {
   const tmp = AUTH_PATH + ".tmp";
   await writeFile(tmp, JSON.stringify(json, null, 2), { mode: 0o600 });
   await rename(tmp, AUTH_PATH);
+  // Whenever we rewrite auth.json (anthropic OR codex refresh), refresh the
+  // bearer cache so mother's pi can keep authenticating after a token rotate.
+  await refreshValidBearers();
 }
 
 async function performRefresh(): Promise<void> {
@@ -422,7 +441,7 @@ function checkClientAuth(req: Request): { ok: true; cell: string } | { ok: false
   const auth = req.headers.get("authorization") ?? "";
   const m = auth.match(/^Bearer\s+(.+)$/i);
   if (!m) return { ok: false, reason: "missing Bearer auth" };
-  if (m[1] !== SHARED_SECRET) return { ok: false, reason: "bad bearer" };
+  if (!validBearers.has(m[1])) return { ok: false, reason: "bad bearer" };
   const cell = req.headers.get("x-cell-name") ?? "unknown";
   return { ok: true, cell };
 }
@@ -907,6 +926,11 @@ async function forwardToCell(req: Request, name: string): Promise<Response> {
 }
 
 // ───────────────────── server ─────────────────────
+
+// Prime the bearer cache so mother's local pi can authenticate from the very
+// first request (otherwise her OAuth bearer wouldn't be in the set yet and
+// would 401 until the first auth.json refresh).
+await refreshValidBearers();
 
 const server = Bun.serve({
   port: PORT,
