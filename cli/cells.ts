@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 import { $ } from "bun";
-import { readFile, writeFile, mkdir, unlink, symlink, cp, readdir, stat, rm } from "node:fs/promises";
+import { readFile, writeFile, mkdir, unlink, symlink, cp, readdir, stat, rm, rename } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { dirname, join, basename } from "node:path";
 import { existsSync, statSync } from "node:fs";
@@ -931,7 +931,38 @@ async function cmdDestroyOne(name: string): Promise<boolean> {
   const reg = await loadRegistry();
   reg.cells = reg.cells.filter((c) => c.name !== name);
   await saveRegistry(reg);
+
+  // Evict pulse state for the destroyed cell so the scheduler doesn't keep
+  // trying to fire to a non-existent target. Best-effort — pulse tolerates
+  // orphan state, this just keeps the digest clean.
+  await evictPulseStateForCell(name);
   return true;
+}
+
+async function evictPulseStateForCell(name: string): Promise<void> {
+  const cachePath = join(homedir(), ".cells", "pulse-cache", `${name}.json`);
+  if (existsSync(cachePath)) {
+    try { await unlink(cachePath); } catch { /* best-effort */ }
+  }
+  const statePath = join(homedir(), ".cells", "pulse.json");
+  if (!existsSync(statePath)) return;
+  try {
+    const state = JSON.parse(await readFile(statePath, "utf-8"));
+    if (!state.lastFire || typeof state.lastFire !== "object") return;
+    const cellPrefix = `${name}:`;
+    let pruned = 0;
+    for (const k of Object.keys(state.lastFire)) {
+      if (k.startsWith(cellPrefix)) {
+        delete state.lastFire[k];
+        pruned++;
+      }
+    }
+    if (pruned > 0) {
+      const tmp = statePath + ".tmp";
+      await writeFile(tmp, JSON.stringify(state, null, 2));
+      await rename(tmp, statePath);
+    }
+  } catch { /* corrupt state — leave alone, pulse will read or repair on next run */ }
 }
 
 async function cmdDestroy(args: string[]) {
