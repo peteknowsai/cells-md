@@ -1783,9 +1783,14 @@ async function setupMotherVault(): Promise<void> {
   try { await unlink(memLink); } catch { /* not present */ }
   await symlink(join(CELL_REPO, "state", "memory"), memLink);
 
-  // .pi/skills — markdown tree, mirrors mother's .pi/skills/.
+  // .pi/skills and .pi/prompts — markdown trees, mirror mother's layout.
   const skillsSrc = join(CELL_REPO, ".pi", "skills");
   await copyMarkdownTree(skillsSrc, join(vault, ".pi", "skills"));
+
+  const promptsSrc = join(CELL_REPO, ".pi", "prompts");
+  if (existsSync(promptsSrc)) {
+    await copyMarkdownTree(promptsSrc, join(vault, ".pi", "prompts"));
+  }
 
   // Synthesized extension docs land under .pi/extensions/<name>.md as
   // siblings to where each extension's <name>/ directory would be.
