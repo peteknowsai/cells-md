@@ -73,10 +73,11 @@ for F in $(find "${SEARCH_ROOTS[@]}" -name anthropic.js -path '*providers*' 2>/d
   patched_anthropic_adaptive=$((patched_anthropic_adaptive+1))
 done
 
-# 4. pi-coding-agent THINKING_LEVELS arrays include "adaptive".
+# 4. pi-coding-agent THINKING_LEVELS arrays include "adaptive". 0.72
+# dropped THINKING_LEVELS_WITH_XHIGH; patch whichever array(s) exist.
 for F in $(find "${SEARCH_ROOTS[@]}" -name agent-session.js -path '*core*' 2>/dev/null); do
   if grep -q 'THINKING_LEVELS.*"adaptive"' "$F"; then continue; fi
-  if ! grep -q 'THINKING_LEVELS_WITH_XHIGH' "$F"; then continue; fi
+  if ! grep -q 'const THINKING_LEVELS' "$F"; then continue; fi
   [ -f "$F.bak" ] || cp "$F" "$F.bak"
   sed -i \
     -e 's|const THINKING_LEVELS = \["off", "minimal", "low", "medium", "high"\];|const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "adaptive"];|' \
