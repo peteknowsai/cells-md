@@ -1466,10 +1466,11 @@ async function pullMarkdown(name: string, vaultPath: string): Promise<{ persona:
  *     left in place for browsing.
  *   - `AGENTS.md` (the cell's thin entrypoint) → removed; renderAgents
  *     writes a richer dashboard AGENTS.md in its place.
+ *   - `.pi/` → renamed to `pi/` so Obsidian's file explorer surfaces it
+ *     (Obsidian hides dotfile directories by default).
  *   - Everything else → left exactly where it was pulled. The vault
  *     mirrors the cell's directory layout: .md anatomy files at root,
- *     .pi/skills/, .pi/prompts/, state/memory/, state/wiki/ all
- *     preserved.
+ *     pi/skills/, pi/prompts/, state/memory/, state/wiki/ all preserved.
  */
 async function restructureVault(vaultPath: string): Promise<{ persona: string | null }> {
   let persona: string | null = null;
@@ -1485,6 +1486,16 @@ async function restructureVault(vaultPath: string): Promise<{ persona: string | 
   const agentsSrc = join(vaultPath, "AGENTS.md");
   if (existsSync(agentsSrc)) await rm(agentsSrc);
 
+  // Rename .pi → pi so Obsidian shows the dir. The cell uses .pi (harness
+  // convention); the vault drops the dot purely for visibility.
+  const pulledPi = join(vaultPath, ".pi");
+  const vaultPi = join(vaultPath, "pi");
+  if (existsSync(pulledPi)) {
+    if (existsSync(vaultPi)) await rm(vaultPi, { recursive: true, force: true });
+    const { rename } = await import("node:fs/promises");
+    await rename(pulledPi, vaultPi);
+  }
+
   return { persona };
 }
 
@@ -1495,7 +1506,7 @@ async function pullExtensionDocs(name: string, vaultPath: string): Promise<Array
   const exts = list.stdout.split("\n").map((s) => s.trim()).filter(Boolean);
   // Mirror the cell layout: synthesized doc lands as .pi/extensions/<name>.md
   // (sibling to where each extension's <name>/index.ts would be on the cell).
-  const extDir = join(vaultPath, ".pi", "extensions");
+  const extDir = join(vaultPath, "pi", "extensions");
   await mkdir(extDir, { recursive: true });
   const results: Array<{ name: string; meta: ExtensionMeta }> = [];
   for (const ext of exts) {
@@ -1670,7 +1681,7 @@ function renderAgents(
       summary = summary.replace(prefix, "");
       summary = summary.slice(0, 160);
       const tail = summary ? ` — ${summary}` : "";
-      out.push(`- [${e.name}](.pi/extensions/${e.name}.md)${tail}`);
+      out.push(`- [${e.name}](pi/extensions/${e.name}.md)${tail}`);
     }
     out.push("");
   }
@@ -1678,7 +1689,7 @@ function renderAgents(
   // Skills.
   if (skills.length > 0) {
     out.push("## Skills", "");
-    for (const s of skills) out.push(`- [${s}](.pi/skills/${s}/SKILL.md)`);
+    for (const s of skills) out.push(`- [${s}](pi/skills/${s}/SKILL.md)`);
     out.push("");
   }
 
@@ -1772,7 +1783,9 @@ async function setupMotherVault(): Promise<void> {
   for (const f of ["README.md", "AGENTS.md", "persona.md", ...ANATOMY_FILES]) {
     if (existsSync(join(vault, f))) await rm(join(vault, f));
   }
-  for (const d of [".pi", "state", "extensions", "skills", "prompts", "memory", "wiki"]) {
+  // Wipe both old layouts: ".pi" (post-mirror, pre-no-dot) and "pi" (current),
+  // plus the older hoisted dirs (extensions/, skills/, prompts/, memory/, wiki/).
+  for (const d of [".pi", "pi", "state", "extensions", "skills", "prompts", "memory", "wiki"]) {
     if (existsSync(join(vault, d))) await rm(join(vault, d), { recursive: true, force: true });
   }
 
@@ -1785,25 +1798,25 @@ async function setupMotherVault(): Promise<void> {
 
   // .pi/skills and .pi/prompts — markdown trees, mirror mother's layout.
   const skillsSrc = join(CELL_REPO, ".pi", "skills");
-  await copyMarkdownTree(skillsSrc, join(vault, ".pi", "skills"));
+  await copyMarkdownTree(skillsSrc, join(vault, "pi", "skills"));
 
   const promptsSrc = join(CELL_REPO, ".pi", "prompts");
   if (existsSync(promptsSrc)) {
-    await copyMarkdownTree(promptsSrc, join(vault, ".pi", "prompts"));
+    await copyMarkdownTree(promptsSrc, join(vault, "pi", "prompts"));
   }
 
   // Synthesized extension docs land under .pi/extensions/<name>.md as
   // siblings to where each extension's <name>/ directory would be.
   const exts = await readLocalExtensionDocs(
     join(CELL_REPO, ".pi", "extensions"),
-    join(vault, ".pi", "extensions"),
+    join(vault, "pi", "extensions"),
   );
 
   // .pi/settings.json — copied verbatim so Pete can browse harness config
   // (extensions list, default model, enabled models) in Obsidian.
   const settingsSrc = join(CELL_REPO, ".pi", "settings.json");
   if (existsSync(settingsSrc)) {
-    await cp(settingsSrc, join(vault, ".pi", "settings.json"));
+    await cp(settingsSrc, join(vault, "pi", "settings.json"));
   }
 
   // Copy anatomy files verbatim. Skip ones that don't exist on mother.
@@ -1816,7 +1829,7 @@ async function setupMotherVault(): Promise<void> {
   const soulPath = join(CELL_REPO, "SOUL.md");
   const persona = existsSync(soulPath) ? await readFile(soulPath, "utf-8") : null;
 
-  const skills = await listSkills(join(vault, ".pi", "skills"));
+  const skills = await listSkills(join(vault, "pi", "skills"));
   const mem = await gatherMemoryContext(join(CELL_REPO, "state", "memory"));
   const md = renderAgents("mother", null, persona, exts, skills, mem);
   await writeFile(join(vault, "AGENTS.md"), md);
@@ -1833,7 +1846,9 @@ async function syncOneCell(name: string): Promise<{ name: string; status: string
   for (const f of ["README.md", "AGENTS.md", "persona.md", ...ANATOMY_FILES]) {
     if (existsSync(join(vault, f))) await rm(join(vault, f));
   }
-  for (const d of [".pi", "state", "extensions", "skills", "prompts", "memory", "yearnings", "wiki"]) {
+  // Wipe both old layouts: ".pi" (post-mirror, pre-no-dot) and "pi" (current),
+  // plus the older hoisted dirs.
+  for (const d of [".pi", "pi", "state", "extensions", "skills", "prompts", "memory", "yearnings", "wiki"]) {
     if (existsSync(join(vault, d))) await rm(join(vault, d), { recursive: true, force: true });
   }
 
@@ -1843,7 +1858,7 @@ async function syncOneCell(name: string): Promise<{ name: string; status: string
     console.error(`  warn: api failed for ${name}: ${(e as Error).message}`);
     return null;
   });
-  const skills = await listSkills(join(vault, ".pi", "skills"));
+  const skills = await listSkills(join(vault, "pi", "skills"));
   const mem = await gatherMemoryContext(join(vault, "state", "memory"));
   const md = renderAgents(name, info, persona, exts, skills, mem);
   await writeFile(join(vault, "AGENTS.md"), md);
