@@ -1425,8 +1425,10 @@ async function pullMarkdown(name: string, vaultPath: string): Promise<{ persona:
   // Pull the agent's anatomy files at the root (AGENTS.md is the entrypoint;
   // SOUL/IDENTITY/TOOLS/CELLS/CONTACTS/MEMORY/HEARTBEAT are the sharded
   // OpenClaw-style files that compose into systemPrompt or live as pure
-  // observability), plus state/ and the .pi/ markdown trees.
-  const findScript = `cd /home/sprite/agent && find AGENTS.md SOUL.md IDENTITY.md TOOLS.md CELLS.md CONTACTS.md MEMORY.md HEARTBEAT.md state/memory state/wiki .pi/skills .pi/prompts \\( -name '*.md' -o -name 'SKILL.md' \\) -type f 2>/dev/null | tar czf - -T -`;
+  // observability), plus state/ and the .pi/ markdown trees, plus
+  // .pi/settings.json so Pete can browse harness config directly in
+  // Obsidian. tar emits two streams (md + json) joined by a single find.
+  const findScript = `cd /home/sprite/agent && { find AGENTS.md SOUL.md IDENTITY.md TOOLS.md CELLS.md CONTACTS.md MEMORY.md HEARTBEAT.md state/memory state/wiki .pi/skills .pi/prompts \\( -name '*.md' -o -name 'SKILL.md' \\) -type f 2>/dev/null; [ -f .pi/settings.json ] && echo .pi/settings.json; } | tar czf - -T -`;
   // Post-extract we collapse state/memory -> memory and state/wiki -> wiki so
   // the vault stays flat. Pete reads it in Obsidian; one fewer level to click.
   const send = Bun.spawn(["sprite", "exec", "-s", name, "--", "bash", "-lc", findScript], {
@@ -1791,6 +1793,13 @@ async function setupMotherVault(): Promise<void> {
     join(CELL_REPO, ".pi", "extensions"),
     join(vault, ".pi", "extensions"),
   );
+
+  // .pi/settings.json — copied verbatim so Pete can browse harness config
+  // (extensions list, default model, enabled models) in Obsidian.
+  const settingsSrc = join(CELL_REPO, ".pi", "settings.json");
+  if (existsSync(settingsSrc)) {
+    await cp(settingsSrc, join(vault, ".pi", "settings.json"));
+  }
 
   // Copy anatomy files verbatim. Skip ones that don't exist on mother.
   for (const f of ANATOMY_FILES) {
