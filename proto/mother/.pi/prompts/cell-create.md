@@ -19,7 +19,7 @@ Parse the JSON. It has six fields:
   This becomes the `<THINKING>` substitution in the birth ritual.
 - `extensions` — array of *in-tree* extension names the cell should keep
   (any subset of `memory`, `mentality`, `wiki`, `dream`). May be empty.
-  Birth pushes the full template, then deletes the unselected ones.
+  Birth pushes the full DNA, then deletes the unselected ones.
   This becomes the `<EXTENSIONS>` substitution in the birth ritual.
 - `packages` — array of npm/git package short names to install via
   `pi install` (e.g. `pi-web-access`). May be empty. This becomes the

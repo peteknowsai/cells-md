@@ -42,7 +42,7 @@ A one-time `./bootstrap <namespace> <domain>` at first clone:
 
 - `mv cli/cells.ts cli/<namespace>.ts`
 - update `package.json` `bin` entry
-- `mv template/bin/cells template/bin/<namespace>`
+- `mv proto/mother/dna/bin/cells proto/mother/dna/bin/<namespace>`
 - update internal references (the birth skill, the on-sprite symlink
   path, anywhere `bin/cells` is hardcoded)
 - bake the domain into the renamed CLI as a constant (mother host
@@ -52,7 +52,7 @@ Skip bootstrap → defaults stay (`cells`, `cells.md`).
 
 ### How the binary knows its namespace
 
-Both CLIs (`cli/<ns>.ts` on Mac, `template/bin/<ns>` on each sprite)
+Both CLIs (`cli/<ns>.ts` on Mac, `proto/mother/dna/bin/<ns>` on each sprite)
 read their own basename via `argv[1]` at startup. No config file
 needed — the filename *is* the configuration.
 
@@ -68,7 +68,7 @@ const fromSpriteName = (s: string) =>
 - `cli/<ns>.ts`: every Sprites API call wraps name in `toSpriteName`;
   every response unwraps via `fromSpriteName`. Registry stays in
   user-facing form (still keyed by `pete`, not `cells-pete`).
-- `template/bin/<ns>`: same translation. `cells list` filters API
+- `proto/mother/dna/bin/<ns>`: same translation. `cells list` filters API
   output to entries that start with `<NAMESPACE>-`. Optionally a
   second section "other sprites in org" for visibility, or just hide
   them.
@@ -88,7 +88,7 @@ arg; it gets baked in as a constant.
 
 Configuring DNS + the cloudflared tunnel for a new domain is **manual
 in Phase A** — same process documented in
-`memory/project_mother_proxy.md`. Bootstrap can print the commands you
+`proto/mother/state/memory/project_mother_proxy.md`. Bootstrap can print the commands you
 need to run rather than execute them itself.
 
 ## Phasing

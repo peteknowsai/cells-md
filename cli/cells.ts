@@ -8,7 +8,11 @@ import { fileURLToPath } from "node:url";
 import * as readline from "node:readline/promises";
 
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
-const CELL_REPO = dirname(SCRIPT_DIR);
+const REPO_ROOT = dirname(SCRIPT_DIR);
+const PROTO_DIR = join(REPO_ROOT, "proto");
+const MOTHER_ROOT = join(PROTO_DIR, "mother");
+const PULSE_ROOT = join(PROTO_DIR, "pulse");
+const DNA_DIR = join(MOTHER_ROOT, "dna");
 const REGISTRY_DIR = join(homedir(), ".cells");
 const REGISTRY_PATH = join(REGISTRY_DIR, "cells.json");
 
@@ -27,7 +31,7 @@ const MODEL_IDS = {
 type ModelKey = keyof typeof MODEL_IDS;
 
 // In-tree extensions a user can opt into at create time. Each lives at
-// template/.pi/extensions/<name>/ — birth pushes the whole template, then
+// proto/mother/dna/.pi/extensions/<name>/ — birth pushes the whole dna, then
 // deletes the unselected ones from the cell.
 const OPTIONAL_EXTENSIONS = ["memory", "mentality", "wiki", "dream"] as const;
 type OptionalExtension = (typeof OPTIONAL_EXTENSIONS)[number];
@@ -407,7 +411,7 @@ async function selectMany(
 
 function spawnInRepo(cmd: string[], env?: Record<string, string>) {
   return Bun.spawn(cmd, {
-    cwd: CELL_REPO,
+    cwd: MOTHER_ROOT,
     env: env ? { ...process.env, ...env } : undefined,
     stdin: "inherit",
     stdout: "inherit",
@@ -461,7 +465,7 @@ async function launchMotherTui(extraArgs: string[] = []) {
   // Pi persists sessions to ~/.pi/agent/sessions/ on its own, so closing the
   // terminal and re-running picks up where you left off.
   const proc = Bun.spawn(["pi", ...extraArgs], {
-    cwd: CELL_REPO,
+    cwd: MOTHER_ROOT,
     stdin: "inherit",
     stdout: "inherit",
     stderr: "inherit",
@@ -561,19 +565,19 @@ async function cmdShell(name: string) {
     // (Future: when mother might run on a dedicated host, dispatch via
     // ~/.cells/mother.json — see docs/namespacing.md for the broader plan.)
     console.log(`mother lives on this Mac. her anatomy:`);
-    console.log(`  entrypoint: ${CELL_REPO}/AGENTS.md         (cross-harness contract)`);
-    console.log(`  soul:       ${CELL_REPO}/SOUL.md           (persona — read by use-max into systemPrompt)`);
-    console.log(`  identity:   ${CELL_REPO}/IDENTITY.md       (metadata: name, model, provider)`);
-    console.log(`  tools:      ${CELL_REPO}/TOOLS.md          (capability inventory)`);
-    console.log(`  contacts:   ${CELL_REPO}/CONTACTS.md       (who she interacts with)`);
-    console.log(`  memory ptr: ${CELL_REPO}/MEMORY.md         (root-level pointer to state/memory/)`);
-    console.log(`  heartbeat:  ${CELL_REPO}/HEARTBEAT.md      (declared schedule)`);
-    console.log(`  config:     ${CELL_REPO}/.pi/settings.json`);
-    console.log(`  extensions: ${CELL_REPO}/.pi/extensions/`);
-    console.log(`  skills:     ${CELL_REPO}/.pi/skills/`);
-    console.log(`  memory:     ${CELL_REPO}/state/memory/`);
+    console.log(`  entrypoint: ${MOTHER_ROOT}/AGENTS.md         (cross-harness contract)`);
+    console.log(`  soul:       ${MOTHER_ROOT}/SOUL.md           (persona — read by use-max into systemPrompt)`);
+    console.log(`  identity:   ${MOTHER_ROOT}/IDENTITY.md       (metadata: name, model, provider)`);
+    console.log(`  tools:      ${MOTHER_ROOT}/TOOLS.md          (capability inventory)`);
+    console.log(`  contacts:   ${MOTHER_ROOT}/CONTACTS.md       (who she interacts with)`);
+    console.log(`  memory ptr: ${MOTHER_ROOT}/MEMORY.md         (root-level pointer to state/memory/)`);
+    console.log(`  heartbeat:  ${MOTHER_ROOT}/HEARTBEAT.md      (declared schedule)`);
+    console.log(`  config:     ${MOTHER_ROOT}/.pi/settings.json`);
+    console.log(`  extensions: ${MOTHER_ROOT}/.pi/extensions/`);
+    console.log(`  skills:     ${MOTHER_ROOT}/.pi/skills/`);
+    console.log(`  memory:     ${MOTHER_ROOT}/state/memory/`);
     console.log(`  pi data:    ${process.env.HOME}/.pi/agent/  (sessions, auth.json — shared with the proxy)`);
-    console.log(`  runs from:  ${CELL_REPO}  (project root; pi auto-discovers .pi/ here)`);
+    console.log(`  runs from:  ${MOTHER_ROOT}  (mother's agent root; pi auto-discovers .pi/ here)`);
     return;
   }
   await requireCell(name);
@@ -1218,7 +1222,6 @@ async function cmdUnscheduleDreams() {
 
 async function dreamMother(): Promise<boolean> {
   console.log(`→ dreaming mother`);
-  const repoDir = dirname(dirname(fileURLToPath(import.meta.url)));
   const proc = Bun.spawn(
     [
       "claude",
@@ -1227,7 +1230,7 @@ async function dreamMother(): Promise<boolean> {
       "--dangerously-skip-permissions",
     ],
     {
-      cwd: repoDir,
+      cwd: MOTHER_ROOT,
       stdin: "ignore",
       stdout: "inherit",
       stderr: "inherit",
@@ -1794,13 +1797,13 @@ async function setupMotherVault(): Promise<void> {
   await mkdir(join(vault, "state"), { recursive: true });
   const memLink = join(vault, "state", "memory");
   try { await unlink(memLink); } catch { /* not present */ }
-  await symlink(join(CELL_REPO, "state", "memory"), memLink);
+  await symlink(join(MOTHER_ROOT, "state", "memory"), memLink);
 
   // .pi/skills and .pi/prompts — markdown trees, mirror mother's layout.
-  const skillsSrc = join(CELL_REPO, ".pi", "skills");
+  const skillsSrc = join(MOTHER_ROOT, ".pi", "skills");
   await copyMarkdownTree(skillsSrc, join(vault, "pi", "skills"));
 
-  const promptsSrc = join(CELL_REPO, ".pi", "prompts");
+  const promptsSrc = join(MOTHER_ROOT, ".pi", "prompts");
   if (existsSync(promptsSrc)) {
     await copyMarkdownTree(promptsSrc, join(vault, "pi", "prompts"));
   }
@@ -1808,29 +1811,29 @@ async function setupMotherVault(): Promise<void> {
   // Synthesized extension docs land under .pi/extensions/<name>.md as
   // siblings to where each extension's <name>/ directory would be.
   const exts = await readLocalExtensionDocs(
-    join(CELL_REPO, ".pi", "extensions"),
+    join(MOTHER_ROOT, ".pi", "extensions"),
     join(vault, "pi", "extensions"),
   );
 
   // .pi/settings.json — copied verbatim so Pete can browse harness config
   // (extensions list, default model, enabled models) in Obsidian.
-  const settingsSrc = join(CELL_REPO, ".pi", "settings.json");
+  const settingsSrc = join(MOTHER_ROOT, ".pi", "settings.json");
   if (existsSync(settingsSrc)) {
     await cp(settingsSrc, join(vault, "pi", "settings.json"));
   }
 
   // Copy anatomy files verbatim. Skip ones that don't exist on mother.
   for (const f of ANATOMY_FILES) {
-    const src = join(CELL_REPO, f);
+    const src = join(MOTHER_ROOT, f);
     if (existsSync(src)) await cp(src, join(vault, f));
   }
 
   // Persona body for the synthesized AGENTS.md dashboard.
-  const soulPath = join(CELL_REPO, "SOUL.md");
+  const soulPath = join(MOTHER_ROOT, "SOUL.md");
   const persona = existsSync(soulPath) ? await readFile(soulPath, "utf-8") : null;
 
   const skills = await listSkills(join(vault, "pi", "skills"));
-  const mem = await gatherMemoryContext(join(CELL_REPO, "state", "memory"));
+  const mem = await gatherMemoryContext(join(MOTHER_ROOT, "state", "memory"));
   const md = renderAgents("mother", null, persona, exts, skills, mem);
   await writeFile(join(vault, "AGENTS.md"), md);
 }

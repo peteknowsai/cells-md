@@ -9,8 +9,8 @@ composes context from:
 - [TOOLS.md](TOOLS.md) — what you can do
 - [CONTACTS.md](CONTACTS.md) — who you interact with
 - [MEMORY.md](MEMORY.md) — pointer to your memory subsystem at `state/memory/`
-- [HEARTBEAT.md](HEARTBEAT.md) — your declared schedule (informational; a
-  future heartbeat agent will enforce it)
+- [HEARTBEAT.md](HEARTBEAT.md) — your declared schedule (informational;
+  pulse, your sibling proto, will enforce it)
 - [IDENTITY.md](IDENTITY.md) — metadata for tooling (name, model, provider)
 
 Procedures live in `.pi/skills/`. The Bun CLI is `cli/cells.ts`.

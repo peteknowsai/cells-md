@@ -3,7 +3,6 @@
 > Concrete plan for building Cell's L1 memory system. Reference docs:
 > - `docs/auto-dream-memory.md` — pattern guidelines (Swain-derived)
 > - `ROADMAP.md` Phase 1 — original scope
-> - `~/Projects/cells/PI-FIRST-PARTY-BILLING-RECIPE.md` — billing constraints we must preserve
 
 ## Goal
 
@@ -78,7 +77,7 @@ ephemeral conversation state. If MEMORY.md feels messy or outdated, call
 `dream`.
 ```
 
-This text lives in `template/.pi/extensions/memory/auto-memory-prompt.md`,
+This text lives in `proto/mother/dna/.pi/extensions/memory/auto-memory-prompt.md`,
 loaded by the extension and templated with current MEMORY.md content.
 
 ## Phase 1.0 — the basic write/read loop
@@ -86,7 +85,7 @@ loaded by the extension and templated with current MEMORY.md content.
 ### Files to create
 
 ```
-template/.pi/extensions/memory/
+proto/mother/dna/.pi/extensions/memory/
 ├── index.ts                    ← the extension
 └── auto-memory-prompt.md       ← static template injected into system prompt
 ```
@@ -95,15 +94,15 @@ template/.pi/extensions/memory/
 
 | File | Change |
 |---|---|
-| `template/.pi/settings.json` | Add `".pi/extensions/memory/index.ts"` after identity |
-| `template/AGENTS.md` | Brief one-paragraph pointer to memory section |
-| `template/.gitignore` | Add `memory/` |
+| `proto/mother/dna/.pi/settings.json` | Add `".pi/extensions/memory/index.ts"` after identity |
+| `proto/mother/dna/AGENTS.md` | Brief one-paragraph pointer to memory section |
+| `proto/mother/dna/.gitignore` | Add `memory/` |
 | `ROADMAP.md` | Mark Phase 1.0 in progress, link this doc |
 
-Birth ritual already pushes the whole `template/` to `/home/sprite/agent/`,
+Birth ritual already pushes the whole `proto/mother/dna/` to `/home/sprite/agent/`,
 so the extension comes along for free. No birth.md changes required.
 
-### Extension shape (`template/.pi/extensions/memory/index.ts`)
+### Extension shape (`proto/mother/dna/.pi/extensions/memory/index.ts`)
 
 ```typescript
 import { Type } from "@sinclair/typebox";
@@ -270,7 +269,7 @@ returns identity's persona output.
 
 ### AGENTS.md addition
 
-Append a one-paragraph section to `template/AGENTS.md`:
+Append a one-paragraph section to `proto/mother/dna/AGENTS.md`:
 
 ```markdown
 ## Memory
@@ -284,7 +283,7 @@ itself.
 
 ### Verification (Phase 1.0)
 
-1. `bun build template/.pi/extensions/memory/index.ts --target=node` — clean.
+1. `bun build proto/mother/dna/.pi/extensions/memory/index.ts --target=node` — clean.
 2. `cells kill <name> && cells birth <name>` — fresh agent.
 3. `cells talk <name>` — agent should mention having a memory directory.
 4. `sprite exec -s <name> -- ls /home/sprite/agent/memory/` — should show MEMORY.md and yearnings/.
@@ -298,13 +297,13 @@ itself.
 ### Files to create
 
 ```
-template/.pi/extensions/memory/
+proto/mother/dna/.pi/extensions/memory/
 └── dream-ritual.md             ← system prompt for the dream subagent
 ```
 
 ### Files to modify
 
-`template/.pi/extensions/memory/index.ts` — add `dream` tool registration.
+`proto/mother/dna/.pi/extensions/memory/index.ts` — add `dream` tool registration.
 
 ### Dream tool implementation
 
@@ -400,11 +399,11 @@ network. No identity — you are not the agent itself, you are its consolidator.
 
 ## Order of work
 
-1. Write `template/.pi/extensions/memory/auto-memory-prompt.md`.
-2. Write `template/.pi/extensions/memory/index.ts` (Phase 1.0 only — skip dream tool).
-3. Update `template/.pi/settings.json` to load the extension.
-4. Update `template/AGENTS.md` with memory paragraph.
-5. Update `template/.gitignore` to exclude `memory/`.
+1. Write `proto/mother/dna/.pi/extensions/memory/auto-memory-prompt.md`.
+2. Write `proto/mother/dna/.pi/extensions/memory/index.ts` (Phase 1.0 only — skip dream tool).
+3. Update `proto/mother/dna/.pi/settings.json` to load the extension.
+4. Update `proto/mother/dna/AGENTS.md` with memory paragraph.
+5. Update `proto/mother/dna/.gitignore` to exclude `memory/`.
 6. `bun build` to verify compile.
 7. `cells kill <name> && cells birth <name>` against a clean Sprite.
 8. Run Phase 1.0 verification steps.

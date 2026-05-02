@@ -35,7 +35,7 @@ import { tmpdir } from "node:os";
  * Where memory lives depends on context:
  *   - On a Sprite (where the agent runs in /home/sprite/agent): use the
  *     sprite-side state dir.
- *   - On Pete's Mac (mother running in ~/Projects/cells): cwd/state/memory.
+ *   - On Pete's Mac (mother running in ~/Projects/cells/proto/mother, pulse in ~/Projects/cells/proto/pulse): cwd/state/memory.
  *   - Override via env var CELL_MEMORY_DIR.
  *
  * Both contexts get identical structure: MEMORY.md + topical files +

@@ -1,6 +1,6 @@
 ---
 name: health-check
-description: Run a thorough end-to-end health check on a cell. Covers the Sprite VM, the runtime stack (tmux/Pi/bun), auth (OAuth + shared secrets), the agent template (extensions + memory), and live agent behavior (responsiveness, tool calls, egress). Produces a one-table report with pass/fail per capability.
+description: Run a thorough end-to-end health check on a cell. Covers the Sprite VM, the runtime stack (tmux/Pi/bun), auth (OAuth + shared secrets), the agent DNA (extensions + memory), and live agent behavior (responsiveness, tool calls, egress). Produces a one-table report with pass/fail per capability.
 allowed-tools: [bash, sprite_exec, sprite_checkpoint, talk_to_agent, peek_agent_screen, read_agent_memory, report_outcome, read]
 ---
 

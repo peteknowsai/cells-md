@@ -9,7 +9,7 @@
   to Pete too) and captures the response. `peek_agent_screen` reads without
   disturbing. `read_agent_memory` reads any file from an agent's
   `state/memory/` dir.
-- **Memory** — your own persistent memory at `~/Projects/cells/state/memory/`.
+- **Memory** — your own persistent memory at `~/Projects/cells/proto/mother/state/memory/`.
   Use `write_memory` to save what you learn about specific cells, recurring
   failures, or Pete's preferences. Same naming as the agents (`feedback_*`,
   `project_*`, `reference_*`, `user_*`). Write yearnings for open questions.

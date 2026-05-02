@@ -18,12 +18,12 @@ anything inside it.
 **Includes:**
 
 - `cell` CLI: `pi`, `create`, `talk`, `list`, `sleep`, `wake`, `checkpoint`, `destroy`
-- Local mother Pi project (`SOUL.md` + sharded anatomy files at root + use-max extension + `package.json`) so it bills against Pro/Max via the [first-party billing recipe](~/Projects/cells/PI-FIRST-PARTY-BILLING-RECIPE.md)
-- `template/` — recipe-compliant cell-on-Sprite layout that birth pushes onto each Sprite
-- `.pi/skills/birth/SKILL.md` — birth ritual the mother follows:
+- Local mother Pi project at `proto/mother/` (`SOUL.md` + sharded anatomy files + use-max extension + `package.json`) so it bills against Pro/Max via the first-party billing recipe
+- `proto/mother/dna/` — recipe-compliant cell-on-Sprite layout that birth pushes onto each Sprite
+- `proto/mother/.pi/skills/birth/SKILL.md` — birth ritual the mother follows:
   - create the Sprite + configure egress (anthropic, bun.sh, npm, github)
   - install Bun on the Sprite
-  - tar+push `template/` to `/root/cell`, `sed` substitute `__NAME__`
+  - tar+push `proto/mother/dna/` to `/root/cell`, `sed` substitute `__NAME__`
   - run `bun install` on the Sprite
   - inject shared keys (`CELLS_PROXY_SECRET`, `EXA_API_KEY`, `SPRITES_TOKEN`) from `~/.cells/secrets.json` and patch pi-ai's model registry to route through `mother.cells.md`
   - write the `~/.bashrc` shim that auto-attaches `tmux new-session -A -s cell pi` on `sprite console`

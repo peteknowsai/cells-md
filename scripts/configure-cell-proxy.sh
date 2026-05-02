@@ -65,7 +65,7 @@ sed -i 's|__SECRET__|$SECRET|g' ~/.bashrc.d/site_proxy
 chmod 600 ~/.bashrc.d/site_proxy
 
 # 2. Run the cell's idempotent JS-patch script. It also fires automatically
-# as bun-install's postinstall hook (see template/package.json), so this
+# as bun-install's postinstall hook (see proto/mother/dna/package.json), so this
 # direct call is mainly for retrofits and re-runs after rotating secrets.
 if [ -x ~/agent/scripts/apply-pi-patches.sh ]; then
   bash ~/agent/scripts/apply-pi-patches.sh

@@ -104,7 +104,7 @@ export default function (pi: any) {
     name: "sprite_push",
     label: "Push directory to Sprite",
     description:
-      "Push a local directory's contents to a path on the Sprite via tar pipe. Creates the destination if missing. Use for shipping the agent template.",
+      "Push a local directory's contents to a path on the Sprite via tar pipe. Creates the destination if missing. Use for shipping the agent DNA.",
     parameters: Type.Object({
       name: Type.String({ description: "Sprite name." }),
       localPath: Type.String({ description: "Absolute local path to the directory whose contents will be pushed." }),

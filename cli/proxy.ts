@@ -39,12 +39,17 @@
 import { readFile, writeFile, rename } from "node:fs/promises";
 import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+
+const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
+const REPO_ROOT = dirname(SCRIPT_DIR);
+const MOTHER_ROOT = join(REPO_ROOT, "proto", "mother");
 
 const AUTH_PATH = join(homedir(), ".pi/agent/auth.json");
 const SECRETS_PATH = join(homedir(), ".cells/secrets.json");
 const CELLS_REGISTRY = join(homedir(), ".cells/cells.json");
-const ACTIVITY_PATH = join(homedir(), "Projects/cells/state/memory/project_cells_activity.md");
+const ACTIVITY_PATH = join(MOTHER_ROOT, "state/memory/project_cells_activity.md");
 const UPSTREAM = "https://api.anthropic.com";
 const CODEX_UPSTREAM = "https://chatgpt.com/backend-api";
 const PORT = Number(process.env.CELLS_PROXY_PORT ?? 8787);

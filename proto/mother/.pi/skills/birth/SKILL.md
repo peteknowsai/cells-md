@@ -1,6 +1,6 @@
 ---
 name: birth
-description: Provision a new agent on a fresh Sprite. Creates the VM, configures egress, installs runtime tools, pushes the recipe-compliant template, runs `bun install`, injects the OAuth token, installs the login shim, and takes the first checkpoint.
+description: Provision a new agent on a fresh Sprite. Creates the VM, configures egress, installs runtime tools, pushes the recipe-compliant DNA, runs `bun install`, injects the OAuth token, installs the login shim, and takes the first checkpoint.
 allowed-tools: [bash, sprite_create, sprite_destroy, sprite_exec, sprite_push, sprite_egress_allow, sprite_checkpoint, report_outcome, read]
 ---
 
@@ -9,8 +9,7 @@ allowed-tools: [bash, sprite_create, sprite_destroy, sprite_exec, sprite_push, s
 Bring a new agent into being on a fresh Sprite. The agent's name is in the
 user's message; substitute it for `<NAME>` in every step below.
 
-This ritual follows `~/Projects/cells/PI-FIRST-PARTY-BILLING-RECIPE.md`. Every
-step matters — if you shortcut, the agent silently lands on extra-usage billing.
+Every step matters — if you shortcut, the agent silently lands on extra-usage billing.
 
 Prefer the sprite_* tools for every step that has them — they're cleaner than
 shell-out and surface errors as structured tool results. The `bash` tool is
@@ -148,11 +147,12 @@ EOF
 ls -la /home/sprite/.bun/bin/bun && tmux -V
 ```
 
-## 4. Push the agent template
+## 4. Push the agent DNA
 
-The repo's `template/` directory contains the canonical recipe-compliant
-layout. The agent's "anatomy" is sharded into single-purpose markdown files
-at the agent root, each independently editable:
+Mother's `dna/` directory (at `proto/mother/dna/`) contains the canonical
+recipe-compliant layout — the genetic material every cell is born with.
+The agent's "anatomy" is sharded into single-purpose markdown files at the
+agent root, each independently editable:
 
 - `AGENTS.md` — thin entrypoint (cross-harness convention)
 - `SOUL.md` — identity + behavior (the use-max systemPrompt source)
@@ -168,7 +168,7 @@ Plus `.pi/extensions/use-max`, `.pi/settings.json`, `package.json`,
 
 Use `sprite_push` with:
 - `name: <NAME>`
-- `localPath: /Users/pete/Projects/cells/template`
+- `localPath: /Users/pete/Projects/cells/proto/mother/dna`
 - `remotePath: /home/sprite/agent`
 
 Then substitute `__NAME__`, `__MODEL__`, `__PROVIDER__`, and `__THINKING__`
@@ -212,12 +212,12 @@ later.
 
 Use `sprite_exec`:
 
-The template ships with `bin/cells` — a slim on-sprite CLI (read+talk only,
+The DNA ships with `bin/cells` — a slim on-sprite CLI (read+talk only,
 backed by the Sprites HTTP API). Make it executable and symlink onto PATH
 so both the agent's bash and the `self` extension can call it.
 
 First, prune the in-tree optional extensions the user did NOT pick. The
-template ships with all four (`memory`, `mentality`, `wiki`, `dream`) under
+DNA ships with all four (`memory`, `mentality`, `wiki`, `dream`) under
 `/home/sprite/agent/.pi/extensions/`; we keep only those listed in
 `<EXTENSIONS>` and delete the rest.
 

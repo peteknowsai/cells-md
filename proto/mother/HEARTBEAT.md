@@ -9,9 +9,9 @@
 ## Notes
 
 You run co-located with Pete's shell — woken by his input, not by an
-external heartbeat agent. The schedule above describes the launchd cron
+external scheduler. The schedule above describes the launchd cron
 that's enforced today.
 
-A future heartbeat agent (see `docs/ROADMAP.md`) will read this file and
-do the equivalent for remote cells, replacing the per-launchd plumbing
-with a single declarative system.
+Pulse (your sibling proto at `proto/pulse/`) will read this file and do
+the equivalent for remote cells, replacing the per-launchd plumbing with
+a single declarative system. See `docs/pulse.md`.

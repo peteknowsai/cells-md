@@ -1,0 +1,11 @@
+{
+  "extensions": [],
+  "enabledModels": [
+    "openai-codex/gpt-5.5",
+    "openai/gpt-5.5-pro",
+    "claude-haiku-4-5"
+  ],
+  "defaultProvider": "openai-codex",
+  "defaultModel": "gpt-5.5",
+  "defaultThinkingLevel": "medium"
+}

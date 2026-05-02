@@ -1,8 +1,15 @@
-# Heartbeat Agent
+# Pulse
 
 > **Status:** plan, not yet implemented. Phase 1 of HEARTBEAT.md (declarative
 > file at agent root) shipped on `4ba1952`. This doc covers the next phase:
 > the agent that reads those files and triggers wake-ups.
+>
+> **Design has evolved since this was first drafted.** Originally pictured as
+> a standalone Bun daemon. Pulse is now a real Pi agent — second proto
+> alongside mother, lives at `proto/pulse/`. It reads each cell's HEARTBEAT.md
+> from the **vault mirror** (already populated by `cells sync`), not via
+> `sprite exec`. The daemon shape below is preserved for reference but the
+> "Not a pi instance" claim is obsolete.
 
 ## Context
 
@@ -12,7 +19,7 @@ file is currently documentation-only — the existing
 `cells schedule-dreams` launchd plist still drives the actual nightly
 dreams, identically for every cell, with no per-cell variation.
 
-The next step is a **heartbeat agent**: a long-running process on Pete's
+The next step is a **pulse**: a long-running process on Pete's
 Mac that reads each cell's `HEARTBEAT.md`, interprets it, and triggers
 the declared wake-ups via `cells talk <name> "<wake message>"`. Replaces
 the launchd-cron-for-dreams with one declarative system that scales to
@@ -33,7 +40,7 @@ This doc is the implementation plan. Pick it up after fresh context.
   them all and fires them.
 - **HEARTBEAT.md is interpretive, not strict cron.** Pete wants to write
   things like "every weekday at 8am, summarize the news" without
-  reaching for cron syntax. The heartbeat agent is itself an LLM agent —
+  reaching for cron syntax. The pulse is itself an LLM agent —
   it interprets prose schedules into structured fire times.
 
 ## Vision: end state
@@ -43,7 +50,7 @@ This doc is the implementation plan. Pick it up after fresh context.
 │ Pete's Mac                                            │
 │                                                       │
 │  ┌───────────────────────────────────────────────┐   │
-│  │ heartbeat daemon (launchd, always-on)         │   │
+│  │ pulse daemon (launchd, always-on)         │   │
 │  │  • tick loop (every ~60s)                     │   │
 │  │  • cache: schedules parsed from HEARTBEAT.md  │   │
 │  │  • state: ~/.cells/heartbeat.json             │   │
@@ -157,7 +164,7 @@ under `KeepAlive=true`. Replaces (eventually) `cells schedule-dreams`,
 which becomes redundant.
 
 Migration: keep `schedule-dreams` plist functional through Phase 2; only
-remove it in Phase 3 once the heartbeat agent is proven for nightly dreams.
+remove it in Phase 3 once the pulse is proven for nightly dreams.
 
 ## Phases
 
@@ -233,18 +240,18 @@ latency on schedule changes is fine.
   `~/.cells/logs/heartbeat.log`, retry next tick (cron eval gives a
   small window where the item is still "due").
 - **Time zones.** HEARTBEAT.md says "8am" — local Mac time? UTC?
-  Lean: local Mac time (where heartbeat daemon runs). Document this
+  Lean: local Mac time (where pulse daemon runs). Document this
   in the default HEARTBEAT.md template.
 - **What to do on cell destroy?** Clear cached schedule + lastFire
   entries for that cell. Plumb into `cmdKill`.
 - **Do we want HEARTBEAT.md content in the agent's systemPrompt?**
-  Currently no — it's pure observability for the heartbeat agent.
+  Currently no — it's pure observability for the pulse.
   The cell doesn't need to know its own schedule unless it's going to
   reason about it. Keep out of use-max composer for now.
 
 ## Backstop / fallback
 
-If the heartbeat agent breaks, cells still wake when Pete uses them
+If the pulse breaks, cells still wake when Pete uses them
 manually (cells talk / cells stream). The only thing missed is
 scheduled wake-ups. Failure is recoverable. Worst case for Phase 2:
 revert to `schedule-dreams` plist while debugging.
