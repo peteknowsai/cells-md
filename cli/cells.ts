@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 import { $ } from "bun";
-import { readFile, writeFile, mkdir, unlink, symlink, cp, readdir, stat, rm, rename, rmdir } from "node:fs/promises";
+import { readFile, writeFile, mkdir, unlink, symlink, cp, readdir, stat, rm } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { dirname, join, basename } from "node:path";
 import { existsSync, statSync } from "node:fs";
@@ -1449,40 +1449,25 @@ async function pullMarkdown(name: string, vaultPath: string): Promise<{ persona:
     // Empty archive is benign — tar emits a warning but exits non-zero.
     if (!/empty archive/i.test(err)) throw new Error(`tar extract failed: ${err.trim()}`);
   }
-  // Flatten state/memory -> memory and state/wiki -> wiki in the vault.
-  await flattenStateDir(vaultPath);
-  // Reshape the on-cell .pi/ tree into the vault layout (Pi-named dirs at
-  // top level, persona body returned for inlining into AGENTS.md).
+  // Vault mirrors the cell's filesystem: anatomy .md files at root,
+  // .pi/skills/ and .pi/prompts/ under .pi/, state/memory/ and state/wiki/
+  // under state/. No reshaping. The only synthetic artifact is the
+  // dashboard AGENTS.md that renderAgents writes over the top.
   return await restructureVault(vaultPath);
-}
-
-async function flattenStateDir(vaultPath: string): Promise<void> {
-  const stateDir = join(vaultPath, "state");
-  if (!existsSync(stateDir)) return;
-  for (const sub of ["memory", "wiki"]) {
-    const src = join(stateDir, sub);
-    const dst = join(vaultPath, sub);
-    if (!existsSync(src)) continue;
-    if (existsSync(dst)) await rm(dst, { recursive: true, force: true });
-    await rename(src, dst);
-  }
-  // Remove state/ if empty after flatten.
-  try { await rmdir(stateDir); } catch { /* not empty, leave it */ }
 }
 
 /**
  * After pullMarkdown drops files into vaultPath under their on-cell paths
- * (`AGENTS.md`, `SOUL.md`, ..., `.pi/skills/...`, etc.), restructure to vault
- * shape:
+ * (`AGENTS.md`, `SOUL.md`, `.pi/skills/...`, `state/memory/...`, etc.),
+ * restructure to vault shape:
  *   - `SOUL.md` → captured as persona (the use-max systemPrompt source) and
  *     left in place for browsing.
  *   - `AGENTS.md` (the cell's thin entrypoint) → removed; renderAgents
  *     writes a richer dashboard AGENTS.md in its place.
- *   - The other anatomy files (IDENTITY/TOOLS/CELLS/CONTACTS/MEMORY/
- *     HEARTBEAT) → left in vault verbatim for browsing.
- *   - `.pi/skills/` → `skills/`
- *   - `.pi/prompts/` → `prompts/`
- *   - `.pi/` removed
+ *   - Everything else → left exactly where it was pulled. The vault
+ *     mirrors the cell's directory layout: .md anatomy files at root,
+ *     .pi/skills/, .pi/prompts/, state/memory/, state/wiki/ all
+ *     preserved.
  */
 async function restructureVault(vaultPath: string): Promise<{ persona: string | null }> {
   let persona: string | null = null;
@@ -1491,28 +1476,13 @@ async function restructureVault(vaultPath: string): Promise<{ persona: string | 
     persona = await readFile(soulSrc, "utf-8");
   }
 
-  // The cell's AGENTS.md is the thin cross-harness entrypoint, not the persona.
-  // renderAgents writes a richer vault dashboard over the top, so drop the
-  // pulled one to avoid leaving stale content behind during a partial run.
+  // The cell's AGENTS.md is the thin cross-harness entrypoint, not the
+  // persona. renderAgents writes a richer vault dashboard over the top,
+  // so drop the pulled one to avoid leaving stale content behind during
+  // a partial run.
   const agentsSrc = join(vaultPath, "AGENTS.md");
   if (existsSync(agentsSrc)) await rm(agentsSrc);
 
-  const piDir = join(vaultPath, ".pi");
-  const skillsSrc = join(piDir, "skills");
-  if (existsSync(skillsSrc)) {
-    const skillsDst = join(vaultPath, "skills");
-    if (existsSync(skillsDst)) await rm(skillsDst, { recursive: true, force: true });
-    await cp(skillsSrc, skillsDst, { recursive: true });
-  }
-
-  const promptsSrc = join(piDir, "prompts");
-  if (existsSync(promptsSrc)) {
-    const promptsDst = join(vaultPath, "prompts");
-    if (existsSync(promptsDst)) await rm(promptsDst, { recursive: true, force: true });
-    await cp(promptsSrc, promptsDst, { recursive: true });
-  }
-
-  if (existsSync(piDir)) await rm(piDir, { recursive: true, force: true });
   return { persona };
 }
 
@@ -1521,7 +1491,9 @@ async function pullExtensionDocs(name: string, vaultPath: string): Promise<Array
   const list = await spriteExecCapture(name, "ls -1 /home/sprite/agent/.pi/extensions/ 2>/dev/null");
   if (!list.ok) return [];
   const exts = list.stdout.split("\n").map((s) => s.trim()).filter(Boolean);
-  const extDir = join(vaultPath, "extensions");
+  // Mirror the cell layout: synthesized doc lands as .pi/extensions/<name>.md
+  // (sibling to where each extension's <name>/index.ts would be on the cell).
+  const extDir = join(vaultPath, ".pi", "extensions");
   await mkdir(extDir, { recursive: true });
   const results: Array<{ name: string; meta: ExtensionMeta }> = [];
   for (const ext of exts) {
@@ -1696,7 +1668,7 @@ function renderAgents(
       summary = summary.replace(prefix, "");
       summary = summary.slice(0, 160);
       const tail = summary ? ` — ${summary}` : "";
-      out.push(`- [${e.name}](extensions/${e.name}.md)${tail}`);
+      out.push(`- [${e.name}](.pi/extensions/${e.name}.md)${tail}`);
     }
     out.push("");
   }
@@ -1704,7 +1676,7 @@ function renderAgents(
   // Skills.
   if (skills.length > 0) {
     out.push("## Skills", "");
-    for (const s of skills) out.push(`- [${s}](skills/${s}/SKILL.md)`);
+    for (const s of skills) out.push(`- [${s}](.pi/skills/${s}/SKILL.md)`);
     out.push("");
   }
 
@@ -1713,12 +1685,12 @@ function renderAgents(
   const topicalCount = `${mem.topicals.length} topical file${mem.topicals.length === 1 ? "" : "s"}`;
   const yearningCount = `${mem.yearnings.length} yearning${mem.yearnings.length === 1 ? "" : "s"}`;
   out.push(`${topicalCount} · ${yearningCount}${mem.lastDream ? ` · last dream ${mem.lastDream}` : ""}`);
-  out.push("→ [MEMORY.md](memory/MEMORY.md)", "");
+  out.push("→ [MEMORY.md](state/memory/MEMORY.md)", "");
 
   if (mem.topicals.length > 0) {
     for (const t of mem.topicals) {
       const tail = t.preview ? ` — ${t.preview}` : "";
-      out.push(`- [${t.title}](memory/${t.filename})${tail}`);
+      out.push(`- [${t.title}](state/memory/${t.filename})${tail}`);
     }
     out.push("");
   }
@@ -1733,7 +1705,7 @@ function renderAgents(
         .join(" ")
         .replace(/\s+/g, " ")
         .trim();
-      out.push(`- **${y.title}** — [${y.filename}](memory/yearnings/${y.filename})`);
+      out.push(`- **${y.title}** — [${y.filename}](state/memory/yearnings/${y.filename})`);
       if (firstPara) out.push(`  ${firstPara}`);
     }
     out.push("");
@@ -1793,48 +1765,44 @@ async function setupMotherVault(): Promise<void> {
   const vault = join(VAULT_DIR, "mother");
   await mkdir(vault, { recursive: true });
 
-  // Wipe any prior layout artifacts so renames/migrations land cleanly.
-  // Includes the anatomy files so a re-sync after one is removed leaves
-  // no stale copy behind.
+  // Vault mirrors mother's filesystem layout. Wipe everything that gets
+  // regenerated so renames + removals land cleanly.
   for (const f of ["README.md", "AGENTS.md", "persona.md", ...ANATOMY_FILES]) {
     if (existsSync(join(vault, f))) await rm(join(vault, f));
   }
-  for (const d of ["extensions", "skills", "prompts", ".pi"]) {
+  for (const d of [".pi", "state", "extensions", "skills", "prompts", "memory", "wiki"]) {
     if (existsSync(join(vault, d))) await rm(join(vault, d), { recursive: true, force: true });
   }
 
-  // Symlink memory (always replace to keep current). existsSync follows
-  // symlinks, so a stale link to a no-longer-existing target reports
-  // false — use unlink directly and ignore ENOENT.
-  const memLink = join(vault, "memory");
+  // state/memory — symlink to keep mother's vault always-current. existsSync
+  // follows symlinks, so a stale link reports false; use unlink + swallow ENOENT.
+  await mkdir(join(vault, "state"), { recursive: true });
+  const memLink = join(vault, "state", "memory");
   try { await unlink(memLink); } catch { /* not present */ }
   await symlink(join(CELL_REPO, "state", "memory"), memLink);
 
-  // Skills tree (markdown only — follows symlinks).
+  // .pi/skills — markdown tree, mirrors mother's .pi/skills/.
   const skillsSrc = join(CELL_REPO, ".pi", "skills");
-  await copyMarkdownTree(skillsSrc, join(vault, "skills"));
+  await copyMarkdownTree(skillsSrc, join(vault, ".pi", "skills"));
 
-  // Extension docs from local sources.
+  // Synthesized extension docs land under .pi/extensions/<name>.md as
+  // siblings to where each extension's <name>/ directory would be.
   const exts = await readLocalExtensionDocs(
     join(CELL_REPO, ".pi", "extensions"),
-    join(vault, "extensions"),
+    join(vault, ".pi", "extensions"),
   );
 
-  // Copy the anatomy files into the vault verbatim so Pete can browse them
-  // alongside the synthesized AGENTS.md dashboard. Skip ones that don't
-  // exist (e.g. CELLS.md on mother).
+  // Copy anatomy files verbatim. Skip ones that don't exist on mother.
   for (const f of ANATOMY_FILES) {
     const src = join(CELL_REPO, f);
     if (existsSync(src)) await cp(src, join(vault, f));
   }
 
-  // Persona body for renderAgents — SOUL.md is the canonical source. The
-  // synthesized vault AGENTS.md interleaves persona + extensions + skills
-  // + memory snapshot; the raw anatomy files live alongside for direct browsing.
+  // Persona body for the synthesized AGENTS.md dashboard.
   const soulPath = join(CELL_REPO, "SOUL.md");
   const persona = existsSync(soulPath) ? await readFile(soulPath, "utf-8") : null;
 
-  const skills = await listSkills(join(vault, "skills"));
+  const skills = await listSkills(join(vault, ".pi", "skills"));
   const mem = await gatherMemoryContext(join(CELL_REPO, "state", "memory"));
   const md = renderAgents("mother", null, persona, exts, skills, mem);
   await writeFile(join(vault, "AGENTS.md"), md);
@@ -1844,13 +1812,14 @@ async function syncOneCell(name: string): Promise<{ name: string; status: string
   const vault = join(VAULT_DIR, name);
   await mkdir(vault, { recursive: true });
 
-  // Wipe everything that gets regenerated. Memory/yearnings/prompts come
-  // from the pull and replace whatever was there. Anatomy files (SOUL,
-  // CELLS, etc.) get pulled fresh by pullMarkdown.
+  // Wipe everything that gets regenerated. Anatomy files at root come back
+  // via pullMarkdown; .pi/ and state/ trees are repopulated wholesale.
+  // Old hoisted layout (skills/, prompts/, memory/, yearnings/, extensions/)
+  // is wiped too in case the vault was synced under the previous shape.
   for (const f of ["README.md", "AGENTS.md", "persona.md", ...ANATOMY_FILES]) {
     if (existsSync(join(vault, f))) await rm(join(vault, f));
   }
-  for (const d of ["extensions", "skills", "prompts", ".pi", "state", "memory", "yearnings"]) {
+  for (const d of [".pi", "state", "extensions", "skills", "prompts", "memory", "yearnings", "wiki"]) {
     if (existsSync(join(vault, d))) await rm(join(vault, d), { recursive: true, force: true });
   }
 
@@ -1860,8 +1829,8 @@ async function syncOneCell(name: string): Promise<{ name: string; status: string
     console.error(`  warn: api failed for ${name}: ${(e as Error).message}`);
     return null;
   });
-  const skills = await listSkills(join(vault, "skills"));
-  const mem = await gatherMemoryContext(join(vault, "memory"));
+  const skills = await listSkills(join(vault, ".pi", "skills"));
+  const mem = await gatherMemoryContext(join(vault, "state", "memory"));
   const md = renderAgents(name, info, persona, exts, skills, mem);
   await writeFile(join(vault, "AGENTS.md"), md);
   return info ? { name, status: info.status, lastRunningAt: info.last_running_at } : { name, status: "?", lastRunningAt: null };
