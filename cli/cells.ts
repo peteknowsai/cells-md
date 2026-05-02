@@ -1434,14 +1434,88 @@ node -e '
   return true;
 }
 
+/**
+ * Inverse of refreshExtensionOnCell: drop the extension entry from
+ * settings.json and rm the dir on the cell. Idempotent.
+ */
+async function removeExtensionOnCell(cellName: string, extName: string): Promise<boolean> {
+  const entry = `.pi/extensions/${extName}/index.ts`;
+  const script = `
+set -e
+cd /home/sprite/agent
+node -e '
+  const fs = require("fs");
+  const p = ".pi/settings.json";
+  const s = JSON.parse(fs.readFileSync(p, "utf-8"));
+  s.extensions = (s.extensions || []).filter(x => x !== "${entry}");
+  fs.writeFileSync(p, JSON.stringify(s, null, 2) + "\\n");
+'
+rm -rf /home/sprite/agent/.pi/extensions/${extName}
+echo removed
+`.trim();
+  const r = await spriteExecCapture(cellName, script);
+  if (!r.ok) {
+    console.error(`✗ ${cellName}: remove failed — ${r.stderr.trim()}`);
+    return false;
+  }
+  console.log(`✓ ${cellName}: ${extName} removed`);
+  return true;
+}
+
+/**
+ * Restart pi on a cell so newly-pushed extensions actually load. Kills the
+ * tmux session and re-launches pi via the canonical bashrc.d-sourcing chain
+ * (matches scripts/register-agent-service.sh). Detached so this command
+ * returns once pi has been kicked off.
+ *
+ * Note: this doesn't re-install the sprite supervisor service. Cells born
+ * before the supervisor existed (or after a crashed keeper) still need
+ * register-agent-service.sh for crash auto-recovery. This just gets pi back
+ * up *now* after a refresh.
+ */
+async function restartPiOnCell(cellName: string): Promise<boolean> {
+  // Three-stage: kill, brief settle, re-launch in a backgrounded keeper loop
+  // so we get pi-crash recovery for the rest of this VM uptime.
+  const script = `
+tmux kill-session -t ${cellName} 2>/dev/null || true
+sleep 1
+cd /home/sprite/agent
+setsid bash -lc 'tmux new-session -dA -s ${cellName} bash -lc "for f in /home/sprite/.bashrc.d/*; do . \\$f; done; export PATH=/home/sprite/.local/bin:\\$HOME/.bun/bin:\\$PATH; exec pi" && while tmux has-session -t ${cellName} 2>/dev/null; do sleep 10; done' </dev/null >/dev/null 2>&1 &
+disown
+sleep 2
+tmux has-session -t ${cellName} 2>/dev/null && echo restarted || { echo "✗ tmux session not present after restart"; exit 1; }
+`.trim();
+  const r = await spriteExecCapture(cellName, script);
+  if (!r.ok) {
+    console.error(`✗ ${cellName}: restart failed — ${r.stderr.trim() || r.stdout.trim()}`);
+    return false;
+  }
+  console.log(`✓ ${cellName}: pi restarted (extensions reloaded)`);
+  return true;
+}
+
 async function cmdRefreshExtensions(args: string[]) {
-  // Parse: <cell|--all> [extName...]. If no extName, default to heartbeat-watch
-  // (the one Phase E exists for). Future use: pass any DNA extension name.
-  let target = args[0];
-  let extNames = args.slice(1);
+  // Flags: --restart (kick pi after pushing so the extension loads),
+  //        --remove (inverse: drop the extension instead of pushing).
+  let restart = false;
+  let remove = false;
+  const positional: string[] = [];
+  for (const a of args) {
+    if (a === "--restart") restart = true;
+    else if (a === "--remove") remove = true;
+    else positional.push(a);
+  }
+  if (remove && restart) {
+    // Allowed: remove + restart-after-remove makes sense.
+  }
+
+  let target = positional[0];
+  let extNames = positional.slice(1);
   if (!target) {
-    console.error("usage: cells refresh-extensions <name|--all> [extension...]");
-    console.error("       defaults to heartbeat-watch when no extension is named");
+    console.error("usage: cells refresh-extensions <name|--all> [extension...] [--restart] [--remove]");
+    console.error("       --restart  kick pi on the cell so the new extension loads");
+    console.error("       --remove   inverse: rm the extension and drop from settings.json");
+    console.error("       default extension when none given: heartbeat-watch");
     process.exit(1);
   }
   if (extNames.length === 0) extNames = ["heartbeat-watch"];
@@ -1454,8 +1528,13 @@ async function cmdRefreshExtensions(args: string[]) {
   let failCount = 0;
   for (const cell of targets) {
     for (const ext of extNames) {
-      console.log(`→ ${cell} ← ${ext}`);
-      const ok = await refreshExtensionOnCell(cell, ext);
+      const verb = remove ? "rm" : "←";
+      console.log(`→ ${cell} ${verb} ${ext}`);
+      const ok = remove ? await removeExtensionOnCell(cell, ext) : await refreshExtensionOnCell(cell, ext);
+      ok ? okCount++ : failCount++;
+    }
+    if (restart && (okCount > 0 || remove)) {
+      const ok = await restartPiOnCell(cell);
       ok ? okCount++ : failCount++;
     }
   }
@@ -2377,7 +2456,10 @@ switch (sub) {
     console.log("  cells unschedule-pi-patches remove launchd watcher");
     console.log("  cells schedule-pulse        install launchd plist (pulse ticks every 60s)");
     console.log("  cells unschedule-pulse      remove pulse launchd plist");
-    console.log("  cells refresh-extensions <name|--all> [ext...]  push DNA extension(s) onto existing cell(s) (default: heartbeat-watch)");
+    console.log("  cells refresh-extensions <name|--all> [ext...] [--restart] [--remove]");
+    console.log("                              push DNA extension(s) onto existing cell(s) (default: heartbeat-watch)");
+    console.log("                              --restart kicks pi on the cell so new extensions load (otherwise dormant until next pi start)");
+    console.log("                              --remove deletes the extension dir + drops it from settings.json (inverse of push)");
     console.log("  cells heartbeat [name|--tail]  show pulse digest, one cell's schedule, or recent fires");
     console.log("  cells kill <name>... [-y]   destroy one or more cells (irreversible) (alias: destroy)");
     console.log("                              --all-but <name>... kill every cell except the listed ones");
