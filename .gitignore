@@ -11,3 +11,4 @@ build/
 .pi/npm/
 # only the top-level memory dir (cell-keeper's data) — NOT the memory extension code under template/.pi/
 /memory/
+.claude/

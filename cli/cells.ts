@@ -12,9 +12,11 @@ const REPO_ROOT = dirname(SCRIPT_DIR);
 const PROTO_DIR = join(REPO_ROOT, "proto");
 const MOTHER_ROOT = join(PROTO_DIR, "mother");
 const PULSE_ROOT = join(PROTO_DIR, "pulse");
+const OPERATOR_ROOT = join(PROTO_DIR, "operator");
 const DNA_DIR = join(MOTHER_ROOT, "dna");
 const REGISTRY_DIR = join(homedir(), ".cells");
 const REGISTRY_PATH = join(REGISTRY_DIR, "cells.json");
+const CHANNELS_PATH = join(REGISTRY_DIR, "channels.json");
 
 // Model registry — short name → { provider, modelId }. Anthropic doesn't
 // provide a floating "claude-opus-latest" alias; the major-version-stamped
@@ -33,7 +35,7 @@ type ModelKey = keyof typeof MODEL_IDS;
 // In-tree extensions a user can opt into at create time. Each lives at
 // proto/mother/dna/.pi/extensions/<name>/ — birth pushes the whole dna, then
 // deletes the unselected ones from the cell.
-const OPTIONAL_EXTENSIONS = ["memory", "mentality", "wiki", "dream"] as const;
+const OPTIONAL_EXTENSIONS = ["memory", "mentality", "wiki", "dream", "slack-channel"] as const;
 type OptionalExtension = (typeof OPTIONAL_EXTENSIONS)[number];
 
 // Curated list of npm/git packages a cell can install via `pi install`.
@@ -52,6 +54,8 @@ const RESERVED_NAMES = new Set([
   "schedule-pi-patches", "unschedule-pi-patches",
   "schedule-pulse", "unschedule-pulse",
   "refresh-extensions", "heartbeat", "pulse",
+  "channel", "channels",
+  "schedule-operator", "unschedule-operator", "operator",
 ]);
 
 type SelectOption = {
@@ -523,10 +527,12 @@ async function cmdTalk(name: string, args: string[]) {
       return;
     }
     if (flag === "-r" || flag === "--resume") {
-      // Inject /resume into the agent tmux session so the live pi opens
-      // its session picker. Then attach so the user can interact with it.
+      // Inject /resume into the cell's tmux pi session so the live pi
+      // opens its session picker. Target by cell name (-t pete) — the
+      // legacy `-t agent` matches an ambiguous window name when a
+      // separate `cells shell` session is also up.
       const inject = Bun.spawn(
-        ["sprite", "exec", "-s", name, "--", "tmux", "send-keys", "-t", "agent", "/resume", "Enter"],
+        ["sprite", "exec", "-s", name, "--", "tmux", "send-keys", "-t", name, "/resume", "Enter"],
         { stdin: "ignore", stdout: "ignore", stderr: "inherit" },
       );
       const code = await inject.exited;
@@ -543,22 +549,57 @@ async function cmdTalk(name: string, args: string[]) {
     process.exit(1);
   }
   const message = args.join(" ");
-  // One-shot: spawn a fresh `pi -p` on the peer. Clean stdout (just the
-  // reply), no TUI chrome, no main-session pollution. The fresh pi loads
-  // the agent's persona + memory + tools via extensions, so it's still
-  // "the same agent" — just an ephemeral side-conversation.
+  // Inject the message into the cell's persistent tmux pi session so
+  // every wake — Slack via operator, scheduled via pulse, manual CLI —
+  // accumulates in one continuous conversation. Earlier this code
+  // spawned a fresh `pi -p`, which loaded the agent's persona/memory
+  // but started each turn from a blank conversational context — making
+  // follow-ups ("did they win tonight?") incoherent.
   //
-  // Birth writes the .bashrc.d sourcing into ~/.profile, so `bash -lc`
-  // login shells get PATH and secrets automatically. No explicit source
-  // needed here.
+  // tmux send-keys is the same mechanism `cells talk <name> -r` uses
+  // for /resume injection. Only ONE pi runs in tmux, so we're not
+  // racing two writers on the session file.
+  //
+  // -l (literal) sends the text verbatim — preserves newlines, special
+  // chars, no shell-style key interpretation. Then a separate Enter to
+  // submit. Pi's input buffer holds the text until the agent is idle.
+  //
+  // Retry: if pi's TUI is mid-stream (previous turn still running) it
+  // can refuse keys with "not in a mode". Back off and retry — pi
+  // re-enters input mode the moment streaming ends.
   const escaped = message.replace(/'/g, "'\\''");
-  const script = `cd /home/sprite/agent && pi -p '${escaped}'`;
-  const proc = Bun.spawn(
-    ["sprite", "exec", "-s", name, "--", "bash", "-lc", script],
-    { stdin: "ignore", stdout: "inherit", stderr: "inherit" },
-  );
-  const code = await proc.exited;
-  if (code !== 0) process.exit(code);
+  // Target the cell-named tmux session explicitly (e.g. -t pete). The
+  // legacy `-t agent` matches a window NAME ambiguously — a stray
+  // `cells shell <name>` creates a second window also named "agent",
+  // making send-keys land on the wrong pane (which would print
+  // "from-slack channel=..." into a bash shell instead of pi).
+  const script = `tmux send-keys -t ${name} -l '${escaped}' && tmux send-keys -t ${name} Enter`;
+  const MAX_ATTEMPTS = 6;
+  const BASE_BACKOFF_MS = 1500;
+  let lastCode = 0;
+  let lastErr = "";
+  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+    const proc = Bun.spawn(
+      ["sprite", "exec", "-s", name, "--", "bash", "-lc", script],
+      { stdin: "ignore", stdout: "pipe", stderr: "pipe" },
+    );
+    const stderr = await new Response(proc.stderr).text();
+    lastCode = await proc.exited;
+    lastErr = stderr;
+    if (lastCode === 0) {
+      if (attempt > 1) console.error(`(delivered to ${name} on attempt ${attempt})`);
+      return;
+    }
+    // Only retry the recognizable "TUI mid-stream" failure mode; any
+    // other exit code is a real error worth surfacing immediately.
+    if (!/not in a mode/i.test(stderr)) break;
+    if (attempt < MAX_ATTEMPTS) {
+      const wait = BASE_BACKOFF_MS * attempt;
+      await new Promise((r) => setTimeout(r, wait));
+    }
+  }
+  process.stderr.write(lastErr);
+  process.exit(lastCode);
 }
 
 async function cmdShell(name: string) {
@@ -735,6 +776,7 @@ type CreateOpts = {
   thinking?: string;
   extensions?: string[];
   packages?: string[];
+  slackChannel?: string;
 };
 
 const PACKAGE_VALUES = OPTIONAL_PACKAGES.map((p) => p.value);
@@ -779,6 +821,13 @@ function parseCreateArgs(args: string[]): { name: string; opts: CreateOpts } {
         process.exit(1);
       }
       opts.thinking = v;
+    } else if (a.startsWith("--slack-channel=")) {
+      const v = a.slice("--slack-channel=".length).trim();
+      if (v && !CHANNEL_ID_PATTERNS.slack.test(v)) {
+        console.error(`bad Slack channel ID: ${v} (expected ${CHANNEL_ID_PATTERNS.slack})`);
+        process.exit(1);
+      }
+      opts.slackChannel = v;
     } else if (a.startsWith("--")) {
       console.error(`unknown flag: ${a}`);
       process.exit(1);
@@ -820,6 +869,8 @@ async function cmdCreate(name: string, opts: CreateOpts) {
   let thinking: string;
   let extensions: string[];
   let packages: string[];
+
+  let slackChannel: string | undefined = opts.slackChannel;
 
   if (interactive) {
     console.log(`\nbirthing cell '${name}'\n`);
@@ -869,6 +920,24 @@ async function cmdCreate(name: string, opts: CreateOpts) {
     extensions = answers[2] as string[];
     packages = answers[3] as string[];
     thinking = answers[4] as string;
+
+    // 6th step is free-text (readline) — no back support, just skip-or-enter.
+    // Only prompts when slack-channel was checked in extensions OR Pete
+    // wants to bind a channel without enabling the tool (rare); we keep
+    // it unconditional for symmetry but blank skips silently.
+    const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+    try {
+      const ans = (await rl.question("Slack channel ID? (paste or empty to skip): ")).trim();
+      if (ans) {
+        if (!CHANNEL_ID_PATTERNS.slack.test(ans)) {
+          console.error(`bad Slack channel ID: ${ans} — skipping bind`);
+        } else {
+          slackChannel = ans;
+        }
+      }
+    } finally {
+      rl.close();
+    }
   } else {
     harness = opts.harness ?? "pi";
     modelKey = opts.model ?? "opus";
@@ -898,6 +967,12 @@ async function cmdCreate(name: string, opts: CreateOpts) {
     thinking = "medium";
   }
 
+  // If a Slack channel was provided, ensure slack-channel ships with the
+  // cell — operator's routing won't reach the cell otherwise.
+  if (slackChannel && !extensions.includes("slack-channel")) {
+    extensions = [...extensions, "slack-channel"];
+  }
+
   const choice = MODEL_IDS[modelKey];
   const payload = {
     harness,
@@ -920,6 +995,23 @@ async function cmdCreate(name: string, opts: CreateOpts) {
   const reg = await loadRegistry();
   reg.cells.push({ name, created_at: new Date().toISOString() });
   await saveRegistry(reg);
+
+  // Post-birth: bind the Slack channel. Best-effort — birth already
+  // succeeded; if this fails, Pete can run `cells channel link` manually.
+  if (slackChannel) {
+    try {
+      const file = await loadChannels();
+      file.bindings[slackChannel] = {
+        cell: name,
+        kind: "slack",
+        createdAt: new Date().toISOString(),
+      };
+      await saveChannels(file);
+      console.log(`✓ linked ${slackChannel} → ${name} (slack)`);
+    } catch (e) {
+      console.error(`✗ channel bind failed (${e}); run: cells channel link ${name} ${slackChannel}`);
+    }
+  }
 }
 
 async function cmdDestroyOne(name: string): Promise<boolean> {
@@ -936,6 +1028,7 @@ async function cmdDestroyOne(name: string): Promise<boolean> {
   // trying to fire to a non-existent target. Best-effort — pulse tolerates
   // orphan state, this just keeps the digest clean.
   await evictPulseStateForCell(name);
+  await evictChannelBindingsForCell(name);
   return true;
 }
 
@@ -963,6 +1056,158 @@ async function evictPulseStateForCell(name: string): Promise<void> {
       await rename(tmp, statePath);
     }
   } catch { /* corrupt state — leave alone, pulse will read or repair on next run */ }
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// channels.json — channel-id → cell binding registry. Keyed by channel ID
+// because inbound events arrive with a channel ID and need O(1) routing.
+// One cell can be bound to multiple channels (multiple keys, same .cell).
+// ────────────────────────────────────────────────────────────────────────────
+
+type ChannelKind = "slack"; // future: "imessage" | "telegram" | "email"
+type ChannelBinding = { cell: string; kind: ChannelKind; createdAt: string };
+type ChannelsFile = { version: 1; bindings: Record<string, ChannelBinding> };
+
+const CHANNEL_ID_PATTERNS: Record<ChannelKind, RegExp> = {
+  slack: /^[CDG][A-Z0-9]{8,}$/, // C=public, D=DM, G=private/group/mpdm
+};
+
+async function loadChannels(): Promise<ChannelsFile> {
+  if (!existsSync(CHANNELS_PATH)) return { version: 1, bindings: {} };
+  try {
+    const j = JSON.parse(await readFile(CHANNELS_PATH, "utf-8"));
+    if (j && typeof j === "object" && j.bindings) return j as ChannelsFile;
+  } catch { /* fallthrough */ }
+  return { version: 1, bindings: {} };
+}
+
+async function saveChannels(file: ChannelsFile): Promise<void> {
+  await mkdir(REGISTRY_DIR, { recursive: true });
+  const tmp = CHANNELS_PATH + ".tmp";
+  await writeFile(tmp, JSON.stringify(file, null, 2));
+  await rename(tmp, CHANNELS_PATH);
+}
+
+async function evictChannelBindingsForCell(name: string): Promise<void> {
+  if (!existsSync(CHANNELS_PATH)) return;
+  try {
+    const file = await loadChannels();
+    let pruned = 0;
+    for (const [id, b] of Object.entries(file.bindings)) {
+      if (b.cell === name) {
+        delete file.bindings[id];
+        pruned++;
+      }
+    }
+    if (pruned > 0) await saveChannels(file);
+  } catch { /* best-effort */ }
+}
+
+async function cmdChannel(args: string[]) {
+  const sub = args[0];
+  const rest = args.slice(1);
+  switch (sub) {
+    case "link":   await cmdChannelLink(rest); break;
+    case "unlink": await cmdChannelUnlink(rest); break;
+    case "list":   await cmdChannelList(); break;
+    default:
+      console.error("usage:");
+      console.error("  cells channel link <cell> <channel-id> [--kind=slack]");
+      console.error("  cells channel unlink <cell> [<channel-id>]");
+      console.error("  cells channel list");
+      process.exit(sub ? 1 : 0);
+  }
+}
+
+async function cmdChannelLink(args: string[]) {
+  let kind: ChannelKind = "slack";
+  const positional: string[] = [];
+  for (const a of args) {
+    if (a.startsWith("--kind=")) {
+      const v = a.slice("--kind=".length);
+      if (v !== "slack") {
+        console.error(`unsupported kind: ${v} (only 'slack' for now)`);
+        process.exit(1);
+      }
+      kind = v;
+    } else if (a.startsWith("-")) {
+      console.error(`unknown flag: ${a}`);
+      process.exit(1);
+    } else positional.push(a);
+  }
+  const [cell, channelId] = positional;
+  if (!cell || !channelId) {
+    console.error("usage: cells channel link <cell> <channel-id> [--kind=slack]");
+    process.exit(1);
+  }
+  await requireCell(cell);
+  if (!CHANNEL_ID_PATTERNS[kind].test(channelId)) {
+    console.error(`bad channel ID for kind=${kind}: ${channelId} (expected ${CHANNEL_ID_PATTERNS[kind]})`);
+    process.exit(1);
+  }
+  const file = await loadChannels();
+  const prev = file.bindings[channelId];
+  file.bindings[channelId] = {
+    cell,
+    kind,
+    createdAt: prev?.createdAt ?? new Date().toISOString(),
+  };
+  await saveChannels(file);
+  if (prev && prev.cell !== cell) {
+    console.log(`linked ${channelId} → ${cell} (${kind}) — was ${prev.cell}`);
+  } else if (prev) {
+    console.log(`already linked ${channelId} → ${cell} (${kind})`);
+  } else {
+    console.log(`linked ${channelId} → ${cell} (${kind})`);
+  }
+}
+
+async function cmdChannelUnlink(args: string[]) {
+  const [cell, channelId] = args;
+  if (!cell) {
+    console.error("usage: cells channel unlink <cell> [<channel-id>]");
+    process.exit(1);
+  }
+  const file = await loadChannels();
+  if (channelId) {
+    const b = file.bindings[channelId];
+    if (!b) {
+      console.error(`no binding for ${channelId}`);
+      process.exit(1);
+    }
+    if (b.cell !== cell) {
+      console.error(`binding ${channelId} is for ${b.cell}, not ${cell}`);
+      process.exit(1);
+    }
+    delete file.bindings[channelId];
+    await saveChannels(file);
+    console.log(`unlinked ${channelId} (was ${cell})`);
+    return;
+  }
+  let pruned = 0;
+  for (const [id, b] of Object.entries(file.bindings)) {
+    if (b.cell === cell) { delete file.bindings[id]; pruned++; }
+  }
+  if (pruned === 0) {
+    console.log(`no bindings for ${cell}`);
+    return;
+  }
+  await saveChannels(file);
+  console.log(`unlinked ${pruned} channel${pruned === 1 ? "" : "s"} from ${cell}`);
+}
+
+async function cmdChannelList() {
+  const file = await loadChannels();
+  const entries = Object.entries(file.bindings);
+  if (entries.length === 0) {
+    console.log("(no channel bindings)");
+    return;
+  }
+  console.log(`${"channel".padEnd(14)} ${"cell".padEnd(14)} ${"kind".padEnd(8)} created`);
+  console.log(`${"".padEnd(14, "-")} ${"".padEnd(14, "-")} ${"".padEnd(8, "-")} -------`);
+  for (const [id, b] of entries.sort((a, b) => a[1].cell.localeCompare(b[1].cell))) {
+    console.log(`${id.padEnd(14)} ${b.cell.padEnd(14)} ${b.kind.padEnd(8)} ${b.createdAt}`);
+  }
 }
 
 async function cmdDestroy(args: string[]) {
@@ -1389,6 +1634,98 @@ async function cmdUnschedulePulse() {
   if (existsSync(pulsePlistPath())) {
     await unlink(pulsePlistPath());
     console.log(`✓ removed ${pulsePlistPath()}`);
+  } else {
+    console.log("(no plist found)");
+  }
+  console.log("✓ unscheduled");
+}
+
+const OPERATOR_LABEL = "com.pete.cells-operator";
+
+function operatorPlistPath(): string {
+  return join(homedir(), "Library/LaunchAgents", `${OPERATOR_LABEL}.plist`);
+}
+
+function buildOperatorPlist(): string {
+  const launcher = join(OPERATOR_ROOT, "bin", "operator-run");
+  const logsDir = join(homedir(), ".cells", "logs");
+  const path = "/Users/pete/.bun/bin:/Users/pete/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin";
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>${OPERATOR_LABEL}</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>${launcher}</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>${path}</string>
+    <key>HOME</key>
+    <string>${homedir()}</string>
+  </dict>
+  <key>KeepAlive</key>
+  <true/>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>StandardOutPath</key>
+  <string>${logsDir}/operator.log</string>
+  <key>StandardErrorPath</key>
+  <string>${logsDir}/operator.err</string>
+</dict>
+</plist>
+`;
+}
+
+async function cmdScheduleOperator() {
+  const launcher = join(OPERATOR_ROOT, "bin", "operator-run");
+  if (!existsSync(launcher)) {
+    console.error(`✗ launcher missing: ${launcher}`);
+    process.exit(1);
+  }
+  const logsDir = join(homedir(), ".cells", "logs");
+  await mkdir(logsDir, { recursive: true });
+  await mkdir(dirname(operatorPlistPath()), { recursive: true });
+  await writeFile(operatorPlistPath(), buildOperatorPlist());
+  console.log(`✓ wrote plist: ${operatorPlistPath()}`);
+
+  const uid = process.getuid?.() ?? 501;
+
+  await Bun.spawn(["launchctl", "bootout", `gui/${uid}/${OPERATOR_LABEL}`], {
+    stdin: "ignore",
+    stdout: "ignore",
+    stderr: "ignore",
+  }).exited;
+
+  const proc = Bun.spawn(["launchctl", "bootstrap", `gui/${uid}`, operatorPlistPath()], {
+    stdin: "ignore",
+    stdout: "inherit",
+    stderr: "inherit",
+  });
+  const code = await proc.exited;
+  if (code !== 0) {
+    console.error("✗ launchctl bootstrap failed");
+    process.exit(1);
+  }
+
+  console.log(`✓ scheduled: operator long-lived (KeepAlive)`);
+  console.log(`  logs: ${logsDir}/operator.log (stdout), operator.err (stderr)`);
+  console.log(`  unschedule with: cells unschedule-operator`);
+}
+
+async function cmdUnscheduleOperator() {
+  const uid = process.getuid?.() ?? 501;
+  await Bun.spawn(["launchctl", "bootout", `gui/${uid}/${OPERATOR_LABEL}`], {
+    stdin: "ignore",
+    stdout: "inherit",
+    stderr: "inherit",
+  }).exited;
+  if (existsSync(operatorPlistPath())) {
+    await unlink(operatorPlistPath());
+    console.log(`✓ removed ${operatorPlistPath()}`);
   } else {
     console.log("(no plist found)");
   }
@@ -2457,8 +2794,12 @@ switch (sub) {
   case "unschedule-pi-patches": await cmdUnschedulePiPatches(); break;
   case "schedule-pulse":        await cmdSchedulePulse(); break;
   case "unschedule-pulse":      await cmdUnschedulePulse(); break;
+  case "schedule-operator":     await cmdScheduleOperator(); break;
+  case "unschedule-operator":   await cmdUnscheduleOperator(); break;
   case "refresh-extensions":    await cmdRefreshExtensions(rest); break;
   case "heartbeat":             await cmdHeartbeat(rest); break;
+  case "channel":
+  case "channels":              await cmdChannel(rest); break;
   case "doctor":             await cmdDoctor(); break;
   case "shell":              await cmdShell(needName(rest, "shell")); break;
   case "see":                await cmdSee(needName(rest, "see")); break;
@@ -2468,8 +2809,9 @@ switch (sub) {
     console.log("  cells birth <name> [flags]  provision a new cell on a Sprite (alias: create)");
     console.log("                              flags: --harness=pi --model=opus|sonnet|haiku|gpt-5.5|gpt-5.5-pro|deepseek-v4-flash|deepseek-v4-pro");
     console.log("                                     --thinking=off|minimal|low|medium|high|xhigh|adaptive");
-    console.log("                                     --extensions=memory,mentality,wiki,dream");
+    console.log("                                     --extensions=memory,mentality,wiki,dream,slack-channel");
     console.log("                                     --packages=pi-web-access");
+    console.log("                                     --slack-channel=C0123456789  (auto-installs slack-channel + binds via cells channel link)");
     console.log("                              no flags = interactive TUI; any flag = non-interactive (defaults fill the rest)");
     console.log("  cells talk <name> [msg]     attach to a cell's TUI (no msg) or send one-shot (with msg).");
     console.log("                              'mother' = local pi; accepts any pi flag (-c, -r, --session=<id>, -p ...).");
@@ -2488,11 +2830,17 @@ switch (sub) {
     console.log("  cells unschedule-pi-patches remove launchd watcher");
     console.log("  cells schedule-pulse        install launchd plist (pulse ticks every 60s)");
     console.log("  cells unschedule-pulse      remove pulse launchd plist");
+    console.log("  cells schedule-operator     install launchd plist (operator long-lived; holds Slack Socket Mode)");
+    console.log("  cells unschedule-operator   remove operator launchd plist");
     console.log("  cells refresh-extensions <name|--all> [ext...] [--restart] [--remove]");
     console.log("                              push DNA extension(s) onto existing cell(s) (default: heartbeat-watch)");
     console.log("                              --restart kicks pi on the cell so new extensions load (otherwise dormant until next pi start)");
     console.log("                              --remove deletes the extension dir + drops it from settings.json (inverse of push)");
     console.log("  cells heartbeat [name|--tail]  show pulse digest, one cell's schedule, or recent fires");
+    console.log("  cells channel link <cell> <channel-id> [--kind=slack]");
+    console.log("                              bind a Slack channel ID to a cell (operator routes inbound by this map)");
+    console.log("  cells channel unlink <cell> [<channel-id>]  remove one or all bindings for a cell");
+    console.log("  cells channel list           list all channel↔cell bindings");
     console.log("  cells kill <name>... [-y]   destroy one or more cells (irreversible) (alias: destroy)");
     console.log("                              --all-but <name>... kill every cell except the listed ones");
     console.log("                              -y/--yes skip the confirmation prompt");

@@ -217,21 +217,23 @@ backed by the Sprites HTTP API). Make it executable and symlink onto PATH
 so both the agent's bash and the `self` extension can call it.
 
 First, prune the in-tree optional extensions the user did NOT pick. The
-DNA ships with all four (`memory`, `mentality`, `wiki`, `dream`) under
-`/home/sprite/agent/.pi/extensions/`; we keep only those listed in
-`<EXTENSIONS>` and delete the rest.
+DNA ships with all five (`memory`, `mentality`, `wiki`, `dream`,
+`slack-channel`) under `/home/sprite/agent/.pi/extensions/`; we keep
+only those listed in `<EXTENSIONS>` and delete the rest.
 
-The always-installed extensions (`use-max`, `self`) stay regardless.
+The always-installed extensions (`use-max`, `self`, `heartbeat-watch`)
+stay regardless.
 
-For each name in `["memory", "mentality", "wiki", "dream"]` that is NOT in
-`<EXTENSIONS>`, delete the directory via `sprite_exec`:
+For each name in `["memory", "mentality", "wiki", "dream",
+"slack-channel"]` that is NOT in `<EXTENSIONS>`, delete the directory via
+`sprite_exec`:
 
 ```bash
 rm -rf /home/sprite/agent/.pi/extensions/<name>
 ```
 
-If `<EXTENSIONS>` is `["memory", "wiki"]`, delete `mentality` and `dream`.
-If `<EXTENSIONS>` is empty, delete all four.
+If `<EXTENSIONS>` is `["memory", "wiki"]`, delete the other three.
+If `<EXTENSIONS>` is empty, delete all five.
 
 Then run the baseline install:
 
@@ -259,12 +261,13 @@ Example: if `<PACKAGES>` is `["pi-web-access"]`, run via `sprite_exec`:
 pi install -l npm:pi-web-access
 ```
 
-The optional in-tree extensions are the Cell memory architecture:
+The optional in-tree extensions:
 
 - `memory` — atoms + yearnings, `write_memory` / `write_yearning` tools, MEMORY.md always-loaded
 - `mentality` — single `mentality.md` synthesis, always-loaded
 - `wiki` — deep narrative knowledge, lazy-queried
 - `dream` — async learner, four-phase consolidation from past sessions
+- `slack-channel` — `slack_post` tool for posting to the cell's bound Slack channel via mother proxy
 
 Storage extensions (memory / mentality / wiki) function standalone. Dream is
 the optional accelerant. Pi auto-discovers extensions in `.pi/extensions/`
