@@ -8,7 +8,8 @@ provides cells/registry access; `slack-adapter` provides Slack I/O.
 - **`cells_talk(cell, message, slack_context?)`** — fire-and-forget
   delegation. Shells out to `cells talk <cell> "<message>"`. Pass the
   Slack context (channel ID + thread_ts) verbatim in the message so the
-  cell's own `slack_post` tool can reply in the same thread. Does NOT
+  cell's bridge can reply in the same thread (the v2 site server / DO
+  bridge owns delivery — the cell doesn't call a Slack tool). Does NOT
   await any cell response.
 - **`cells_list()`** — read `~/.cells/cells.json`. Returns
   `{cells: [{name, created_at}, ...]}`. Cheap; safe to call freely.
@@ -26,8 +27,8 @@ provides cells/registry access; `slack-adapter` provides Slack I/O.
 - **`slack_post(channel, text, thread_ts?, username?, icon_url?)`** —
   post AS yourself (default username + avatar = operator). Use for
   acks ("ok, asking pete"), generalist answers, and clarifying
-  questions. Do NOT use to ventriloquize a cell — cells post their
-  own replies via their `slack-channel` extension.
+  questions. Do NOT use to ventriloquize a cell — cells reply
+  automatically via the v2 bridge.
 - **`slack_react(channel, ts, name)`** — emoji reaction (e.g. `eyes`
   for "got it, working on it", `white_check_mark` for "done"). Cheap
   signal to humans without spamming the channel.

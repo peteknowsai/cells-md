@@ -8,8 +8,8 @@
  *   - cells_status    — read ~/.cells/pulse.json + heartbeats digest
  *   - cells_talk      — shell out to `cells talk <cell> "<msg>"`,
  *                       fire-and-forget. Slack context is embedded in
- *                       the message so the cell's slack-channel
- *                       extension can reply in the right thread.
+ *                       the message so the cell's v2 bridge replies in
+ *                       the right thread.
  *   - channel_lookup  — read ~/.cells/channels.json for a channel ID
  *
  * The slack_post / slack_react tools live in the slack-adapter
@@ -115,7 +115,7 @@ export default function (pi: any) {
     name: "cells_talk",
     label: "Talk to a cell",
     description:
-      "Fire-and-forget delegation: shell out to `cells talk <cell> \"<message>\"` (the cell's pi terminal receives the message as user input). Does NOT await the cell's response — replies come back via the cell's own slack_post tool. When forwarding from Slack, embed the channel/thread context verbatim in the message so the cell can reply in the right thread, e.g.: `from-slack channel=C0123 thread=1714.5 user=U0456 text=<verbatim>`.",
+      "Fire-and-forget delegation: shell out to `cells talk <cell> \"<message>\"` (the cell's pi receives the message as user input). Does NOT await the cell's response — replies come back via the cell's v2 bridge (per-cell CF Worker → Slack). When forwarding from Slack, embed the channel/thread context verbatim in the message so the cell's bridge replies in the right thread, e.g.: `from-slack channel=C0123 thread=1714.5 user=U0456 text=<verbatim>`.",
     parameters: Type.Object({
       cell: Type.String({ description: "The target cell's name (must exist in registry)." }),
       message: Type.String({ description: "What to say. For Slack delegation, use the from-slack envelope above." }),

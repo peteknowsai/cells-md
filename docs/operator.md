@@ -1,26 +1,25 @@
-# operator (RETIRED — see cells-cloud-front Phase 1a)
+# operator (RETIRED — see cells-cloud-front Phases 1a + v2 bridge)
 
-> **This document describes the v1 operator that was retired in
-> cells-cloud-front Phase 1a.** Slack inbound + outbound now run
-> through Cloudflare:
+> **This document describes the v1 operator and the v1.5 drainer-based
+> bridge.** Both are retired. Current architecture (v2):
 >
-> - `slack.cells.md` (Cloudflare Worker `cells-front-slack`) handles
->   the Slack Events API webhook AND the outbound `/send` route
->   that cells use via the slack-channel extension.
-> - Each cell has its own Worker `cells-front-<cell>` at
->   `<cell>.cells.md` with a `CellInbox` Durable Object. The Slack
->   Worker fans out to the right cell via channel→cell bindings in
->   the `CHANNELS` KV namespace.
-> - An in-sprite `cell-drainer` service (registered via
->   `scripts/register-drainer-service.sh`) long-polls
->   `<cell>.cells.md/inbox/poll`, hosts `pi --mode rpc --continue`
->   as a child, and writes prompts to pi's stdin.
+> - `slack.cells.md` (Cloudflare Worker `cells-front-slack`) still
+>   handles the Slack Events API webhook + outbound `/send` and
+>   `/edit` (chat.update) routes.
+> - Each cell has its own Worker `cells-front-<cell>` with a
+>   `CellAgent` Durable Object that holds a **persistent outbound
+>   WebSocket** to the cell's site server at `<sprite>.sprites.app/agent`.
+> - The cell's `site/server.ts` spawns `pi --mode rpc` as a child
+>   process. The DO ↔ site WS pipes pi's RPC event stream into
+>   live-edited Slack messages (thinking, tool calls, text — all
+>   streamed). There is no `slack-channel` pi extension, no
+>   `cell-drainer` service, no tmux pi, no long-poll.
+> - Channel bindings still live in `CHANNELS` KV + `~/.cells/channels.json`.
 >
 > Phase 4 of the cloud-front roadmap reintroduces operator in a
-> different shape — an HTTP-driven LLM-routed inbox at
-> `operator.cells.md/inbox/*` for an "operator channel" where Pete
-> directs work and operator picks the right cell. Until then, the
-> files in `proto/operator/` are kept for reference only.
+> different shape — an HTTP-driven LLM-routed inbox for an "operator
+> channel" where Pete directs work and operator picks the right cell.
+> Until then, the files in `proto/operator/` are kept for reference only.
 
 The rest of this document is the v1 architecture as it existed before
 retirement, kept for historical context.
@@ -120,7 +119,7 @@ pulse.
 | `proto/operator/state/log.md` | (future) daily narrative — operator-written |
 | `cli/proxy.ts` | `slack.cells.md/send` host branch |
 | `cli/cells.ts` | `cells channel link/unlink/list`, `schedule-operator`, birth prompt |
-| `proto/mother/dna/.pi/extensions/slack-channel/` | optional cell extension; `slack_post` tool |
+| ~~`proto/mother/dna/.pi/extensions/slack-channel/`~~ | (removed in v2 — bridge owns delivery) |
 
 ## State
 
@@ -156,41 +155,39 @@ pulse.
 8. Restart mother (`launchctl kickstart -k gui/$UID/com.pete.cells-proxy`)
    so the proxy reads `SLACK_BOT_TOKEN`.
 
-## Per-cell setup
+## Per-cell setup (v2 — automated at birth)
 
-For each cell that should be reachable via Slack:
+`cells birth` handles the per-cell Slack wiring end-to-end when `slack`
+is selected in the **Channels** step:
 
-1. **Create a private channel in Slack.** Convention: `#cells-pete`,
-   `#cells-scott`, etc. (Public is fine too; private gives you a
-   DM-feeling sidebar entry without per-cell bot apps.)
-2. **Invite the bot:** `/invite @cells` in the channel.
-3. **Bind the channel to the cell:** copy the channel ID (channel
-   name → "About" → bottom of panel) and run:
-   ```sh
-   cells channel link <cell> <channel-id>
-   ```
-4. **Ensure the cell has the slack-channel extension.** New cells get
-   it via the birth prompt. Existing cells need a one-shot retrofit:
-   ```sh
-   cells refresh-extensions <cell> slack-channel --restart
-   ```
+1. CLI calls Slack `conversations.create` with `name=cells-<NAME>` using
+   `SLACK_BOT_TOKEN`, returns the channel ID. (Bot needs `channels:manage`
+   scope.)
+2. CLI binds the channel ID → cell mapping in `~/.cells/channels.json`
+   and the `CHANNELS` KV namespace.
+3. `scripts/deploy-cell-worker.sh <NAME>` deploys the per-cell CF worker
+   (the `CellAgent` DO that holds the persistent WS to the sprite).
+4. Bot is auto-added as channel creator. Humans join the channel from
+   the Slack sidebar (one click) — no `/invite` needed.
 
-After this, anything posted in the bound channel routes to the cell.
-The cell's `slack_post` tool uses the channel's ID and (optional)
-`thread_ts` from the inbound envelope to reply in the same thread.
+There is no per-cell pi extension to install. Pi runs in `--mode rpc`
+under the site service; the bridge is the only delivery path.
 
 ## Birth integration
 
-`cells birth` (interactive) has a 6th step:
+`cells birth` (interactive) has a **Channels** multi-select step:
 ```
-Slack channel ID? (paste or empty to skip):
+Channels?
+[ ] slack
+[ ] email  (coming soon)
 ```
-A non-empty paste:
-- adds `slack-channel` to the chosen extensions automatically
-- writes the channel↔cell binding post-birth
+Checking `slack` → CLI auto-creates `#cells-<name>`, binds it, and
+deploys the worker. No channel-ID prompt.
 
-Non-interactive flag: `--slack-channel=C0123456789`. Bad IDs rejected at
-parse time.
+Non-interactive flags:
+- `--channels=slack` — auto-create + bind + deploy.
+- `--slack-channel=C0123456789` — legacy: bind to an existing channel
+  by ID (skips create).
 
 ## Identity in Slack
 

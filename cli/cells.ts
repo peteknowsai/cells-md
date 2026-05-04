@@ -34,7 +34,7 @@ type ModelKey = keyof typeof MODEL_IDS;
 // In-tree extensions a user can opt into at create time. Each lives at
 // proto/mother/dna/.pi/extensions/<name>/ — birth pushes the whole dna, then
 // deletes the unselected ones from the cell.
-const OPTIONAL_EXTENSIONS = ["memory", "mentality", "wiki", "dream", "slack-channel"] as const;
+const OPTIONAL_EXTENSIONS = ["memory", "mentality", "wiki", "dream"] as const;
 type OptionalExtension = (typeof OPTIONAL_EXTENSIONS)[number];
 
 // Curated list of npm/git packages a cell can install via `pi install`.
@@ -105,6 +105,15 @@ const THINKING_OPTIONS = THINKING_OPTIONS_BASE;
 const THINKING_VALUES = [...THINKING_OPTIONS_BASE.map((o) => o.value), "adaptive"];
 const DEFAULT_THINKING = "medium";
 
+// Anthropic models silently disable thinking at sub-high levels — their
+// thinkingLevelMap only contains entries for high/xhigh, so medium maps
+// to "off". Default Claude cells to high so birth doesn't quietly produce
+// a thinking-less cell. Other providers honor medium fine.
+function defaultThinkingFor(modelKey: ModelKey): string {
+  const provider = MODEL_IDS[modelKey].provider;
+  return provider === "anthropic" ? "high" : DEFAULT_THINKING;
+}
+
 function thinkingOptionsFor(modelKey: ModelKey): SelectOption[] {
   return modelKey === "opus" ? [...THINKING_OPTIONS_BASE, ADAPTIVE_OPTION] : THINKING_OPTIONS_BASE;
 }
@@ -122,6 +131,16 @@ const EXTENSION_OPTIONS: SelectOption[] = OPTIONAL_EXTENSIONS.map((p) => ({
   value: p,
   label: p,
 }));
+
+// Channels — what messaging surfaces the cell is reachable on. Each
+// implies its own infra setup at birth (Slack: auto-create channel,
+// bind, deploy CF worker). Keep the list short and additive.
+const CHANNEL_VALUES = ["slack"] as const;
+type ChannelValue = (typeof CHANNEL_VALUES)[number];
+const CHANNEL_OPTIONS: SelectOption[] = [
+  { value: "slack", label: "slack" },
+  { value: "email", label: "email", hint: "(coming soon)" },
+];
 
 const PACKAGE_OPTIONS: SelectOption[] = OPTIONAL_PACKAGES.map((p) => ({
   value: p.value,
@@ -775,6 +794,7 @@ type CreateOpts = {
   thinking?: string;
   extensions?: string[];
   packages?: string[];
+  channels?: ChannelValue[];
   slackChannel?: string;
 };
 
@@ -827,6 +847,16 @@ function parseCreateArgs(args: string[]): { name: string; opts: CreateOpts } {
         process.exit(1);
       }
       opts.slackChannel = v;
+    } else if (a.startsWith("--channels=")) {
+      const v = a.slice("--channels=".length);
+      const parts = v ? v.split(",").map((s) => s.trim()).filter(Boolean) : [];
+      for (const p of parts) {
+        if (!(CHANNEL_VALUES as readonly string[]).includes(p)) {
+          console.error(`unknown channel: ${p}. choose from: ${CHANNEL_VALUES.join(", ")}`);
+          process.exit(1);
+        }
+      }
+      opts.channels = parts as ChannelValue[];
     } else if (a.startsWith("--")) {
       console.error(`unknown flag: ${a}`);
       process.exit(1);
@@ -861,13 +891,15 @@ async function cmdCreate(name: string, opts: CreateOpts) {
     opts.model === undefined &&
     opts.thinking === undefined &&
     opts.extensions === undefined &&
-    opts.packages === undefined;
+    opts.packages === undefined &&
+    opts.channels === undefined;
 
   let harness: string;
   let modelKey: ModelKey;
   let thinking: string;
   let extensions: string[];
   let packages: string[];
+  let channels: ChannelValue[];
 
   let slackChannel: string | undefined = opts.slackChannel;
 
@@ -876,7 +908,7 @@ async function cmdCreate(name: string, opts: CreateOpts) {
     // Step machine so the user can ←/⌫ back to a previous prompt mid-flow.
     const answers: (string | string[] | undefined)[] = [];
     let i = 0;
-    while (i < 5) {
+    while (i < 6) {
       const canGoBack = i > 0;
       let result: string | string[] | Back;
       if (i === 0) {
@@ -898,10 +930,15 @@ async function cmdCreate(name: string, opts: CreateOpts) {
           canGoBack,
           initialChecked: (answers[3] as string[] | undefined) ?? PACKAGE_DEFAULTS,
         });
-      } else {
+      } else if (i === 4) {
         result = await selectOne("Thinking?", thinkingOptionsFor(answers[1] as ModelKey), {
           canGoBack,
-          initialValue: (answers[4] as string | undefined) ?? DEFAULT_THINKING,
+          initialValue: (answers[4] as string | undefined) ?? defaultThinkingFor(answers[1] as ModelKey),
+        });
+      } else {
+        result = await selectMany("Channels?", CHANNEL_OPTIONS, {
+          canGoBack,
+          initialChecked: answers[5] as string[] | undefined,
         });
       }
       if (result === BACK) {
@@ -919,30 +956,15 @@ async function cmdCreate(name: string, opts: CreateOpts) {
     extensions = answers[2] as string[];
     packages = answers[3] as string[];
     thinking = answers[4] as string;
-
-    // 6th step is free-text (readline) — no back support, just skip-or-enter.
-    // Only prompts when slack-channel was checked in extensions OR Pete
-    // wants to bind a channel without enabling the tool (rare); we keep
-    // it unconditional for symmetry but blank skips silently.
-    const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
-    try {
-      const ans = (await rl.question("Slack channel ID? (paste or empty to skip): ")).trim();
-      if (ans) {
-        if (!CHANNEL_ID_PATTERNS.slack.test(ans)) {
-          console.error(`bad Slack channel ID: ${ans} — skipping bind`);
-        } else {
-          slackChannel = ans;
-        }
-      }
-    } finally {
-      rl.close();
-    }
+    const rawChannels = (answers[5] as string[]).filter((c) => (CHANNEL_VALUES as readonly string[]).includes(c));
+    channels = rawChannels as ChannelValue[];
   } else {
     harness = opts.harness ?? "pi";
     modelKey = opts.model ?? "opus";
-    thinking = opts.thinking ?? DEFAULT_THINKING;
+    thinking = opts.thinking ?? defaultThinkingFor(modelKey);
     extensions = opts.extensions ?? [];
     packages = opts.packages ?? PACKAGE_DEFAULTS;
+    channels = opts.channels ?? (opts.slackChannel ? ["slack"] : []);
     if (harness !== "pi") {
       console.error(`harness '${harness}' not yet supported (only 'pi' for v1)`);
       process.exit(1);
@@ -964,14 +986,6 @@ async function cmdCreate(name: string, opts: CreateOpts) {
   if (MIN_MEDIUM_THINKING_MODELS.has(modelKey) && SUB_MEDIUM_THINKING.has(thinking)) {
     console.warn(`note: ${modelKey} requires thinking ≥ medium; bumping '${thinking}' → 'medium'`);
     thinking = "medium";
-  }
-
-  // If a Slack channel was provided, ensure slack-channel ships with
-  // the cell. The slack-channel extension also signals to the birth
-  // ritual that this cell wants the cloud-front pipeline (drainer
-  // service + per-cell Worker) instead of the legacy tmux pi.
-  if (slackChannel && !extensions.includes("slack-channel")) {
-    extensions = [...extensions, "slack-channel"];
   }
 
   const choice = MODEL_IDS[modelKey];
@@ -997,10 +1011,29 @@ async function cmdCreate(name: string, opts: CreateOpts) {
   reg.cells.push({ name, created_at: new Date().toISOString() });
   await saveRegistry(reg);
 
-  // Post-birth: bind the Slack channel. Best-effort — birth already
-  // succeeded; if this fails, Pete can run `cells channel link` manually.
-  if (slackChannel) {
+  // Post-birth: wire Slack if requested. Best-effort — the cell itself
+  // exists; if any of these steps fail, Pete can re-run them manually.
+  if (channels.includes("slack")) {
     try {
+      // Auto-create the channel if no existing ID was passed via
+      // --slack-channel. Convention: cells-<name>. If the channel
+      // already exists (`name_taken`), bind to the existing one.
+      if (!slackChannel) {
+        slackChannel = await ensureSlackChannel(name);
+        console.log(`✓ slack channel ${slackChannel} (#cells-${name})`);
+        // Best-effort: invite the human owner so the channel shows up
+        // in their sidebar. Failures here don't block the birth — the
+        // channel still exists and routes; Pete can /invite himself.
+        try {
+          const userId = await resolveSlackUserId();
+          if (userId) {
+            await inviteSlackUser(slackChannel, userId);
+            console.log(`✓ invited ${userId} to #cells-${name}`);
+          }
+        } catch (e) {
+          console.warn(`! could not auto-invite to #cells-${name}: ${e}`);
+        }
+      }
       const file = await loadChannels();
       file.bindings[slackChannel] = {
         cell: name,
@@ -1011,8 +1044,154 @@ async function cmdCreate(name: string, opts: CreateOpts) {
       await kvUpsert(slackChannel, name);
       console.log(`✓ linked ${slackChannel} → ${name} (slack)`);
     } catch (e) {
-      console.error(`✗ channel bind failed (${e}); run: cells channel link ${name} ${slackChannel}`);
+      console.error(`✗ slack wiring failed: ${e}`);
+      console.error(`  retry: cells channel link ${name} <id>`);
     }
+
+    // Deploy the per-cell CF Worker (the CellAgent DO that holds the
+    // persistent WS to the sprite). Runs deploy-cell-worker.sh, which
+    // resolves the sprite host and runs `wrangler deploy`.
+    try {
+      const script = join(REPO_ROOT, "scripts/deploy-cell-worker.sh");
+      const proc = Bun.spawn(["bash", script, name], { stdout: "inherit", stderr: "inherit" });
+      const code = await proc.exited;
+      if (code !== 0) {
+        console.error(`✗ worker deploy failed (exit ${code})`);
+        console.error(`  retry: scripts/deploy-cell-worker.sh ${name}`);
+      } else {
+        console.log(`✓ deployed cells-front-${name}`);
+      }
+    } catch (e) {
+      console.error(`✗ worker deploy failed: ${e}`);
+      console.error(`  retry: scripts/deploy-cell-worker.sh ${name}`);
+    }
+  }
+}
+
+// Slack: create #cells-<name> via conversations.create (requires
+// channels:manage on the bot scope). If the channel already exists,
+// fall back to looking it up. Returns the channel ID either way.
+async function ensureSlackChannel(cellName: string): Promise<string> {
+  const token = await readSecret("SLACK_BOT_TOKEN");
+  if (!token) throw new Error("SLACK_BOT_TOKEN missing from ~/.cells/secrets.json");
+
+  // Try the bare cell name first; if that's taken, fall back to the
+  // namespaced `cells-<name>` form to avoid colliding with a
+  // pre-existing unrelated channel.
+  const tryCreate = async (name: string) => {
+    const r = await fetch("https://slack.com/api/conversations.create", {
+      method: "POST",
+      headers: { authorization: `Bearer ${token}`, "content-type": "application/json; charset=utf-8" },
+      body: JSON.stringify({ name, is_private: false }),
+    });
+    return (await r.json()) as { ok: boolean; channel?: { id: string }; error?: string };
+  };
+
+  const bare = await tryCreate(cellName);
+  if (bare.ok && bare.channel?.id) return bare.channel.id;
+  if (bare.error !== "name_taken") {
+    throw new Error(`conversations.create #${cellName} failed: ${bare.error ?? "unknown"}`);
+  }
+
+  // Brand prefix comes from the Slack bot's own username so this stays
+  // correct across installs where the project is rebranded (e.g. "zero"
+  // instead of "cells"). Falls back to "cells" only if auth.test fails.
+  const prefix = await getSlackBrandPrefix(token);
+  const prefixed = `${prefix}-${cellName}`;
+  console.log(`! #${cellName} taken; using #${prefixed}`);
+  const pref = await tryCreate(prefixed);
+  if (pref.ok && pref.channel?.id) return pref.channel.id;
+  if (pref.error !== "name_taken") {
+    throw new Error(`conversations.create #${prefixed} failed: ${pref.error ?? "unknown"}`);
+  }
+
+  // Both names taken — look up the prefixed one (which we'd own from a
+  // prior cells run) and bind to it. Walk pagination in case the
+  // workspace has a lot of channels.
+  let cursor: string | undefined;
+  for (let i = 0; i < 10; i++) {
+    const url = new URL("https://slack.com/api/conversations.list");
+    url.searchParams.set("types", "public_channel,private_channel");
+    url.searchParams.set("limit", "1000");
+    if (cursor) url.searchParams.set("cursor", cursor);
+    const r = await fetch(url, { headers: { authorization: `Bearer ${token}` } });
+    const j = (await r.json()) as {
+      ok: boolean;
+      channels?: { id: string; name: string }[];
+      response_metadata?: { next_cursor?: string };
+      error?: string;
+    };
+    if (!j.ok) throw new Error(`conversations.list failed: ${j.error ?? "unknown"}`);
+    const hit = j.channels?.find((c) => c.name === prefixed);
+    if (hit) return hit.id;
+    cursor = j.response_metadata?.next_cursor || undefined;
+    if (!cursor) break;
+  }
+  throw new Error(`#${prefixed} reported name_taken but not found in conversations.list`);
+}
+
+// Slack bot's own username, lowercased and slugged. Used as the
+// channel-name prefix when a cell's bare name collides with an
+// existing channel. Cached per-process — bot name doesn't change.
+let _slackBrandPrefix: string | null = null;
+async function getSlackBrandPrefix(botToken: string): Promise<string> {
+  if (_slackBrandPrefix) return _slackBrandPrefix;
+  try {
+    const r = await fetch("https://slack.com/api/auth.test", {
+      method: "POST",
+      headers: { authorization: `Bearer ${botToken}` },
+    });
+    const j = (await r.json()) as { ok: boolean; user?: string };
+    const raw = j.ok && j.user ? j.user : "cells";
+    _slackBrandPrefix = raw.toLowerCase().replace(/[^a-z0-9-]/g, "-").replace(/-+/g, "-").replace(/^-|-$/g, "") || "cells";
+  } catch {
+    _slackBrandPrefix = "cells";
+  }
+  return _slackBrandPrefix;
+}
+
+// Look up the human owner's Slack user ID via auth.test on
+// SLACK_USER_TOKEN. The user token belongs to whoever installed the
+// app (Pete), so this returns Pete's ID. No extra scope required —
+// auth.test just reflects the token owner.
+async function resolveSlackUserId(): Promise<string | null> {
+  const userToken = await readSecret("SLACK_USER_TOKEN");
+  if (!userToken) return null;
+  const r = await fetch("https://slack.com/api/auth.test", {
+    method: "POST",
+    headers: { authorization: `Bearer ${userToken}` },
+  });
+  const j = (await r.json()) as { ok: boolean; user_id?: string; error?: string };
+  if (!j.ok || !j.user_id) throw new Error(`auth.test failed: ${j.error ?? "unknown"}`);
+  return j.user_id;
+}
+
+async function inviteSlackUser(channelId: string, userId: string): Promise<void> {
+  const botToken = await readSecret("SLACK_BOT_TOKEN");
+  if (!botToken) throw new Error("SLACK_BOT_TOKEN missing");
+  const r = await fetch("https://slack.com/api/conversations.invite", {
+    method: "POST",
+    headers: {
+      authorization: `Bearer ${botToken}`,
+      "content-type": "application/json; charset=utf-8",
+    },
+    body: JSON.stringify({ channel: channelId, users: userId }),
+  });
+  const j = (await r.json()) as { ok: boolean; error?: string };
+  // already_in_channel is fine — idempotent re-runs.
+  if (!j.ok && j.error !== "already_in_channel") {
+    throw new Error(`conversations.invite failed: ${j.error ?? "unknown"}`);
+  }
+}
+
+async function readSecret(key: string): Promise<string | null> {
+  if (!existsSync(SECRETS_PATH)) return null;
+  try {
+    const s = JSON.parse(await readFile(SECRETS_PATH, "utf-8")) as Record<string, unknown>;
+    const v = s[key];
+    return typeof v === "string" && v ? v : null;
+  } catch {
+    return null;
   }
 }
 
@@ -1030,8 +1209,86 @@ async function cmdDestroyOne(name: string): Promise<boolean> {
   // trying to fire to a non-existent target. Best-effort — pulse tolerates
   // orphan state, this just keeps the digest clean.
   await evictPulseStateForCell(name);
+  await archiveSlackChannelsForCell(name);
   await evictChannelBindingsForCell(name);
+  await deleteCellWorker(name);
   return true;
+}
+
+async function archiveSlackChannelsForCell(name: string): Promise<void> {
+  if (!existsSync(CHANNELS_PATH)) return;
+  let bindings: Record<string, { cell: string; kind: string }>;
+  try {
+    bindings = (await loadChannels()).bindings;
+  } catch {
+    return;
+  }
+  const slackIds = Object.entries(bindings)
+    .filter(([, b]) => b.cell === name && b.kind === "slack")
+    .map(([id]) => id);
+  if (slackIds.length === 0) return;
+  const token = await readSecret("SLACK_BOT_TOKEN");
+  if (!token) {
+    console.warn(`! SLACK_BOT_TOKEN missing — leaving ${slackIds.length} Slack channel(s) live`);
+    return;
+  }
+  for (const channel of slackIds) {
+    try {
+      const r = await fetch("https://slack.com/api/conversations.archive", {
+        method: "POST",
+        headers: { authorization: `Bearer ${token}`, "content-type": "application/json; charset=utf-8" },
+        body: JSON.stringify({ channel }),
+      });
+      const j = (await r.json()) as { ok: boolean; error?: string };
+      // already_archived is fine; not_in_channel means we lost membership
+      // somewhere — channel is still live, log and move on.
+      if (!j.ok && j.error !== "already_archived") {
+        console.warn(`! archive ${channel} failed: ${j.error ?? "unknown"}`);
+      } else {
+        console.log(`✓ archived slack channel ${channel}`);
+      }
+    } catch (e) {
+      console.warn(`! archive ${channel} failed: ${e}`);
+    }
+  }
+}
+
+async function deleteCellWorker(name: string): Promise<void> {
+  // wrangler delete needs the rendered config (same template the deploy
+  // script produces). Reuse the template inline since the deploy script
+  // is single-purpose for "deploy."
+  const template = join(REPO_ROOT, "cli/worker/cell/wrangler.toml");
+  if (!existsSync(template)) return;
+  try {
+    const tpl = await readFile(template, "utf-8");
+    // SPRITE_HOST doesn't matter for delete, but the placeholder must be
+    // substituted or wrangler chokes on the unrendered TOML.
+    const rendered = tpl.replaceAll("{{CELL}}", name).replaceAll("{{SPRITE_HOST}}", "ignored.sprites.app");
+    const renderedPath = join(REPO_ROOT, "cli/worker/cell", `.wrangler.${name}.toml`);
+    await Bun.write(renderedPath, rendered);
+    try {
+      const proc = Bun.spawn(["bunx", "wrangler", "delete", "--config", renderedPath], {
+        cwd: join(REPO_ROOT, "cli/worker/cell"),
+        stdin: new TextEncoder().encode("y\n"), // confirm prompt
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+      const code = await proc.exited;
+      if (code !== 0) {
+        const err = await new Response(proc.stderr).text();
+        // service_not_found is fine — already gone.
+        if (!/Couldn'?t find a Worker|10007|not found/i.test(err)) {
+          console.warn(`! worker delete failed (exit ${code})`);
+        }
+      } else {
+        console.log(`✓ deleted cells-front-${name}`);
+      }
+    } finally {
+      try { await unlink(renderedPath); } catch { /* best-effort */ }
+    }
+  } catch (e) {
+    console.warn(`! worker delete failed: ${e}`);
+  }
 }
 
 async function evictPulseStateForCell(name: string): Promise<void> {
@@ -1871,27 +2128,18 @@ echo removed
 }
 
 /**
- * Restart pi on a cell so newly-pushed extensions actually load. Kills the
- * tmux session and re-launches pi via the canonical bashrc.d-sourcing chain
- * (matches scripts/register-agent-service.sh). Detached so this command
- * returns once pi has been kicked off.
+ * Restart pi on a cell so newly-pushed extensions actually load.
  *
- * Note: this doesn't re-install the sprite supervisor service. Cells born
- * before the supervisor existed (or after a crashed keeper) still need
- * register-agent-service.sh for crash auto-recovery. This just gets pi back
- * up *now* after a refresh.
+ * v2: pi runs as a child of the site server (proto/mother/dna/site/server.ts).
+ * Killing pi is enough — the site server's `pi.exited` handler respawns
+ * it after PI_RESPAWN_DELAY_MS (1s) and pi re-reads extensions on boot.
+ * No need to restart the sprite service itself.
  */
 async function restartPiOnCell(cellName: string): Promise<boolean> {
-  // Three-stage: kill, brief settle, re-launch in a backgrounded keeper loop
-  // so we get pi-crash recovery for the rest of this VM uptime.
   const script = `
-tmux kill-session -t ${cellName} 2>/dev/null || true
-sleep 1
-cd /home/sprite/agent
-setsid bash -lc 'tmux new-session -dA -s ${cellName} bash -lc "for f in /home/sprite/.bashrc.d/*; do . \\$f; done; export PATH=/home/sprite/.local/bin:\\$HOME/.bun/bin:\\$PATH; exec pi" && while tmux has-session -t ${cellName} 2>/dev/null; do sleep 10; done' </dev/null >/dev/null 2>&1 &
-disown
+pkill -f "pi --mode rpc" 2>/dev/null || true
 sleep 2
-tmux has-session -t ${cellName} 2>/dev/null && echo restarted || { echo "✗ tmux session not present after restart"; exit 1; }
+pgrep -f "pi --mode rpc" >/dev/null && echo restarted || { echo "✗ pi not running after kill — site service may be down"; exit 1; }
 `.trim();
   const r = await spriteExecCapture(cellName, script);
   if (!r.ok) {
@@ -2848,9 +3096,10 @@ switch (sub) {
     console.log("  cells birth <name> [flags]  provision a new cell on a Sprite (alias: create)");
     console.log("                              flags: --harness=pi --model=opus|sonnet|haiku|gpt-5.5|gpt-5.5-pro|deepseek-v4-flash|deepseek-v4-pro");
     console.log("                                     --thinking=off|minimal|low|medium|high|xhigh|adaptive");
-    console.log("                                     --extensions=memory,mentality,wiki,dream,slack-channel");
+    console.log("                                     --extensions=memory,mentality,wiki,dream");
     console.log("                                     --packages=pi-web-access");
-    console.log("                                     --slack-channel=C0123456789  (auto-installs slack-channel + binds via cells channel link)");
+    console.log("                                     --channels=slack         (auto-creates #cells-<name>, binds, deploys worker)");
+    console.log("                                     --slack-channel=C0123456789  (legacy: bind to existing channel by ID)");
     console.log("                              no flags = interactive TUI; any flag = non-interactive (defaults fill the rest)");
     console.log("  cells talk <name> [msg]     attach to a cell's TUI (no msg) or send one-shot (with msg).");
     console.log("                              'mother' = local pi; accepts any pi flag (-c, -r, --session=<id>, -p ...).");

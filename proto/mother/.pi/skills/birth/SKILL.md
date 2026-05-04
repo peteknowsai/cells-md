@@ -35,10 +35,10 @@ Don't proceed until this succeeds — every later step depends on egress.
 
 ## 3. Install system tools and configure tmux
 
-Bun is not pre-installed on Sprite VMs. tmux often is, but install/upgrade it
-to be safe — Pi runs inside a tmux session, so the agent's continuity depends
-on it. Pi also uses modified-Enter keys (Shift+Enter for newline, plain Enter
-to submit) which require tmux's `extended-keys` to be on.
+Bun is not pre-installed on Sprite VMs. tmux often is, but install/upgrade
+it to be safe — useful for interactive shell sessions. (In v2 pi runs
+under the site service, not in a tmux session, but tmux remains handy
+for keeping side shells alive across sprite console reconnects.)
 
 Also install the standard terminal-editing toolkit (`micro`, `fzf`,
 `ripgrep`, `bat`) — see `docs/terminal-setup.md`. These power the `mf` /
@@ -217,23 +217,24 @@ backed by the Sprites HTTP API). Make it executable and symlink onto PATH
 so both the agent's bash and the `self` extension can call it.
 
 First, prune the in-tree optional extensions the user did NOT pick. The
-DNA ships with all five (`memory`, `mentality`, `wiki`, `dream`,
-`slack-channel`) under `/home/sprite/agent/.pi/extensions/`; we keep
-only those listed in `<EXTENSIONS>` and delete the rest.
+DNA ships with all four (`memory`, `mentality`, `wiki`, `dream`) under
+`/home/sprite/agent/.pi/extensions/`; we keep only those listed in
+`<EXTENSIONS>` and delete the rest.
 
 The always-installed extensions (`use-max`, `self`, `heartbeat-watch`)
-stay regardless.
+stay regardless. Slack delivery is handled by the v2 bridge (the
+per-cell Cloudflare Worker + the cell's site server's WebSocket
+endpoint), not by any in-pi extension.
 
-For each name in `["memory", "mentality", "wiki", "dream",
-"slack-channel"]` that is NOT in `<EXTENSIONS>`, delete the directory via
-`sprite_exec`:
+For each name in `["memory", "mentality", "wiki", "dream"]` that is NOT
+in `<EXTENSIONS>`, delete the directory via `sprite_exec`:
 
 ```bash
 rm -rf /home/sprite/agent/.pi/extensions/<name>
 ```
 
-If `<EXTENSIONS>` is `["memory", "wiki"]`, delete the other three.
-If `<EXTENSIONS>` is empty, delete all five.
+If `<EXTENSIONS>` is `["memory", "wiki"]`, delete the other two.
+If `<EXTENSIONS>` is empty, delete all four.
 
 Then **register the chosen optional extensions in `.pi/settings.json`**.
 The DNA template's `extensions` array only lists the always-installed
@@ -282,7 +283,6 @@ The optional in-tree extensions:
 - `mentality` — single `mentality.md` synthesis, always-loaded
 - `wiki` — deep narrative knowledge, lazy-queried
 - `dream` — async learner, four-phase consolidation from past sessions
-- `slack-channel` — `slack_post` tool for posting to the cell's bound Slack channel via mother proxy
 
 Storage extensions (memory / mentality / wiki) function standalone. Dream is
 the optional accelerant. Pi auto-discovers extensions in `.pi/extensions/`
@@ -407,51 +407,19 @@ if you rotate `CELLS_PROXY_SECRET`.
 Background: see `state/memory/project_mother_proxy.md` and
 `state/memory/reference_pi_internals.md` for why this is necessary.
 
-## 7. Register the cell's pi-host service (auto-start Pi on VM boot)
-
-Without this, Pi only starts when a human attaches interactively (the
-shell shim in step 8). That breaks any automation that wakes a hibernated
-cell — the VM is up but Pi isn't running.
-
-Two service shapes. **Pick exactly one** based on the chosen extensions:
-
-**A. `slack-channel` is among the chosen extensions → `site` service
-hosts pi (cells-cloud-front Phase 1c).**
-
-The cell receives Slack messages via Cloudflare. The cell's Cloudflare
-Worker pushes inbound events to `https://<sprite-host>/inbox/push`,
-which the site server (~/agent/site/server.ts) handles by piping the
-event into pi's stdin. The site server spawns `pi --mode rpc --continue`
-itself, so registering the `site` service is the only piece needed.
-
-There is no separate `drainer` service in this mode. Skip step 7b's
-"register the site service" — the same registration covers both
-responsibilities.
-
-```bash
-scripts/register-site-service.sh <NAME>
-scripts/deploy-cell-worker.sh <NAME>   # provisions cells-front-<NAME> on Cloudflare
-```
-
-**B. No `slack-channel` extension → legacy `agent` service.**
-
-Pi runs interactively under tmux. `cells talk <NAME>` injects messages
-via tmux send-keys. No cloud inbox. The site server runs without pi
-in this mode (it's only serving the homepage at `<name>.cells.md`).
-
-```bash
-scripts/register-agent-service.sh <NAME>
-```
-
-Don't register both — two pi processes both calling `--continue` race
-over the same most-recent session file.
-
-## 7b. Register the `site` service + open the cell URL to mother
+## 7. Register the `site` service + open the cell URL to mother
 
 The cell's public face at `<NAME>.cells.md` is served by the cell itself,
 not mother — `~/agent/site/server.ts` is a tiny Bun web server that the
 cell owns and can morph (drop `public/index.html`, add routes, swap the
 whole thing for a different framework). Mother just reverse-proxies.
+
+In v2, the site server is also the **pi host**: it spawns `pi --mode rpc`
+as a child process and exposes a `/agent` WebSocket endpoint. The
+per-cell Cloudflare Worker (deployed below if a Slack channel is bound)
+holds a persistent outbound WebSocket to that endpoint and is the only
+delivery path for inbound prompts and outbound replies. There is no
+separate `agent` service and no tmux pi.
 
 Two pieces:
 
@@ -459,52 +427,54 @@ Two pieces:
    `<name>-XXX.sprites.app` redirects unauthenticated traffic to a
    sprites.dev login. Mother can't carry the org-token cookie through a
    reverse proxy, so we open the URL. Security still holds because the
-   site server requires `x-mother-secret` (set in step 6c), and mother
-   is the only thing that knows it.
+   site server requires `x-mother-secret` (set in step 6c) on HTTP
+   routes and `Authorization: Bearer <MOTHER_SECRET>` on the `/agent`
+   WS upgrade — mother (and the per-cell Worker) is the only thing that
+   knows the secret.
 
    ```bash
    sprite url update --auth public -s <NAME>
    ```
 
-2. **Register the `site` service.** Same shape as `agent` in step 7;
-   supervises `bun run server.ts` with `CELL_NAME` and `PORT=8080` set:
+2. **Register the `site` service.** Supervises `bun run server.ts`
+   with `CELL_NAME` and `PORT=8080` set; the server itself spawns pi:
 
    ```bash
    scripts/register-site-service.sh <NAME>
    ```
 
-After both, `cells see <NAME>` should open `<NAME>.cells.md` in the
-browser and render the cell's homepage.
+The per-cell Cloudflare Worker (the `CellAgent` DO that holds the
+persistent WS to the sprite) is deployed by the `cells` CLI itself
+post-birth — not from inside the birth ritual — because it runs on
+the Mac and depends on the sprite already existing. You don't need
+to touch `deploy-cell-worker.sh` here.
 
-## 8. Login shim — auto-attach to Pi TUI
+After both pieces register, `cells see <NAME>` should open
+`<NAME>.cells.md` in the browser and render the cell's homepage.
+
+## 8. Login shim — env on interactive login
 
 Sprite's interactive shell is **zsh** (despite `/etc/passwd` listing /bin/bash
-as the login shell), so the shim must go in both `.zshrc` and `.bashrc`. zsh
-doesn't auto-source `.bashrc.d`, so we also have to source it explicitly from
-`.zshrc`.
+as the login shell). zsh doesn't auto-source `.bashrc.d`, so we explicitly
+source it from `.zshrc` so an interactive login has the same env (PATH,
+ANTHROPIC_AUTH_TOKEN, MOTHER_SECRET, etc.) as the site service.
+
+In v2 we **don't** auto-attach to a pi TUI on login. Pi runs as a child
+of the site service (step 7); the cell speaks via the WebSocket bridge.
+Logging in lands you in a normal zsh in `/home/sprite/agent` so you can
+inspect logs, edit files, or run `pi --mode tui` manually against a
+separate session if you want to drive pi interactively.
 
 Use `sprite_exec`:
 
 ```bash
-cat >> /home/sprite/.bashrc << 'EOF'
-
-# agent: auto-attach to Pi TUI on interactive login
-if [ -z "$TMUX" ] && [ -t 0 ]; then
-  cd /home/sprite/agent
-  exec tmux new-session -A -s <NAME> pi
-fi
-EOF
-
 cat >> /home/sprite/.zshrc << 'EOF'
 
 # agent: source bashrc.d for env (PATH, ANTHROPIC_AUTH_TOKEN, etc)
 for f in /home/sprite/.bashrc.d/*; do source $f; done
 
-# agent: auto-attach to Pi TUI on interactive login
-if [[ -z "$TMUX" && -t 0 ]]; then
-  cd /home/sprite/agent
-  exec tmux new-session -A -s <NAME> pi
-fi
+# agent: drop into the agent dir on login
+cd /home/sprite/agent
 EOF
 ```
 

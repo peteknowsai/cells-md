@@ -17,9 +17,9 @@ composes context from:
 mother and pulse. It runs locally on Pete's Mac under launchd as a
 long-lived process, holds a Slack Socket Mode connection (no public
 webhook), and routes inbound human messages to cells (or handles them
-inline as a generalist). Cells reply directly via the `slack-channel`
-extension → mother proxy → `chat.postMessage`, posting AS the cell via
-Slack's `username`/`icon_url` override.
+inline as a generalist). Cells reply directly via the v2 bridge
+(per-cell CF Worker → Slack `chat.postMessage`/`chat.update`), posting
+AS the cell via Slack's `username`/`icon_url` override.
 
 Operator does not birth or destroy cells (mother). Operator does not
 fire scheduled wake-ups (pulse). Operator only mediates human ↔ cell
