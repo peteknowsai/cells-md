@@ -1621,7 +1621,13 @@ async function streamCellBridge(name: string, opts: StreamOpts): Promise<void> {
   let inFlight = false;
   let agentEnded = false;
   let promptOpen = opts.interactive;
-  let activeText = false;     // true while pi is mid-text in the current turn
+  let activeText = false;       // true while pi is mid-text in the current turn
+  let activeThinking = false;   // true while pi is mid-thinking-block
+  let activeToolId: string | null = null; // tool whose line is open and awaiting its result
+  // Track tool calls by id so we can render name + args alongside the
+  // result when tool_execution_end fires (the start event has args, the
+  // end event has the result; we join them).
+  const tools = new Map<string, { name: string; args: any }>();
   const rl = opts.interactive
     ? readline.createInterface({ input: process.stdin, output: process.stdout })
     : null;
@@ -1652,22 +1658,77 @@ async function streamCellBridge(name: string, opts: StreamOpts): Promise<void> {
     }
   };
 
+  // Helper: when transitioning out of a streaming block (thinking,
+  // text, or an open tool line), emit a single trailing newline so the
+  // next prefix lands on its own line.
+  const closeActiveBlock = () => {
+    if (activeThinking || activeText || activeToolId) {
+      process.stdout.write("\n");
+      activeThinking = false;
+      activeText = false;
+      activeToolId = null;
+    }
+  };
+
   const handleEvent = (event: any) => {
     if (event.type === "message_update") {
       const ev = event.assistantMessageEvent;
       if (ev?.type === "text_delta" && typeof ev.delta === "string") {
+        if (activeThinking) { process.stdout.write("\n"); activeThinking = false; }
+        if (!activeText) process.stdout.write(`\x1b[1m${name}>\x1b[0m `);
         process.stdout.write(ev.delta);
         activeText = true;
-      } else if (ev?.type === "thinking_delta" && typeof ev.delta === "string") {
-        // Render thinking dimmed; keep it on its own line.
-        process.stdout.write(`\x1b[2m${ev.delta}\x1b[0m`);
+      } else if (ev?.type === "thinking_start") {
+        // Mark "thinking" with a static label, not the streaming text —
+        // the body is intentionally hidden so the conversation stays
+        // readable. Replaced with the actual reply once it lands.
+        if (!activeThinking) {
+          process.stdout.write(`\x1b[2m[thinking…]\x1b[0m`);
+          activeThinking = true;
+        }
+      } else if (ev?.type === "thinking_end") {
+        if (activeThinking) { process.stdout.write("\n"); activeThinking = false; }
+      } else if (ev?.type === "toolcall_end" && ev.toolCall) {
+        // Stash the call's args by id so we can render them alongside
+        // the result when tool_execution_end fires.
+        tools.set(String(ev.toolCall.id ?? ""), {
+          name: String(ev.toolCall.name ?? "?"),
+          args: ev.toolCall.arguments,
+        });
       }
-    } else if (event.type === "tool_execution_start" && event.toolCall) {
-      const tc = event.toolCall;
-      if (activeText) { process.stdout.write("\n"); activeText = false; }
-      process.stdout.write(`\x1b[2m🔧 ${tc.name}\x1b[0m\n`);
+    } else if (event.type === "tool_execution_start") {
+      const id = String(event.toolCallId ?? "");
+      const tc = tools.get(id);
+      const tname = tc?.name ?? String(event.name ?? "?");
+      const argSummary = tc ? cliSummarizeArgs(tname, tc.args) : "";
+      closeActiveBlock();
+      // Open the tool line; result will be appended in tool_execution_end.
+      const head = argSummary ? `[${tname}: ${argSummary}]` : `[${tname}]`;
+      process.stdout.write(`\x1b[2m${head}\x1b[0m`);
+      activeToolId = id;
+    } else if (event.type === "tool_execution_end") {
+      const id = String(event.toolCallId ?? "");
+      const result = typeof event.result === "string" ? event.result : JSON.stringify(event.result ?? "");
+      const unwrapped = cliUnwrapToolResult(result);
+      const isError = !!event.isError;
+      // If we never saw a start (rare), open the line now.
+      if (activeToolId !== id) {
+        const tc = tools.get(id);
+        const tname = tc?.name ?? "?";
+        const argSummary = tc ? cliSummarizeArgs(tname, tc.args) : "";
+        closeActiveBlock();
+        const head = argSummary ? `[${tname}: ${argSummary}]` : `[${tname}]`;
+        process.stdout.write(`\x1b[2m${head}\x1b[0m`);
+      }
+      const tail = unwrapped
+        ? (isError ? ` \x1b[31m✗ ${cliTruncate(unwrapped, 200)}\x1b[0m`
+                   : ` → \x1b[2m${cliTruncate(unwrapped, 200)}\x1b[0m`)
+        : (isError ? " \x1b[31m✗\x1b[0m" : " ✓");
+      process.stdout.write(`${tail}\n`);
+      activeToolId = null;
+      tools.delete(id);
     } else if (event.type === "agent_end") {
-      if (activeText) { process.stdout.write("\n"); activeText = false; }
+      closeActiveBlock();
       inFlight = false;
       agentEnded = true;
       if (opts.interactive) showPrompt();
@@ -1805,6 +1866,53 @@ async function resolveSpriteHost(name: string, secret: string): Promise<string |
 // filters bot_message subtypes, so this doesn't loop back through
 // /events into the cell. Best-effort: failures don't block the bridge
 // send.
+// One-line arg summary used in the CLI tool render. Mirrors the
+// cell-agent.ts logic but kept local so the bridge worker doesn't get
+// a dependency on this file.
+function cliSummarizeArgs(toolName: string, args: any): string {
+  const a = (args && typeof args === "object") ? args as Record<string, any> : {};
+  const pick = (k: string) => typeof a[k] === "string" ? a[k] : "";
+  switch (toolName) {
+    case "write_memory": case "write_yearning": case "read_memory":
+      return pick("name");
+    case "write_file": case "read_file": case "edit_file":
+      return pick("path") || pick("file_path");
+    case "bash": case "shell":
+      return pick("command");
+    case "web_search": case "code_search":
+      return pick("query");
+    case "fetch_content": case "get_search_content":
+      return pick("url") || pick("query");
+    default: {
+      const firstStr = Object.values(a).find(v => typeof v === "string");
+      if (firstStr) return String(firstStr);
+      const n = Object.keys(a).length;
+      return n > 0 ? `{${n} arg${n === 1 ? "" : "s"}}` : "";
+    }
+  }
+}
+
+// Pull text out of pi's standard tool-result envelope.
+function cliUnwrapToolResult(raw: string): string {
+  if (!raw) return "";
+  try {
+    const obj = JSON.parse(raw);
+    if (obj && Array.isArray(obj.content)) {
+      const texts = obj.content
+        .filter((c: any) => c && c.type === "text" && typeof c.text === "string")
+        .map((c: any) => c.text);
+      if (texts.length) return texts.join("\n").trim();
+    }
+    if (typeof obj === "string") return obj.trim();
+  } catch { /* not JSON */ }
+  return raw.trim();
+}
+
+function cliTruncate(s: string, n: number): string {
+  if (s.length <= n) return s.replace(/\n+/g, " ");
+  return s.slice(0, n).replace(/\n+/g, " ") + "…";
+}
+
 async function mirrorPromptToSlack(cellName: string, text: string, secret: string): Promise<void> {
   const user = userInfo().username;
   const username = `${user} (cli)`;
