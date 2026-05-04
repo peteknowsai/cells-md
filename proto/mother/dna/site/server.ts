@@ -18,7 +18,7 @@
  * messages. No slack_post tool, no skill enforcement, no safety-net
  * session-tail. The bridge is the only delivery path.
  *
- * Auth: WS upgrade requires Authorization: Bearer <MOTHER_SECRET>.
+ * Auth: WS upgrade requires Authorization: Bearer <CELLS_PROXY_SECRET>.
  */
 
 import { type Subprocess, spawn } from "bun";
@@ -28,7 +28,7 @@ import { fileURLToPath } from "node:url";
 
 const PORT = Number(process.env.PORT ?? 8080);
 const NAME = process.env.CELL_NAME ?? "unknown";
-const SECRET = process.env.MOTHER_SECRET ?? "";
+const SECRET = process.env.CELLS_PROXY_SECRET ?? "";
 const HOME = process.env.HOME ?? "/home/sprite";
 
 // Stable per-cell session file. We pin pi to this on every spawn so

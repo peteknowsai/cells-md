@@ -11,8 +11,8 @@
  * and move on — pulse's bootstrap walk catches stragglers next time it
  * boots, so a missed event isn't catastrophic.
  *
- * Auth: shared CELLS_PROXY_SECRET, available on cells as MOTHER_SECRET (set
- * by configure-cell-proxy.sh into ~/.bashrc.d/site_proxy).
+ * Auth: shared CELLS_PROXY_SECRET, set by configure-cell-proxy.sh into
+ * ~/.bashrc.d/site_proxy.
  *
  * Cell name: this cell's hostname, which by convention matches the cell
  * name in the registry (sprites.dev sprite name == cell name == agent name).
@@ -62,9 +62,9 @@ export default function (pi: any) {
       return;
     }
 
-    const secret = process.env.MOTHER_SECRET;
+    const secret = process.env.CELLS_PROXY_SECRET;
     if (!secret) {
-      console.error("[heartbeat-watch] MOTHER_SECRET not set — extension idle");
+      console.error("[heartbeat-watch] CELLS_PROXY_SECRET not set — extension idle");
       return;
     }
 

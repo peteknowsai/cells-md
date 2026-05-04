@@ -66,7 +66,7 @@ above except parse-prose-into-cron and write-daily-log is deterministic.
 Cells notify pulse on HEARTBEAT.md edits via the `heartbeat-watch`
 extension shipped in their DNA. The extension `fs.watch`es the file with
 a 2s debounce and POSTs the new content to `pulse.cells.md/heartbeat-changed`,
-which the subscriptions proxy authenticates (`MOTHER_SECRET` bearer) and writes
+which pulse authenticates (`CELLS_PROXY_SECRET` bearer) and writes
 to `~/.cells/pulse-inbox/<cell>-<ts>.md`. Pulse drains the inbox each
 pulse. No `sprite exec` reads — hibernating cells stay hibernating.
 

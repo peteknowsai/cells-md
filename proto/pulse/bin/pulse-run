@@ -22,11 +22,9 @@ if [[ -z "$SECRET" ]]; then
 fi
 
 # pi-ai's openai-codex provider reads OPENAI_CODEX_API_KEY as the bearer.
-# heartbeat-watch and proxy reads use MOTHER_SECRET. They're the same shared
-# secret on the cells side; pulse only needs the codex one for outbound LLM
-# calls, but exporting both keeps parity with what mother does.
+# Pulse only needs the codex one for outbound LLM calls.
 export OPENAI_CODEX_API_KEY="$SECRET"
-export MOTHER_SECRET="$SECRET"
+export CELLS_PROXY_SECRET="$SECRET"
 
 # Isolate pulse's pi auth from mother's. Without this, pi reads
 # ~/.pi/agent/auth.json (mother's anthropic OAuth) and tries to use that

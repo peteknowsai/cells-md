@@ -380,11 +380,12 @@ does five things:
    (`CELLS_PROXY_SECRET` from `~/.cells/secrets.json`) as `ANTHROPIC_AUTH_TOKEN`.
 2. Drops `~/.bashrc.d/codex_proxy` with the same secret as `OPENAI_CODEX_API_KEY`,
    read by the `codex-proxy` extension at pi startup.
-3. Drops `~/.bashrc.d/site_proxy` with the same secret as `MOTHER_SECRET`,
-   read by the cell's site server (`~/agent/site/server.ts`). The site
-   server gates the `/agent` WebSocket upgrade on
-   `Authorization: Bearer <MOTHER_SECRET>`; only the per-cell Cloudflare
-   Worker (which knows the secret) can establish the bridge.
+3. Drops `~/.bashrc.d/site_proxy` with the same secret as `CELLS_PROXY_SECRET`,
+   read by the cell's site server (`~/agent/site/server.ts`) and by the
+   `heartbeat-watch` extension. The site server gates the `/agent`
+   WebSocket upgrade on `Authorization: Bearer <CELLS_PROXY_SECRET>`;
+   only the per-cell Cloudflare Worker (which knows the secret) can
+   establish the bridge.
 4. Patches the hardcoded `api.anthropic.com` URL in `pi-ai`'s model registry
    to `proxy.cells.md`. Pi does NOT respect `ANTHROPIC_BASE_URL` — the URL
    is baked per-model in `models.generated.js`. The patch is idempotent.
@@ -428,7 +429,7 @@ Two pieces:
    `<name>-XXX.sprites.app` redirects unauthenticated traffic to a
    sprites.dev login. The per-cell Cloudflare Worker can't carry the
    org-token cookie, so we open the URL. Security still holds because the
-   site server requires `Authorization: Bearer <MOTHER_SECRET>` on the
+   site server requires `Authorization: Bearer <CELLS_PROXY_SECRET>` on the
    `/agent` WS upgrade — the per-cell Worker is the only thing that knows
    the secret. Static HTTP routes (homepage, public/) are public.
 
@@ -457,7 +458,7 @@ After both pieces register, `cells see <NAME>` should open
 Sprite's interactive shell is **zsh** (despite `/etc/passwd` listing /bin/bash
 as the login shell). zsh doesn't auto-source `.bashrc.d`, so we explicitly
 source it from `.zshrc` so an interactive login has the same env (PATH,
-ANTHROPIC_AUTH_TOKEN, MOTHER_SECRET, etc.) as the site service.
+ANTHROPIC_AUTH_TOKEN, CELLS_PROXY_SECRET, etc.) as the site service.
 
 In v2 we **don't** auto-attach to a pi TUI on login. Pi runs as a child
 of the site service (step 7); the cell speaks via the WebSocket bridge.

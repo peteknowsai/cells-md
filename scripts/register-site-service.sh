@@ -16,7 +16,7 @@ TOKEN=$(jq -r '.SPRITES_TOKEN // empty' "$SECRETS")
 
 # The service command:
 #   1. cd into the site dir.
-#   2. Source env files (.bashrc.d/*) so MOTHER_SECRET is set.
+#   2. Source env files (.bashrc.d/*) so CELLS_PROXY_SECRET is set.
 #   3. Put bun on PATH.
 #   4. Export CELL_NAME + PORT for server.ts.
 #   5. exec bun in foreground; if it crashes the service exits and the
