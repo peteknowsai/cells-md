@@ -1,7 +1,7 @@
 #!/usr/bin/env bun
 import { $ } from "bun";
 import { readFile, writeFile, mkdir, unlink, symlink, cp, readdir, stat, rm, rename } from "node:fs/promises";
-import { homedir, tmpdir } from "node:os";
+import { homedir, tmpdir, userInfo } from "node:os";
 import { dirname, join, basename } from "node:path";
 import { existsSync, statSync } from "node:fs";
 import { fileURLToPath } from "node:url";
@@ -54,7 +54,6 @@ const RESERVED_NAMES = new Set([
   "schedule-pulse", "unschedule-pulse",
   "refresh-extensions", "heartbeat", "pulse",
   "channel", "channels",
-  "unschedule-operator",
 ]);
 
 type SelectOption = {
@@ -535,89 +534,20 @@ async function cmdTalk(name: string, args: string[]) {
     return;
   }
   if (args[0]!.startsWith("-")) {
-    // Cells run a single persistent pi inside tmux. We can't spawn a
-    // parallel pi safely — two writers on one session file = corruption.
-    // Instead, drive the LIVE pi via slash commands sent through tmux.
-    const flag = args[0]!;
-    if (flag === "-c" || flag === "--continue") {
-      // Live pi IS the most recent session by definition — just attach.
-      await attach();
-      return;
-    }
-    if (flag === "-r" || flag === "--resume") {
-      // Inject /resume into the cell's tmux pi session so the live pi
-      // opens its session picker. Target by cell name (-t pete) — the
-      // legacy `-t agent` matches an ambiguous window name when a
-      // separate `cells shell` session is also up.
-      const inject = Bun.spawn(
-        ["sprite", "exec", "-s", name, "--", "tmux", "send-keys", "-t", name, "/resume", "Enter"],
-        { stdin: "ignore", stdout: "ignore", stderr: "inherit" },
-      );
-      const code = await inject.exited;
-      if (code !== 0) {
-        console.error(`failed to inject /resume into ${name}'s tmux session (exit ${code})`);
-        process.exit(1);
-      }
-      await attach();
-      return;
-    }
+    // v1 used -c/-r to drive a tmux pi session via send-keys. v2 cells
+    // have no tmux pi — pi runs as a child of the site service and the
+    // bridge is the only interface. The session is managed automatically
+    // (cell-<name>/main.jsonl, pinned via switch_session at startup).
     console.error(
-      `flag '${flag}' isn't supported for cells. Supported: -c|--continue (attach to live), -r|--resume (open picker). For arbitrary --session=<id>, attach with 'cells talk ${name}' and use /resume or /tree from inside.`,
+      `flag '${args[0]}' isn't supported on v2 cells. Use 'cells talk ${name}' to drop into the sprite shell, or 'cells talk ${name} "<msg>"' to send a prompt over the bridge. Multi-turn: 'cells stream ${name}'.`,
     );
     process.exit(1);
   }
+  // v2: drive the cell's pi via the WebSocket bridge — same session as
+  // Slack, mirror the prompt to the bound channel first so Slack stays
+  // the canonical scrollback. Reply streams here in the terminal.
   const message = args.join(" ");
-  // Inject the message into the cell's persistent tmux pi session so
-  // every wake — Slack via operator, scheduled via pulse, manual CLI —
-  // accumulates in one continuous conversation. Earlier this code
-  // spawned a fresh `pi -p`, which loaded the agent's persona/memory
-  // but started each turn from a blank conversational context — making
-  // follow-ups ("did they win tonight?") incoherent.
-  //
-  // tmux send-keys is the same mechanism `cells talk <name> -r` uses
-  // for /resume injection. Only ONE pi runs in tmux, so we're not
-  // racing two writers on the session file.
-  //
-  // -l (literal) sends the text verbatim — preserves newlines, special
-  // chars, no shell-style key interpretation. Then a separate Enter to
-  // submit. Pi's input buffer holds the text until the agent is idle.
-  //
-  // Retry: if pi's TUI is mid-stream (previous turn still running) it
-  // can refuse keys with "not in a mode". Back off and retry — pi
-  // re-enters input mode the moment streaming ends.
-  const escaped = message.replace(/'/g, "'\\''");
-  // Target the cell-named tmux session explicitly (e.g. -t pete). The
-  // legacy `-t agent` matches a window NAME ambiguously — a stray
-  // `cells shell <name>` creates a second window also named "agent",
-  // making send-keys land on the wrong pane (which would print
-  // "from-slack channel=..." into a bash shell instead of pi).
-  const script = `tmux send-keys -t ${name} -l '${escaped}' && tmux send-keys -t ${name} Enter`;
-  const MAX_ATTEMPTS = 6;
-  const BASE_BACKOFF_MS = 1500;
-  let lastCode = 0;
-  let lastErr = "";
-  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
-    const proc = Bun.spawn(
-      ["sprite", "exec", "-s", name, "--", "bash", "-lc", script],
-      { stdin: "ignore", stdout: "pipe", stderr: "pipe" },
-    );
-    const stderr = await new Response(proc.stderr).text();
-    lastCode = await proc.exited;
-    lastErr = stderr;
-    if (lastCode === 0) {
-      if (attempt > 1) console.error(`(delivered to ${name} on attempt ${attempt})`);
-      return;
-    }
-    // Only retry the recognizable "TUI mid-stream" failure mode; any
-    // other exit code is a real error worth surfacing immediately.
-    if (!/not in a mode/i.test(stderr)) break;
-    if (attempt < MAX_ATTEMPTS) {
-      const wait = BASE_BACKOFF_MS * attempt;
-      await new Promise((r) => setTimeout(r, wait));
-    }
-  }
-  process.stderr.write(lastErr);
-  process.exit(lastCode);
+  await streamCellBridge(name, { interactive: false, initialMessage: message });
 }
 
 async function cmdShell(name: string) {
@@ -1639,70 +1569,64 @@ async function cmdCheckpoint(name: string) {
 }
 
 /**
- * Multi-turn streaming conversation with a remote agent over Pi RPC.
+ * Multi-turn streaming conversation with a remote cell over the v2
+ * bridge — opens a WebSocket directly to the cell's site server
+ * (wss://<sprite-host>/agent), shares the same pi process and session
+ * file Slack uses, renders pi's RPC events into the terminal as they
+ * stream.
  *
- * Spawns `pi --mode rpc` on the agent's Sprite via `sprite exec` with
- * piped stdin/stdout. We send JSONL `prompt` commands; Pi streams events
- * back including `message_update` text_deltas and `agent_end`.
- *
- * Framing is strict LF-only — same rule as Pi's own jsonl.ts. We do NOT
- * use Node's readline (it splits on Unicode line separators which can
- * appear inside JSON string values).
+ * Pete's CLI prompts are mirrored into the cell's bound Slack channel
+ * first (as a bot_message authored as the Mac user) so Slack stays the
+ * canonical scrollback. The Slack edge filters bot_message subtypes,
+ * so this doesn't loop back through the routing path.
  */
 async function cmdStream(name: string) {
   await requireCell(name);
+  await streamCellBridge(name, { interactive: true });
+}
 
-  const proc = Bun.spawn(
-    [
-      "sprite",
-      "exec",
-      "-s",
-      name,
-      "--",
-      "bash",
-      "-lc",
-      "cd /home/sprite/agent && pi --mode rpc",
-    ],
-    { stdin: "pipe", stdout: "pipe", stderr: "pipe" },
-  );
+type StreamOpts = {
+  interactive: boolean;
+  initialMessage?: string;
+};
+
+async function streamCellBridge(name: string, opts: StreamOpts): Promise<void> {
+  const secret = await readSecret("CELLS_PROXY_SECRET");
+  if (!secret) {
+    console.error("CELLS_PROXY_SECRET missing from ~/.cells/secrets.json");
+    process.exit(1);
+  }
+  const host = await resolveSpriteHost(name, secret);
+  if (!host) {
+    console.error(`could not resolve sprite host for ${name}`);
+    process.exit(1);
+  }
+
+  // Bun extends WebSocket to accept a `headers` option; we use Bearer
+  // auth for the /agent upgrade just like the cell DO does.
+  const ws = new WebSocket(`wss://${host}/agent`, {
+    headers: { authorization: `Bearer ${secret}` },
+  } as any);
 
   let reqCounter = 0;
   let inFlight = false;
-  let promptOpen = true;
-  const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+  let agentEnded = false;
+  let promptOpen = opts.interactive;
+  let activeText = false;     // true while pi is mid-text in the current turn
+  const rl = opts.interactive
+    ? readline.createInterface({ input: process.stdin, output: process.stdout })
+    : null;
 
   const showPrompt = () => {
-    if (!promptOpen) return;
+    if (!rl || !promptOpen) return;
     rl.setPrompt(`${name}> `);
     rl.prompt();
   };
 
-  const sendCommand = (cmd: object): void => {
-    const line = `${JSON.stringify(cmd)}\n`;
-    proc.stdin.write(line);
-  };
-
-  // Stream stdout: split on \n strictly, parse each line as JSON, render.
-  let buffer = "";
-  const onChunk = (chunk: Uint8Array) => {
-    buffer += new TextDecoder().decode(chunk);
-    while (true) {
-      const i = buffer.indexOf("\n");
-      if (i === -1) return;
-      const line = buffer.slice(0, i).replace(/\r$/, "");
-      buffer = buffer.slice(i + 1);
-      if (!line) continue;
-      let event: any;
-      try {
-        event = JSON.parse(line);
-      } catch {
-        // Pi may emit non-JSON banner lines on startup (e.g. "Pi Code Agent v0.70.6")
-        // Print them dimly so user sees them, then ignore for protocol purposes.
-        process.stderr.write(`\x1b[2m${line}\x1b[0m\n`);
-        continue;
-      }
-      handleEvent(event);
-    }
+  const sendPrompt = (message: string) => {
+    inFlight = true;
+    activeText = false;
+    ws.send(JSON.stringify({ type: "prompt", id: `req-${++reqCounter}`, message, streamingBehavior: "steer" }));
   };
 
   const handleEvent = (event: any) => {
@@ -1710,76 +1634,122 @@ async function cmdStream(name: string) {
       const ev = event.assistantMessageEvent;
       if (ev?.type === "text_delta" && typeof ev.delta === "string") {
         process.stdout.write(ev.delta);
+        activeText = true;
+      } else if (ev?.type === "thinking_delta" && typeof ev.delta === "string") {
+        // Render thinking dimmed; keep it on its own line.
+        process.stdout.write(`\x1b[2m${ev.delta}\x1b[0m`);
       }
+    } else if (event.type === "tool_execution_start" && event.toolCall) {
+      const tc = event.toolCall;
+      if (activeText) { process.stdout.write("\n"); activeText = false; }
+      process.stdout.write(`\x1b[2m🔧 ${tc.name}\x1b[0m\n`);
     } else if (event.type === "agent_end") {
-      process.stdout.write("\n");
+      if (activeText) { process.stdout.write("\n"); activeText = false; }
       inFlight = false;
-      showPrompt();
+      agentEnded = true;
+      if (opts.interactive) showPrompt();
+      else { try { ws.close(); } catch {} }
     } else if (event.type === "response" && event.success === false) {
-      process.stdout.write(`\n[error] ${event.error}\n`);
+      process.stderr.write(`\n[error] ${event.error}\n`);
       inFlight = false;
-      showPrompt();
+      if (opts.interactive) showPrompt();
     }
   };
 
-  // Pump stdout
-  (async () => {
-    const reader = proc.stdout.getReader();
-    while (true) {
-      const { value, done } = await reader.read();
-      if (done) break;
-      if (value) onChunk(value);
+  ws.addEventListener("message", (ev) => {
+    const data = typeof ev.data === "string" ? ev.data : new TextDecoder().decode(ev.data as any);
+    for (const raw of data.split("\n")) {
+      const line = raw.replace(/\r$/, "").trim();
+      if (!line) continue;
+      let event: any;
+      try { event = JSON.parse(line); } catch { continue; }
+      handleEvent(event);
     }
-  })();
-
-  // Pump stderr (just dim and pass through)
-  (async () => {
-    const reader = proc.stderr.getReader();
-    while (true) {
-      const { value, done } = await reader.read();
-      if (done) break;
-      if (value) process.stderr.write(value);
-    }
-  })();
-
-  // Read user input line-by-line
-  rl.on("line", (line) => {
-    const trimmed = line.trim();
-    if (trimmed === "/exit" || trimmed === "/quit") {
-      promptOpen = false;
-      rl.close();
-      return;
-    }
-    if (!trimmed) {
-      showPrompt();
-      return;
-    }
-    if (inFlight) {
-      // Drop input while agent is still responding. User can /abort if needed.
-      console.log("(still responding — wait or type /abort)");
-      showPrompt();
-      return;
-    }
-    if (trimmed === "/abort") {
-      sendCommand({ type: "abort", id: `req-${++reqCounter}` });
-      return;
-    }
-    inFlight = true;
-    sendCommand({ type: "prompt", id: `req-${++reqCounter}`, message: trimmed });
   });
 
-  rl.on("close", () => {
-    promptOpen = false;
-    try {
-      proc.stdin.end();
-    } catch {}
-    proc.kill();
+  ws.addEventListener("close", () => {
+    if (rl) { promptOpen = false; rl.close(); }
+  });
+  ws.addEventListener("error", (e) => {
+    console.error(`ws error: ${String((e as any).message ?? e).slice(0, 200)}`);
   });
 
-  showPrompt();
+  // Wait for connection, then send initial message (if any) or open prompt.
+  await new Promise<void>((resolve, reject) => {
+    ws.addEventListener("open", () => resolve(), { once: true });
+    ws.addEventListener("error", () => reject(new Error("ws connect failed")), { once: true });
+  });
 
-  await proc.exited;
-  if (promptOpen) rl.close();
+  // If we have an initial message, mirror to Slack first so the bound
+  // channel sees the prompt + reply naturally. Best-effort.
+  if (opts.initialMessage) {
+    await mirrorPromptToSlack(name, opts.initialMessage, secret).catch(() => {});
+    sendPrompt(opts.initialMessage);
+  }
+
+  if (rl) {
+    rl.on("line", async (line) => {
+      const trimmed = line.trim();
+      if (trimmed === "/exit" || trimmed === "/quit") { rl.close(); return; }
+      if (!trimmed) { showPrompt(); return; }
+      if (inFlight) {
+        console.log("(still responding — wait, or type /abort)");
+        showPrompt();
+        return;
+      }
+      if (trimmed === "/abort") {
+        ws.send(JSON.stringify({ type: "abort", id: `req-${++reqCounter}` }));
+        return;
+      }
+      await mirrorPromptToSlack(name, trimmed, secret).catch(() => {});
+      sendPrompt(trimmed);
+    });
+    rl.on("close", () => { promptOpen = false; try { ws.close(); } catch {} });
+    showPrompt();
+  }
+
+  // For one-shot mode, wait for agent_end.
+  if (!opts.interactive) {
+    await new Promise<void>((resolve) => {
+      const tick = setInterval(() => { if (agentEnded) { clearInterval(tick); resolve(); } }, 100);
+    });
+    try { ws.close(); } catch {}
+  } else {
+    // Interactive mode: keep alive until rl closes.
+    await new Promise<void>((resolve) => {
+      ws.addEventListener("close", () => resolve(), { once: true });
+    });
+  }
+}
+
+// Resolve a cell's sprite host (e.g. "ned-bas32.sprites.app") via the
+// cell worker's /debug endpoint — faster than `sprite info` and uses
+// the same bearer secret we already have.
+async function resolveSpriteHost(name: string, secret: string): Promise<string | null> {
+  try {
+    const r = await fetch(`https://${name}.cells.md/debug`, {
+      headers: { authorization: `Bearer ${secret}` },
+    });
+    if (!r.ok) return null;
+    const j = (await r.json()) as { sprite?: string };
+    return j.sprite ?? null;
+  } catch {
+    return null;
+  }
+}
+
+// Mirror a CLI prompt into the cell's bound Slack channel as a bot
+// message with the Mac user's name as the override. The slack edge
+// filters bot_message subtypes, so this doesn't loop back through
+// /events into the cell. Best-effort: failures don't block the bridge
+// send.
+async function mirrorPromptToSlack(cellName: string, text: string, secret: string): Promise<void> {
+  const username = `${userInfo().username} (cli)`;
+  await fetch("https://slack.cells.md/send", {
+    method: "POST",
+    headers: { "content-type": "application/json", authorization: `Bearer ${secret}` },
+    body: JSON.stringify({ cell: cellName, text, username }),
+  });
 }
 
 async function dreamOne(name: string): Promise<boolean> {
@@ -2001,32 +1971,6 @@ async function cmdUnschedulePulse() {
     console.log("(no plist found)");
   }
   console.log("✓ unscheduled");
-}
-
-// Operator is retired in cells-cloud-front Phase 1a — Slack now lands
-// on Cloudflare and routes deterministically to the bound cell. The
-// `unschedule-operator` command stays so Pete can boot out the
-// previously-installed launchd plist on existing machines.
-const OPERATOR_LABEL = "com.pete.cells-operator";
-
-function operatorPlistPath(): string {
-  return join(homedir(), "Library/LaunchAgents", `${OPERATOR_LABEL}.plist`);
-}
-
-async function cmdUnscheduleOperator() {
-  const uid = process.getuid?.() ?? 501;
-  await Bun.spawn(["launchctl", "bootout", `gui/${uid}/${OPERATOR_LABEL}`], {
-    stdin: "ignore",
-    stdout: "inherit",
-    stderr: "inherit",
-  }).exited;
-  if (existsSync(operatorPlistPath())) {
-    await unlink(operatorPlistPath());
-    console.log(`✓ removed ${operatorPlistPath()}`);
-  } else {
-    console.log("(no plist found)");
-  }
-  console.log("✓ operator unscheduled (retired in Phase 1a — Slack handled by Cloudflare Worker)");
 }
 
 /**
@@ -3082,7 +3026,6 @@ switch (sub) {
   case "unschedule-pi-patches": await cmdUnschedulePiPatches(); break;
   case "schedule-pulse":        await cmdSchedulePulse(); break;
   case "unschedule-pulse":      await cmdUnschedulePulse(); break;
-  case "unschedule-operator":   await cmdUnscheduleOperator(); break;
   case "refresh-extensions":    await cmdRefreshExtensions(rest); break;
   case "heartbeat":             await cmdHeartbeat(rest); break;
   case "channel":
@@ -3101,15 +3044,15 @@ switch (sub) {
     console.log("                                     --channels=slack         (auto-creates #cells-<name>, binds, deploys worker)");
     console.log("                                     --slack-channel=C0123456789  (legacy: bind to existing channel by ID)");
     console.log("                              no flags = interactive TUI; any flag = non-interactive (defaults fill the rest)");
-    console.log("  cells talk <name> [msg]     attach to a cell's TUI (no msg) or send one-shot (with msg).");
-    console.log("                              'mother' = local pi; accepts any pi flag (-c, -r, --session=<id>, -p ...).");
-    console.log("                              cells: -c/--continue attaches; -r/--resume opens picker via tmux send-keys.");
+    console.log("  cells talk <name> [msg]     no msg → drop into the cell's sprite shell.");
+    console.log("                              with msg → one-shot prompt over the bridge; reply streams here AND in Slack.");
+    console.log("                              'mother' is special: accepts any pi flag (-c, -r, --session=<id>, -p ...).");
     console.log("  cells list                  list known cells");
     console.log("  cells sleep <name>          force-hibernate a Sprite");
     console.log("  cells wake <name>           force-wake a Sprite");
     console.log("  cells checkpoint <name>     snapshot a cell's filesystem");
     console.log("  cells dream <name|mother|--all>  run dream consolidation on a cell, the mother, or all");
-    console.log("  cells stream <name>         interactive multi-turn streaming chat with a cell (Pi RPC)");
+    console.log("  cells stream <name>         interactive multi-turn chat with a cell over the bridge (Slack mirrors)");
     console.log("  cells sync [name]           pull cell markdown into ~/Obsidian/cells/ (default: all + mother)");
     console.log("  cells doctor                inspect mother OAuth state + proxy health (run when cells act 401-y)");
     console.log("  cells shell <name>          drop into a bash shell on a cell (separate tmux from the agent; Ctrl+D exits)");
@@ -3118,7 +3061,6 @@ switch (sub) {
     console.log("  cells unschedule-pi-patches remove launchd watcher");
     console.log("  cells schedule-pulse        install launchd plist (pulse ticks every 60s)");
     console.log("  cells unschedule-pulse      remove pulse launchd plist");
-    console.log("  cells unschedule-operator   boot out the legacy operator launchd plist (operator retired in Phase 1a)");
     console.log("  cells refresh-extensions <name|--all> [ext...] [--restart] [--remove]");
     console.log("                              push DNA extension(s) onto existing cell(s) (default: heartbeat-watch)");
     console.log("                              --restart kicks pi on the cell so new extensions load (otherwise dormant until next pi start)");
