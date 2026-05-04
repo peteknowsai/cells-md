@@ -1,11 +1,31 @@
-# operator
+# operator (RETIRED — see cells-cloud-front Phase 1a)
 
-Operator is the third local proto, alongside mother and pulse. It sits at
-the edge of human messaging — Slack today, eventually iMessage/Telegram/
-email — and routes inbound to cells, or handles them inline as a
-generalist. V1 ships **Slack only**.
+> **This document describes the v1 operator that was retired in
+> cells-cloud-front Phase 1a.** Slack inbound + outbound now run
+> through Cloudflare:
+>
+> - `slack.cells.md` (Cloudflare Worker `cells-front-slack`) handles
+>   the Slack Events API webhook AND the outbound `/send` route
+>   that cells use via the slack-channel extension.
+> - Each cell has its own Worker `cells-front-<cell>` at
+>   `<cell>.cells.md` with a `CellInbox` Durable Object. The Slack
+>   Worker fans out to the right cell via channel→cell bindings in
+>   the `CHANNELS` KV namespace.
+> - An in-sprite `cell-drainer` service (registered via
+>   `scripts/register-drainer-service.sh`) long-polls
+>   `<cell>.cells.md/inbox/poll`, hosts `pi --mode rpc --continue`
+>   as a child, and writes prompts to pi's stdin.
+>
+> Phase 4 of the cloud-front roadmap reintroduces operator in a
+> different shape — an HTTP-driven LLM-routed inbox at
+> `operator.cells.md/inbox/*` for an "operator channel" where Pete
+> directs work and operator picks the right cell. Until then, the
+> files in `proto/operator/` are kept for reference only.
 
-## Architecture
+The rest of this document is the v1 architecture as it existed before
+retirement, kept for historical context.
+
+## Architecture (v1, retired)
 
 ```
    Slack (Socket Mode WebSocket out from Mac)

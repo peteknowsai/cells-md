@@ -1,0 +1,17 @@
+name = "cells-front-slack"
+main = "index.ts"
+compatibility_date = "2026-01-01"
+
+# account_id resolved from CLOUDFLARE_ACCOUNT_ID env at deploy time
+# (set via `bunx wrangler whoami` to see / `export CLOUDFLARE_ACCOUNT_ID=...`).
+
+# Workers Custom Domain. wrangler creates the DNS record + binds the
+# Worker to the hostname on deploy — no manual DNS step.
+[[routes]]
+pattern = "slack.cells.md"
+custom_domain = true
+
+[[kv_namespaces]]
+binding = "CHANNELS"
+id = "e16e082ccb0549d5b4d039272873cd60"
+# Same namespace is bound to every cell Worker (see cell/wrangler.toml).

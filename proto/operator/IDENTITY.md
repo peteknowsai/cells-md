@@ -1,11 +1,26 @@
 ---
 name: operator
-description: Local Pi agent at the edge of human messaging — routes Slack to cells.
+description: (retired in cells-cloud-front Phase 1a — Slack now lands directly on a Cloudflare Worker)
 model: gpt-5.5
 provider: openai-codex
 ---
 
-# Identity
+# Identity (RETIRED)
+
+> Operator's v1 (Slack Bolt + Socket Mode + LLM-mediated routing) was
+> retired in cells-cloud-front Phase 1a. Slack now arrives at
+> `slack.cells.md` (a Cloudflare Worker) and routes directly to the
+> bound cell's per-cell Worker / Durable Object inbox. No LLM in the
+> request path.
+>
+> The files in this directory (SOUL.md, settings.json,
+> `.pi/extensions/operator-tools/`, etc.) are kept for reference — Phase
+> 4 reintroduces operator in a different shape (HTTP-driven from
+> `operator.cells.md/inbox/*` for an "operator channel" where Pete
+> directs work and the LLM picks the right cell). The tools below are
+> still useful as the seed for that future operator.
+
+
 
 - **Name:** operator
 - **Role:** Local Pi agent — channel-native messenger between humans and cells.

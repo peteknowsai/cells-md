@@ -235,6 +235,21 @@ rm -rf /home/sprite/agent/.pi/extensions/<name>
 If `<EXTENSIONS>` is `["memory", "wiki"]`, delete the other three.
 If `<EXTENSIONS>` is empty, delete all five.
 
+Then **register the chosen optional extensions in `.pi/settings.json`**.
+The DNA template's `extensions` array only lists the always-installed
+ones (`use-max`, `mother-codex`, `self`, `thinking`, `heartbeat-watch`).
+Pi loads only what's in this array — leaving an extension on disk
+without registering it does nothing. For each name in `<EXTENSIONS>`,
+append `.pi/extensions/<name>/index.ts` via `sprite_exec`:
+
+```bash
+jq --arg p ".pi/extensions/<name>/index.ts" \
+  '.extensions += [$p]' /home/sprite/agent/.pi/settings.json \
+  > /tmp/s.json && mv /tmp/s.json /home/sprite/agent/.pi/settings.json
+```
+
+If `<EXTENSIONS>` is empty, skip this step.
+
 Then run the baseline install:
 
 ```bash
@@ -392,29 +407,44 @@ if you rotate `CELLS_PROXY_SECRET`.
 Background: see `state/memory/project_mother_proxy.md` and
 `state/memory/reference_pi_internals.md` for why this is necessary.
 
-## 7. Register the `agent` service (auto-start Pi on VM boot)
+## 7. Register the cell's pi-host service (auto-start Pi on VM boot)
 
 Without this, Pi only starts when a human attaches interactively (the
 shell shim in step 8). That breaks any automation that wakes a hibernated
 cell — the VM is up but Pi isn't running.
 
-Register a Sprite *service* named `agent`. Sprites "services" are a
-platform feature: they keep a process running, restart it on crash, and
-auto-start it when the VM boots. They're not exposed by the `sprite` CLI,
-but available via HTTP API.
+Two service shapes. **Pick exactly one** based on the chosen extensions:
 
-Use local `bash` (not `sprite_exec` — the call goes from your Mac to the
-Sprites API):
+**A. `slack-channel` is among the chosen extensions → `site` service
+hosts pi (cells-cloud-front Phase 1c).**
+
+The cell receives Slack messages via Cloudflare. The cell's Cloudflare
+Worker pushes inbound events to `https://<sprite-host>/inbox/push`,
+which the site server (~/agent/site/server.ts) handles by piping the
+event into pi's stdin. The site server spawns `pi --mode rpc --continue`
+itself, so registering the `site` service is the only piece needed.
+
+There is no separate `drainer` service in this mode. Skip step 7b's
+"register the site service" — the same registration covers both
+responsibilities.
+
+```bash
+scripts/register-site-service.sh <NAME>
+scripts/deploy-cell-worker.sh <NAME>   # provisions cells-front-<NAME> on Cloudflare
+```
+
+**B. No `slack-channel` extension → legacy `agent` service.**
+
+Pi runs interactively under tmux. `cells talk <NAME>` injects messages
+via tmux send-keys. No cloud inbox. The site server runs without pi
+in this mode (it's only serving the homepage at `<name>.cells.md`).
 
 ```bash
 scripts/register-agent-service.sh <NAME>
 ```
 
-The script reads `SPRITES_TOKEN` from `~/.cells/secrets.json` and PUTs a
-service that runs `tmux new-session -dA -s <NAME> pi` plus a wait loop.
-The loop keeps the service process alive while the tmux session exists,
-so Sprites considers the service "running" and doesn't restart it
-unnecessarily.
+Don't register both — two pi processes both calling `--continue` race
+over the same most-recent session file.
 
 ## 7b. Register the `site` service + open the cell URL to mother
 

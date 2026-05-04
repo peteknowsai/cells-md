@@ -12,7 +12,6 @@ const REPO_ROOT = dirname(SCRIPT_DIR);
 const PROTO_DIR = join(REPO_ROOT, "proto");
 const MOTHER_ROOT = join(PROTO_DIR, "mother");
 const PULSE_ROOT = join(PROTO_DIR, "pulse");
-const OPERATOR_ROOT = join(PROTO_DIR, "operator");
 const DNA_DIR = join(MOTHER_ROOT, "dna");
 const REGISTRY_DIR = join(homedir(), ".cells");
 const REGISTRY_PATH = join(REGISTRY_DIR, "cells.json");
@@ -55,7 +54,7 @@ const RESERVED_NAMES = new Set([
   "schedule-pulse", "unschedule-pulse",
   "refresh-extensions", "heartbeat", "pulse",
   "channel", "channels",
-  "schedule-operator", "unschedule-operator", "operator",
+  "unschedule-operator",
 ]);
 
 type SelectOption = {
@@ -967,8 +966,10 @@ async function cmdCreate(name: string, opts: CreateOpts) {
     thinking = "medium";
   }
 
-  // If a Slack channel was provided, ensure slack-channel ships with the
-  // cell — operator's routing won't reach the cell otherwise.
+  // If a Slack channel was provided, ensure slack-channel ships with
+  // the cell. The slack-channel extension also signals to the birth
+  // ritual that this cell wants the cloud-front pipeline (drainer
+  // service + per-cell Worker) instead of the legacy tmux pi.
   if (slackChannel && !extensions.includes("slack-channel")) {
     extensions = [...extensions, "slack-channel"];
   }
@@ -1007,6 +1008,7 @@ async function cmdCreate(name: string, opts: CreateOpts) {
         createdAt: new Date().toISOString(),
       };
       await saveChannels(file);
+      await kvUpsert(slackChannel, name);
       console.log(`✓ linked ${slackChannel} → ${name} (slack)`);
     } catch (e) {
       console.error(`✗ channel bind failed (${e}); run: cells channel link ${name} ${slackChannel}`);
@@ -1088,18 +1090,103 @@ async function saveChannels(file: ChannelsFile): Promise<void> {
   await rename(tmp, CHANNELS_PATH);
 }
 
+// channels.json mirrors to a Cloudflare KV namespace (CHANNELS) so the
+// Slack Worker can resolve channel→cell at request time without a
+// laptop hop. Best-effort: a KV write failure logs a warning but
+// doesn't roll back the local file. Re-sync via `cells channel sync`.
+//
+// We talk to the CF REST API directly instead of shelling out to
+// `wrangler kv key put` — wrangler 3.x defaults that command to LOCAL
+// (miniflare) emulation, which the live Worker can't read. Wrangler
+// 4 added a `--remote` flag but it's not available in 3.
+async function kvChannelsNamespaceId(): Promise<string | null> {
+  if (process.env.CLOUDFLARE_KV_CHANNELS_ID) return process.env.CLOUDFLARE_KV_CHANNELS_ID;
+  if (existsSync(SECRETS_PATH)) {
+    try {
+      const s = JSON.parse(await readFile(SECRETS_PATH, "utf-8"));
+      if (typeof s.CLOUDFLARE_KV_CHANNELS_ID === "string") return s.CLOUDFLARE_KV_CHANNELS_ID;
+    } catch { /* fallthrough */ }
+  }
+  return null;
+}
+
+async function cfCreds(): Promise<{ accountId: string; token: string } | null> {
+  const accountId = process.env.CLOUDFLARE_ACCOUNT_ID
+    ?? (await readSecretsKey("CLOUDFLARE_ACCOUNT_ID"));
+  // Prefer a long-lived API token; fall back to wrangler's OAuth token
+  // (refreshed by `bunx wrangler login`).
+  let token = process.env.CLOUDFLARE_API_TOKEN
+    ?? (await readSecretsKey("CLOUDFLARE_API_TOKEN"));
+  if (!token) token = await readWranglerOauthToken();
+  if (!accountId || !token) return null;
+  return { accountId, token };
+}
+
+async function readSecretsKey(key: string): Promise<string | null> {
+  if (!existsSync(SECRETS_PATH)) return null;
+  try {
+    const s = JSON.parse(await readFile(SECRETS_PATH, "utf-8"));
+    return typeof s[key] === "string" ? s[key] : null;
+  } catch { return null; }
+}
+
+async function readWranglerOauthToken(): Promise<string | null> {
+  const path = join(homedir(), "Library/Preferences/.wrangler/config/default.toml");
+  if (!existsSync(path)) return null;
+  try {
+    const text = await readFile(path, "utf-8");
+    const m = text.match(/^oauth_token\s*=\s*"([^"]+)"/m);
+    return m ? m[1] : null;
+  } catch { return null; }
+}
+
+async function kvUpsert(channelId: string, cell: string): Promise<void> {
+  const id = await kvChannelsNamespaceId();
+  const creds = await cfCreds();
+  if (!id || !creds) {
+    console.warn(`[kv] missing CLOUDFLARE_KV_CHANNELS_ID or account/token — local channels.json updated but KV is stale`);
+    return;
+  }
+  const r = await fetch(
+    `https://api.cloudflare.com/client/v4/accounts/${creds.accountId}/storage/kv/namespaces/${id}/values/${encodeURIComponent(channelId)}`,
+    { method: "PUT", headers: { Authorization: `Bearer ${creds.token}` }, body: cell },
+  );
+  if (!r.ok) {
+    console.warn(`[kv] put ${channelId}=${cell} failed (${r.status}): ${(await r.text()).slice(0, 200)}`);
+  }
+}
+
+async function kvDelete(channelId: string): Promise<void> {
+  const id = await kvChannelsNamespaceId();
+  const creds = await cfCreds();
+  if (!id || !creds) {
+    console.warn(`[kv] missing CLOUDFLARE_KV_CHANNELS_ID or account/token — local channels.json updated but KV is stale`);
+    return;
+  }
+  const r = await fetch(
+    `https://api.cloudflare.com/client/v4/accounts/${creds.accountId}/storage/kv/namespaces/${id}/values/${encodeURIComponent(channelId)}`,
+    { method: "DELETE", headers: { Authorization: `Bearer ${creds.token}` } },
+  );
+  if (!r.ok) {
+    console.warn(`[kv] delete ${channelId} failed (${r.status}): ${(await r.text()).slice(0, 200)}`);
+  }
+}
+
 async function evictChannelBindingsForCell(name: string): Promise<void> {
   if (!existsSync(CHANNELS_PATH)) return;
   try {
     const file = await loadChannels();
-    let pruned = 0;
+    const removed: string[] = [];
     for (const [id, b] of Object.entries(file.bindings)) {
       if (b.cell === name) {
         delete file.bindings[id];
-        pruned++;
+        removed.push(id);
       }
     }
-    if (pruned > 0) await saveChannels(file);
+    if (removed.length > 0) {
+      await saveChannels(file);
+      for (const id of removed) await kvDelete(id);
+    }
   } catch { /* best-effort */ }
 }
 
@@ -1110,11 +1197,13 @@ async function cmdChannel(args: string[]) {
     case "link":   await cmdChannelLink(rest); break;
     case "unlink": await cmdChannelUnlink(rest); break;
     case "list":   await cmdChannelList(); break;
+    case "sync":   await cmdChannelSync(); break;
     default:
       console.error("usage:");
       console.error("  cells channel link <cell> <channel-id> [--kind=slack]");
       console.error("  cells channel unlink <cell> [<channel-id>]");
       console.error("  cells channel list");
+      console.error("  cells channel sync                # re-mirror channels.json → KV");
       process.exit(sub ? 1 : 0);
   }
 }
@@ -1153,6 +1242,7 @@ async function cmdChannelLink(args: string[]) {
     createdAt: prev?.createdAt ?? new Date().toISOString(),
   };
   await saveChannels(file);
+  await kvUpsert(channelId, cell);
   if (prev && prev.cell !== cell) {
     console.log(`linked ${channelId} → ${cell} (${kind}) — was ${prev.cell}`);
   } else if (prev) {
@@ -1181,19 +1271,21 @@ async function cmdChannelUnlink(args: string[]) {
     }
     delete file.bindings[channelId];
     await saveChannels(file);
+    await kvDelete(channelId);
     console.log(`unlinked ${channelId} (was ${cell})`);
     return;
   }
-  let pruned = 0;
+  const removed: string[] = [];
   for (const [id, b] of Object.entries(file.bindings)) {
-    if (b.cell === cell) { delete file.bindings[id]; pruned++; }
+    if (b.cell === cell) { delete file.bindings[id]; removed.push(id); }
   }
-  if (pruned === 0) {
+  if (removed.length === 0) {
     console.log(`no bindings for ${cell}`);
     return;
   }
   await saveChannels(file);
-  console.log(`unlinked ${pruned} channel${pruned === 1 ? "" : "s"} from ${cell}`);
+  for (const id of removed) await kvDelete(id);
+  console.log(`unlinked ${removed.length} channel${removed.length === 1 ? "" : "s"} from ${cell}`);
 }
 
 async function cmdChannelList() {
@@ -1208,6 +1300,20 @@ async function cmdChannelList() {
   for (const [id, b] of entries.sort((a, b) => a[1].cell.localeCompare(b[1].cell))) {
     console.log(`${id.padEnd(14)} ${b.cell.padEnd(14)} ${b.kind.padEnd(8)} ${b.createdAt}`);
   }
+}
+
+async function cmdChannelSync() {
+  const file = await loadChannels();
+  const entries = Object.entries(file.bindings);
+  if (entries.length === 0) {
+    console.log("(no bindings to sync)");
+    return;
+  }
+  for (const [id, b] of entries) {
+    await kvUpsert(id, b.cell);
+    console.log(`synced ${id} → ${b.cell}`);
+  }
+  console.log(`✓ synced ${entries.length} binding${entries.length === 1 ? "" : "s"} to KV`);
 }
 
 async function cmdDestroy(args: string[]) {
@@ -1640,80 +1746,14 @@ async function cmdUnschedulePulse() {
   console.log("✓ unscheduled");
 }
 
+// Operator is retired in cells-cloud-front Phase 1a — Slack now lands
+// on Cloudflare and routes deterministically to the bound cell. The
+// `unschedule-operator` command stays so Pete can boot out the
+// previously-installed launchd plist on existing machines.
 const OPERATOR_LABEL = "com.pete.cells-operator";
 
 function operatorPlistPath(): string {
   return join(homedir(), "Library/LaunchAgents", `${OPERATOR_LABEL}.plist`);
-}
-
-function buildOperatorPlist(): string {
-  const launcher = join(OPERATOR_ROOT, "bin", "operator-run");
-  const logsDir = join(homedir(), ".cells", "logs");
-  const path = "/Users/pete/.bun/bin:/Users/pete/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin";
-  return `<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-  <key>Label</key>
-  <string>${OPERATOR_LABEL}</string>
-  <key>ProgramArguments</key>
-  <array>
-    <string>${launcher}</string>
-  </array>
-  <key>EnvironmentVariables</key>
-  <dict>
-    <key>PATH</key>
-    <string>${path}</string>
-    <key>HOME</key>
-    <string>${homedir()}</string>
-  </dict>
-  <key>KeepAlive</key>
-  <true/>
-  <key>RunAtLoad</key>
-  <true/>
-  <key>StandardOutPath</key>
-  <string>${logsDir}/operator.log</string>
-  <key>StandardErrorPath</key>
-  <string>${logsDir}/operator.err</string>
-</dict>
-</plist>
-`;
-}
-
-async function cmdScheduleOperator() {
-  const launcher = join(OPERATOR_ROOT, "bin", "operator-run");
-  if (!existsSync(launcher)) {
-    console.error(`✗ launcher missing: ${launcher}`);
-    process.exit(1);
-  }
-  const logsDir = join(homedir(), ".cells", "logs");
-  await mkdir(logsDir, { recursive: true });
-  await mkdir(dirname(operatorPlistPath()), { recursive: true });
-  await writeFile(operatorPlistPath(), buildOperatorPlist());
-  console.log(`✓ wrote plist: ${operatorPlistPath()}`);
-
-  const uid = process.getuid?.() ?? 501;
-
-  await Bun.spawn(["launchctl", "bootout", `gui/${uid}/${OPERATOR_LABEL}`], {
-    stdin: "ignore",
-    stdout: "ignore",
-    stderr: "ignore",
-  }).exited;
-
-  const proc = Bun.spawn(["launchctl", "bootstrap", `gui/${uid}`, operatorPlistPath()], {
-    stdin: "ignore",
-    stdout: "inherit",
-    stderr: "inherit",
-  });
-  const code = await proc.exited;
-  if (code !== 0) {
-    console.error("✗ launchctl bootstrap failed");
-    process.exit(1);
-  }
-
-  console.log(`✓ scheduled: operator long-lived (KeepAlive)`);
-  console.log(`  logs: ${logsDir}/operator.log (stdout), operator.err (stderr)`);
-  console.log(`  unschedule with: cells unschedule-operator`);
 }
 
 async function cmdUnscheduleOperator() {
@@ -1729,7 +1769,7 @@ async function cmdUnscheduleOperator() {
   } else {
     console.log("(no plist found)");
   }
-  console.log("✓ unscheduled");
+  console.log("✓ operator unscheduled (retired in Phase 1a — Slack handled by Cloudflare Worker)");
 }
 
 /**
@@ -2794,7 +2834,6 @@ switch (sub) {
   case "unschedule-pi-patches": await cmdUnschedulePiPatches(); break;
   case "schedule-pulse":        await cmdSchedulePulse(); break;
   case "unschedule-pulse":      await cmdUnschedulePulse(); break;
-  case "schedule-operator":     await cmdScheduleOperator(); break;
   case "unschedule-operator":   await cmdUnscheduleOperator(); break;
   case "refresh-extensions":    await cmdRefreshExtensions(rest); break;
   case "heartbeat":             await cmdHeartbeat(rest); break;
@@ -2830,17 +2869,17 @@ switch (sub) {
     console.log("  cells unschedule-pi-patches remove launchd watcher");
     console.log("  cells schedule-pulse        install launchd plist (pulse ticks every 60s)");
     console.log("  cells unschedule-pulse      remove pulse launchd plist");
-    console.log("  cells schedule-operator     install launchd plist (operator long-lived; holds Slack Socket Mode)");
-    console.log("  cells unschedule-operator   remove operator launchd plist");
+    console.log("  cells unschedule-operator   boot out the legacy operator launchd plist (operator retired in Phase 1a)");
     console.log("  cells refresh-extensions <name|--all> [ext...] [--restart] [--remove]");
     console.log("                              push DNA extension(s) onto existing cell(s) (default: heartbeat-watch)");
     console.log("                              --restart kicks pi on the cell so new extensions load (otherwise dormant until next pi start)");
     console.log("                              --remove deletes the extension dir + drops it from settings.json (inverse of push)");
     console.log("  cells heartbeat [name|--tail]  show pulse digest, one cell's schedule, or recent fires");
     console.log("  cells channel link <cell> <channel-id> [--kind=slack]");
-    console.log("                              bind a Slack channel ID to a cell (operator routes inbound by this map)");
+    console.log("                              bind a Slack channel to a cell (mirrors to Cloudflare KV for the Slack Worker)");
     console.log("  cells channel unlink <cell> [<channel-id>]  remove one or all bindings for a cell");
     console.log("  cells channel list           list all channel↔cell bindings");
+    console.log("  cells channel sync           re-mirror channels.json to Cloudflare KV");
     console.log("  cells kill <name>... [-y]   destroy one or more cells (irreversible) (alias: destroy)");
     console.log("                              --all-but <name>... kill every cell except the listed ones");
     console.log("                              -y/--yes skip the confirmation prompt");

@@ -64,7 +64,6 @@ const AUTH_PATH = join(homedir(), ".pi/agent/auth.json");
 const SECRETS_PATH = join(homedir(), ".cells/secrets.json");
 const PULSE_INBOX_DIR = join(homedir(), ".cells/pulse-inbox");
 const CELLS_REGISTRY = join(homedir(), ".cells/cells.json");
-const CHANNELS_PATH = join(homedir(), ".cells/channels.json");
 const ACTIVITY_PATH = join(MOTHER_ROOT, "state/memory/project_cells_activity.md");
 const UPSTREAM = "https://api.anthropic.com";
 const CODEX_UPSTREAM = "https://chatgpt.com/backend-api";
@@ -691,148 +690,6 @@ async function handlePulseProxy(req: Request): Promise<Response> {
   return new Response("not found", { status: 404 });
 }
 
-// ───────────────────── slack.cells.md ─────────────────────
-//
-// Outbound-only from cells. Inbound from Slack arrives via Socket Mode
-// directly into the operator process — never touches this proxy.
-
-type ChannelKind = "slack";
-type ChannelBinding = { cell: string; kind: ChannelKind; createdAt: string };
-type ChannelsFile = { version: 1; bindings: Record<string, ChannelBinding> };
-
-function loadChannels(): ChannelsFile {
-  if (!existsSync(CHANNELS_PATH)) return { version: 1, bindings: {} };
-  try {
-    const j = JSON.parse(readFileSync(CHANNELS_PATH, "utf-8"));
-    if (j && typeof j === "object" && j.bindings) return j as ChannelsFile;
-  } catch { /* fallthrough */ }
-  return { version: 1, bindings: {} };
-}
-
-function readSlackBotToken(): string | null {
-  if (process.env.SLACK_BOT_TOKEN) return process.env.SLACK_BOT_TOKEN;
-  if (existsSync(SECRETS_PATH)) {
-    try {
-      const s = JSON.parse(readFileSync(SECRETS_PATH, "utf-8"));
-      if (typeof s.SLACK_BOT_TOKEN === "string") return s.SLACK_BOT_TOKEN;
-    } catch { /* fallthrough */ }
-  }
-  return null;
-}
-
-// MD5 keeps the gravatar identicon contract; we only need a stable hash.
-async function md5Hex(input: string): Promise<string> {
-  const { createHash } = await import("node:crypto");
-  return createHash("md5").update(input).digest("hex");
-}
-
-async function handleSlackProxy(req: Request): Promise<Response> {
-  const url = new URL(req.url);
-
-  if (req.method === "GET" && (url.pathname === "/" || url.pathname === "")) {
-    const channels = loadChannels();
-    const rows = Object.entries(channels.bindings)
-      .map(([id, b]) => `<tr><td><code>${id}</code></td><td>${b.cell}</td><td>${b.kind}</td></tr>`)
-      .join("") || `<tr><td colspan="3" style="color:#888">(no bindings)</td></tr>`;
-    return htmlPage(
-      "slack · cells",
-      `<h1>slack</h1>
-       <p class="sub">outbound endpoint · cells POST here to post in Slack as themselves</p>
-       <p>Inbound Slack events go to the operator process via Socket Mode,
-       not this proxy. See <a href="https://mother.cells.md/">mother</a> for the dashboard.</p>
-       <h2>bindings</h2>
-       <table><thead><tr><th>channel</th><th>cell</th><th>kind</th></tr></thead><tbody>${rows}</tbody></table>`,
-    );
-  }
-
-  if (req.method === "POST" && url.pathname === "/send") {
-    const auth = checkClientAuth(req);
-    if (!auth.ok) return new Response(`unauthorized: ${auth.reason}`, { status: 401 });
-
-    let payload: {
-      cell?: string;
-      text?: string;
-      channel?: string;
-      thread_ts?: string;
-      username?: string;
-      icon_url?: string;
-    };
-    try {
-      payload = await req.json();
-    } catch {
-      return new Response("bad json", { status: 400 });
-    }
-    const cell = (payload.cell ?? "").trim();
-    const text = payload.text ?? "";
-    if (!cell || !/^[a-z0-9-]+$/.test(cell)) return new Response("missing or bad cell", { status: 400 });
-    if (typeof text !== "string" || !text) return new Response("missing text", { status: 400 });
-
-    // Resolve channel: explicit override wins, else first binding for cell.
-    const channels = loadChannels();
-    let channel = payload.channel;
-    if (!channel) {
-      for (const [id, b] of Object.entries(channels.bindings)) {
-        if (b.cell === cell) { channel = id; break; }
-      }
-    }
-    if (!channel) {
-      return new Response(JSON.stringify({ ok: false, error: "no channel for cell" }), {
-        status: 404,
-        headers: { "content-type": "application/json" },
-      });
-    }
-
-    const botToken = readSlackBotToken();
-    if (!botToken) {
-      console.error(`[slack] /send hit but SLACK_BOT_TOKEN missing — see plan Phase A`);
-      return new Response(JSON.stringify({ ok: false, error: "slack bot token not configured" }), {
-        status: 503,
-        headers: { "content-type": "application/json" },
-      });
-    }
-
-    const username = payload.username ?? cell;
-    const iconUrl =
-      payload.icon_url ??
-      `https://www.gravatar.com/avatar/${await md5Hex(`cell:${cell}`)}?d=identicon&s=96`;
-
-    const body = {
-      channel,
-      text,
-      // username + icon_url override the bot's default identity per
-      // message; needs chat:write.customize scope on the app.
-      username,
-      icon_url: iconUrl,
-      ...(payload.thread_ts ? { thread_ts: payload.thread_ts } : {}),
-    };
-
-    const upstream = await fetch("https://slack.com/api/chat.postMessage", {
-      method: "POST",
-      headers: {
-        authorization: `Bearer ${botToken}`,
-        "content-type": "application/json; charset=utf-8",
-      },
-      body: JSON.stringify(body),
-    });
-    const respText = await upstream.text();
-    let respJson: any = null;
-    try { respJson = JSON.parse(respText); } catch { /* keep raw */ }
-
-    const okFlag = respJson?.ok === true;
-    const id = respJson?.ts ?? "?";
-    console.log(
-      `[${new Date().toISOString()}] slack ${cell} → ${channel} ${okFlag ? `ok ts=${id}` : `FAIL ${respJson?.error ?? upstream.status}`} (${text.length}B)`,
-    );
-
-    return new Response(respText, {
-      status: okFlag ? 200 : 502,
-      headers: { "content-type": "application/json" },
-    });
-  }
-
-  return new Response("not found", { status: 404 });
-}
-
 // ───────────────────── dashboard / cell page data ─────────────────────
 
 type CellInfo = {
@@ -1108,10 +965,8 @@ const server = Bun.serve({
       return handlePulseProxy(req);
     }
 
-    // slack.cells.md → cell-side outbound (POST /send) + status page
-    if (host.startsWith("slack.cells.md")) {
-      return handleSlackProxy(req);
-    }
+    // slack.cells.md → handled by Cloudflare Worker (cells-front-slack);
+    // never reaches the mother proxy.
 
     // <cell>.cells.md → forward to the cell's own site server
     const cell = cellNameFromHost(host);
@@ -1130,7 +985,7 @@ console.log(`    mother.cells.md/v1/*         → Anthropic proxy (Bearer auth)`
 console.log(`    mother.cells.md/codex/*      → OpenAI Codex proxy (Bearer auth)`);
 console.log(`    mother.cells.md/_proxy/health`);
 console.log(`    pulse.cells.md/heartbeat-changed → pulse inbox (Bearer auth)`);
-console.log(`    slack.cells.md/send          → outbound to Slack (Bearer auth)`);
 console.log(`    <cell>.cells.md/             → cell page`);
+console.log(`    (slack.cells.md handled by Cloudflare Worker)`);
 console.log(`  upstreams: ${UPSTREAM}, ${CODEX_UPSTREAM}`);
 console.log(`  auth file: ${AUTH_PATH}`);

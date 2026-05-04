@@ -36,7 +36,10 @@ export default function (pi: any) {
     name: "slack_post",
     label: "Post to Slack",
     description:
-      "Send a message to your bound Slack channel (or a specific channel/thread if given). Use this to reply to a question forwarded from Slack via the operator, to surface progress proactively, or to ask the human something. Posts as you (your cell name + a per-cell avatar) — not as a generic bot. Returns the chat.postMessage response from Slack.",
+      "Post a message to your bound Slack channel (or a specific channel/thread if given). " +
+      "**REQUIRED whenever you receive a prompt prefixed with `from-slack`** — that prefix means the human asked you in Slack, and the only way they can hear your answer is if you call slack_post. Replying only in the agent transcript is invisible to them. " +
+      "Also use proactively to surface progress, or to ask the human something. " +
+      "Posts as you (your cell name + a per-cell avatar) — not as a generic bot. Returns the chat.postMessage response from Slack.",
     parameters: Type.Object({
       text: Type.String({
         description: "The message to send. Slack mrkdwn supported.",
@@ -95,33 +98,60 @@ export default function (pi: any) {
         ...(params.icon_url ? { icon_url: params.icon_url } : {}),
       };
 
-      let res: Response;
-      try {
-        res = await fetch(SLACK_SEND_URL, {
-          method: "POST",
-          headers: {
-            "content-type": "application/json",
-            authorization: `Bearer ${secret}`,
-          },
-          body: JSON.stringify(body),
-        });
-      } catch (e) {
-        return {
-          content: [
-            { type: "text", text: `✗ slack_post unreachable: ${String(e).slice(0, 200)}` },
-          ],
-        };
-      }
+      // Pi globally disables undici body/headers timeouts (cli.js sets
+      // bodyTimeout=0, headersTimeout=0 to support slow local LLMs), so
+      // a stalled TCP stream here would hang the tool — and the agent —
+      // forever. Enforce our own 30s deadline via AbortController.
+      const ac = new AbortController();
+      const onAbort = () => ac.abort();
+      signal.addEventListener("abort", onAbort);
+      const t = setTimeout(() => ac.abort(), 30_000);
 
-      const text = await res.text();
-      if (!res.ok) {
-        return {
-          content: [
-            { type: "text", text: `✗ slack_post ${res.status}: ${text.slice(0, 300)}` },
-          ],
-        };
+      // The 30s timer must protect BOTH the fetch (headers) and the body
+      // read — fetch() resolves as soon as headers arrive, but res.text()
+      // can still hang forever if the body stream stalls. Keep the timer
+      // armed until the body is fully read.
+      try {
+        let res: Response;
+        try {
+          res = await fetch(SLACK_SEND_URL, {
+            method: "POST",
+            headers: {
+              "content-type": "application/json",
+              authorization: `Bearer ${secret}`,
+            },
+            body: JSON.stringify(body),
+            signal: ac.signal,
+          });
+        } catch (e) {
+          return {
+            content: [
+              { type: "text", text: `✗ slack_post unreachable: ${String(e).slice(0, 200)}` },
+            ],
+          };
+        }
+        let text: string;
+        try {
+          text = await res.text();
+        } catch (e) {
+          return {
+            content: [
+              { type: "text", text: `✗ slack_post body-read failed: ${String(e).slice(0, 200)}` },
+            ],
+          };
+        }
+        if (!res.ok) {
+          return {
+            content: [
+              { type: "text", text: `✗ slack_post ${res.status}: ${text.slice(0, 300)}` },
+            ],
+          };
+        }
+        return { content: [{ type: "text", text }] };
+      } finally {
+        clearTimeout(t);
+        signal.removeEventListener("abort", onAbort);
       }
-      return { content: [{ type: "text", text }] };
     },
   });
 }

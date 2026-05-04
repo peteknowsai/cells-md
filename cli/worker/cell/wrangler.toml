@@ -1,0 +1,37 @@
+name = "cells-front-{{CELL}}"
+main = "index.ts"
+compatibility_date = "2026-01-01"
+
+# Per-cell deploy. The {{CELL}} placeholder is rendered to the actual
+# cell name at deploy time — see scripts/deploy-cell-worker.sh.
+# account_id resolved from CLOUDFLARE_ACCOUNT_ID env at deploy time.
+
+[vars]
+CELL_NAME = "{{CELL}}"
+# Substituted at deploy time from `sprite info -s {{CELL}}` —
+# e.g. "bob-bas32.sprites.app". The cell Worker pushes inbound
+# events to https://${SPRITE_HOST}/inbox/push.
+SPRITE_HOST = "{{SPRITE_HOST}}"
+
+# Workers Custom Domain (per cell). wrangler creates the DNS record on deploy.
+[[routes]]
+pattern = "{{CELL}}.cells.md"
+custom_domain = true
+
+[[durable_objects.bindings]]
+name = "CELL_AGENT"
+class_name = "CellAgent"
+
+[[migrations]]
+tag = "v1"
+new_classes = ["CellInbox"]
+
+[[migrations]]
+tag = "v2"
+renamed_classes = [{ from = "CellInbox", to = "CellAgent" }]
+
+[[kv_namespaces]]
+binding = "CHANNELS"
+id = "e16e082ccb0549d5b4d039272873cd60"
+# Same CHANNELS namespace as the Slack Worker (cells can look up
+# their own bindings, e.g. for slack_post default-channel resolution).

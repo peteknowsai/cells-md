@@ -21,5 +21,10 @@
   "defaultThinkingLevel": "__THINKING__",
   "warnings": {
     "anthropicExtraUsage": false
+  },
+  "retry": {
+    "provider": {
+      "timeoutMs": 60000
+    }
   }
 }
