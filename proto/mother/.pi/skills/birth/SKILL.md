@@ -60,6 +60,14 @@ sharp edges — they're idempotent and fast):
 ```bash
 curl -fsSL https://bun.sh/install | bash
 curl -fsSL https://sprites.dev/install.sh | sh
+# gh CLI — required by pi's /share (it shells out to `gh gist create`).
+# Tarball install avoids the GitHub apt-repo dance and dpkg-lock exposure.
+# Auth happens via GH_TOKEN injected in step 6b — `gh auth status` honors it
+# natively, so no interactive `gh auth login` is needed.
+GH_VERSION=2.62.0
+curl -fsSL "https://github.com/cli/cli/releases/download/v${GH_VERSION}/gh_${GH_VERSION}_linux_amd64.tar.gz" \
+  | sudo tar -xz -C /usr/local --strip-components=1 \
+    "gh_${GH_VERSION}_linux_amd64/bin/gh"
 mkdir -p /home/sprite/.local/bin
 ln -sf /usr/bin/batcat /home/sprite/.local/bin/bat
 cat > /home/sprite/.tmux.conf << 'EOF'
@@ -158,8 +166,8 @@ bash scripts/apt-install-on-cell.sh <NAME> tmux micro fzf ripgrep bat
 ```
 
 Before moving on, verify every required binary is on PATH on the sprite:
-`sprite_exec`-run `command -v bun tmux micro fzf rg batcat` and confirm
-all six print a path. If any are missing, re-run only the substep that
+`sprite_exec`-run `command -v bun tmux micro fzf rg batcat gh` and confirm
+all seven print a path. If any are missing, re-run only the substep that
 provided that binary; do not proceed to step 4.
 
 **Recovery posture for the whole birth:** if any single sub-operation fails

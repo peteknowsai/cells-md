@@ -501,13 +501,64 @@ async function cmdPi() {
   await launchMotherTui();
 }
 
+function humanDate(iso: string): string {
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return iso;
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${pad(d.getMonth() + 1)}/${pad(d.getDate())}/${d.getFullYear()} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
+async function readCellModel(name: string): Promise<string | null> {
+  const p = join(VAULT_DIR, name, "IDENTITY.md");
+  if (!existsSync(p)) return null;
+  try {
+    const txt = await readFile(p, "utf-8");
+    const m = txt.match(/^model:\s*(\S+)/m);
+    return m ? m[1]! : null;
+  } catch { return null; }
+}
+
 async function cmdList() {
   const reg = await loadRegistry();
   if (reg.cells.length === 0) {
     console.log("no cells");
     return;
   }
-  for (const c of reg.cells) console.log(`${c.name.padEnd(20)} ${c.created_at}`);
+  const sorted = [...reg.cells].sort((a, b) => b.created_at.localeCompare(a.created_at));
+  const rows = await Promise.all(
+    sorted.map(async (c) => ({
+      name: c.name,
+      model: (await readCellModel(c.name)) ?? "?",
+      born: humanDate(c.created_at),
+    })),
+  );
+
+  const nameWidth = Math.max(4, ...rows.map((r) => r.name.length));
+  const modelWidth = Math.max(5, ...rows.map((r) => r.model.length));
+  const header = `${"name".padEnd(nameWidth)}  ${"model".padEnd(modelWidth)}  birthday`;
+
+  // Non-TTY (piped/scripted): plain columns with header, no picker.
+  if (!process.stdout.isTTY) {
+    console.log(header);
+    for (const r of rows) {
+      console.log(`${r.name.padEnd(nameWidth)}  ${r.model.padEnd(modelWidth)}  ${r.born}`);
+    }
+    return;
+  }
+
+  // TTY: interactive picker → launches `cells talk <name>` on selection.
+  // Indent header by 2 to line up with the picker's "❯ " pointer column.
+  const options: SelectOption[] = rows.map((r) => ({
+    value: r.name,
+    label: `${r.name.padEnd(nameWidth)}  ${r.model.padEnd(modelWidth)}  ${r.born}`,
+  }));
+  // Embed header as a dim second line of the prompt so it sits between
+  // "pick a cell..." and the options. \x1b[22m turns off bold from the
+  // surrounding bold span; \x1b[2m dims the header.
+  const promptWithHeader = `pick a cell to talk to\x1b[22m\n  \x1b[2m${header}`;
+  const picked = await selectOne(promptWithHeader, options);
+  if (typeof picked !== "string") return;
+  await cmdTalk(picked, []);
 }
 
 async function cmdTalk(name: string, args: string[]) {
@@ -998,6 +1049,16 @@ async function cmdCreate(name: string, opts: CreateOpts) {
   } catch (e) {
     console.error(`✗ worker deploy failed: ${e}`);
     console.error(`  retry: scripts/deploy-cell-worker.sh ${name}`);
+  }
+
+  // Mirror the cell into Pete's Obsidian vault so it shows up in
+  // `cells list` (model column reads from the vault's IDENTITY.md) and
+  // is browsable immediately. Best-effort — vault sync isn't load-bearing.
+  try {
+    await cmdSync(name);
+  } catch (e) {
+    console.error(`! initial vault sync failed: ${e}`);
+    console.error(`  retry: cells sync ${name}`);
   }
 }
 

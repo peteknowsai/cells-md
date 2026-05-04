@@ -78,13 +78,16 @@ if [ \"\$held\" = 1 ]; then
 fi
 
 run_apt() {
-  sudo apt-get update -y && sudo apt-get install -y \$PKGS
+  # \$1 = extra apt-get flags. Empty by default; retry forces IPv4 because
+  # archive.ubuntu.com sometimes returns only AAAA records on sprites and
+  # the IPv6 path is degraded — apt then bleeds at <1KB/s for many minutes.
+  sudo apt-get \$1 update -y && sudo apt-get \$1 install -y \$PKGS
 }
 
-if ! run_apt; then
-  echo 'apt failed once; retrying after 5s'
+if ! run_apt ''; then
+  echo 'apt failed once; retrying with IPv4 forced'
   sleep 5
-  run_apt || { echo 'apt failed twice — aborting (mother: surface this to Pete, do not loop)'; exit 2; }
+  run_apt '-o Acquire::ForceIPv4=true' || { echo 'apt failed twice — aborting (mother: surface this to Pete, do not loop)'; exit 2; }
 fi
 
 # Verify every requested package resolved to a binary on PATH.
