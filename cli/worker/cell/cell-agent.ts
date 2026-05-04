@@ -29,9 +29,24 @@ interface Env {
 
 const SLACK_SEND_URL = "https://slack.cells.md/send";
 const SLACK_EDIT_URL = "https://slack.cells.md/edit";
+const SLACK_REPLY_URL = "https://slack.cells.md/reply";
 const ALARM_INTERVAL_MS = 25_000;
-const FLUSH_INTERVAL_MS = 1100;        // chat.update rate-limit safe (~1Hz)
+// Default flush cadence. Slack documents 1/sec/message but tolerates
+// faster bursts; we honor 429 + Retry-After dynamically below to back
+// off without hard-capping at 1Hz.
+const FLUSH_INTERVAL_MS = 400;
+const FLUSH_BACKOFF_DECAY_MS = 60_000; // decay 429 backoff after 60s clean
+const FLUSH_BACKOFF_CAP_MS = 5_000;
 const IDLE_WINDOW_MS = 60_000;         // close WS and let sprite hibernate after 60s idle
+// Slack enforces 40,000 chars on chat.postMessage and chat.update; we
+// cap our rendered chunks at 35k to leave headroom for the
+// "…continued ↓" footer + a small streaming delta between flushes.
+const SLACK_MSG_CAP = 35_000;
+const SLACK_CONTINUE_FOOTER = "\n\n_…continued ↓_";
+// Tool results above this length get a thread reply with the full text;
+// the inline tool line shows the first TOOL_PREVIEW_CAP chars + a
+// "see thread" pointer.
+const TOOL_PREVIEW_CAP = 1000;
 
 type ToolCall = {
   id: string;
@@ -39,6 +54,9 @@ type ToolCall = {
   arguments: any;
   result?: string;
   isError?: boolean;
+  // ts of the thread reply holding the full result, set once on
+  // tool_execution_end if the unwrapped result exceeds TOOL_PREVIEW_CAP.
+  threadTs?: string;
 };
 
 type TurnState = {
@@ -53,6 +71,12 @@ type TurnState = {
   flushTimer: number | null;
   lastFlushAt: number;
   ended: boolean;
+  disconnected: boolean;         // bridge WS dropped mid-turn — append a footer on final flush
+  // Continuation thread replies in order, posted under slackTs when the
+  // rendered text exceeds SLACK_MSG_CAP. Each entry holds the ts of the
+  // continuation message and the chunk we last wrote to it (used so we
+  // can chat.update it as more text streams in).
+  overflow: { ts: string; text: string }[];
 };
 
 export class CellAgent {
@@ -67,6 +91,10 @@ export class CellAgent {
   // Last in-memory activity timestamp. Persisted via storage on every bump
   // so the alarm (which may run in a separate invocation) can read it.
   private lastActivity = 0;
+  // Slack 429 self-heal. flushBackoffMs replaces FLUSH_INTERVAL_MS while
+  // active; decays back when no 429 has been seen for FLUSH_BACKOFF_DECAY_MS.
+  private flushBackoffMs = FLUSH_INTERVAL_MS;
+  private last429At = 0;
 
   constructor(state: DurableObjectState, env: Env) {
     this.state = state;
@@ -195,6 +223,21 @@ export class CellAgent {
       ws.addEventListener("close", () => {
         console.log(`[${this.env.CELL_NAME}] ws closed`);
         if (this.ws === ws) this.ws = null;
+        // If a turn was streaming when the WS dropped, the user sees a
+        // frozen Slack message with no clue why. Finalize it with a
+        // footer so they know to retry. Pi's session continuity is
+        // preserved on the sprite — the next /append starts a clean
+        // new turn.
+        const t = this.currentTurn;
+        if (t && !t.ended) {
+          t.disconnected = true;
+          t.ended = true;
+          if (t.flushTimer != null) {
+            clearTimeout(t.flushTimer);
+            t.flushTimer = null;
+          }
+          void this.flushSlack(true);
+        }
       });
       ws.addEventListener("error", (e: any) => {
         console.error(`[${this.env.CELL_NAME}] ws error: ${String(e).slice(0, 120)}`);
@@ -267,6 +310,9 @@ export class CellAgent {
       if (tc) {
         tc.result = typeof ev.result === "string" ? ev.result : JSON.stringify(ev.result ?? "");
         tc.isError = !!ev.isError;
+        // The full-result thread post happens inside flushSlack, after
+        // the parent message exists — that way we don't post a thread
+        // reply with no parent to attach to.
         this.scheduleFlush();
       }
       return;
@@ -293,6 +339,8 @@ export class CellAgent {
       flushTimer: null,
       lastFlushAt: 0,
       ended: false,
+      disconnected: false,
+      overflow: [],
     };
     void this.flushSlack(false);
   }
@@ -309,15 +357,38 @@ export class CellAgent {
 
   // ---- Slack rendering & emission ----
 
+  private currentFlushInterval(): number {
+    // Decay backoff after a clean window with no 429s.
+    if (this.flushBackoffMs > FLUSH_INTERVAL_MS &&
+        Date.now() - this.last429At > FLUSH_BACKOFF_DECAY_MS) {
+      this.flushBackoffMs = FLUSH_INTERVAL_MS;
+    }
+    return this.flushBackoffMs;
+  }
+
   private scheduleFlush() {
     if (!this.currentTurn || this.currentTurn.ended) return;
     if (this.currentTurn.flushTimer != null) return;
     const now = Date.now();
-    const delay = Math.max(0, this.currentTurn.lastFlushAt + FLUSH_INTERVAL_MS - now);
+    const delay = Math.max(0, this.currentTurn.lastFlushAt + this.currentFlushInterval() - now);
     this.currentTurn.flushTimer = setTimeout(() => {
       if (this.currentTurn) this.currentTurn.flushTimer = null;
       void this.flushSlack(false);
     }, delay) as unknown as number;
+  }
+
+  // Read Slack's Retry-After (seconds) and arm an in-memory backoff so
+  // scheduleFlush stretches subsequent edits. Caps at FLUSH_BACKOFF_CAP_MS
+  // — any longer and we'd visibly stall the user, better to risk a few
+  // more 429s while pi is still mid-turn.
+  private noteRateLimit(retryAfterHeader: string | null) {
+    const seconds = Number(retryAfterHeader ?? "1");
+    const ms = Math.min(
+      Math.max(Number.isFinite(seconds) ? seconds * 1000 : 1000, 1000),
+      FLUSH_BACKOFF_CAP_MS,
+    );
+    this.flushBackoffMs = Math.max(this.flushBackoffMs, ms);
+    this.last429At = Date.now();
   }
 
   private async flushSlack(final: boolean): Promise<void> {
@@ -325,30 +396,132 @@ export class CellAgent {
     if (!t) return;
     t.lastFlushAt = Date.now();
 
-    const text = renderTurn(t, final);
+    const fullText = renderTurn(t, final);
+    // Split into chunks each <= SLACK_MSG_CAP. Index 0 is the parent
+    // message body; indexes 1+ map onto t.overflow[0..]. All chunks
+    // except the last get a "_…continued ↓_" footer.
+    const chunks = splitForCap(fullText, SLACK_MSG_CAP);
 
     try {
-      if (!t.slackTs) {
-        const res = await fetch(SLACK_SEND_URL, {
-          method: "POST",
-          headers: { "content-type": "application/json", authorization: `Bearer ${this.env.CELLS_PROXY_SECRET}` },
-          body: JSON.stringify({ cell: this.env.CELL_NAME, text, channel: t.channel, thread_ts: t.threadTs || undefined }),
-        });
-        if (!res.ok) { console.error(`[${this.env.CELL_NAME}] slack post failed ${res.status}: ${(await res.text()).slice(0, 200)}`); return; }
-        const j: any = await res.json();
-        t.slackTs = String(j?.ts ?? "");
-      } else {
-        const res = await fetch(SLACK_EDIT_URL, {
-          method: "POST",
-          headers: { "content-type": "application/json", authorization: `Bearer ${this.env.CELLS_PROXY_SECRET}` },
-          body: JSON.stringify({ cell: this.env.CELL_NAME, text, channel: t.channel, ts: t.slackTs }),
-        });
-        if (!res.ok) console.error(`[${this.env.CELL_NAME}] slack edit failed ${res.status}: ${(await res.text()).slice(0, 200)}`);
+      for (let i = 0; i < chunks.length; i++) {
+        const isLast = i === chunks.length - 1;
+        const chunkText = isLast ? chunks[i] : chunks[i] + SLACK_CONTINUE_FOOTER;
+
+        if (i === 0) {
+          if (await this.postOrEditParent(t, chunkText)) continue;
+          return; // 429 or upstream failure — abort this flush
+        }
+
+        const overflowIdx = i - 1;
+        if (overflowIdx < t.overflow.length) {
+          // Existing continuation — edit it.
+          if (chunkText === t.overflow[overflowIdx].text) continue; // unchanged, skip
+          const ok = await this.postSlackEdit(t.channel, t.overflow[overflowIdx].ts, chunkText);
+          if (!ok) return;
+          t.overflow[overflowIdx].text = chunkText;
+        } else {
+          // New continuation — post into the thread under the parent.
+          if (!t.slackTs) return; // shouldn't happen: parent posted above
+          const ts = await this.postSlackReply(t.channel, t.slackTs, chunkText);
+          if (!ts) return;
+          t.overflow.push({ ts, text: chunkText });
+        }
+      }
+
+      // Post full-result thread replies for tools whose unwrapped result
+      // exceeds TOOL_PREVIEW_CAP. Idempotent via tc.threadTs guard. Done
+      // after parent/overflow so we know slackTs exists.
+      if (t.slackTs) {
+        for (const tc of t.tools) {
+          if (tc.threadTs || !tc.result) continue;
+          const full = unwrapResult(tc.result);
+          if (full.length <= TOOL_PREVIEW_CAP) continue;
+          const body = "```\n" + full + "\n```";
+          // Bodies bigger than the per-message cap get split too — same
+          // chunker as the main render path. The first chunk seeds
+          // tc.threadTs; further chunks ride along under the same parent.
+          const chunks = splitForCap(body, SLACK_MSG_CAP);
+          let firstTs: string | null = null;
+          for (const chunk of chunks) {
+            const ts = await this.postSlackReply(t.channel, t.slackTs, chunk);
+            if (!ts) break;
+            if (!firstTs) firstTs = ts;
+          }
+          if (firstTs) tc.threadTs = firstTs;
+        }
       }
     } catch (e) {
       console.error(`[${this.env.CELL_NAME}] flush error: ${String(e).slice(0, 200)}`);
     }
   }
+
+  // Post the parent message (first time) or chat.update it. Returns true
+  // on success, false on 429 or upstream failure (caller bails).
+  private async postOrEditParent(t: TurnState, text: string): Promise<boolean> {
+    if (!t.slackTs) {
+      const res = await fetch(SLACK_SEND_URL, {
+        method: "POST",
+        headers: { "content-type": "application/json", authorization: `Bearer ${this.env.CELLS_PROXY_SECRET}` },
+        body: JSON.stringify({ cell: this.env.CELL_NAME, text, channel: t.channel, thread_ts: t.threadTs || undefined }),
+      });
+      if (res.status === 429) { this.noteRateLimit(res.headers.get("retry-after")); return false; }
+      if (!res.ok) { console.error(`[${this.env.CELL_NAME}] slack post failed ${res.status}: ${(await res.text()).slice(0, 200)}`); return false; }
+      const j: any = await res.json();
+      t.slackTs = String(j?.ts ?? "");
+      return true;
+    }
+    return this.postSlackEdit(t.channel, t.slackTs, text);
+  }
+
+  private async postSlackEdit(channel: string, ts: string, text: string): Promise<boolean> {
+    const res = await fetch(SLACK_EDIT_URL, {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: `Bearer ${this.env.CELLS_PROXY_SECRET}` },
+      body: JSON.stringify({ cell: this.env.CELL_NAME, text, channel, ts }),
+    });
+    if (res.status === 429) { this.noteRateLimit(res.headers.get("retry-after")); return false; }
+    if (!res.ok) {
+      console.error(`[${this.env.CELL_NAME}] slack edit failed ${res.status}: ${(await res.text()).slice(0, 200)}`);
+      return false;
+    }
+    return true;
+  }
+
+  // Post a thread reply under the parent message. Returns the new ts on
+  // success, null on 429 or upstream failure.
+  private async postSlackReply(channel: string, parentTs: string, text: string): Promise<string | null> {
+    const res = await fetch(SLACK_REPLY_URL, {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: `Bearer ${this.env.CELLS_PROXY_SECRET}` },
+      body: JSON.stringify({ cell: this.env.CELL_NAME, text, channel, thread_ts: parentTs }),
+    });
+    if (res.status === 429) { this.noteRateLimit(res.headers.get("retry-after")); return null; }
+    if (!res.ok) {
+      console.error(`[${this.env.CELL_NAME}] slack reply failed ${res.status}: ${(await res.text()).slice(0, 200)}`);
+      return null;
+    }
+    const j: any = await res.json();
+    const ts = String(j?.ts ?? "");
+    return ts || null;
+  }
+}
+
+// Split text into chunks each <= cap. Prefer to break on the last
+// "\n\n" boundary at or before cap; if no boundary in the last 5k of
+// the cap window, hard-slice at cap to avoid pathological spillover.
+function splitForCap(text: string, cap: number): string[] {
+  if (text.length <= cap) return [text];
+  const chunks: string[] = [];
+  let remaining = text;
+  while (remaining.length > cap) {
+    const window = remaining.slice(0, cap);
+    const boundary = window.lastIndexOf("\n\n");
+    const cut = boundary >= cap - 5000 ? boundary : cap;
+    chunks.push(remaining.slice(0, cut));
+    remaining = remaining.slice(cut).replace(/^\n+/, "");
+  }
+  if (remaining) chunks.push(remaining);
+  return chunks;
 }
 
 function renderTurn(t: TurnState, final: boolean): string {
@@ -368,7 +541,11 @@ function renderTurn(t: TurnState, final: boolean): string {
     parts.push(t.text);
   }
   if (parts.length === 0) {
+    if (t.disconnected) return "_⚠ connection lost — pi is still working; next message will start fresh_";
     return final ? "*(no response)*" : "…";
+  }
+  if (t.disconnected) {
+    parts.push("_⚠ connection lost — pi is still working; next message will start fresh_");
   }
   return parts.join("\n\n");
 }
@@ -397,7 +574,23 @@ function formatToolLine(tc: ToolCall): string {
   if (argSummary && resultText.toLowerCase().includes(argSummary.toLowerCase())) {
     return line + " ✓";
   }
-  return line + ` → ${truncate(resultText, 120)}`;
+  // Long results: show a short preview inline + pointer to the thread
+  // reply with the full text (posted by flushSlack). If the thread post
+  // hasn't landed yet, fall back to the longer truncated form.
+  if (resultText.length > TOOL_PREVIEW_CAP) {
+    const preview = truncate(resultText, TOOL_PREVIEW_CAP);
+    if (tc.threadTs) {
+      return line + ` → ${preview} _↳ ${formatBytes(resultText.length)} (see thread)_`;
+    }
+    return line + ` → ${preview}`;
+  }
+  return line + ` → ${resultText.replace(/\n+/g, " ")}`;
+}
+
+function formatBytes(n: number): string {
+  if (n < 1024) return `${n}B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)}KB`;
+  return `${(n / (1024 * 1024)).toFixed(1)}MB`;
 }
 
 function summarizeArgs(toolName: string, args: Record<string, any>): string {

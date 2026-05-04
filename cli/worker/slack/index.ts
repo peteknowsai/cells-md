@@ -26,6 +26,7 @@ export default {
     const url = new URL(req.url);
     if (req.method === "POST" && url.pathname === "/events") return handleEvents(req, env, ctx);
     if (req.method === "POST" && url.pathname === "/send") return handleSend(req, env);
+    if (req.method === "POST" && url.pathname === "/reply") return handleReply(req, env);
     if (req.method === "POST" && url.pathname === "/edit") return handleEdit(req, env);
     if (req.method === "GET" && url.pathname === "/_debug/kv") {
       const auth = req.headers.get("authorization") ?? "";
@@ -234,6 +235,29 @@ async function handleSend(req: Request, env: Env): Promise<Response> {
     status: okFlag ? 200 : 502,
     headers: { "content-type": "application/json" },
   });
+}
+
+// /reply — thread-reply variant of /send. Same payload shape; thread_ts
+// is required. Used by the cell DO to push tool-result read-mores and
+// 40k-cap continuations under the parent turn message. Just delegates
+// to handleSend after enforcing thread_ts is present, since handleSend
+// already supports threading via the optional thread_ts field.
+async function handleReply(req: Request, env: Env): Promise<Response> {
+  const auth = req.headers.get("authorization") ?? "";
+  if (auth !== `Bearer ${env.CELLS_PROXY_SECRET}`) {
+    return new Response("unauthorized", { status: 401 });
+  }
+  // Peek at the body to enforce thread_ts before forwarding.
+  const raw = await req.text();
+  let payload: { thread_ts?: string };
+  try { payload = JSON.parse(raw); }
+  catch { return new Response("bad json", { status: 400 }); }
+  if (!payload.thread_ts) {
+    return new Response("missing thread_ts", { status: 400 });
+  }
+  // Rebuild the request so handleSend can re-parse it.
+  const forwarded = new Request(req, { body: raw });
+  return handleSend(forwarded, env);
 }
 
 // chat.update for streaming edits. The CellAgent DO calls this every ~1Hz
