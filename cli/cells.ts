@@ -977,24 +977,27 @@ async function cmdCreate(name: string, opts: CreateOpts) {
       console.error(`✗ slack wiring failed: ${e}`);
       console.error(`  retry: cells channel link ${name} <id>`);
     }
+  }
 
-    // Deploy the per-cell CF Worker (the CellAgent DO that holds the
-    // persistent WS to the sprite). Runs deploy-cell-worker.sh, which
-    // resolves the sprite host and runs `wrangler deploy`.
-    try {
-      const script = join(REPO_ROOT, "scripts/deploy-cell-worker.sh");
-      const proc = Bun.spawn(["bash", script, name], { stdout: "inherit", stderr: "inherit" });
-      const code = await proc.exited;
-      if (code !== 0) {
-        console.error(`✗ worker deploy failed (exit ${code})`);
-        console.error(`  retry: scripts/deploy-cell-worker.sh ${name}`);
-      } else {
-        console.log(`✓ deployed cells-front-${name}`);
-      }
-    } catch (e) {
-      console.error(`✗ worker deploy failed: ${e}`);
+  // Deploy the per-cell CF Worker (the CellAgent DO that holds the
+  // persistent WS to the sprite). Runs deploy-cell-worker.sh, which
+  // resolves the sprite host and runs `wrangler deploy`. Required
+  // regardless of Slack — without this Worker, <name>.cells.md falls
+  // through to the subscriptions proxy and 404s, which breaks `cells
+  // talk` (resolveSpriteHost hits <name>.cells.md/debug).
+  try {
+    const script = join(REPO_ROOT, "scripts/deploy-cell-worker.sh");
+    const proc = Bun.spawn(["bash", script, name], { stdout: "inherit", stderr: "inherit" });
+    const code = await proc.exited;
+    if (code !== 0) {
+      console.error(`✗ worker deploy failed (exit ${code})`);
       console.error(`  retry: scripts/deploy-cell-worker.sh ${name}`);
+    } else {
+      console.log(`✓ deployed cells-front-${name}`);
     }
+  } catch (e) {
+    console.error(`✗ worker deploy failed: ${e}`);
+    console.error(`  retry: scripts/deploy-cell-worker.sh ${name}`);
   }
 }
 
