@@ -6,6 +6,7 @@ import { dirname, join, basename } from "node:path";
 import { existsSync, statSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import * as readline from "node:readline/promises";
+import { createHash } from "node:crypto";
 
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = dirname(SCRIPT_DIR);
@@ -1596,11 +1597,16 @@ async function streamCellBridge(name: string, opts: StreamOpts): Promise<void> {
     process.exit(1);
   }
 
-  // Bun extends WebSocket to accept a `headers` option; we use Bearer
-  // auth for the /agent upgrade just like the cell DO does.
-  const ws = new WebSocket(`wss://${host}/agent`, {
-    headers: { authorization: `Bearer ${secret}` },
-  } as any);
+  // Sprites hibernate. The first WS attempt against a cold sprite often
+  // stalls (Fly hands the upgrade to a VM that isn't ready yet). Retry
+  // up to 4 times with exponential backoff — typical cold-start
+  // resolves on attempt 2 or 3 within ~30s.
+  process.stdout.write(`\x1b[2m── connecting to ${host}…\x1b[0m`);
+  const ws = await connectBridgeWS(host, secret).catch((e) => {
+    process.stdout.write("\r\x1b[K");
+    console.error(`✗ ${e instanceof Error ? e.message : String(e)}`);
+    process.exit(1);
+  });
 
   // Resolve the cell's bound Slack channel + the Mac user's Slack uid.
   // When both exist, prompts route through /inbox/append: the DO sees a
@@ -1691,11 +1697,8 @@ async function streamCellBridge(name: string, opts: StreamOpts): Promise<void> {
     console.error(`ws error: ${String((e as any).message ?? e).slice(0, 200)}`);
   });
 
-  // Wait for connection, then send initial message (if any) or open prompt.
-  await new Promise<void>((resolve, reject) => {
-    ws.addEventListener("open", () => resolve(), { once: true });
-    ws.addEventListener("error", () => reject(new Error("ws connect failed")), { once: true });
-  });
+  // Clear the "connecting…" line.
+  process.stdout.write("\r\x1b[K");
 
   if (opts.initialMessage) {
     await sendPrompt(opts.initialMessage);
@@ -1734,6 +1737,34 @@ async function streamCellBridge(name: string, opts: StreamOpts): Promise<void> {
       ws.addEventListener("close", () => resolve(), { once: true });
     });
   }
+}
+
+// Open a WebSocket to wss://<host>/agent with bearer auth, retrying
+// on cold-start stalls. Each attempt waits up to 12s for `open`;
+// retries back off (3s, 6s, 12s) for up to ~30s total.
+async function connectBridgeWS(host: string, secret: string): Promise<WebSocket> {
+  const PER_ATTEMPT_MS = 12_000;
+  const BACKOFFS = [0, 3_000, 6_000, 12_000];
+  let lastErr: any = null;
+  for (let i = 0; i < BACKOFFS.length; i++) {
+    if (BACKOFFS[i] > 0) await new Promise((r) => setTimeout(r, BACKOFFS[i]));
+    const ws = new WebSocket(`wss://${host}/agent`, {
+      headers: { authorization: `Bearer ${secret}` },
+    } as any);
+    try {
+      await new Promise<void>((resolve, reject) => {
+        const t = setTimeout(() => reject(new Error("attempt timeout")), PER_ATTEMPT_MS);
+        ws.addEventListener("open", () => { clearTimeout(t); resolve(); }, { once: true });
+        ws.addEventListener("error", (e: any) => { clearTimeout(t); reject(new Error(String(e?.message ?? e).slice(0, 120))); }, { once: true });
+        ws.addEventListener("close", (e: any) => { clearTimeout(t); reject(new Error(`closed ${e?.code ?? "?"}`)); }, { once: true });
+      });
+      return ws;
+    } catch (e) {
+      lastErr = e;
+      try { ws.close(); } catch {}
+    }
+  }
+  throw new Error(`ws connect to ${host} failed after ${BACKOFFS.length} attempts: ${String(lastErr).slice(0, 200)}`);
 }
 
 // Look up the slack channel ID bound to this cell from the local
@@ -1775,11 +1806,16 @@ async function resolveSpriteHost(name: string, secret: string): Promise<string |
 // /events into the cell. Best-effort: failures don't block the bridge
 // send.
 async function mirrorPromptToSlack(cellName: string, text: string, secret: string): Promise<void> {
-  const username = `${userInfo().username} (cli)`;
+  const user = userInfo().username;
+  const username = `${user} (cli)`;
+  // Distinct gravatar so the CLI message doesn't share the cell's
+  // identicon. Seeded by user, not cell, so it's stable across cells.
+  const iconHash = createHash("md5").update(`cli:${user}`).digest("hex");
+  const icon_url = `https://www.gravatar.com/avatar/${iconHash}?d=identicon&s=96`;
   await fetch("https://slack.cells.md/send", {
     method: "POST",
     headers: { "content-type": "application/json", authorization: `Bearer ${secret}` },
-    body: JSON.stringify({ cell: cellName, text, username }),
+    body: JSON.stringify({ cell: cellName, text, username, icon_url }),
   });
 }
 
