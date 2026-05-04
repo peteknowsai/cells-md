@@ -3,10 +3,10 @@
 #
 # These keep four behaviors working that stock pi packages don't give us:
 #
-#   1. Anthropic baseUrl → mother.cells.md (so cells use Pete's Claude Max sub
-#      via the mother proxy on Pete's laptop, home-IP egress).
+#   1. Anthropic baseUrl → proxy.cells.md (so cells use Pete's Claude Max sub
+#      via the subscriptions proxy running on Pete's laptop, home-IP egress).
 #   2. Codex extractAccountId neutralized (cells ship the proxy secret as
-#      bearer; mother adds the real chatgpt-account-id server-side).
+#      bearer; the proxy adds the real chatgpt-account-id server-side).
 #   3. Anthropic mapThinkingLevelToEffort returns undefined for "adaptive"
 #      (so the model fully decides per-turn — no effort hint).
 #   4. pi-coding-agent THINKING_LEVELS arrays include "adaptive" (so
@@ -41,14 +41,13 @@ patched_anthropic_adaptive=0
 patched_levels=0
 
 # 1. Anthropic baseUrl swap. Handles both fresh installs (api.anthropic.com)
-# and cells transiently routed via proxy.cells.md (the pass-4 cutover that
-# was rolled back when chatgpt.com's CF anti-loop made egress-IP detection
-# a real concern for both vendors).
+# and cells previously pointed at mother.cells.md (the pre-split routing,
+# when the proxy was bundled into mother).
 for F in $(find "${SEARCH_ROOTS[@]}" -name models.generated.js 2>/dev/null); do
-  if grep -qE 'api\.anthropic\.com|proxy\.cells\.md' "$F"; then
+  if grep -qE 'api\.anthropic\.com|mother\.cells\.md' "$F"; then
     [ -f "$F.bak" ] || cp "$F" "$F.bak"
-    "${SED_INPLACE[@]}" -e 's|https://api.anthropic.com|https://mother.cells.md|g' \
-                        -e 's|https://proxy.cells.md|https://mother.cells.md|g' "$F"
+    "${SED_INPLACE[@]}" -e 's|https://api.anthropic.com|https://proxy.cells.md|g' \
+                        -e 's|https://mother.cells.md|https://proxy.cells.md|g' "$F"
     patched_url=$((patched_url+1))
   fi
 done

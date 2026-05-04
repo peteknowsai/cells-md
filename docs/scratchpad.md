@@ -3,37 +3,6 @@
 Loose follow-ups. Not blocking any current work; here so we don't
 forget.
 
-## OAuth Worker — security hardening (post-pass-4)
-
-**Issue.** The pass-4 plan (`docs/oauth-worker.md`) commits to storing
-refresh tokens in CF Worker DO storage. Convenient for getting the
-worker running. Not ideal long-term — anyone with Wrangler access to
-this account can dump the refresh tokens, which are the keys to Pete's
-Anthropic Claude Max and ChatGPT Plus accounts.
-
-**Better designs to consider once pass-4 is stable:**
-
-1. **Refresh tokens stay on Pete's laptop only.** The Worker only
-   holds the current short-lived access token (~1hr). Mother's
-   refresh-agent does the OAuth refresh round-trip locally using its
-   refresh token, then PUTs only the access token to the DO. Failure
-   mode: laptop offline + access token expires → cells dead until
-   laptop comes back. Same blast radius as today, but with no
-   long-lived secrets in the cloud.
-
-2. **Encrypted refresh tokens in DO storage.** Encrypt with a key
-   that lives only on Pete's laptop. Worker can read but not
-   decrypt. Mother decrypts locally to do the refresh. Requires
-   setting up the key, distributing only to mother. Adds complexity
-   for marginal benefit over (1).
-
-3. **Hardware-backed signing key.** Refresh flow signed with a Mac
-   keychain item. Most secure, most ceremony.
-
-**Recommendation when revisiting:** option (1). Smallest change from
-the initial pass-4 design (Worker stops holding refresh tokens; PUT
-endpoint only accepts access tokens).
-
 ## Slack manifest scope minimization (pass-2 leftover)
 
 Bot scopes that aren't actually used by any code path:

@@ -1,26 +1,32 @@
 /**
- * mother-codex — route codex requests through mother.cells.md.
+ * mother-codex — route codex requests through the subscriptions proxy
+ * at proxy.cells.md.
  *
- * Codex stays on mother (Pete's home IP via cloudflared) even after the
- * pass-4 Anthropic cutover to proxy.cells.md. Reason: chatgpt.com is also
- * fronted by Cloudflare and aggressively blocks CF-Worker → CF-zone hops
- * with an anti-loop Ray-ID challenge. Anthropic doesn't share that
- * constraint, so /v1/* moved to the Worker but /codex/* is kept on mother
- * indefinitely. See docs/scratchpad.md for revisit notes.
+ * Both Anthropic and Codex egress through Pete's laptop via cloudflared
+ * (home-IP egress). See docs/architectural-decisions/0001 for why we
+ * don't run this in a Cloudflare Worker.
+ *
+ * Pi-ai has no env-var fallback for the openai-codex provider, so we use
+ * the registerProvider API: override both the baseUrl and the apiKey so
+ * getApiKeyAndHeaders returns our shared secret and outgoing requests
+ * hit the proxy.
  *
  * Cells have no ~/.pi/agent/auth.json entry for openai-codex, so the
  * authStorage path returns nothing and the registerProvider apiKey wins.
  *
  * The cell-side openai-codex-responses.js is sed-patched at birth to
  * neutralize JWT-based extractAccountId (our bearer is the proxy secret,
- * not a JWT). Mother adds the real chatgpt-account-id server-side.
+ * not a JWT). The proxy adds the real chatgpt-account-id server-side.
+ *
+ * Extension named "mother-codex" for legacy reasons; rename when we
+ * split mother-the-cell out from the proxy concept entirely.
  */
 
 export default function (pi: any) {
   const secret = process.env.OPENAI_CODEX_API_KEY;
   if (!secret) return;
   pi.registerProvider("openai-codex", {
-    baseUrl: "https://mother.cells.md/codex",
+    baseUrl: "https://proxy.cells.md/codex",
     apiKey: secret,
     authHeader: true,
   });
