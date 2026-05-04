@@ -21,6 +21,7 @@ still available for local-only operations on the Mac (e.g., reading
 - `sprite` CLI authenticated (verify with `sprite org list`)
 - `~/.cells/secrets.json` contains `CELLS_PROXY_SECRET` (the bearer token cells use to reach the subscriptions proxy at `https://proxy.cells.md`)
 - No existing agent with this name (the Bun CLI checks before invoking you)
+- All `bash scripts/...` invocations in this skill are relative to the cells repo root (`~/Projects/cells`). `cd` there before running them, or prefix each call with `cd ~/Projects/cells &&`.
 
 ## 1. Create the Sprite
 
