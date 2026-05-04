@@ -26,14 +26,16 @@ anything inside it.
   - tar+push `proto/mother/dna/` to `/root/cell`, `sed` substitute `__NAME__`
   - run `bun install` on the Sprite
   - inject shared keys (`CELLS_PROXY_SECRET`, `EXA_API_KEY`, `SPRITES_TOKEN`) from `~/.cells/secrets.json` and patch pi-ai's model registry to route through `mother.cells.md`
-  - write the `~/.bashrc` shim that auto-attaches `tmux new-session -A -s cell pi` on `sprite console`
+  - register the `site` sprite service (it serves `<cell>.cells.md` and
+    spawns `pi --mode rpc` as a child; the per-cell CF Worker holds a
+    persistent WebSocket to it as the prompt/event bridge)
   - take the first checkpoint
 - `.pi/prompts/` — slash commands the CLI invokes (`cell-create`, `cell-destroy`, `cell-checkpoint`)
 
-**Done when:** `cells birth Pete` works end-to-end. `cells talk Pete` lands me in
-a Pi TUI on the Sprite. I have a conversation. I disconnect. The Sprite
-hibernates. I come back days later. Conversation is still there. The cell is
-the same cell.
+**Done when:** `cells birth Pete` works end-to-end. `cells talk Pete` reaches
+the cell over the bridge. I have a conversation. I disconnect. The Sprite
+hibernates. I come back days later. Conversation is still there. The cell
+is the same cell.
 
 **Explicitly NOT in Phase 0:**
 

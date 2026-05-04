@@ -9,8 +9,8 @@ Birth configuration (JSON):
 $2
 
 Parse the JSON. It has six fields:
-- `harness` — for v1 always `"pi"`. If anything else, abort with a clear
-  error to Pete: `"harness '<value>' not yet supported (only 'pi' for v1)"`.
+- `harness` — currently always `"pi"`. If anything else, abort with a clear
+  error to Pete: `"harness '<value>' not yet supported (only 'pi' today)"`.
 - `provider` — Pi provider ID (`"anthropic"` or `"openai"`). This becomes
   the `<PROVIDER>` substitution in the birth ritual.
 - `model` — model ID (e.g. `claude-opus-4-7`, `gpt-5.5`). This becomes

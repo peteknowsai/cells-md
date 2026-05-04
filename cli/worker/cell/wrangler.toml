@@ -9,8 +9,9 @@ compatibility_date = "2026-01-01"
 [vars]
 CELL_NAME = "{{CELL}}"
 # Substituted at deploy time from `sprite info -s {{CELL}}` —
-# e.g. "bob-bas32.sprites.app". The cell Worker pushes inbound
-# events to https://${SPRITE_HOST}/inbox/push.
+# e.g. "bob-bas32.sprites.app". The CellAgent DO opens a persistent
+# WebSocket to wss://${SPRITE_HOST}/agent for prompt push + event
+# stream from pi --mode rpc.
 SPRITE_HOST = "{{SPRITE_HOST}}"
 
 # Workers Custom Domain (per cell). wrangler creates the DNS record on deploy.
@@ -33,5 +34,5 @@ renamed_classes = [{ from = "CellInbox", to = "CellAgent" }]
 [[kv_namespaces]]
 binding = "CHANNELS"
 id = "e16e082ccb0549d5b4d039272873cd60"
-# Same CHANNELS namespace as the Slack Worker (cells can look up
-# their own bindings, e.g. for slack_post default-channel resolution).
+# Same CHANNELS namespace as the Slack Worker. Read-shared so future
+# bridge logic can resolve a cell's bound channel without an extra hop.
