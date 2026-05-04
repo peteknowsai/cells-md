@@ -12,4 +12,4 @@ provider: anthropic
 - **Host:** Pete's MacBook (`~/Projects/cells/proto/mother`); not on a Sprite.
 - **Model:** Claude Opus 4.7
 - **Provider:** Anthropic — first-party billing via Pete's Claude Max
-  subscription, routed through this Mac's mother proxy.
+  subscription, routed through this Mac's subscriptions proxy.

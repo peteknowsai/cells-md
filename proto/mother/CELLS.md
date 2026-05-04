@@ -44,7 +44,7 @@ Pete before invoking you on destructive ops. Specifically you:
 ## Proxy and OAuth refresh
 
 You own the OAuth state for Pete's Claude Max and ChatGPT Plus
-subscriptions. The mother proxy at `mother.cells.md` runs as a launchd
+subscriptions. The subscriptions proxy at `proxy.cells.md` runs as a launchd
 service on this Mac and uses tokens from `~/.pi/agent/auth.json` (refreshed
 on a timer, with mutex + backoff) to swap a fresh access token into every
 cell's API call.

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Wire a cell to the mother proxy at https://mother.cells.md.
+# Wire a cell to the subscriptions proxy at https://proxy.cells.md.
 #
 # Drops two ~/.bashrc.d/ env files (the only piece that needs the shared
 # secret), then triggers the cell-side apply-pi-patches.sh which does the
@@ -28,11 +28,11 @@ esac
 sprite exec -s "$NAME" -- bash -lc "
 set -euo pipefail
 
-# 1a. Anthropic env file: route to mother proxy.
+# 1a. Anthropic env file: route to subscriptions proxy.
 mkdir -p ~/.bashrc.d
 rm -f ~/.bashrc.d/anthropic_api_key  # legacy, would conflict
 cat > ~/.bashrc.d/anthropic_proxy <<'EOF'
-# Route Anthropic API calls through mother proxy (cells.md fleet).
+# Route Anthropic API calls through subscriptions proxy (cells.md fleet).
 # Pi treats this as an OAuth token (Bearer auth) thanks to the sk-ant-oat prefix.
 export ANTHROPIC_OAUTH_TOKEN=__SECRET__
 export ANTHROPIC_AUTH_TOKEN=__SECRET__
@@ -41,10 +41,10 @@ EOF
 sed -i 's|__SECRET__|$SECRET|g' ~/.bashrc.d/anthropic_proxy
 chmod 600 ~/.bashrc.d/anthropic_proxy
 
-# 1b. Codex env file: read by the mother-codex extension at pi startup.
+# 1b. Codex env file: read by the codex-proxy extension at pi startup.
 cat > ~/.bashrc.d/codex_proxy <<'EOF'
-# Route OpenAI Codex (ChatGPT sub) calls through mother proxy.
-# Pi-ai has no built-in env lookup for openai-codex; the mother-codex
+# Route OpenAI Codex (ChatGPT sub) calls through subscriptions proxy.
+# Pi-ai has no built-in env lookup for openai-codex; the codex-proxy
 # extension reads this var and calls pi.registerProvider with it.
 export OPENAI_CODEX_API_KEY=__SECRET__
 EOF

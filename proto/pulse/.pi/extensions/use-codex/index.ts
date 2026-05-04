@@ -3,8 +3,8 @@
  *
  * Two responsibilities:
  *
- *   1. Route openai-codex requests through mother.cells.md/codex (so pulse's
- *      gpt-5.5 calls land on Pete's ChatGPT sub via the mother proxy, not on
+ *   1. Route openai-codex requests through proxy.cells.md/codex (so pulse's
+ *      gpt-5.5 calls land on Pete's ChatGPT sub via the subscriptions proxy, not on
  *      metered OpenAI API). Same mechanism as cells use — register the
  *      openai-codex provider with the proxy URL + shared bearer secret.
  *
@@ -47,7 +47,7 @@ export default function (pi: any) {
   const secret = process.env.OPENAI_CODEX_API_KEY;
   if (secret) {
     pi.registerProvider("openai-codex", {
-      baseUrl: "https://mother.cells.md/codex",
+      baseUrl: "https://proxy.cells.md/codex",
       apiKey: secret,
       authHeader: true,
     });

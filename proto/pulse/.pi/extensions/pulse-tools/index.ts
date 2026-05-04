@@ -6,7 +6,7 @@
  * is on disk under ~/.cells/:
  *
  *   pulse.json              runtime state (lastPulse, currentPulse, lastFire, log[])
- *   pulse-inbox/            files dropped by mother proxy when cells push HEARTBEAT.md
+ *   pulse-inbox/            files dropped by subscriptions proxy when cells push HEARTBEAT.md
  *   pulse-inbox/processed/  archive of drained inbox files
  *   pulse-cache/<cell>.json parsed schedule per cell ({items: [{id, cron, message}]})
  *

@@ -19,7 +19,7 @@ still available for local-only operations on the Mac (e.g., reading
 ## Preconditions
 
 - `sprite` CLI authenticated (verify with `sprite org list`)
-- `~/.cells/secrets.json` contains `CELLS_PROXY_SECRET` (the bearer token cells use to reach the mother's proxy at `https://mother.cells.md`)
+- `~/.cells/secrets.json` contains `CELLS_PROXY_SECRET` (the bearer token cells use to reach the subscriptions proxy at `https://proxy.cells.md`)
 - No existing agent with this name (the Bun CLI checks before invoking you)
 
 ## 1. Create the Sprite
@@ -238,7 +238,7 @@ If `<EXTENSIONS>` is empty, delete all four.
 
 Then **register the chosen optional extensions in `.pi/settings.json`**.
 The DNA template's `extensions` array only lists the always-installed
-ones (`use-max`, `mother-codex`, `self`, `thinking`, `heartbeat-watch`).
+ones (`use-max`, `codex-proxy`, `self`, `thinking`, `heartbeat-watch`).
 Pi loads only what's in this array — leaving an extension on disk
 without registering it does nothing. For each name in `<EXTENSIONS>`,
 append `.pi/extensions/<name>/index.ts` via `sprite_exec`:
@@ -365,28 +365,28 @@ chmod 600 /home/sprite/.bashrc.d/exa
 ```
 
 `ANTHROPIC_API_KEY` is intentionally absent from `secrets.json` — cells
-route through the mother's proxy and don't hold real Anthropic credentials.
+route through the subscriptions proxy and don't hold real Anthropic credentials.
 The legacy approach was to push a frozen OAuth access token; it expired
 hours after birth.
 
-## 6c. Wire the cell to the mother's proxy
+## 6c. Wire the cell to the subscriptions proxy
 
 Cells reach both Anthropic (Claude Max) and OpenAI Codex (ChatGPT Plus)
-via `https://mother.cells.md`, which the mother laptop runs as the single
+via `https://proxy.cells.md`, which the mother laptop runs as the single
 OAuth principal for both subscriptions across the whole fleet. This step
 does five things:
 
 1. Drops `~/.bashrc.d/anthropic_proxy` with the shared bearer secret
    (`CELLS_PROXY_SECRET` from `~/.cells/secrets.json`) as `ANTHROPIC_AUTH_TOKEN`.
 2. Drops `~/.bashrc.d/codex_proxy` with the same secret as `OPENAI_CODEX_API_KEY`,
-   read by the `mother-codex` extension at pi startup.
+   read by the `codex-proxy` extension at pi startup.
 3. Drops `~/.bashrc.d/site_proxy` with the same secret as `MOTHER_SECRET`,
    read by the cell's site server (`~/agent/site/server.ts`). The site
    server gates the `/agent` WebSocket upgrade on
    `Authorization: Bearer <MOTHER_SECRET>`; only the per-cell Cloudflare
    Worker (which knows the secret) can establish the bridge.
 4. Patches the hardcoded `api.anthropic.com` URL in `pi-ai`'s model registry
-   to `mother.cells.md`. Pi does NOT respect `ANTHROPIC_BASE_URL` — the URL
+   to `proxy.cells.md`. Pi does NOT respect `ANTHROPIC_BASE_URL` — the URL
    is baked per-model in `models.generated.js`. The patch is idempotent.
 5. Neutralizes JWT-based `extractAccountId` in `pi-ai`'s codex provider —
    cells ship the proxy secret as bearer (not a JWT), so the original

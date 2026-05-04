@@ -1,5 +1,5 @@
 /**
- * mother-codex — route codex requests through the subscriptions proxy
+ * codex-proxy — route codex requests through the subscriptions proxy
  * at proxy.cells.md.
  *
  * Both Anthropic and Codex egress through Pete's laptop via cloudflared
@@ -17,9 +17,6 @@
  * The cell-side openai-codex-responses.js is sed-patched at birth to
  * neutralize JWT-based extractAccountId (our bearer is the proxy secret,
  * not a JWT). The proxy adds the real chatgpt-account-id server-side.
- *
- * Extension named "mother-codex" for legacy reasons; rename when we
- * split mother-the-cell out from the proxy concept entirely.
  */
 
 export default function (pi: any) {

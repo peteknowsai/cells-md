@@ -25,7 +25,7 @@ anything inside it.
   - install Bun on the Sprite
   - tar+push `proto/mother/dna/` to `/root/cell`, `sed` substitute `__NAME__`
   - run `bun install` on the Sprite
-  - inject shared keys (`CELLS_PROXY_SECRET`, `EXA_API_KEY`, `SPRITES_TOKEN`) from `~/.cells/secrets.json` and patch pi-ai's model registry to route through `mother.cells.md`
+  - inject shared keys (`CELLS_PROXY_SECRET`, `EXA_API_KEY`, `SPRITES_TOKEN`) from `~/.cells/secrets.json` and patch pi-ai's model registry to route through `proxy.cells.md`
   - register the `site` sprite service (it serves `<cell>.cells.md` and
     spawns `pi --mode rpc` as a child; the per-cell CF Worker holds a
     persistent WebSocket to it as the prompt/event bridge)

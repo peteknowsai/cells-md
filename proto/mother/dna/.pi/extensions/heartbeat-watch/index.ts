@@ -7,7 +7,7 @@
  * its cached cron table. Without this, pulse would have to poll every cell
  * over sprite_exec — wasteful and warms otherwise-hibernating sprites.
  *
- * Best-effort. On HTTP failure (mother proxy down, transient network), log
+ * Best-effort. On HTTP failure (subscriptions proxy down, transient network), log
  * and move on — pulse's bootstrap walk catches stragglers next time it
  * boots, so a missed event isn't catastrophic.
  *

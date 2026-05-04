@@ -8,7 +8,7 @@ do when something looks wrong.
 
 ## TL;DR
 
-- The **mother proxy** (`cli/proxy.ts`) is the single entity in the
+- The **subscriptions proxy** (`cli/proxy.ts`) is the single entity in the
   fleet that ever calls Anthropic's `/v1/oauth/token`.
 - It runs a 5-minute timer that proactively refreshes when the access
   token has < 60 minutes remaining.
@@ -124,7 +124,7 @@ new refresh. Set to null in a `finally` after the refresh completes.
 ### Liveness check
 
 ```
-GET https://mother.cells.md/_proxy/health
+GET https://proxy.cells.md/_proxy/health
 ```
 
 Returns:

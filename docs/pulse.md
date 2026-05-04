@@ -14,7 +14,7 @@
 | Codex routing + anatomy composer | `proto/pulse/.pi/extensions/use-codex/index.ts` |
 | Launcher (loads secrets, isolates pi auth) | `proto/pulse/bin/pulse-run` |
 | Inbox push extension (ships in cell DNA) | `proto/mother/dna/.pi/extensions/heartbeat-watch/index.ts` |
-| Inbox endpoint (mother proxy host route) | `cli/proxy.ts` (`pulse.cells.md/heartbeat-changed`) |
+| Inbox endpoint (subscriptions proxy host route) | `cli/proxy.ts` (`pulse.cells.md/heartbeat-changed`) |
 
 ## Runtime state (on Pete's Mac)
 
@@ -66,7 +66,7 @@ above except parse-prose-into-cron and write-daily-log is deterministic.
 Cells notify pulse on HEARTBEAT.md edits via the `heartbeat-watch`
 extension shipped in their DNA. The extension `fs.watch`es the file with
 a 2s debounce and POSTs the new content to `pulse.cells.md/heartbeat-changed`,
-which the mother proxy authenticates (`MOTHER_SECRET` bearer) and writes
+which the subscriptions proxy authenticates (`MOTHER_SECRET` bearer) and writes
 to `~/.cells/pulse-inbox/<cell>-<ts>.md`. Pulse drains the inbox each
 pulse. No `sprite exec` reads — hibernating cells stay hibernating.
 
@@ -91,6 +91,6 @@ the wake message. Same prose → same id (stable hash) so re-parses don't
 churn `lastFire` and miss-fire.
 
 Pulse runs on `gpt-5.5` medium via Pete's ChatGPT subscription, routed
-through mother proxy at `mother.cells.md/codex` — same path cells use for
+through subscriptions proxy at `proxy.cells.md/codex` — same path cells use for
 codex requests. Cheap because the LLM only fires on inbox events (rare)
 and the daily-log step (once per UTC day).

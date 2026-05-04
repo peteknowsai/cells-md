@@ -1,6 +1,6 @@
-// Mother proxy for the cells fleet — single Bun.serve that handles:
+// Subscriptions proxy for the cells fleet — single Bun.serve that handles:
 //
-//   mother.cells.md
+//   proxy.cells.md  (and mother.cells.md as a legacy alias)
 //     /                   → fleet dashboard (HTML)
 //     /v1/*               → Anthropic API proxy (Bearer auth required)
 //     /codex/*            → OpenAI Codex (ChatGPT sub) proxy (Bearer auth required)
@@ -546,7 +546,7 @@ async function handleApiProxy(req: Request): Promise<Response> {
 
 // ───────────────────── proxy (codex path) ─────────────────────
 //
-// Cells hit https://mother.cells.md/codex/<rest>; we strip the /codex prefix
+// Cells hit https://proxy.cells.md/codex/<rest>; we strip the /codex prefix
 // and forward to chatgpt.com/backend-api/<rest>. Cell-side ships the
 // CELLS_PROXY_SECRET as Bearer; we replace it with the real codex JWT and
 // inject chatgpt-account-id + originator (the cell's pi-ai is patched to
@@ -572,7 +572,7 @@ async function handleCodexProxy(req: Request): Promise<Response> {
   }
 
   // Forward the full path verbatim. The cell's pi-ai posts to /codex/responses
-  // (with baseUrl=https://mother.cells.md/codex, the codex provider's URL
+  // (with baseUrl=https://proxy.cells.md/codex, the codex provider's URL
   // resolver appends /responses). Backend-api's matching endpoint is
   // /codex/responses, so the path lines up — no stripping required.
   const upstreamUrl = CODEX_UPSTREAM + url.pathname + url.search;
@@ -648,7 +648,7 @@ async function handlePulseProxy(req: Request): Promise<Response> {
        <p class="sub">timekeeper · reads HEARTBEAT.md, fires scheduled wake-ups</p>
        <p>This is the inbox endpoint pulse listens to. Cells POST schedule
        changes here; pulse drains them on its next tick. See
-       <a href="https://mother.cells.md/">mother</a> for the dashboard.</p>`,
+       <a href="https://proxy.cells.md/">the proxy</a> for the fleet dashboard.</p>`,
     );
   }
 
@@ -824,7 +824,7 @@ async function dashboardHtml(): Promise<Response> {
     </table>
     <h2>Recent activity</h2>
     <ul class="activity">${activity || "<li><em>no activity</em></li>"}</ul>
-    <p class="sub">mother.cells.md \u00b7 <span class="pill">proxy + dashboard</span></p>`,
+    <p class="sub">proxy.cells.md \u00b7 <span class="pill">subscriptions proxy + dashboard</span></p>`,
   );
 }
 
@@ -866,19 +866,20 @@ const server = Bun.serve({
 
     // slack.cells.md → handled by Cloudflare Worker (cells-front-slack).
     // <cell>.cells.md → handled by per-cell Cloudflare Worker.
-    // Neither reaches the mother proxy in v2.
+    // Neither reaches the subscriptions proxy in v2.
 
     return new Response("unknown host", { status: 404 });
   },
 });
 
-console.log(`mother listening on http://localhost:${server.port}`);
+console.log(`subscriptions proxy listening on http://localhost:${server.port}`);
 console.log(`  routes:`);
-console.log(`    mother.cells.md/             → dashboard`);
-console.log(`    mother.cells.md/v1/*         → Anthropic proxy (Bearer auth)`);
-console.log(`    mother.cells.md/codex/*      → OpenAI Codex proxy (Bearer auth)`);
-console.log(`    mother.cells.md/_proxy/health`);
+console.log(`    proxy.cells.md/             → dashboard`);
+console.log(`    proxy.cells.md/v1/*         → Anthropic proxy (Bearer auth)`);
+console.log(`    proxy.cells.md/codex/*      → OpenAI Codex proxy (Bearer auth)`);
+console.log(`    proxy.cells.md/_proxy/health`);
 console.log(`    pulse.cells.md/heartbeat-changed → pulse inbox (Bearer auth)`);
+console.log(`    (mother.cells.md served as a legacy alias for proxy.cells.md)`);
 console.log(`    (slack.cells.md and <cell>.cells.md handled by Cloudflare Workers)`);
 console.log(`  upstreams: ${UPSTREAM}, ${CODEX_UPSTREAM}`);
 console.log(`  auth file: ${AUTH_PATH}`);

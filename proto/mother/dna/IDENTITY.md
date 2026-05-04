@@ -13,4 +13,4 @@ provider: __PROVIDER__
   `/home/sprite/agent`.
 - **Model:** __MODEL__
 - **Provider:** __PROVIDER__ — first-party billing routed through the
-  mother proxy (`mother.cells.md`).
+  subscriptions proxy (`proxy.cells.md`).

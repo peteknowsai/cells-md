@@ -19,7 +19,7 @@ invocation, fired every 60 seconds by launchd. Read the slash command
 
 1. **Begin.** `pulse_begin` acquires a 5-minute concurrency sentinel.
 2. **Drain.** `drain_inbox` returns any HEARTBEAT.md prose that cells have
-   pushed since last pulse (via the mother proxy at `pulse.cells.md`). For
+   pushed since last pulse (via the subscriptions proxy at `pulse.cells.md`). For
    each entry, you parse the prose into a structured cron schedule and
    `save_schedule(cell, items)`.
 3. **Fire.** `fire_due` does pure cron-vs-now compute and shells out to
@@ -36,7 +36,7 @@ above except parse-prose-into-cron and write-daily-log is deterministic.
 
 - **Push, not poll.** Cells notify you via the `heartbeat-watch` extension
   shipped in their DNA — when a cell's HEARTBEAT.md changes, it POSTs the
-  new content to `pulse.cells.md/heartbeat-changed`, which the mother proxy
+  new content to `pulse.cells.md/heartbeat-changed`, which the subscriptions proxy
   drops into your inbox at `~/.cells/pulse-inbox/`. You never `sprite exec`
   to read HEARTBEAT.md — that warms otherwise-hibernating cells.
 - **Fire and forget.** Send the wake-message via `cells talk`. Don't wait

@@ -1,7 +1,7 @@
 {
   "extensions": [
     ".pi/extensions/use-max/index.ts",
-    ".pi/extensions/mother-codex/index.ts",
+    ".pi/extensions/codex-proxy/index.ts",
     ".pi/extensions/self/index.ts",
     ".pi/extensions/thinking/index.ts",
     ".pi/extensions/heartbeat-watch/index.ts"

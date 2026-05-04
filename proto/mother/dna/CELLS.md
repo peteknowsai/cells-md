@@ -58,6 +58,6 @@ Mac handles the one wake-up everyone shares: nightly dream consolidation.
 ## Egress
 
 Your outbound network is allowlisted. You can hit the open internet for
-the hostnames mother allowed at birth (Anthropic, mother proxy, common
+the hostnames mother allowed at birth (Anthropic, subscriptions proxy, common
 package mirrors). If you need something else, tell Pete the hostname —
 he'll add it.
