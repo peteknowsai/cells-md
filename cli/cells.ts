@@ -49,7 +49,7 @@ const RESERVED_NAMES = new Set([
   "tmux", "shell", "agent", "pi", "sprite", "localhost",
   // Names that collide with cells subcommands.
   "create", "birth", "talk", "list", "sleep", "wake",
-  "checkpoint", "destroy", "kill", "dream", "stream", "sync", "doctor",
+  "checkpoint", "destroy", "kill", "dream", "tui", "sync", "doctor",
   "schedule-pi-patches", "unschedule-pi-patches",
   "schedule-pulse", "unschedule-pulse",
   "refresh-extensions", "heartbeat", "pulse",
@@ -519,35 +519,34 @@ async function cmdTalk(name: string, args: string[]) {
   }
   await requireCell(name);
 
-  const attach = async () => {
-    const proc = Bun.spawn(["sprite", "console", "-s", name], {
-      stdin: "inherit",
-      stdout: "inherit",
-      stderr: "inherit",
-    });
-    await proc.exited;
-  };
-
   if (args.length === 0) {
-    // No args → attach to the live tmux+pi service running on the cell.
-    await attach();
+    // No args → interactive bridge chat. Same session as Slack; each
+    // prompt mirrors to the bound channel so Slack stays the journal.
+    await streamCellBridge(name, { interactive: true });
     return;
   }
   if (args[0]!.startsWith("-")) {
-    // v1 used -c/-r to drive a tmux pi session via send-keys. v2 cells
-    // have no tmux pi — pi runs as a child of the site service and the
-    // bridge is the only interface. The session is managed automatically
-    // (cell-<name>/main.jsonl, pinned via switch_session at startup).
     console.error(
-      `flag '${args[0]}' isn't supported on v2 cells. Use 'cells talk ${name}' to drop into the sprite shell, or 'cells talk ${name} "<msg>"' to send a prompt over the bridge. Multi-turn: 'cells stream ${name}'.`,
+      `flag '${args[0]}' isn't supported on cell talk. Use 'cells talk ${name}' for an interactive chat, 'cells talk ${name} "<msg>"' for one-shot, or 'cells tui ${name}' to drop into the sprite shell.`,
     );
     process.exit(1);
   }
-  // v2: drive the cell's pi via the WebSocket bridge — same session as
-  // Slack, mirror the prompt to the bound channel first so Slack stays
-  // the canonical scrollback. Reply streams here in the terminal.
+  // One-shot bridge prompt — reply streams here AND in Slack.
   const message = args.join(" ");
   await streamCellBridge(name, { interactive: false, initialMessage: message });
+}
+
+async function cmdTui(name: string) {
+  await requireCell(name);
+  // Drop into a sprite-side tmux session (for shell debugging, file
+  // poking, manually running pi --mode tui against a side session,
+  // etc). Not a pi conversation — that's `cells talk`.
+  const proc = Bun.spawn(["sprite", "console", "-s", name], {
+    stdin: "inherit",
+    stdout: "inherit",
+    stderr: "inherit",
+  });
+  await proc.exited;
 }
 
 async function cmdShell(name: string) {
@@ -1580,11 +1579,6 @@ async function cmdCheckpoint(name: string) {
  * canonical scrollback. The Slack edge filters bot_message subtypes,
  * so this doesn't loop back through the routing path.
  */
-async function cmdStream(name: string) {
-  await requireCell(name);
-  await streamCellBridge(name, { interactive: true });
-}
-
 type StreamOpts = {
   interactive: boolean;
   initialMessage?: string;
@@ -1608,7 +1602,16 @@ async function streamCellBridge(name: string, opts: StreamOpts): Promise<void> {
     headers: { authorization: `Bearer ${secret}` },
   } as any);
 
-  let reqCounter = 0;
+  // Resolve the cell's bound Slack channel + the Mac user's Slack uid.
+  // When both exist, prompts route through /inbox/append: the DO sees a
+  // synthetic Slack-shaped event, which (a) wakes the DO so it renders
+  // pi's reply into Slack, and (b) embeds the right channel in pi's
+  // prompt prefix so the bridge keeps Slack threading consistent. If
+  // either is missing, fall back to direct WS send (cell still answers
+  // in this terminal, just not in Slack).
+  const channel = await resolveBoundChannel(name);
+  const slackUserId = channel ? await resolveSlackUserId().catch(() => null) : null;
+  const useInboxPath = !!(channel && slackUserId);
   let inFlight = false;
   let agentEnded = false;
   let promptOpen = opts.interactive;
@@ -1619,14 +1622,28 @@ async function streamCellBridge(name: string, opts: StreamOpts): Promise<void> {
 
   const showPrompt = () => {
     if (!rl || !promptOpen) return;
-    rl.setPrompt(`${name}> `);
+    rl.setPrompt("> ");
     rl.prompt();
   };
 
-  const sendPrompt = (message: string) => {
+  const sendPrompt = async (message: string) => {
     inFlight = true;
     activeText = false;
-    ws.send(JSON.stringify({ type: "prompt", id: `req-${++reqCounter}`, message, streamingBehavior: "steer" }));
+    if (useInboxPath) {
+      // Mirror the human's voice into the bound channel (bot_message
+      // subtype, filtered by the Slack edge so it doesn't re-route),
+      // then poke the DO via /inbox/append so it drives pi and renders
+      // the reply into Slack. The local WS connection here is purely a
+      // viewer for the same event stream.
+      await mirrorPromptToSlack(name, message, secret).catch(() => {});
+      await fetch(`https://${name}.cells.md/inbox/append`, {
+        method: "POST",
+        headers: { authorization: `Bearer ${secret}`, "content-type": "application/json" },
+        body: JSON.stringify({ event: { channel, user: slackUserId, text: message } }),
+      }).catch((e) => console.error(`[mirror] inbox/append failed: ${String(e).slice(0, 200)}`));
+    } else {
+      ws.send(JSON.stringify({ type: "prompt", message, streamingBehavior: "steer" }));
+    }
   };
 
   const handleEvent = (event: any) => {
@@ -1680,11 +1697,8 @@ async function streamCellBridge(name: string, opts: StreamOpts): Promise<void> {
     ws.addEventListener("error", () => reject(new Error("ws connect failed")), { once: true });
   });
 
-  // If we have an initial message, mirror to Slack first so the bound
-  // channel sees the prompt + reply naturally. Best-effort.
   if (opts.initialMessage) {
-    await mirrorPromptToSlack(name, opts.initialMessage, secret).catch(() => {});
-    sendPrompt(opts.initialMessage);
+    await sendPrompt(opts.initialMessage);
   }
 
   if (rl) {
@@ -1698,13 +1712,13 @@ async function streamCellBridge(name: string, opts: StreamOpts): Promise<void> {
         return;
       }
       if (trimmed === "/abort") {
-        ws.send(JSON.stringify({ type: "abort", id: `req-${++reqCounter}` }));
+        ws.send(JSON.stringify({ type: "abort" }));
         return;
       }
-      await mirrorPromptToSlack(name, trimmed, secret).catch(() => {});
-      sendPrompt(trimmed);
+      await sendPrompt(trimmed);
     });
     rl.on("close", () => { promptOpen = false; try { ws.close(); } catch {} });
+    process.stdout.write(`\x1b[2m── talking to ${name}${useInboxPath ? " (mirroring to slack)" : ""} — /exit to quit\x1b[0m\n`);
     showPrompt();
   }
 
@@ -1719,6 +1733,23 @@ async function streamCellBridge(name: string, opts: StreamOpts): Promise<void> {
     await new Promise<void>((resolve) => {
       ws.addEventListener("close", () => resolve(), { once: true });
     });
+  }
+}
+
+// Look up the slack channel ID bound to this cell from the local
+// channels.json registry. Used by the bridge client to route CLI
+// prompts through /inbox/append (which sets pendingChannel on the DO
+// and ensures pi's reply renders into the same Slack thread).
+async function resolveBoundChannel(cellName: string): Promise<string | null> {
+  if (!existsSync(CHANNELS_PATH)) return null;
+  try {
+    const file = await loadChannels();
+    for (const [id, b] of Object.entries(file.bindings)) {
+      if (b.cell === cellName && b.kind === "slack") return id;
+    }
+    return null;
+  } catch {
+    return null;
   }
 }
 
@@ -3020,7 +3051,7 @@ switch (sub) {
   case "kill":
   case "destroy":    await cmdDestroy(rest); break;
   case "dream":              await cmdDream(rest[0] ?? ""); break;
-  case "stream":             await cmdStream(needName(rest, "stream")); break;
+  case "tui":                await cmdTui(needName(rest, "tui")); break;
   case "sync":               await cmdSync(rest[0] || undefined); break;
   case "schedule-pi-patches":   await cmdSchedulePiPatches(); break;
   case "unschedule-pi-patches": await cmdUnschedulePiPatches(); break;
@@ -3044,15 +3075,15 @@ switch (sub) {
     console.log("                                     --channels=slack         (auto-creates #cells-<name>, binds, deploys worker)");
     console.log("                                     --slack-channel=C0123456789  (legacy: bind to existing channel by ID)");
     console.log("                              no flags = interactive TUI; any flag = non-interactive (defaults fill the rest)");
-    console.log("  cells talk <name> [msg]     no msg → drop into the cell's sprite shell.");
-    console.log("                              with msg → one-shot prompt over the bridge; reply streams here AND in Slack.");
+    console.log("  cells talk <name> [msg]     interactive bridge chat (no msg) or one-shot (with msg).");
+    console.log("                              Reply streams in this terminal AND mirrors to Slack — same session as Slack.");
     console.log("                              'mother' is special: accepts any pi flag (-c, -r, --session=<id>, -p ...).");
+    console.log("  cells tui <name>            drop into a sprite-side tmux shell (debug, file poking, etc).");
     console.log("  cells list                  list known cells");
     console.log("  cells sleep <name>          force-hibernate a Sprite");
     console.log("  cells wake <name>           force-wake a Sprite");
     console.log("  cells checkpoint <name>     snapshot a cell's filesystem");
     console.log("  cells dream <name|mother|--all>  run dream consolidation on a cell, the mother, or all");
-    console.log("  cells stream <name>         interactive multi-turn chat with a cell over the bridge (Slack mirrors)");
     console.log("  cells sync [name]           pull cell markdown into ~/Obsidian/cells/ (default: all + mother)");
     console.log("  cells doctor                inspect mother OAuth state + proxy health (run when cells act 401-y)");
     console.log("  cells shell <name>          drop into a bash shell on a cell (separate tmux from the agent; Ctrl+D exits)");
