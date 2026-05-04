@@ -200,9 +200,14 @@ async function handleSend(req: Request, env: Env): Promise<Response> {
   const iconUrl =
     payload.icon_url ?? `https://www.gravatar.com/avatar/${await md5Hex(`cell:${cell}`)}?d=identicon&s=96`;
 
+  // Use markdown_text — Slack server-side renders standard markdown
+  // (headings, **bold**, *italic*, [text](url), bullets, blockquotes,
+  // inline code), so cells can emit normal markdown without us
+  // running a client-side converter. Note: markdown_text and text
+  // are mutually exclusive per Slack's API.
   const body = {
     channel,
-    text,
+    markdown_text: text,
     username,
     icon_url: iconUrl,
     ...(payload.thread_ts ? { thread_ts: payload.thread_ts } : {}),
@@ -255,7 +260,7 @@ async function handleEdit(req: Request, env: Env): Promise<Response> {
       authorization: `Bearer ${env.SLACK_BOT_TOKEN}`,
       "content-type": "application/json; charset=utf-8",
     },
-    body: JSON.stringify({ channel, ts, text }),
+    body: JSON.stringify({ channel, ts, markdown_text: text }),
   });
   const respText = await upstream.text();
   let respJson: any = null;

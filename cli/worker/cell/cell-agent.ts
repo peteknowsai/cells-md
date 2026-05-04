@@ -354,24 +354,21 @@ export class CellAgent {
 function renderTurn(t: TurnState, final: boolean): string {
   const parts: string[] = [];
   if (t.thinking.trim()) {
-    parts.push("🧠 _thinking_");
+    parts.push("🧠 *thinking*");
     parts.push("> " + t.thinking.split("\n").join("\n> "));
   } else if (t.thinkingActive) {
-    parts.push("🧠 _thinking…_");
+    parts.push("🧠 *thinking…*");
   } else if (t.thinkingObserved) {
-    // Reasoning happened but the provider didn't expose any text
-    // (e.g. OpenAI-codex encrypts the chain-of-thought).
-    parts.push("🧠 _reasoned silently_");
+    parts.push("🧠 *reasoned silently*");
   }
   if (t.tools.length > 0) {
-    // Tools as a single tight block, one line per call.
     parts.push(t.tools.map(formatToolLine).join("\n"));
   }
   if (t.text.trim()) {
     parts.push(t.text);
   }
   if (parts.length === 0) {
-    return final ? "_(no response)_" : "…";
+    return final ? "*(no response)*" : "…";
   }
   return parts.join("\n\n");
 }
@@ -384,7 +381,7 @@ function formatToolLine(tc: ToolCall): string {
   const args = (tc.arguments && typeof tc.arguments === "object") ? tc.arguments as Record<string, any> : {};
   const argSummary = summarizeArgs(tc.name, args);
 
-  let line = `🔧 *${tc.name}*`;
+  let line = `🔧 **${tc.name}**`;
   if (argSummary) line += ` \`${argSummary}\``;
 
   if (tc.result === undefined) return line; // still in flight
