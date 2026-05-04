@@ -53,13 +53,12 @@ injected from `~/.cells/secrets.json` in step 6b. If that key isn't in the
 secrets file, the API-based self tools simply return a clear error;
 `talk_to_self` works regardless.
 
-Use `sprite_exec` with this command:
+Use `sprite_exec` for the curl installs and tmux config (these don't have
+sharp edges — they're idempotent and fast):
 
 ```bash
 curl -fsSL https://bun.sh/install | bash
 curl -fsSL https://sprites.dev/install.sh | sh
-sudo apt-get update -y
-sudo apt-get install -y tmux micro fzf ripgrep bat
 mkdir -p /home/sprite/.local/bin
 ln -sf /usr/bin/batcat /home/sprite/.local/bin/bat
 cat > /home/sprite/.tmux.conf << 'EOF'
@@ -144,8 +143,28 @@ setw -g monitor-bell on
 set -g bell-action other
 setw -g window-status-bell-style 'fg=#C8C093,dotted-underscore'
 EOF
-ls -la /home/sprite/.bun/bin/bun && tmux -V
+ls -la /home/sprite/.bun/bin/bun
 ```
+
+Then install the apt baseline using the helper script (laptop-side, **not**
+`sprite_exec`). It handles dpkg-lock contention deterministically — if the
+lock is held, it waits 30s, then force-unlocks once and retries. Without
+this, a transient network blip mid-`apt-get` can leave the lock pinned for
+~15 minutes.
+
+```bash
+bash scripts/apt-install-on-cell.sh <NAME> tmux micro fzf ripgrep bat
+```
+
+Before moving on, verify every required binary is on PATH on the sprite:
+`sprite_exec`-run `command -v bun tmux micro fzf rg batcat` and confirm
+all six print a path. If any are missing, re-run only the substep that
+provided that binary; do not proceed to step 4.
+
+**Recovery posture for the whole birth:** if any single sub-operation fails
+twice, *stop and surface the error to Pete* with the specific command and
+stderr. Do not enter ad-hoc retry loops. Birth is rare enough that a quick
+hard-fail is always better than a slow silent one.
 
 ## 4. Push the agent DNA
 
