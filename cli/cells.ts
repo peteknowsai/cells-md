@@ -1145,7 +1145,36 @@ async function cmdDestroyOne(name: string): Promise<boolean> {
   await archiveSlackChannelsForCell(name);
   await evictChannelBindingsForCell(name);
   await deleteCellWorker(name);
+  await removeVaultEntry(name);
   return true;
+}
+
+// Remove the cell's Obsidian vault dir (created by cmdSync at birth) and
+// refresh the top-level README roster so the destroyed cell stops showing
+// in the index. Best-effort — vault sync isn't load-bearing.
+async function removeVaultEntry(name: string): Promise<void> {
+  const dir = join(VAULT_DIR, name);
+  if (existsSync(dir)) {
+    try {
+      await rm(dir, { recursive: true, force: true });
+      console.log(`✓ removed vault entry ${name}`);
+    } catch (e) {
+      console.warn(`! vault remove failed for ${name}: ${e}`);
+    }
+  }
+  // Best-effort roster refresh. If the vault dir is missing entirely
+  // (vault never set up), skip silently.
+  if (!existsSync(VAULT_DIR)) return;
+  try {
+    const reg = await loadRegistry();
+    const rows = await Promise.all(
+      reg.cells.map(async (c) => {
+        const info = await getSpriteInfo(c.name).catch(() => null);
+        return { name: c.name, status: info?.status ?? "?", lastRunningAt: info?.last_running_at ?? null };
+      }),
+    );
+    await writeRoster(rows);
+  } catch { /* best-effort */ }
 }
 
 async function archiveSlackChannelsForCell(name: string): Promise<void> {
@@ -1228,6 +1257,21 @@ async function evictPulseStateForCell(name: string): Promise<void> {
   const cachePath = join(homedir(), ".cells", "pulse-cache", `${name}.json`);
   if (existsSync(cachePath)) {
     try { await unlink(cachePath); } catch { /* best-effort */ }
+  }
+  // Inbox files dropped by heartbeat-watch. Match `<name>-<ts>.md` in both
+  // the live inbox and the processed/ archive so destroyed cells don't
+  // leave orphan posts behind.
+  for (const sub of ["", "processed"]) {
+    const dir = join(homedir(), ".cells", "pulse-inbox", sub);
+    if (!existsSync(dir)) continue;
+    try {
+      const files = await readdir(dir);
+      for (const f of files) {
+        if (f.startsWith(`${name}-`) && f.endsWith(".md")) {
+          try { await unlink(join(dir, f)); } catch { /* best-effort */ }
+        }
+      }
+    } catch { /* best-effort */ }
   }
   const statePath = join(homedir(), ".cells", "pulse.json");
   if (!existsSync(statePath)) return;
