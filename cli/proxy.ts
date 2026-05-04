@@ -80,6 +80,17 @@ function readSecret(): string {
 }
 const SHARED_SECRET = readSecret();
 
+function readRefreshSecret(): string | null {
+  if (process.env.MOTHER_REFRESH_SECRET) return process.env.MOTHER_REFRESH_SECRET;
+  if (existsSync(SECRETS_PATH)) {
+    const s = JSON.parse(readFileSync(SECRETS_PATH, "utf-8"));
+    if (s.MOTHER_REFRESH_SECRET) return s.MOTHER_REFRESH_SECRET;
+  }
+  return null;
+}
+const REFRESH_SECRET = readRefreshSecret();
+const PROXY_WORKER_URL = process.env.PROXY_WORKER_URL ?? "https://proxy.cells.md";
+
 type AnthropicAuth = { type: "oauth"; refresh: string; access: string; expires: number };
 type CodexAuth = {
   type: "oauth";
@@ -146,6 +157,17 @@ const REFRESH_HEADROOM_MS = 60 * 60 * 1000;
 const REFRESH_TICK_MS = 5 * 60 * 1000;
 const RATE_LIMIT_BACKOFF_MS = 10 * 60 * 1000;
 const AUTH_NEEDS_LOGIN_FLAG = join(homedir(), ".cells", "auth-needs-login");
+
+// Pass-4 cutover flag. When this file exists, mother's HTTP serving for
+// /v1/* and /codex/* responds with 410 Gone — forcing cells onto the new
+// proxy.cells.md Worker path. Flip on:  touch ~/.cells/mother-http-disabled
+// Flip off: rm ~/.cells/mother-http-disabled
+// Checked per-request so toggling needs no proxy restart. Refresh + push
+// loops keep running either way so the DO stays current as a fallback.
+const MOTHER_HTTP_DISABLED_FLAG = join(homedir(), ".cells", "mother-http-disabled");
+function motherHttpDisabled(): boolean {
+  return existsSync(MOTHER_HTTP_DISABLED_FLAG);
+}
 
 let blockedUntilMs = 0;
 let inFlight: Promise<void> | null = null;
@@ -426,6 +448,97 @@ setInterval(() => {
 }, CODEX_REFRESH_TICK_MS);
 refreshCodexIfNeeded().catch((e) => console.error(`[codex-refresh] startup error: ${e}`));
 
+// ───────────────────── proxy.cells.md push loop ─────────────────────
+//
+// Pass 4: the OAuth-bearing forward proxy is moving to a CF Worker at
+// proxy.cells.md (cli/worker/proxy/). This loop pushes our locally-
+// refreshed tokens up to the Worker's TokenStore DO so cells can hit
+// the Worker directly instead of round-tripping through the laptop.
+//
+// Strategy: after each refresh tick (and at startup), compare our local
+// access token to what the DO has and PUT if different. Empty DO →
+// always PUT. Both proxies stay live in parallel; the Worker is dormant
+// until a cell is re-patched to point at proxy.cells.md.
+
+const PUSH_TICK_MS = 5 * 60 * 1000;
+let lastPushedAnthropicAccess: string | null = null;
+let lastPushedCodexAccess: string | null = null;
+
+async function pushTokensToWorker(): Promise<void> {
+  if (!REFRESH_SECRET) return; // Worker push disabled — secret not in ~/.cells/secrets.json.
+
+  // Anthropic.
+  try {
+    const { access, expiresMs } = await readAccessToken();
+    if (access !== lastPushedAnthropicAccess) {
+      const auth = JSON.parse(await readFile(AUTH_PATH, "utf-8")) as AuthJson;
+      const refreshToken = auth.anthropic?.refresh;
+      const res = await fetch(`${PROXY_WORKER_URL}/tokens`, {
+        method: "PUT",
+        headers: {
+          "authorization": `Bearer ${REFRESH_SECRET}`,
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({
+          provider: "anthropic",
+          accessToken: access,
+          expiresAt: expiresMs,
+          refreshToken,
+        }),
+      });
+      if (!res.ok) {
+        console.error(`[proxy-push] anthropic PUT ${res.status}: ${await res.text().catch(() => "")}`.slice(0, 200));
+      } else {
+        lastPushedAnthropicAccess = access;
+        console.log(`[proxy-push] anthropic token synced (expires in ${Math.round((expiresMs - Date.now()) / 60000)}m)`);
+      }
+    }
+  } catch (e) {
+    console.error(`[proxy-push] anthropic error: ${e}`);
+  }
+
+  // Codex.
+  try {
+    const c = await readCodexAuth();
+    if (c.access !== lastPushedCodexAccess) {
+      const res = await fetch(`${PROXY_WORKER_URL}/tokens`, {
+        method: "PUT",
+        headers: {
+          "authorization": `Bearer ${REFRESH_SECRET}`,
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({
+          provider: "codex",
+          accessToken: c.access,
+          expiresAt: c.expiresMs,
+          refreshToken: c.refresh,
+          accountId: c.accountId,
+        }),
+      });
+      if (!res.ok) {
+        console.error(`[proxy-push] codex PUT ${res.status}: ${await res.text().catch(() => "")}`.slice(0, 200));
+      } else {
+        lastPushedCodexAccess = c.access;
+        console.log(`[proxy-push] codex token synced (expires in ${Math.round((c.expiresMs - Date.now()) / 60000)}m)`);
+      }
+    }
+  } catch (e) {
+    // Codex may legitimately not be configured on some installs; log and move on.
+    if (!String(e).includes("no openai-codex")) {
+      console.error(`[proxy-push] codex error: ${e}`);
+    }
+  }
+}
+
+if (REFRESH_SECRET) {
+  setInterval(() => {
+    pushTokensToWorker().catch((e) => console.error(`[proxy-push] tick error: ${e}`));
+  }, PUSH_TICK_MS);
+  pushTokensToWorker().catch((e) => console.error(`[proxy-push] startup error: ${e}`));
+} else {
+  console.log("[proxy-push] disabled — MOTHER_REFRESH_SECRET not set");
+}
+
 // ───────────────────── routing ─────────────────────
 
 function hostOf(req: Request): string {
@@ -472,10 +585,17 @@ async function handleApiProxy(req: Request): Promise<Response> {
       } catch (e) {
         codex = { configured: false, error: String(e) };
       }
-      return Response.json({ ok: true, anthropic, codex });
+      return Response.json({ ok: true, anthropic, codex, mother_http_disabled: motherHttpDisabled() });
     } catch (e) {
       return Response.json({ ok: false, error: String(e) }, { status: 500 });
     }
+  }
+
+  if (motherHttpDisabled()) {
+    return new Response("mother HTTP disabled — use proxy.cells.md", {
+      status: 410,
+      headers: { "x-cells-mother-http": "disabled" },
+    });
   }
 
   const auth = checkClientAuth(req);
@@ -555,6 +675,10 @@ async function handleCodexProxy(req: Request): Promise<Response> {
 
   const auth = checkClientAuth(req);
   if (!auth.ok) return new Response(`unauthorized: ${auth.reason}`, { status: 401 });
+
+  // Codex deliberately ignores motherHttpDisabled — chatgpt.com blocks
+  // CF-Worker → CF-zone hops with a Ray-ID anti-loop challenge, so Codex
+  // stays on mother indefinitely even after the Anthropic cutover.
 
   let access: string;
   let accountId: string;

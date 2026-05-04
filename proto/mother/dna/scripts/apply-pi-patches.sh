@@ -4,7 +4,7 @@
 # These keep four behaviors working that stock pi packages don't give us:
 #
 #   1. Anthropic baseUrl → mother.cells.md (so cells use Pete's Claude Max sub
-#      via the mother proxy).
+#      via the mother proxy on Pete's laptop, home-IP egress).
 #   2. Codex extractAccountId neutralized (cells ship the proxy secret as
 #      bearer; mother adds the real chatgpt-account-id server-side).
 #   3. Anthropic mapThinkingLevelToEffort returns undefined for "adaptive"
@@ -40,11 +40,15 @@ patched_codex=0
 patched_anthropic_adaptive=0
 patched_levels=0
 
-# 1. Anthropic baseUrl swap.
+# 1. Anthropic baseUrl swap. Handles both fresh installs (api.anthropic.com)
+# and cells transiently routed via proxy.cells.md (the pass-4 cutover that
+# was rolled back when chatgpt.com's CF anti-loop made egress-IP detection
+# a real concern for both vendors).
 for F in $(find "${SEARCH_ROOTS[@]}" -name models.generated.js 2>/dev/null); do
-  if grep -q 'api.anthropic.com' "$F"; then
+  if grep -qE 'api\.anthropic\.com|proxy\.cells\.md' "$F"; then
     [ -f "$F.bak" ] || cp "$F" "$F.bak"
-    "${SED_INPLACE[@]}" 's|https://api.anthropic.com|https://mother.cells.md|g' "$F"
+    "${SED_INPLACE[@]}" -e 's|https://api.anthropic.com|https://mother.cells.md|g' \
+                        -e 's|https://proxy.cells.md|https://mother.cells.md|g' "$F"
     patched_url=$((patched_url+1))
   fi
 done

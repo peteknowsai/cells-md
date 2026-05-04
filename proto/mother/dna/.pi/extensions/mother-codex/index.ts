@@ -1,11 +1,12 @@
 /**
  * mother-codex — route codex requests through mother.cells.md.
  *
- * Mirrors how anthropic gets routed through mother (env var + sed-patched
- * model URL). For codex, pi-ai has no env-var fallback for the openai-codex
- * provider, so we use the registerProvider API instead: override both the
- * baseUrl and the apiKey so getApiKeyAndHeaders returns our shared secret
- * and outgoing requests hit mother.
+ * Codex stays on mother (Pete's home IP via cloudflared) even after the
+ * pass-4 Anthropic cutover to proxy.cells.md. Reason: chatgpt.com is also
+ * fronted by Cloudflare and aggressively blocks CF-Worker → CF-zone hops
+ * with an anti-loop Ray-ID challenge. Anthropic doesn't share that
+ * constraint, so /v1/* moved to the Worker but /codex/* is kept on mother
+ * indefinitely. See docs/scratchpad.md for revisit notes.
  *
  * Cells have no ~/.pi/agent/auth.json entry for openai-codex, so the
  * authStorage path returns nothing and the registerProvider apiKey wins.

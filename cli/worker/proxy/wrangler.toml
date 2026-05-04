@@ -1,0 +1,20 @@
+name = "cells-front-proxy"
+main = "index.ts"
+compatibility_date = "2026-01-01"
+compatibility_flags = ["nodejs_compat"]
+
+# account_id resolved from CLOUDFLARE_ACCOUNT_ID env at deploy time.
+
+# Workers Custom Domain. wrangler creates the DNS record + binds the
+# Worker to the hostname on deploy.
+[[routes]]
+pattern = "proxy.cells.md"
+custom_domain = true
+
+[[durable_objects.bindings]]
+name = "TOKENS"
+class_name = "TokenStore"
+
+[[migrations]]
+tag = "v1"
+new_classes = ["TokenStore"]
