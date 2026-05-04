@@ -433,17 +433,6 @@ function hostOf(req: Request): string {
   return (req.headers.get("host") ?? url.host).toLowerCase();
 }
 
-function cellNameFromHost(host: string): string | null {
-  // mother.cells.md → null (mother host, handled separately)
-  // pulse.cells.md  → null (pulse host, handled separately)
-  // pete.cells.md   → "pete"
-  // localhost:8787  → null (dev/health checks)
-  const m = host.match(/^([a-z0-9-]+)\.cells\.md$/);
-  if (!m) return null;
-  if (m[1] === "mother" || m[1] === "pulse") return null;
-  return m[1];
-}
-
 // ───────────────────── proxy (api path) ─────────────────────
 
 function checkClientAuth(req: Request): { ok: true; cell: string } | { ok: false; reason: string } {
@@ -837,103 +826,6 @@ async function dashboardHtml(): Promise<Response> {
   );
 }
 
-// \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500 cell forwarding \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
-
-// Cell name \u2192 sprites.app hostname. Populated lazily on first request via
-// `sprite info -s <name>`. Cleared on registry mutation (birth/destroy
-// rewrite cells.json \u2014 we just take the easy path and never invalidate;
-// a stale entry only matters if a cell is recreated under the same name).
-const spriteHostCache = new Map<string, string>();
-
-async function spriteHostFor(name: string): Promise<string | null> {
-  const cached = spriteHostCache.get(name);
-  if (cached) return cached;
-  try {
-    const proc = Bun.spawn(["sprite", "info", "-s", name], {
-      stdout: "pipe",
-      stderr: "pipe",
-    });
-    const out = await new Response(proc.stdout).text();
-    await proc.exited;
-    // `URL: https://pete-bas32.sprites.app` \u2014 extract the host part.
-    const m = out.match(/URL:\s*https?:\/\/([^\s/]+)/i);
-    if (!m) return null;
-    spriteHostCache.set(name, m[1]);
-    return m[1];
-  } catch {
-    return null;
-  }
-}
-
-function cellNotFoundHtml(name: string): Response {
-  return htmlPage(
-    name,
-    `<h1>${name}</h1>
-    <p class="sub">No cell by that name in the registry.</p>
-    <p><a href="https://mother.cells.md/">\u2190 fleet</a></p>`,
-  );
-}
-
-function cellSleepingHtml(name: string, why: string): Response {
-  return htmlPage(
-    name,
-    `<h1>${name} <span class="pill">sleeping</span></h1>
-    <p class="sub">Couldn't reach ${name}'s site server: ${why}.
-       It may be hibernated. Try <code>cells wake ${name}</code>.</p>
-    <p><a href="https://mother.cells.md/">\u2190 fleet</a></p>`,
-  );
-}
-
-// Forward <cell>.cells.md/<path> to https://<sprite-host>/<path>. Cell's
-// site server (~/agent/site/server.ts) gates on x-mother-secret which we
-// attach here \u2014 so even though the sprite URL is set to --auth=public,
-// only requests carrying our shared secret reach the cell.
-async function forwardToCell(req: Request, name: string): Promise<Response> {
-  const inRegistry = readCells().some((c) => c.name === name);
-  if (!inRegistry) return cellNotFoundHtml(name);
-
-  const spriteHost = await spriteHostFor(name);
-  if (!spriteHost) return cellSleepingHtml(name, "sprite info lookup failed");
-
-  const url = new URL(req.url);
-  const upstream = `https://${spriteHost}${url.pathname}${url.search}`;
-
-  const headers = new Headers(req.headers);
-  // Strip CF / forwarding headers \u2014 chatgpt.com taught us forwarding these
-  // to another CF-fronted host triggers anti-loop 403s. sprites.app is on
-  // Fly so the immediate risk differs, but symmetric hygiene is safer.
-  for (const h of [
-    "host",
-    "cdn-loop",
-    "x-real-ip",
-  ]) headers.delete(h);
-  for (const k of [...headers.keys()]) {
-    if (k.startsWith("cf-") || k.startsWith("x-forwarded-")) headers.delete(k);
-  }
-  headers.set("host", spriteHost);
-  headers.set("x-mother-secret", SHARED_SECRET);
-
-  let resp: Response;
-  try {
-    resp = await fetch(upstream, {
-      method: req.method,
-      headers,
-      body: req.body,
-      redirect: "manual",
-    });
-  } catch (e) {
-    return cellSleepingHtml(name, `${(e as Error).message}`);
-  }
-
-  // Pass response through (streaming). Strip hop-by-hop headers fetch
-  // already handles, but propagate everything else verbatim.
-  return new Response(resp.body, {
-    status: resp.status,
-    statusText: resp.statusText,
-    headers: resp.headers,
-  });
-}
-
 // ───────────────────── server ─────────────────────
 
 // Prime the bearer cache so mother's local pi can authenticate from the very
@@ -965,14 +857,9 @@ const server = Bun.serve({
       return handlePulseProxy(req);
     }
 
-    // slack.cells.md → handled by Cloudflare Worker (cells-front-slack);
-    // never reaches the mother proxy.
-
-    // <cell>.cells.md → forward to the cell's own site server
-    const cell = cellNameFromHost(host);
-    if (cell) {
-      return forwardToCell(req, cell);
-    }
+    // slack.cells.md → handled by Cloudflare Worker (cells-front-slack).
+    // <cell>.cells.md → handled by per-cell Cloudflare Worker.
+    // Neither reaches the mother proxy in v2.
 
     return new Response("unknown host", { status: 404 });
   },
@@ -985,7 +872,6 @@ console.log(`    mother.cells.md/v1/*         → Anthropic proxy (Bearer auth)`
 console.log(`    mother.cells.md/codex/*      → OpenAI Codex proxy (Bearer auth)`);
 console.log(`    mother.cells.md/_proxy/health`);
 console.log(`    pulse.cells.md/heartbeat-changed → pulse inbox (Bearer auth)`);
-console.log(`    <cell>.cells.md/             → cell page`);
-console.log(`    (slack.cells.md handled by Cloudflare Worker)`);
+console.log(`    (slack.cells.md and <cell>.cells.md handled by Cloudflare Workers)`);
 console.log(`  upstreams: ${UPSTREAM}, ${CODEX_UPSTREAM}`);
 console.log(`  auth file: ${AUTH_PATH}`);

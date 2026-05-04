@@ -382,8 +382,9 @@ does five things:
    read by the `mother-codex` extension at pi startup.
 3. Drops `~/.bashrc.d/site_proxy` with the same secret as `MOTHER_SECRET`,
    read by the cell's site server (`~/agent/site/server.ts`). The site
-   server gates incoming requests on `x-mother-secret` matching this; only
-   mother (which adds the header on forward) can reach the cell.
+   server gates the `/agent` WebSocket upgrade on
+   `Authorization: Bearer <MOTHER_SECRET>`; only the per-cell Cloudflare
+   Worker (which knows the secret) can establish the bridge.
 4. Patches the hardcoded `api.anthropic.com` URL in `pi-ai`'s model registry
    to `mother.cells.md`. Pi does NOT respect `ANTHROPIC_BASE_URL` — the URL
    is baked per-model in `models.generated.js`. The patch is idempotent.
@@ -425,12 +426,11 @@ Two pieces:
 
 1. **Flip the sprite URL to `--auth=public`.** By default the sprite URL
    `<name>-XXX.sprites.app` redirects unauthenticated traffic to a
-   sprites.dev login. Mother can't carry the org-token cookie through a
-   reverse proxy, so we open the URL. Security still holds because the
-   site server requires `x-mother-secret` (set in step 6c) on HTTP
-   routes and `Authorization: Bearer <MOTHER_SECRET>` on the `/agent`
-   WS upgrade — mother (and the per-cell Worker) is the only thing that
-   knows the secret.
+   sprites.dev login. The per-cell Cloudflare Worker can't carry the
+   org-token cookie, so we open the URL. Security still holds because the
+   site server requires `Authorization: Bearer <MOTHER_SECRET>` on the
+   `/agent` WS upgrade — the per-cell Worker is the only thing that knows
+   the secret. Static HTTP routes (homepage, public/) are public.
 
    ```bash
    sprite url update --auth public -s <NAME>

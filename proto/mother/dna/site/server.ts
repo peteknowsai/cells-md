@@ -244,10 +244,6 @@ const server = Bun.serve({
       return new Response("upgrade failed", { status: 500 });
     }
 
-    if (SECRET && req.headers.get("x-mother-secret") !== SECRET) {
-      return new Response("forbidden", { status: 403 });
-    }
-
     const staticHit = serveStatic(url.pathname);
     if (staticHit) return staticHit;
 

@@ -52,13 +52,12 @@ sed -i 's|__SECRET__|$SECRET|g' ~/.bashrc.d/codex_proxy
 chmod 600 ~/.bashrc.d/codex_proxy
 
 # 1c. Site env file: read by ~/agent/site/server.ts. The site server gates
-# on x-mother-secret matching MOTHER_SECRET, so even though the sprite URL
-# is set to --auth=public (so mother can reach it without org-token auth),
-# only requests carrying the shared secret reach the cell.
+# the /agent WebSocket upgrade on Authorization: Bearer <MOTHER_SECRET>; the
+# per-cell Cloudflare Worker carries this secret to establish the bridge.
+# Static HTTP routes are public (sprite URL is --auth=public).
 cat > ~/.bashrc.d/site_proxy <<'EOF'
-# Authenticates incoming requests to the cell's site server (~/agent/site/).
-# Mother proxy attaches x-mother-secret = this value when forwarding
-# <cell>.cells.md → <sprite-host>.
+# Gates the /agent WS upgrade on the cell's site server (~/agent/site/).
+# The per-cell Cloudflare Worker connects with Authorization: Bearer <this>.
 export MOTHER_SECRET=__SECRET__
 EOF
 sed -i 's|__SECRET__|$SECRET|g' ~/.bashrc.d/site_proxy
