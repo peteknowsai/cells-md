@@ -393,8 +393,16 @@ hours after birth.
 
 Cells reach both Anthropic (Claude Max) and OpenAI Codex (ChatGPT Plus)
 via `https://proxy.cells.md`, which the mother laptop runs as the single
-OAuth principal for both subscriptions across the whole fleet. This step
-does five things:
+OAuth principal for both subscriptions across the whole fleet.
+
+This step runs unconditionally — including for direct-API cells (e.g.
+`deepseek`, `openai` non-codex). The proxy env files (`anthropic_proxy`,
+`codex_proxy`) and pi patches (Anthropic URL rewrite, codex
+extractAccountId stub) are harmless on those cells: pi-ai only consults
+the env var for its active provider, and the patched code paths are
+never executed when `defaultProvider` is something else.
+
+This step does five things:
 
 1. Drops `~/.bashrc.d/anthropic_proxy` with the shared bearer secret
    (`CELLS_PROXY_SECRET` from `~/.cells/secrets.json`) as `ANTHROPIC_AUTH_TOKEN`.
