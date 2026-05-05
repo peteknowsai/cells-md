@@ -588,19 +588,22 @@ async function cmdTalk(name: string, args: string[]) {
   await streamCellBridge(name, { interactive: false, initialMessage: message });
 }
 
-async function cmdTui(name: string) {
+async function cmdTui(name: string, extra: string[] = []) {
   await requireCell(name);
-  // Open pi's TUI inside the cell as a fresh side session. Pi creates a
-  // new timestamped session file under its default sessions dir, separate
-  // from the bridge's pinned main.jsonl, so the bridge's --mode rpc pi is
-  // unaffected. (Earlier --no-session caused pi to fail on exit when it
-  // tried to export the session to HTML.) The TUI inherits the cell's
-  // .pi/settings.json — same model, thinking level, extensions as the
-  // bridge agent. For shell access to the cell (no pi), use `cells shell`.
+  // Open pi's TUI inside the cell with its own session pool, separate from
+  // the bridge's pinned main.jsonl (which the talk + slack RPC pi owns).
+  // TUI sessions live in ~/.pi/agent/sessions/cell-<name>/tui/ — fresh per
+  // invocation by default. Pass `-c` to continue the most recent TUI
+  // session, or `-r` to pick from the list. Any other pi flags pass through.
+  // Inherits the cell's .pi/settings.json. For shell access (no pi), use
+  // `cells shell <name>`.
+  const sessionDir = `/home/sprite/.pi/agent/sessions/cell-${name}/tui`;
+  const piArgs = ["--session-dir", sessionDir, ...extra]
+    .map((a) => `'${a.replace(/'/g, "'\\''")}'`).join(" ");
   const proc = Bun.spawn(
     [
       "sprite", "exec", "-s", name, "--tty", "--",
-      "bash", "-lc", "cd /home/sprite/agent && exec pi",
+      "bash", "-lc", `mkdir -p ${sessionDir} && cd /home/sprite/agent && exec pi ${piArgs}`,
     ],
     { stdin: "inherit", stdout: "inherit", stderr: "inherit" },
   );
@@ -3309,7 +3312,7 @@ switch (sub) {
   case "kill":
   case "destroy":    await cmdDestroy(rest); break;
   case "dream":              await cmdDream(rest[0] ?? ""); break;
-  case "tui":                await cmdTui(needName(rest, "tui")); break;
+  case "tui":                await cmdTui(needName(rest, "tui"), rest.slice(1)); break;
   case "sync":               await cmdSync(rest[0] || undefined); break;
   case "schedule-pi-patches":   await cmdSchedulePiPatches(); break;
   case "unschedule-pi-patches": await cmdUnschedulePiPatches(); break;
