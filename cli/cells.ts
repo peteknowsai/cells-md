@@ -590,20 +590,35 @@ async function cmdTalk(name: string, args: string[]) {
 
 async function cmdTui(name: string, extra: string[] = []) {
   await requireCell(name);
-  // Open pi's TUI inside the cell with its own session pool, separate from
-  // the bridge's pinned main.jsonl (which the talk + slack RPC pi owns).
-  // TUI sessions live in ~/.pi/agent/sessions/cell-<name>/tui/ — fresh per
-  // invocation by default. Pass `-c` to continue the most recent TUI
-  // session, or `-r` to pick from the list. Any other pi flags pass through.
-  // Inherits the cell's .pi/settings.json. For shell access (no pi), use
-  // `cells shell <name>`.
+  // Open pi's TUI inside the cell, wrapped in tmux so:
+  //   - the per-cell status bar (~/.tmux.conf) is visible
+  //   - reattach across sprite hibernate is automatic — same pi process,
+  //     same in-flight conversation, no /resume needed
+  //
+  // Session-dir + flag passthrough preserved from the bare-pi version:
+  // TUI sessions live in ~/.pi/agent/sessions/cell-<name>/tui/, isolated
+  // from the bridge's main.jsonl. Pass `-c` to continue the most recent,
+  // `-r` to pick from the list, or any other pi flag.
+  //
+  // Behavior on existing tmux session:
+  //   - no extra args → attach-or-create (`tmux new -A -s tui`). You land
+  //     back in whatever pi is already running there.
+  //   - any extra args  → kill the old `tui` session first, then create
+  //     fresh with the new pi flags. Otherwise tmux silently ignores the
+  //     command on attach and the flags would be a no-op.
+  //
+  // For shell access (no pi), use `cells shell <name>`.
   const sessionDir = `/home/sprite/.pi/agent/sessions/cell-${name}/tui`;
   const piArgs = ["--session-dir", sessionDir, ...extra]
     .map((a) => `'${a.replace(/'/g, "'\\''")}'`).join(" ");
+  const reset = extra.length > 0 ? "tmux kill-session -t tui 2>/dev/null; " : "";
+  const remote =
+    `mkdir -p ${sessionDir} && cd /home/sprite/agent && ${reset}` +
+    `exec tmux new-session -A -s tui -c /home/sprite/agent "pi ${piArgs}"`;
   const proc = Bun.spawn(
     [
       "sprite", "exec", "-s", name, "--tty", "--",
-      "bash", "-lc", `mkdir -p ${sessionDir} && cd /home/sprite/agent && exec pi ${piArgs}`,
+      "bash", "-lc", remote,
     ],
     { stdin: "inherit", stdout: "inherit", stderr: "inherit" },
   );
@@ -1032,6 +1047,7 @@ async function cmdCreate(name: string, opts: CreateOpts) {
       };
       await saveChannels(file);
       await kvUpsert(slackChannel, name);
+      await updateCellStatusChannels(name);
       console.log(`✓ linked ${slackChannel} → ${name} (slack)`);
     } catch (e) {
       console.error(`✗ slack wiring failed: ${e}`);
@@ -1547,6 +1563,12 @@ async function cmdChannelLink(args: string[]) {
   };
   await saveChannels(file);
   await kvUpsert(channelId, cell);
+  await updateCellStatusChannels(cell);
+  if (prev && prev.cell !== cell && prev.cell) {
+    // Also refresh the previously-bound cell's status so its bar drops the
+    // channel that just moved away.
+    await updateCellStatusChannels(prev.cell);
+  }
   if (prev && prev.cell !== cell) {
     console.log(`linked ${channelId} → ${cell} (${kind}) — was ${prev.cell}`);
   } else if (prev) {
@@ -1576,6 +1598,7 @@ async function cmdChannelUnlink(args: string[]) {
     delete file.bindings[channelId];
     await saveChannels(file);
     await kvDelete(channelId);
+    await updateCellStatusChannels(cell);
     console.log(`unlinked ${channelId} (was ${cell})`);
     return;
   }
@@ -1589,7 +1612,60 @@ async function cmdChannelUnlink(args: string[]) {
   }
   await saveChannels(file);
   for (const id of removed) await kvDelete(id);
+  await updateCellStatusChannels(cell);
   console.log(`unlinked ${removed.length} channel${removed.length === 1 ? "" : "s"} from ${cell}`);
+}
+
+// Look up a slack channel's human-readable name (e.g. "cells-pete") so we
+// can show "#cells-pete" in the cell's tmux bar instead of the raw ID.
+// Best-effort: returns the channel ID on any failure.
+async function slackChannelName(channelId: string): Promise<string> {
+  const token = await readSecret("SLACK_BOT_TOKEN");
+  if (!token) return channelId;
+  try {
+    const r = await fetch(`https://slack.com/api/conversations.info?channel=${encodeURIComponent(channelId)}`, {
+      headers: { authorization: `Bearer ${token}` },
+    });
+    const j = (await r.json()) as { ok: boolean; channel?: { name?: string } };
+    return j.ok && j.channel?.name ? `#${j.channel.name}` : channelId;
+  } catch {
+    return channelId;
+  }
+}
+
+// Push the cell's current channel bindings to its on-cell status.json so
+// the tmux status-right shows them. Best-effort — failures log a warning
+// but don't roll back the laptop-side binding.
+async function updateCellStatusChannels(cell: string): Promise<void> {
+  const file = await loadChannels();
+  const ids = Object.entries(file.bindings)
+    .filter(([, b]) => b.cell === cell)
+    .map(([id]) => id);
+  const names = await Promise.all(ids.map(slackChannelName));
+  // Use jq on the cell to merge into status.json, preserving harness and
+  // tolerating a missing file (start from {harness:"pi"} as a safe default).
+  const channelsJson = JSON.stringify(names);
+  const remote = `
+set -e
+F=/home/sprite/agent/.pi/status.json
+mkdir -p "$(dirname "$F")"
+[ -f "$F" ] || echo '{"harness":"pi","channels":[]}' > "$F"
+tmp=$(mktemp)
+jq --argjson ch '${channelsJson.replace(/'/g, "'\\''")}' '.channels = $ch' "$F" > "$tmp" && mv "$tmp" "$F"
+`.trim();
+  try {
+    const proc = Bun.spawn(["sprite", "exec", "-s", cell, "--", "bash", "-c", remote], {
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    const code = await proc.exited;
+    if (code !== 0) {
+      const err = await new Response(proc.stderr).text();
+      console.warn(`! status.json update for ${cell} failed (exit ${code}): ${err.slice(0, 200)}`);
+    }
+  } catch (e) {
+    console.warn(`! status.json update for ${cell} failed: ${e}`);
+  }
 }
 
 async function cmdChannelList() {

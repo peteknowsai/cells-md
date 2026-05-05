@@ -48,6 +48,7 @@ patches are harmless on code paths the cell never executes.
 
 1. Invoke the `birth` skill with these substitutions throughout the ritual:
    - `<NAME>` = `$1`
+   - `<HARNESS>` = the parsed `harness` value
    - `<PROVIDER>` = the parsed `provider` value
    - `<MODEL>` = the parsed `model` value
    - `<THINKING>` = the parsed `thinking` value

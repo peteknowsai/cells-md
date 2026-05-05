@@ -126,24 +126,23 @@ bind Down  split-window -v -c "#{pane_current_path}" "zsh -l"
 bind '|'   split-window -h -c "#{pane_current_path}" "zsh -l"
 bind '-'   split-window -v -c "#{pane_current_path}" "zsh -l"
 
-# Status line — cell name on the left (#S = session name = cell name)
+# Status line — solid color bar in the cell's color across the bottom.
 set -g status-position bottom
 set -g status-justify left
-set -g status-style 'bg=default'
-set -g status-left ' #S '
-set -g status-left-style 'fg=#1F1F28,bg=#957FB8,bold'
+set -g status-style 'fg=__CELL_FG__,bg=__CELL_BG__,bold'
+set -g status-left ' __NAME__ '
 set -g status-left-length 20
-set -g status-right ''
+set -g status-right ' #(/home/sprite/agent/bin/cell-status.sh) '
+set -g status-right-length 60
+set -g status-interval 5
+setw -g window-status-format ''
+setw -g window-status-current-format ''
+setw -g window-status-separator ''
 
 set -g pane-border-lines single
 set -g pane-border-style 'fg=#54546D'
 set -g pane-active-border-style 'fg=#957FB8'
 
-setw -g window-status-separator ''
-setw -g window-status-format '  #I:#W #F  '
-setw -g window-status-style 'bg=default,fg=#C8C093'
-setw -g window-status-current-format '  #I:#W #F  '
-setw -g window-status-current-style 'bg=default,fg=#957FB8,bold'
 setw -g mode-style 'fg=#1F1F28,bg=#7E9CD8'
 
 # Bell notifications: Pi rings the terminal bell when a response is ready.
@@ -222,6 +221,41 @@ sed -i 's/__PROVIDER__/<PROVIDER>/g' \
   /home/sprite/agent/.pi/settings.json
 
 sed -i 's/__THINKING__/<THINKING>/g' /home/sprite/agent/.pi/settings.json
+```
+
+### 4b. Per-cell tmux color chip
+
+The DNA's `~/.tmux.conf` ships with `__CELL_FG__` / `__CELL_BG__`
+placeholders in the `status-left-style` line. Compute the color
+locally and substitute them on the cell:
+
+```bash
+# Locally on the Mac (use bash, NOT sprite_exec):
+read CBG CFG < <(bash scripts/cell-color.sh <NAME>)
+
+# Then sprite_exec to substitute on the cell. Also bake the cell name
+# into the status-left chip so the bar reads the cell name regardless of
+# which tmux session you're attached to (tui, shell, etc.).
+sed -i "s|__CELL_BG__|$CBG|g; s|__CELL_FG__|$CFG|g; s|__NAME__|<NAME>|g" /home/sprite/.tmux.conf
+```
+
+`scripts/cell-color.sh` is deterministic — same name always maps to the
+same palette entry — so retrofits and re-births stay stable.
+
+### 4c. Write the cell's status file
+
+The right side of the tmux bar reads `~/agent/.pi/status.json`. Write
+it now with the harness baked in and channels empty (the laptop's slack
+binding code populates `channels` later if a slack channel is bound):
+
+```bash
+mkdir -p /home/sprite/agent/.pi
+cat > /home/sprite/agent/.pi/status.json <<'EOF'
+{
+  "harness": "<HARNESS>",
+  "channels": []
+}
+EOF
 ```
 
 ## 5. Run `bun install`, install Pi globally, install web-access, install `cells` CLI

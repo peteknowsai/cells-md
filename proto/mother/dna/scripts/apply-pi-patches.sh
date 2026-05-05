@@ -39,6 +39,7 @@ patched_url=0
 patched_codex=0
 patched_anthropic_adaptive=0
 patched_levels=0
+patched_footer=0
 
 # 1. Anthropic baseUrl swap. Handles both fresh installs (api.anthropic.com)
 # and cells previously pointed at mother.cells.md (the pre-split routing,
@@ -98,4 +99,17 @@ for F in $(find "${SEARCH_ROOTS[@]}" -name agent-session.js -path '*core*' 2>/de
   patched_levels=$((patched_levels+1))
 done
 
-echo "pi patches: url=$patched_url codex=$patched_codex anthropic-adaptive=$patched_anthropic_adaptive levels=$patched_levels"
+# 5. pi-coding-agent footer: drop the pwd/branch line. Cells already show
+# the cell name + harness in the tmux status bar (which wraps pi); the
+# pi-side `~/agent` line is redundant noise. Keep stats line only.
+for F in $(find "${SEARCH_ROOTS[@]}" -name footer.js -path '*interactive/components*' 2>/dev/null); do
+  if grep -q 'const lines = \[dimStatsLeft + dimRemainder\];' "$F"; then continue; fi
+  if ! grep -q 'const lines = \[pwdLine, dimStatsLeft + dimRemainder\];' "$F"; then continue; fi
+  [ -f "$F.bak" ] || cp "$F" "$F.bak"
+  "${SED_INPLACE[@]}" \
+    -e 's|const lines = \[pwdLine, dimStatsLeft + dimRemainder\];|const lines = [dimStatsLeft + dimRemainder];|' \
+    "$F"
+  patched_footer=$((patched_footer+1))
+done
+
+echo "pi patches: url=$patched_url codex=$patched_codex anthropic-adaptive=$patched_anthropic_adaptive levels=$patched_levels footer=$patched_footer"
