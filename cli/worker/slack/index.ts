@@ -175,6 +175,16 @@ async function handleEvents(req: Request, env: Env, ctx: ExecutionContext): Prom
   }
   console.log(`route ${channelId} -> ${cell} (user=${event.user} text=${(event.text??"").slice(0,50)} files=${(event.files??[]).length})`);
 
+  // For messages with attachments, slap an :eyes: reaction on
+  // immediately so the user sees the cell "noticed" the file before
+  // transcription/extraction completes (Gemini PDF runs can take
+  // 5-15s; without this the channel feels dead). Fire-and-forget so
+  // a slow reactions.add doesn't push the 200 past Slack's 3s budget.
+  const hasFiles = Array.isArray(event.files) && event.files.length > 0;
+  if (hasFiles && event.ts) {
+    ctx.waitUntil(addReaction(channelId, event.ts, "eyes", env.SLACK_BOT_TOKEN));
+  }
+
   // File processing + fan-out runs in waitUntil — Slack gets its 200
   // immediately while we transcribe audio / encode images and ship
   // the enriched payload to the cell. Transcription on a 30s clip
@@ -277,6 +287,31 @@ async function enrichEventWithFiles(
   const baseText = String(event.text ?? "");
   const newText = [baseText, ...textAdditions].filter(Boolean).join("\n");
   return { event: { ...event, text: newText }, images };
+}
+
+/**
+ * Slap an emoji reaction on a Slack message. Fire-and-forget; logs
+ * any non-OK response but doesn't throw — the rest of the pipeline
+ * shouldn't fail because the user didn't get the eyes acknowledgement.
+ */
+async function addReaction(channel: string, timestamp: string, name: string, botToken: string): Promise<void> {
+  try {
+    const r = await fetch("https://slack.com/api/reactions.add", {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${botToken}`,
+        "content-type": "application/json; charset=utf-8",
+      },
+      body: JSON.stringify({ channel, timestamp, name }),
+    });
+    const j: any = await r.json().catch(() => ({}));
+    // already_reacted is benign — happens on Slack retries.
+    if (!j.ok && j.error !== "already_reacted") {
+      console.log(`reactions.add ${name} -> ${j.error ?? r.status}`);
+    }
+  } catch (e) {
+    console.error(`reactions.add ${name} threw: ${String(e).slice(0, 200)}`);
+  }
 }
 
 async function fetchSlackFile(url: string, botToken: string): Promise<ArrayBuffer> {
