@@ -590,14 +590,20 @@ async function cmdTalk(name: string, args: string[]) {
 
 async function cmdTui(name: string) {
   await requireCell(name);
-  // Drop into a sprite-side tmux session (for shell debugging, file
-  // poking, manually running pi --mode tui against a side session,
-  // etc). Not a pi conversation — that's `cells talk`.
-  const proc = Bun.spawn(["sprite", "console", "-s", name], {
-    stdin: "inherit",
-    stdout: "inherit",
-    stderr: "inherit",
-  });
+  // Open pi's TUI inside the cell as an ephemeral side session.
+  // --no-session keeps it in-memory only so we don't collide with the
+  // bridge's pi (which is running --mode rpc against main.jsonl). The
+  // TUI inherits the cell's .pi/settings.json (default model, thinking
+  // level, extensions), so it behaves like the bridge agent — just on
+  // a throwaway scratch conversation. For shell access to the cell
+  // (no pi), use `cells shell <name>`.
+  const proc = Bun.spawn(
+    [
+      "sprite", "exec", "-s", name, "--tty", "--",
+      "bash", "-lc", "cd /home/sprite/agent && exec pi --no-session",
+    ],
+    { stdin: "inherit", stdout: "inherit", stderr: "inherit" },
+  );
   await proc.exited;
 }
 
