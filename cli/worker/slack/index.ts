@@ -23,6 +23,10 @@ export interface Env {
   // before fan-out to the cell. Set via:
   //   jq -r .OPENAI_API_KEY ~/.cells/secrets.json | (cd cli/worker/slack && bunx wrangler secret put OPENAI_API_KEY)
   OPENAI_API_KEY: string;
+  // Gemini key for gemini-2.5-flash — used to extract text/OCR from PDF
+  // attachments. Set via:
+  //   jq -r .GEMINI_API_KEY ~/.cells/secrets.json | (cd cli/worker/slack && bunx wrangler secret put GEMINI_API_KEY)
+  GEMINI_API_KEY: string;
 }
 
 // Pi accepts inline images on its RPC `prompt` payload — `images?:
@@ -39,6 +43,51 @@ const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
 // 25MB is OpenAI's documented transcription input cap. Slack voice
 // clips are short (typically <2MB), so this is just a safety belt.
 const MAX_AUDIO_BYTES = 25 * 1024 * 1024;
+// 100KB ceiling on inline text/code files. Above that, the prompt grows
+// faster than the model can reason about it; surface a marker instead.
+const MAX_TEXT_BYTES = 100 * 1024;
+// Gemini 2.5 Flash inline_data limit is 20MB. Above that we'd need the
+// Files API upload-then-reference flow — defer until somebody actually
+// shares one that big.
+const MAX_PDF_BYTES = 20 * 1024 * 1024;
+
+// MIME types we treat as inlineable text. Allowlist beats `text/*`
+// alone because a lot of code mimetypes are `application/...`.
+const TEXT_MIMES = new Set([
+  "application/json",
+  "application/xml",
+  "application/javascript",
+  "application/typescript",
+  "application/x-yaml",
+  "application/yaml",
+  "application/x-sh",
+  "application/x-shellscript",
+  "application/x-toml",
+  "application/toml",
+]);
+
+// Map common mimetypes to fenced-code-block language tags. Falls back
+// to the file extension, then to no tag.
+const MIME_TO_LANG: Record<string, string> = {
+  "application/json": "json",
+  "application/xml": "xml",
+  "application/javascript": "js",
+  "application/typescript": "ts",
+  "application/x-yaml": "yaml",
+  "application/yaml": "yaml",
+  "application/x-sh": "sh",
+  "application/x-shellscript": "sh",
+  "application/x-toml": "toml",
+  "application/toml": "toml",
+  "text/markdown": "md",
+  "text/x-python": "py",
+  "text/x-go": "go",
+  "text/x-rust": "rs",
+  "text/x-java": "java",
+  "text/html": "html",
+  "text/css": "css",
+  "text/csv": "csv",
+};
 
 export default {
   async fetch(req: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
@@ -199,9 +248,24 @@ async function enrichEventWithFiles(
         }
         const transcript = await transcribeAudio(buf, mime, name, env.OPENAI_API_KEY);
         textAdditions.push(`[voice]: ${transcript}`);
+      } else if (mime === "application/pdf") {
+        if (buf.byteLength > MAX_PDF_BYTES) {
+          textAdditions.push(`[file: ${name} (pdf, ${kb(buf.byteLength)}) — too large for inline extraction]`);
+          continue;
+        }
+        const text = await extractPdfText(buf, env.GEMINI_API_KEY);
+        textAdditions.push(`[file: ${name}]\n${text}`);
+      } else if (mime.startsWith("text/") || TEXT_MIMES.has(mime)) {
+        if (buf.byteLength > MAX_TEXT_BYTES) {
+          textAdditions.push(`[file: ${name} (${mime}, ${kb(buf.byteLength)}) — too large to inline]`);
+          continue;
+        }
+        const lang = MIME_TO_LANG[mime] ?? extOf(name);
+        const body = new TextDecoder("utf-8", { fatal: false, ignoreBOM: true }).decode(buf);
+        textAdditions.push(`[file: ${name}]\n\`\`\`${lang}\n${body}\n\`\`\``);
       } else {
-        // Other file types (PDF, code, etc.) — not handled today. Mark it
-        // so the agent can at least acknowledge.
+        // Office docs, archives, etc. — not handled today. Mark it so
+        // the agent can at least acknowledge receipt.
         textAdditions.push(`[file: ${name} (${mime}, ${kb(buf.byteLength)}) — not yet supported]`);
       }
     } catch (e) {
@@ -239,6 +303,38 @@ async function transcribeAudio(
   if (!r.ok) throw new Error(`whisper ${r.status}: ${(await r.text()).slice(0, 200)}`);
   const j: any = await r.json();
   return String(j.text ?? "").trim() || "(empty transcript)";
+}
+
+/**
+ * Send a PDF to Gemini 2.5 Flash and ask for plain-text extraction
+ * (preserving headings/lists). Gemini handles native PDFs and
+ * scanned/image-only PDFs equally well via OCR. Returns the candidate
+ * text or throws.
+ */
+async function extractPdfText(buf: ArrayBuffer, geminiKey: string): Promise<string> {
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${geminiKey}`;
+  const body = {
+    contents: [{
+      parts: [
+        { inline_data: { mime_type: "application/pdf", data: bytesToBase64(new Uint8Array(buf)) } },
+        { text: "Extract every text element from this document, preserving structure with headings, lists, and tables where present. Output only the extracted text — no commentary, no preamble." },
+      ],
+    }],
+  };
+  const r = await fetch(url, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!r.ok) throw new Error(`gemini ${r.status}: ${(await r.text()).slice(0, 200)}`);
+  const j: any = await r.json();
+  const text = j?.candidates?.[0]?.content?.parts?.map((p: any) => p?.text ?? "").join("") ?? "";
+  return String(text).trim() || "(empty extraction)";
+}
+
+function extOf(name: string): string {
+  const dot = name.lastIndexOf(".");
+  return dot >= 0 ? name.slice(dot + 1).toLowerCase() : "";
 }
 
 function bytesToBase64(bytes: Uint8Array): string {
