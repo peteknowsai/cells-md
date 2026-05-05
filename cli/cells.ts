@@ -590,17 +590,17 @@ async function cmdTalk(name: string, args: string[]) {
 
 async function cmdTui(name: string) {
   await requireCell(name);
-  // Open pi's TUI inside the cell as an ephemeral side session.
-  // --no-session keeps it in-memory only so we don't collide with the
-  // bridge's pi (which is running --mode rpc against main.jsonl). The
-  // TUI inherits the cell's .pi/settings.json (default model, thinking
-  // level, extensions), so it behaves like the bridge agent — just on
-  // a throwaway scratch conversation. For shell access to the cell
-  // (no pi), use `cells shell <name>`.
+  // Open pi's TUI inside the cell as a fresh side session. Pi creates a
+  // new timestamped session file under its default sessions dir, separate
+  // from the bridge's pinned main.jsonl, so the bridge's --mode rpc pi is
+  // unaffected. (Earlier --no-session caused pi to fail on exit when it
+  // tried to export the session to HTML.) The TUI inherits the cell's
+  // .pi/settings.json — same model, thinking level, extensions as the
+  // bridge agent. For shell access to the cell (no pi), use `cells shell`.
   const proc = Bun.spawn(
     [
       "sprite", "exec", "-s", name, "--tty", "--",
-      "bash", "-lc", "cd /home/sprite/agent && exec pi --no-session",
+      "bash", "-lc", "cd /home/sprite/agent && exec pi",
     ],
     { stdin: "inherit", stdout: "inherit", stderr: "inherit" },
   );
