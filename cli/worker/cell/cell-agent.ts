@@ -149,8 +149,16 @@ export class CellAgent {
     const channel = String(event.channel ?? "");
     const user = String(event.user ?? "");
     const threadTs = String(event.thread_ts ?? "");
-    const text = String(event.text ?? "").replace(/[\r\n]+/g, " ");
+    // event.text may already include `[voice]: …` transcripts and
+    // `[file: …]` markers appended by the slack worker's enrichment step.
+    // Newlines need to survive — collapse only \r and avoid stripping \n.
+    const text = String(event.text ?? "").replace(/\r/g, "");
     const message = `from-slack channel=${channel}${user ? ` user=${user}` : ""}${threadTs ? ` thread=${threadTs}` : ""} text=${text}`;
+    // Pi's RPC `prompt` accepts an optional `images: ImageContent[]`; the
+    // slack worker base64-encodes image attachments and forwards them here.
+    // Vision-capable cell models (Opus/Sonnet) handle them inline; nothing
+    // to do at the cell-agent layer.
+    const images = Array.isArray(body?.images) ? body.images : undefined;
 
     this.pendingChannel = channel;
     this.pendingThreadTs = threadTs;
@@ -164,6 +172,7 @@ export class CellAgent {
     this.ws.send(JSON.stringify({
       type: "prompt",
       message,
+      ...(images && images.length ? { images } : {}),
       streamingBehavior: "steer",
     }));
 

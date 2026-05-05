@@ -19,7 +19,26 @@ export interface Env {
   SLACK_SIGNING_SECRET: string;
   SLACK_BOT_TOKEN: string;
   CELLS_PROXY_SECRET: string;
+  // OpenAI key for gpt-4o-transcribe — turns Slack voice clips into text
+  // before fan-out to the cell. Set via:
+  //   jq -r .OPENAI_API_KEY ~/.cells/secrets.json | (cd cli/worker/slack && bunx wrangler secret put OPENAI_API_KEY)
+  OPENAI_API_KEY: string;
 }
+
+// Pi accepts inline images on its RPC `prompt` payload — `images?:
+// ImageContent[]`, where ImageContent = { type:"image", data, mimeType }
+// (base64-encoded). We extract image attachments from Slack files and
+// pass them through; vision-capable cell models (Opus/Sonnet) handle the
+// rest with no DNA changes.
+type ImageContent = { type: "image"; data: string; mimeType: string };
+
+// 5MB ceiling on inline image attachments. Above this, base64 alone
+// pushes the prompt past Anthropic's per-image limit and the cell will
+// reject the turn. Slack screenshots are usually well under this.
+const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
+// 25MB is OpenAI's documented transcription input cap. Slack voice
+// clips are short (typically <2MB), so this is just a safety belt.
+const MAX_AUDIO_BYTES = 25 * 1024 * 1024;
 
 export default {
   async fetch(req: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
@@ -80,7 +99,12 @@ async function handleEvents(req: Request, env: Env, ctx: ExecutionContext): Prom
     console.log(`drop self/bot: type=${event.type} subtype=${event.subtype} user=${event.user}`);
     return new Response("ok", { status: 200 });
   }
-  if (event.subtype && event.subtype !== "thread_broadcast") {
+  // Allow file_share (image/file uploads) and slack_audio_message (voice
+  // clips) through — the file body is processed below into images +
+  // inline transcripts before fan-out. Everything else with a subtype
+  // (channel_join, message_changed, etc.) still drops.
+  const FILE_SUBTYPES = new Set(["file_share", "slack_audio_message"]);
+  if (event.subtype && event.subtype !== "thread_broadcast" && !FILE_SUBTYPES.has(event.subtype)) {
     console.log(`drop subtype: type=${event.type} subtype=${event.subtype}`);
     return new Response("ok", { status: 200 });
   }
@@ -100,28 +124,135 @@ async function handleEvents(req: Request, env: Env, ctx: ExecutionContext): Prom
     console.log(`drop unbound: channel=${channelId}`);
     return new Response("ok", { status: 200 });
   }
-  console.log(`route ${channelId} -> ${cell} (user=${event.user} text=${(event.text??"").slice(0,50)})`);
+  console.log(`route ${channelId} -> ${cell} (user=${event.user} text=${(event.text??"").slice(0,50)} files=${(event.files??[]).length})`);
 
-  // Fan out to the cell's Worker. Don't await — return 200 to Slack
-  // immediately; Slack retries on >3s response so we don't want to
-  // serialize the cell hop into the response budget.
-  ctx.waitUntil(
-    fetch(`https://${cell}.cells.md/inbox/append`, {
+  // File processing + fan-out runs in waitUntil — Slack gets its 200
+  // immediately while we transcribe audio / encode images and ship
+  // the enriched payload to the cell. Transcription on a 30s clip
+  // is ~2-5s; well within waitUntil's lifetime.
+  ctx.waitUntil((async () => {
+    const enriched = await enrichEventWithFiles(event, env);
+    const r = await fetch(`https://${cell}.cells.md/inbox/append`, {
       method: "POST",
       headers: {
         authorization: `Bearer ${env.CELLS_PROXY_SECRET}`,
         "content-type": "application/json",
       },
-      body: JSON.stringify({ event, team_id: body.team_id, event_id: body.event_id }),
-    }).then((r) => {
-      console.log(`fan-out -> ${cell}: ${r.status}`);
-      if (!r.ok) {
-        return r.text().then((t) => console.error(`fan-out body: ${t.slice(0, 200)}`));
-      }
-    }).catch((e) => console.error(`fan-out to ${cell} threw: ${String(e).slice(0, 300)}`)),
-  );
+      body: JSON.stringify({
+        event: enriched.event,
+        images: enriched.images,
+        team_id: body.team_id,
+        event_id: body.event_id,
+      }),
+    }).catch((e) => { console.error(`fan-out to ${cell} threw: ${String(e).slice(0, 300)}`); return null; });
+    if (!r) return;
+    console.log(`fan-out -> ${cell}: ${r.status}`);
+    if (!r.ok) console.error(`fan-out body: ${(await r.text()).slice(0, 200)}`);
+  })());
 
   return new Response("ok", { status: 200 });
+}
+
+// ───────── file enrichment: voice → transcript, image → base64 ─────────
+
+/**
+ * Walk event.files and produce:
+ *  - enriched event.text with `[voice]: …` transcripts inlined per audio file
+ *    (and `[file: name (mime, Nkb)]` markers for unsupported types so the
+ *    agent at least knows something was sent)
+ *  - images[] of base64-encoded image attachments for pi's RPC `images` arg
+ *
+ * Each file fetch + transcription is independent; one failure leaves a
+ * marker in the text and continues. Never throws — caller depends on
+ * fan-out always firing.
+ */
+async function enrichEventWithFiles(
+  event: any,
+  env: Env,
+): Promise<{ event: any; images: ImageContent[] }> {
+  const files: any[] = Array.isArray(event.files) ? event.files : [];
+  if (files.length === 0) return { event, images: [] };
+
+  const images: ImageContent[] = [];
+  const textAdditions: string[] = [];
+
+  for (const f of files) {
+    const mime = String(f.mimetype ?? "");
+    const name = String(f.name ?? "file");
+    const url = String(f.url_private_download ?? f.url_private ?? "");
+    if (!url) {
+      textAdditions.push(`[file: ${name} (${mime}) — no download url]`);
+      continue;
+    }
+    try {
+      const buf = await fetchSlackFile(url, env.SLACK_BOT_TOKEN);
+      if (mime.startsWith("image/")) {
+        if (buf.byteLength > MAX_IMAGE_BYTES) {
+          textAdditions.push(`[image: ${name} (${mime}, ${kb(buf.byteLength)}) — too large, skipped]`);
+          continue;
+        }
+        images.push({ type: "image", data: bytesToBase64(new Uint8Array(buf)), mimeType: mime });
+      } else if (mime.startsWith("audio/")) {
+        if (buf.byteLength > MAX_AUDIO_BYTES) {
+          textAdditions.push(`[voice: ${name} — too large to transcribe (${kb(buf.byteLength)})]`);
+          continue;
+        }
+        const transcript = await transcribeAudio(buf, mime, name, env.OPENAI_API_KEY);
+        textAdditions.push(`[voice]: ${transcript}`);
+      } else {
+        // Other file types (PDF, code, etc.) — not handled today. Mark it
+        // so the agent can at least acknowledge.
+        textAdditions.push(`[file: ${name} (${mime}, ${kb(buf.byteLength)}) — not yet supported]`);
+      }
+    } catch (e) {
+      console.error(`enrich file ${name} (${mime}): ${String(e).slice(0, 200)}`);
+      textAdditions.push(`[${mime.startsWith("audio/") ? "voice" : "file"}: ${name} — failed to process]`);
+    }
+  }
+
+  const baseText = String(event.text ?? "");
+  const newText = [baseText, ...textAdditions].filter(Boolean).join("\n");
+  return { event: { ...event, text: newText }, images };
+}
+
+async function fetchSlackFile(url: string, botToken: string): Promise<ArrayBuffer> {
+  const r = await fetch(url, { headers: { authorization: `Bearer ${botToken}` } });
+  if (!r.ok) throw new Error(`slack file fetch ${r.status}: ${(await r.text()).slice(0, 200)}`);
+  return await r.arrayBuffer();
+}
+
+async function transcribeAudio(
+  buf: ArrayBuffer,
+  mime: string,
+  name: string,
+  apiKey: string,
+): Promise<string> {
+  const form = new FormData();
+  form.append("file", new Blob([buf], { type: mime }), name);
+  form.append("model", "gpt-4o-transcribe");
+  form.append("response_format", "json");
+  const r = await fetch("https://api.openai.com/v1/audio/transcriptions", {
+    method: "POST",
+    headers: { authorization: `Bearer ${apiKey}` },
+    body: form,
+  });
+  if (!r.ok) throw new Error(`whisper ${r.status}: ${(await r.text()).slice(0, 200)}`);
+  const j: any = await r.json();
+  return String(j.text ?? "").trim() || "(empty transcript)";
+}
+
+function bytesToBase64(bytes: Uint8Array): string {
+  // Workers ship btoa; chunk to avoid blowing the stack on large inputs.
+  let bin = "";
+  const CHUNK = 0x8000;
+  for (let i = 0; i < bytes.length; i += CHUNK) {
+    bin += String.fromCharCode.apply(null, bytes.subarray(i, i + CHUNK) as unknown as number[]);
+  }
+  return btoa(bin);
+}
+
+function kb(n: number): string {
+  return `${Math.round(n / 1024)}kb`;
 }
 
 // HMAC-SHA256 verify per https://api.slack.com/authentication/verifying-requests-from-slack
