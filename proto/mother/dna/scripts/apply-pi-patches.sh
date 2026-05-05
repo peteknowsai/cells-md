@@ -99,16 +99,54 @@ for F in $(find "${SEARCH_ROOTS[@]}" -name agent-session.js -path '*core*' 2>/de
   patched_levels=$((patched_levels+1))
 done
 
-# 5. pi-coding-agent footer: drop the pwd/branch line. Cells already show
-# the cell name + harness in the tmux status bar (which wraps pi); the
-# pi-side `~/agent` line is redundant noise. Keep stats line only.
+# 5. pi-coding-agent footer: replace the stats line with a minimal
+# four-segment format that matches the cell's tmux bar aesthetic:
+#
+#   🧠 <context%>   🤖 <pretty model name [(ctx-window if not 1M)]>   💪 <thinking>   📟 v<pi version>
+#
+# Drops everything else: pwd/branch line (cell name lives in tmux bar),
+# up/down tokens, cache R/W, $ cost, "(auto)" suffix. This is replacement
+# of the entire `const lines = [...]` array — supersedes the old "drop
+# pwd line" patch.
+PI_PKG=$(find "${SEARCH_ROOTS[@]}" -path '*pi-coding-agent/package.json' 2>/dev/null | head -1)
+PI_VER=$(jq -r .version "$PI_PKG" 2>/dev/null || echo "?")
 for F in $(find "${SEARCH_ROOTS[@]}" -name footer.js -path '*interactive/components*' 2>/dev/null); do
-  if grep -q 'const lines = \[dimStatsLeft + dimRemainder\];' "$F"; then continue; fi
-  if ! grep -q 'const lines = \[pwdLine, dimStatsLeft + dimRemainder\];' "$F"; then continue; fi
+  if grep -q '// === cells custom footer ===' "$F"; then continue; fi
+  if ! grep -q 'const lines = \[' "$F"; then continue; fi
   [ -f "$F.bak" ] || cp "$F" "$F.bak"
-  "${SED_INPLACE[@]}" \
-    -e 's|const lines = \[pwdLine, dimStatsLeft + dimRemainder\];|const lines = [dimStatsLeft + dimRemainder];|' \
-    "$F"
+  PI_VER="$PI_VER" python3 - "$F" <<'PY'
+import os, re, sys
+path = sys.argv[1]
+ver = os.environ["PI_VER"]
+src = open(path).read()
+new = '''// === cells custom footer ===
+        const __PI_VER = ''' + repr(ver) + ''';
+        const __PRETTY_MODEL = {
+            "claude-opus-4-7": "Opus 4.7",
+            "claude-opus-4-6": "Opus 4.6",
+            "claude-sonnet-4-6": "Sonnet 4.6",
+            "claude-sonnet-4-5": "Sonnet 4.5",
+            "claude-haiku-4-5": "Haiku 4.5",
+            "deepseek-v4-flash": "DeepSeek v4 Flash",
+            "deepseek-v4-pro": "DeepSeek v4 Pro",
+            "gpt-5.5": "GPT-5.5",
+            "gpt-5.5-pro": "GPT-5.5 Pro",
+        };
+        const __ctxStr = `\\u{1F9E0} ${contextPercent}%`;
+        const __modelId = state.model?.id ?? "no-model";
+        const __modelName = __PRETTY_MODEL[__modelId] ?? __modelId;
+        const __cwSuffix = (contextWindow && contextWindow !== 1000000) ? ` (${formatTokens(contextWindow)})` : "";
+        const __modelStr = `\\u{1F916} ${__modelName}${__cwSuffix}`;
+        const __thinking = state.thinkingLevel ?? "off";
+        const __thinkStr = `\\u{1F4AA} ${__thinking}`;
+        const __verStr = `\\u{1F4DF} v${__PI_VER}`;
+        const __cellsLine = theme.fg("dim", `${__ctxStr}   ${__modelStr}   ${__thinkStr}   ${__verStr}`);
+        const lines = [__cellsLine];'''
+# lambda replacement to avoid re.sub interpreting backslash-escapes in
+# `new` (the unicode escapes for the emojis trip Python's regex engine).
+src = re.sub(r'const lines = \[[^\]]*\];', lambda m: new, src, count=1)
+open(path, 'w').write(src)
+PY
   patched_footer=$((patched_footer+1))
 done
 
