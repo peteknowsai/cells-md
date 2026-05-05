@@ -612,7 +612,13 @@ async function cmdTui(name: string, extra: string[] = []) {
   const piArgs = ["--session-dir", sessionDir, ...extra]
     .map((a) => `'${a.replace(/'/g, "'\\''")}'`).join(" ");
   const reset = extra.length > 0 ? "tmux kill-session -t tui 2>/dev/null; " : "";
+  // Force TERM to a value the cell's terminfo definitely has. Pete's
+  // local terminal exports things like xterm-ghostty / xterm-kitty that
+  // sprite VMs don't ship terminfo for, which makes tmux refuse to
+  // start. tmux's own `default-terminal "tmux-256color"` takes over
+  // once it's running, so the override only affects the outer shell.
   const remote =
+    `export TERM=xterm-256color; ` +
     `mkdir -p ${sessionDir} && cd /home/sprite/agent && ${reset}` +
     `exec tmux new-session -A -s tui -c /home/sprite/agent "pi ${piArgs}"`;
   const proc = Bun.spawn(
@@ -654,12 +660,15 @@ async function cmdShell(name: string) {
   // -A on new-session: attach if "shell" exists, create if not.
   // bash -l inside tmux loads .profile → .bashrc.d (PATH, mf/mft, env).
   // Ctrl+D exits bash, ends the tmux session, drops us back to the Mac.
+  // Wrap in bash -c to override TERM. Pete's terminal exports things
+  // like xterm-ghostty that sprite VMs don't ship terminfo for; tmux
+  // refuses to start with "missing or unsuitable terminal". tmux's
+  // own default-terminal takes over once it's running.
   const proc = Bun.spawn(
     [
       "sprite", "exec", "-s", name, "--tty", "--",
-      "tmux", "new-session", "-A", "-s", "shell",
-      "-c", "/home/sprite/agent",
-      "bash", "-l",
+      "bash", "-c",
+      `export TERM=xterm-256color; exec tmux new-session -A -s shell -c /home/sprite/agent bash -l`,
     ],
     { stdin: "inherit", stdout: "inherit", stderr: "inherit" },
   );
