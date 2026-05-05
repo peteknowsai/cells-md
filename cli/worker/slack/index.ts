@@ -312,7 +312,7 @@ async function transcribeAudio(
  * text or throws.
  */
 async function extractPdfText(buf: ArrayBuffer, geminiKey: string): Promise<string> {
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${geminiKey}`;
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-flash-latest:generateContent?key=${geminiKey}`;
   const body = {
     contents: [{
       parts: [
