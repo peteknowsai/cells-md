@@ -82,24 +82,16 @@ unbind C-b
 set -g prefix C-Space
 bind C-Space send-prefix
 
-# Mouse + scrollback
-set -g mouse on
+# Mouse off — drag-select highlights aren't wanted while talking to pi,
+# and wheel events can land tmux in copy-mode. For scrollback inside the
+# shell use prefix-`[` then arrows / PgUp / PgDn (exit with `q`).
+set -g mouse off
 set -g history-limit 50000
 
-# Forward mouse-wheel events to the running TUI when it's in alternate
-# screen mode (pi-tui, vim, less). Without this, tmux's default
-# WheelUpPane binding auto-enters copy-mode on the first wheel event,
-# which steals keyboard focus from pi and lights up the whole pane.
-bind -T root WheelUpPane   if-shell -F -t= '#{?pane_in_mode,1,#{alternate_on}}' 'send-keys -M' 'select-pane -t=; copy-mode -e; send-keys -M'
-bind -T root WheelDownPane if-shell -F -t= '#{?pane_in_mode,1,#{alternate_on}}' 'send-keys -M' 'send-keys -M'
-
-# Highlight-to-copy: release mouse and selection lands in system clipboard via OSC52.
-# Lock mode-keys to emacs — tmux otherwise picks vi when $EDITOR=vim, which
-# silently breaks scroll/copy-mode keybinds (e.g. `i` does nothing). Exit
-# copy-mode with `q` or Esc.
+# Lock mode-keys to emacs — tmux otherwise picks vi when $EDITOR=vim,
+# which silently breaks scroll/copy-mode keybinds (e.g. `i` does nothing).
 setw -g mode-keys emacs
 set -g set-clipboard on
-bind -T copy-mode MouseDragEnd1Pane send-keys -X copy-pipe-and-cancel
 
 # Snappy escape (helps Pi UI responsiveness)
 set -sg escape-time 0
