@@ -1,6 +1,6 @@
 // Subscriptions proxy for the cells fleet — single Bun.serve that handles:
 //
-//   proxy.cells.md  (and mother.cells.md as a legacy alias)
+//   proxy.cells.md
 //     /                   → fleet dashboard (HTML)
 //     /v1/*               → Anthropic API proxy (Bearer auth required)
 //     /codex/*            → OpenAI Codex (ChatGPT sub) proxy (Bearer auth required)
@@ -495,10 +495,6 @@ async function handleApiProxy(req: Request): Promise<Response> {
   baseHeaders.delete("host");
   baseHeaders.delete("x-cell-name");
   baseHeaders.delete("authorization");
-  if (!baseHeaders.get("anthropic-beta")?.includes("oauth-2025-04-20")) {
-    const existing = baseHeaders.get("anthropic-beta");
-    baseHeaders.set("anthropic-beta", existing ? `${existing}, oauth-2025-04-20` : "oauth-2025-04-20");
-  }
 
   // Buffer the body so we can retry on 401. Anthropic message bodies are
   // small text payloads, so this is fine; streaming responses go back
@@ -589,7 +585,7 @@ async function handleCodexProxy(req: Request): Promise<Response> {
     }
   }
   baseHeaders.set("chatgpt-account-id", accountId);
-  baseHeaders.set("originator", "pi");
+  baseHeaders.set("originator", "codex_cli");
 
   // Buffer body for 401 retry. Codex requests are SSE-streamed responses
   // but the request bodies (POST /responses) are small JSON payloads.
@@ -841,13 +837,11 @@ const server = Bun.serve({
     const host = hostOf(req);
     const url = new URL(req.url);
 
-    // proxy.cells.md (canonical) and mother.cells.md (legacy alias, in
-    // place until cells are re-patched) → Anthropic at /v1/*, codex at
-    // /codex/*, health at /_proxy/health, dashboard at /. localhost:PORT
-    // serves the same routes for local dev.
+    // proxy.cells.md → Anthropic at /v1/*, codex at /codex/*, health at
+    // /_proxy/health, dashboard at /. localhost:PORT serves the same routes
+    // for local dev.
     if (
       host.startsWith("proxy.cells.md") ||
-      host.startsWith("mother.cells.md") ||
       host.startsWith(`localhost:${PORT}`)
     ) {
       if (url.pathname === "/" || url.pathname === "") {
@@ -879,7 +873,6 @@ console.log(`    proxy.cells.md/v1/*         → Anthropic proxy (Bearer auth)`)
 console.log(`    proxy.cells.md/codex/*      → OpenAI Codex proxy (Bearer auth)`);
 console.log(`    proxy.cells.md/_proxy/health`);
 console.log(`    pulse.cells.md/heartbeat-changed → pulse inbox (Bearer auth)`);
-console.log(`    (mother.cells.md served as a legacy alias for proxy.cells.md)`);
 console.log(`    (slack.cells.md and <cell>.cells.md handled by Cloudflare Workers)`);
 console.log(`  upstreams: ${UPSTREAM}, ${CODEX_UPSTREAM}`);
 console.log(`  auth file: ${AUTH_PATH}`);
