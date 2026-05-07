@@ -17,6 +17,7 @@
         "channels:history",
         "channels:manage",
         "channels:read",
+        "groups:write",
         "files:read",
         "groups:history",
         "groups:read",

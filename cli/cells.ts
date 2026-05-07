@@ -3,10 +3,17 @@ import { $ } from "bun";
 import { readFile, writeFile, mkdir, unlink, symlink, cp, readdir, stat, rm, rename } from "node:fs/promises";
 import { homedir, tmpdir, userInfo } from "node:os";
 import { dirname, join, basename } from "node:path";
-import { existsSync, statSync } from "node:fs";
+import { existsSync, statSync, readFileSync, unlinkSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import * as readline from "node:readline/promises";
 import { createHash } from "node:crypto";
+import {
+  formatVariant,
+  variantHash,
+  eggSpriteName,
+  poolKey,
+  type Variant,
+} from "./lib/variant-signature";
 
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = dirname(SCRIPT_DIR);
@@ -17,6 +24,9 @@ const DNA_DIR = join(MOTHER_ROOT, "dna");
 const REGISTRY_DIR = join(homedir(), ".cells");
 const REGISTRY_PATH = join(REGISTRY_DIR, "cells.json");
 const CHANNELS_PATH = join(REGISTRY_DIR, "channels.json");
+const EGGS_PATH = join(REGISTRY_DIR, "eggs.json");
+const EGGS_LOCK_PATH = join(REGISTRY_DIR, ".eggs.lock");
+const MOTHER_LOCK_PATH = join(REGISTRY_DIR, "mother.lock");
 
 // Model registry — short name → { provider, modelId }. Anthropic doesn't
 // provide a floating "claude-opus-latest" alias; the major-version-stamped
@@ -31,6 +41,34 @@ const MODEL_IDS = {
   "deepseek-v4-pro":   { provider: "deepseek",  modelId: "deepseek-v4-pro" },
 } as const;
 type ModelKey = keyof typeof MODEL_IDS;
+
+// Default fallback chain: if the cell's primary model fails (e.g. terminated
+// SSE, 5xx, overloaded, usage_limit), pi-coding-agent's patched
+// _handleRetryableError advances to the next entry. Sticky for the rest of
+// the session — user can /model back manually. Each entry is
+// `<provider>/<modelId>:<thinking>` shorthand; pi-coding-agent's
+// parseModelPattern resolves it.
+//
+// Two-subscription + one-API-key pattern, derived empirically:
+// when *both* subscriptions are in trouble at once (opus terminating AND
+// gpt-5.5 returning usage_limit_reached, observed 2026-05-06 13:50), having
+// a third tier on a fully API-billed provider keeps the fleet alive. The
+// usage_limit case caught the harden loop with a 2-tier chain and 3-of-3
+// births failed; tier 3 prevents that.
+//
+//   - anthropic primary → opus → gpt-5.5:high → deepseek-v4-pro:high
+//   - openai-codex primary → gpt-5.5 → deepseek-v4-pro:<same-thinking>
+//   - deepseek primary → no fallback in v1 (already on the API-billed leaf)
+function buildDefaultChain(primary: { provider: string; modelId: string; thinking: string }): string[] {
+  const head = `${primary.provider}/${primary.modelId}:${primary.thinking}`;
+  if (primary.provider === "anthropic") {
+    return [head, "openai-codex/gpt-5.5:high", "deepseek/deepseek-v4-pro:high"];
+  }
+  if (primary.provider === "openai-codex") {
+    return [head, `deepseek/deepseek-v4-pro:${primary.thinking}`];
+  }
+  return [head];
+}
 
 // In-tree extensions a user can opt into at create time. Each lives at
 // proto/mother/dna/.pi/extensions/<name>/ — birth pushes the whole dna, then
@@ -135,11 +173,11 @@ const EXTENSION_OPTIONS: SelectOption[] = OPTIONAL_EXTENSIONS.map((p) => ({
 // Channels — what messaging surfaces the cell is reachable on. Each
 // implies its own infra setup at birth (Slack: auto-create channel,
 // bind, deploy CF worker). Keep the list short and additive.
-const CHANNEL_VALUES = ["slack"] as const;
+const CHANNEL_VALUES = ["slack", "email"] as const;
 type ChannelValue = (typeof CHANNEL_VALUES)[number];
 const CHANNEL_OPTIONS: SelectOption[] = [
   { value: "slack", label: "slack" },
-  { value: "email", label: "email", hint: "(coming soon)" },
+  { value: "email", label: "email", hint: "<cell>@cells.md" },
 ];
 
 const PACKAGE_OPTIONS: SelectOption[] = OPTIONAL_PACKAGES.map((p) => ({
@@ -150,7 +188,23 @@ const PACKAGE_OPTIONS: SelectOption[] = OPTIONAL_PACKAGES.map((p) => ({
 
 const PACKAGE_DEFAULTS: string[] = OPTIONAL_PACKAGES.filter((p) => p.defaultChecked).map((p) => p.value);
 
-type Cell = { name: string; created_at: string };
+type Cell = {
+  name: string;
+  created_at: string;
+  // Eggs Phase 1: cells hatched from an egg start as "warming" (pi running,
+  // can be talked to) and flip to "alive" once the async post-birth tail
+  // (worker + slack + vault sync + per-cell checkpoint) completes. Cells
+  // birthed via the slow path skip "warming" and go straight to "alive".
+  // Older entries (predating this field) default to "alive" at read time.
+  status?: "warming" | "alive";
+  // egg id this cell hatched from. null/undefined for slow-birth cells.
+  hatched_from?: string;
+  // Model fallback chain (per-cell). First entry is the primary; pi-coding-agent
+  // advances to the next entry on retry-exhaustion via the patch in
+  // apply-pi-patches.sh. Mirrored here so harden-birth can verify the
+  // birth pipeline wrote it correctly into the cell's settings.json.
+  modelChain?: string[];
+};
 type Registry = { cells: Cell[] };
 
 async function loadRegistry(): Promise<Registry> {
@@ -161,6 +215,138 @@ async function loadRegistry(): Promise<Registry> {
 async function saveRegistry(reg: Registry): Promise<void> {
   await mkdir(REGISTRY_DIR, { recursive: true });
   await writeFile(REGISTRY_PATH, JSON.stringify(reg, null, 2));
+}
+
+// ───── eggs.json — pre-warmed cell pool ─────
+//
+// Eggs are sprites with the toolchain installed but no agent identity.
+// Hatching = claiming an egg, sed-substituting (NAME, MODEL, PROVIDER,
+// THINKING) onto it, registering its site service, and starting pi.
+// Auto-hatch in cmdCreate looks for a warm egg matching the requested
+// variant signature; if none, falls back to the slow build-from-scratch
+// path. See docs/eggs-phase-1.md for the full design.
+
+type EggState = "warm" | "claimed" | "live" | "culling";
+
+type Egg = {
+  id: string;                  // 6-hex hash of variant signature
+  sprite_name: string;         // egg-<modeltoken>-<id>
+  variant_signature: string;   // canonical "v1:..." per cli/lib/variant-signature.ts
+  state: EggState;
+  born_at: string;
+  claimed_at: string | null;
+  claimed_by: string | null;   // cell name that hatched this egg
+  max_age_at: string;          // born_at + 7 days; not enforced in Phase 1
+};
+
+type EggsFile = { version: 1; eggs: Egg[] };
+
+async function loadEggs(): Promise<EggsFile> {
+  if (!existsSync(EGGS_PATH)) return { version: 1, eggs: [] };
+  try {
+    const parsed = JSON.parse(await readFile(EGGS_PATH, "utf-8"));
+    if (parsed?.version !== 1 || !Array.isArray(parsed.eggs)) {
+      throw new Error("eggs.json malformed (expected {version: 1, eggs: [...]})");
+    }
+    return parsed as EggsFile;
+  } catch (e) {
+    if ((e as any).code === "ENOENT") return { version: 1, eggs: [] };
+    throw e;
+  }
+}
+
+async function saveEggs(file: EggsFile): Promise<void> {
+  await mkdir(REGISTRY_DIR, { recursive: true });
+  // Atomic write: tmp + rename. Survives mid-write crashes.
+  const tmp = EGGS_PATH + ".tmp";
+  await writeFile(tmp, JSON.stringify(file, null, 2));
+  await rename(tmp, EGGS_PATH);
+}
+
+// Cooperative file lock around eggs.json read-modify-write. Uses an
+// O_EXCL sentinel so two processes cannot both think they hold the
+// lock. Lock timeout is 10s — if a process dies holding the lock the
+// next caller cleans up after the timeout and retries once.
+async function withEggLock<T>(fn: () => Promise<T>): Promise<T> {
+  await mkdir(REGISTRY_DIR, { recursive: true });
+  const start = Date.now();
+  while (Date.now() - start < 10_000) {
+    const fh = await Bun.file(EGGS_LOCK_PATH).exists() ? null : await tryAcquireLock();
+    if (fh) {
+      try {
+        return await fn();
+      } finally {
+        try { await unlink(EGGS_LOCK_PATH); } catch { /* ignore */ }
+      }
+    }
+    // Stale-lock recovery: if the lock is older than 30s, force-clear it.
+    try {
+      const s = statSync(EGGS_LOCK_PATH);
+      if (Date.now() - s.mtimeMs > 30_000) {
+        try { await unlink(EGGS_LOCK_PATH); } catch { /* ignore */ }
+      }
+    } catch { /* lock vanished mid-check */ }
+    await new Promise((r) => setTimeout(r, 50));
+  }
+  throw new Error(`could not acquire eggs lock at ${EGGS_LOCK_PATH} within 10s`);
+}
+
+async function tryAcquireLock(): Promise<boolean> {
+  // Bun has no O_EXCL helper; use node:fs.openSync with the wx flag.
+  try {
+    const fs = await import("node:fs");
+    const fd = fs.openSync(EGGS_LOCK_PATH, "wx");
+    fs.closeSync(fd);
+    return true;
+  } catch (e: any) {
+    if (e.code === "EEXIST") return false;
+    throw e;
+  }
+}
+
+// Atomically claim a warm egg matching the predicate. Returns the
+// claimed egg (state transitioned to "claimed", claimed_at + claimed_by
+// populated) or null if no match.
+async function claimEgg(
+  match: (e: Egg) => boolean,
+  claimedBy: string,
+): Promise<Egg | null> {
+  return withEggLock(async () => {
+    const file = await loadEggs();
+    const egg = file.eggs.find((e) => e.state === "warm" && match(e));
+    if (!egg) return null;
+    egg.state = "claimed";
+    egg.claimed_at = new Date().toISOString();
+    egg.claimed_by = claimedBy;
+    await saveEggs(file);
+    return egg;
+  });
+}
+
+// Mark an egg as live (after its hatch's site service registered and pi
+// is up). Pete can then `cells egg list` and see hatched eggs that have
+// graduated into cells. Phase 3 may auto-cull these once the cell is
+// killed; v1 leaves them as breadcrumbs.
+async function markEggLive(eggId: string): Promise<void> {
+  await withEggLock(async () => {
+    const file = await loadEggs();
+    const egg = file.eggs.find((e) => e.id === eggId);
+    if (!egg) return;
+    egg.state = "live";
+    await saveEggs(file);
+  });
+}
+
+// Mark an egg for culling (after a hatch failure). Pete cleans up via
+// `cells egg cull <id>`.
+async function markEggCulling(eggId: string): Promise<void> {
+  await withEggLock(async () => {
+    const file = await loadEggs();
+    const egg = file.eggs.find((e) => e.id === eggId);
+    if (!egg) return;
+    egg.state = "culling";
+    await saveEggs(file);
+  });
 }
 
 async function findCell(name: string): Promise<Cell | undefined> {
@@ -451,34 +637,117 @@ async function runPi(slashCommand: string, args: string[]): Promise<number> {
 
 type Outcome = { success: boolean; message: string };
 
+// Mother concurrency = 1. Two parallel `pi -p` invocations against
+// mother contend for the OAuth/proxy session and one gets SIGTERMed
+// after ~175s (per project_mother_concurrency.md). Symptom: the user
+// sees "terminated" + "agent did not report outcome" — observed when
+// the harden cron fired during a manual `cells birth`. The lock below
+// serializes every mother-orchestrated command across all processes
+// on this machine. Holders include their PID and label so a stuck
+// holder is diagnosable. Stale locks (process gone) are reclaimed.
+let weHoldMotherLock = false;
+
+function cleanupMotherLockSync(): void {
+  if (!weHoldMotherLock) return;
+  try {
+    const raw = readFileSync(MOTHER_LOCK_PATH, "utf-8");
+    const holder = JSON.parse(raw) as { pid: number };
+    if (holder.pid === process.pid) unlinkSync(MOTHER_LOCK_PATH);
+  } catch {
+    // best-effort
+  }
+  weHoldMotherLock = false;
+}
+
+let signalHandlersInstalled = false;
+function ensureSignalHandlers(): void {
+  if (signalHandlersInstalled) return;
+  signalHandlersInstalled = true;
+  process.on("exit", cleanupMotherLockSync);
+  for (const sig of ["SIGINT", "SIGTERM", "SIGHUP"] as const) {
+    process.on(sig, () => {
+      cleanupMotherLockSync();
+      process.exit(130);
+    });
+  }
+}
+
+async function withMotherLock<T>(label: string, fn: () => Promise<T>): Promise<T> {
+  ensureSignalHandlers();
+
+  // Wait for any existing holder to clear, then claim.
+  let warned = false;
+  while (existsSync(MOTHER_LOCK_PATH)) {
+    let holder: { pid: number; startedAt: string; label: string } | null = null;
+    try {
+      holder = JSON.parse(await readFile(MOTHER_LOCK_PATH, "utf-8"));
+    } catch {
+      // malformed — fall through to reclaim
+    }
+    if (holder) {
+      try {
+        process.kill(holder.pid, 0);
+        // Holder is alive. Wait.
+        if (!warned) {
+          const elapsed = Math.round((Date.now() - new Date(holder.startedAt).getTime()) / 1000);
+          console.warn(`waiting on mother — '${holder.label}' is in flight (pid ${holder.pid}, ${elapsed}s ago)`);
+          warned = true;
+        }
+        await new Promise((r) => setTimeout(r, 5000));
+        continue;
+      } catch {
+        // Holder is dead — reclaim.
+        console.warn(`mother lock: removing stale lock (pid ${holder.pid} no longer alive)`);
+      }
+    }
+    try { await unlink(MOTHER_LOCK_PATH); } catch {}
+    break;
+  }
+
+  await writeFile(
+    MOTHER_LOCK_PATH,
+    JSON.stringify({ pid: process.pid, startedAt: new Date().toISOString(), label }),
+  );
+  weHoldMotherLock = true;
+
+  try {
+    return await fn();
+  } finally {
+    try { await unlink(MOTHER_LOCK_PATH); } catch {}
+    weHoldMotherLock = false;
+  }
+}
+
 async function runPiWithOutcome(
   slashCommand: string,
   args: string[],
 ): Promise<{ exit: number; outcome: Outcome | null }> {
-  const outcomeFile = join(
-    tmpdir(),
-    `cell-outcome-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.json`,
-  );
-  if (existsSync(outcomeFile)) await unlink(outcomeFile);
+  return withMotherLock(`${slashCommand} ${args[0] ?? ""}`.trim(), async () => {
+    const outcomeFile = join(
+      tmpdir(),
+      `cell-outcome-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.json`,
+    );
+    if (existsSync(outcomeFile)) await unlink(outcomeFile);
 
-  const message = `/${slashCommand} ${args.join(" ")}`.trim();
-  const proc = spawnInRepo(["pi", "-p", message], { CELL_OUTCOME_FILE: outcomeFile });
-  const exit = await proc.exited;
+    const message = `/${slashCommand} ${args.join(" ")}`.trim();
+    const proc = spawnInRepo(["pi", "-p", message], { CELL_OUTCOME_FILE: outcomeFile });
+    const exit = await proc.exited;
 
-  let outcome: Outcome | null = null;
-  if (existsSync(outcomeFile)) {
-    try {
-      outcome = JSON.parse(await readFile(outcomeFile, "utf-8"));
-    } catch {
-      // malformed — leave null
+    let outcome: Outcome | null = null;
+    if (existsSync(outcomeFile)) {
+      try {
+        outcome = JSON.parse(await readFile(outcomeFile, "utf-8"));
+      } catch {
+        // malformed — leave null
+      }
+      try {
+        await unlink(outcomeFile);
+      } catch {
+        // best-effort cleanup
+      }
     }
-    try {
-      await unlink(outcomeFile);
-    } catch {
-      // best-effort cleanup
-    }
-  }
-  return { exit, outcome };
+    return { exit, outcome };
+  });
 }
 
 // ───── direct (no Pi) ─────
@@ -1003,6 +1272,7 @@ async function cmdCreate(name: string, opts: CreateOpts) {
   }
 
   const choice = MODEL_IDS[modelKey];
+  const chain = buildDefaultChain({ provider: choice.provider, modelId: choice.modelId, thinking });
   const payload = {
     harness,
     provider: choice.provider,
@@ -1010,89 +1280,93 @@ async function cmdCreate(name: string, opts: CreateOpts) {
     thinking,
     extensions,
     packages,
+    chain,
   };
 
+  // ── Auto-hatch path ──
+  // If a matching warm egg exists, hatch it. Sub-20s to "alive". The
+  // pool key matches on (model, extensions, packages); thinking and
+  // channels are applied at hatch.
+  const fullVariant: Variant = {
+    model: modelKey,
+    thinking,
+    extensions: [...extensions].sort(),
+    packages: [...packages].sort(),
+    channels: [...channels].sort(),
+  };
+  const requestedKey = poolKey(fullVariant);
+  const eggsFile = await loadEggs();
+  const matchingEgg = eggsFile.eggs.find(
+    (e) => e.state === "warm" && e.variant_signature === requestedKey,
+  );
+  if (matchingEgg) {
+    const hatchResult = await hatchEgg(
+      matchingEgg,
+      name,
+      thinking,
+      extensions,
+      channels,
+      chain,
+      slackChannel,
+    );
+    if (hatchResult.ok) {
+      // Magic moment: drop straight into interactive talk if we have a
+      // TTY. The async tail (worker, slack, vault, checkpoint) runs in
+      // parallel — by the time the user has typed their first message,
+      // most of it is done. In non-TTY mode (script invocations), await
+      // the tail instead so the cell is fully provisioned on exit.
+      if (process.stdout.isTTY) {
+        await cmdTalk(name, []);
+      } else if (hatchResult.tailPromise) {
+        await hatchResult.tailPromise;
+      }
+      return;
+    }
+    // hatch failed — fall through to slow birth. The egg has been
+    // marked "culling" by hatchEgg already.
+    console.warn(`! hatch fell back to slow birth: ${hatchResult.reason}`);
+  }
+
+  // ── Slow birth path (no matching egg, or hatch failed) ──
   const { outcome } = await runPiWithOutcome("cell-create", [name, JSON.stringify(payload)]);
   if (!outcome) {
-    console.error("agent did not report outcome — registry not updated");
+    console.error("agent did not report outcome — sweeping potential orphan sprite and aborting");
+    await directSpriteDestroy(name);
     process.exit(1);
   }
   if (!outcome.success) {
-    console.error(`birth failed: ${outcome.message}`);
+    console.error(`birth failed: ${outcome.message} — sweeping potential orphan sprite`);
+    await directSpriteDestroy(name);
     process.exit(1);
   }
+  // Mirror the hatch flow: register as "warming", then fire-and-forget
+  // the post-birth tail (Slack, email, Worker, vault) so the user can
+  // drop into talk immediately. wirePostBirth → markCellAlive flips the
+  // status to "alive" once wiring lands. resolveSpriteHost has retries
+  // for the case where talk happens before the Worker is up.
   const reg = await loadRegistry();
-  reg.cells.push({ name, created_at: new Date().toISOString() });
+  reg.cells.push({ name, created_at: new Date().toISOString(), status: "warming", modelChain: chain });
   await saveRegistry(reg);
 
-  // Post-birth: wire Slack if requested. Best-effort — the cell itself
-  // exists; if any of these steps fail, Pete can re-run them manually.
-  if (channels.includes("slack")) {
+  console.log(`✓ ${name} alive — pi is up; capabilities are warming up async (cf worker, channels, vault).`);
+
+  const tailPromise = (async () => {
     try {
-      // Auto-create the channel if no existing ID was passed via
-      // --slack-channel. Convention: cells-<name>. If the channel
-      // already exists (`name_taken`), bind to the existing one.
-      if (!slackChannel) {
-        slackChannel = await ensureSlackChannel(name);
-        console.log(`✓ slack channel ${slackChannel} (#cells-${name})`);
-        // Best-effort: invite the human owner so the channel shows up
-        // in their sidebar. Failures here don't block the birth — the
-        // channel still exists and routes; Pete can /invite himself.
-        try {
-          const userId = await resolveSlackUserId();
-          if (userId) {
-            await inviteSlackUser(slackChannel, userId);
-            console.log(`✓ invited ${userId} to #cells-${name}`);
-          }
-        } catch (e) {
-          console.warn(`! could not auto-invite to #cells-${name}: ${e}`);
-        }
-      }
-      const file = await loadChannels();
-      file.bindings[slackChannel] = {
-        cell: name,
-        kind: "slack",
-        createdAt: new Date().toISOString(),
-      };
-      await saveChannels(file);
-      await kvUpsert(slackChannel, name);
-      await updateCellStatusChannels(name);
-      console.log(`✓ linked ${slackChannel} → ${name} (slack)`);
+      await wirePostBirth(name, channels, slackChannel);
+      await markCellAlive(name);
     } catch (e) {
-      console.error(`✗ slack wiring failed: ${e}`);
-      console.error(`  retry: cells channel link ${name} <id>`);
+      console.error(`! post-birth wiring failed for ${name}: ${e}`);
     }
-  }
+  })();
 
-  // Deploy the per-cell CF Worker (the CellAgent DO that holds the
-  // persistent WS to the sprite). Runs deploy-cell-worker.sh, which
-  // resolves the sprite host and runs `wrangler deploy`. Required
-  // regardless of Slack — without this Worker, <name>.cells.md falls
-  // through to the subscriptions proxy and 404s, which breaks `cells
-  // talk` (resolveSpriteHost hits <name>.cells.md/debug).
-  try {
-    const script = join(REPO_ROOT, "scripts/deploy-cell-worker.sh");
-    const proc = Bun.spawn(["bash", script, name], { stdout: "inherit", stderr: "inherit" });
-    const code = await proc.exited;
-    if (code !== 0) {
-      console.error(`✗ worker deploy failed (exit ${code})`);
-      console.error(`  retry: scripts/deploy-cell-worker.sh ${name}`);
-    } else {
-      console.log(`✓ deployed cells-front-${name}`);
-    }
-  } catch (e) {
-    console.error(`✗ worker deploy failed: ${e}`);
-    console.error(`  retry: scripts/deploy-cell-worker.sh ${name}`);
-  }
-
-  // Mirror the cell into Pete's Obsidian vault so it shows up in
-  // `cells list` (model column reads from the vault's IDENTITY.md) and
-  // is browsable immediately. Best-effort — vault sync isn't load-bearing.
-  try {
-    await cmdSync(name);
-  } catch (e) {
-    console.error(`! initial vault sync failed: ${e}`);
-    console.error(`  retry: cells sync ${name}`);
+  if (process.stdout.isTTY) {
+    // Magic moment: drop into talk immediately. Tail runs in background;
+    // bun's event loop keeps the process alive while talk holds it.
+    await cmdTalk(name, []);
+  } else {
+    // Non-TTY (scripted): await the tail so callers see a fully-wired
+    // cell when the command exits.
+    await tailPromise;
   }
 }
 
@@ -1223,25 +1497,71 @@ async function readSecret(key: string): Promise<string | null> {
   }
 }
 
-async function cmdDestroyOne(name: string): Promise<boolean> {
-  const { outcome } = await runPiWithOutcome("cell-destroy", [name]);
-  if (!outcome || !outcome.success) {
-    console.error(`destroy '${name}' failed: ${outcome?.message ?? "no outcome reported"}`);
+// Destroy a sprite directly via the sprite CLI, bypassing the mother
+// agent. Safety net for when mother dies mid-destroy or mid-birth — the
+// sprite may be live but our mother-driven path has no way to clean it
+// up. Idempotent: 'sprite not found' counts as success.
+async function directSpriteDestroy(name: string): Promise<boolean> {
+  try {
+    const proc = Bun.spawn(["sprite", "destroy", name, "--force"], {
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    const code = await proc.exited;
+    if (code === 0) return true;
+    const err = await new Response(proc.stderr).text();
+    if (/sprite not found|already destroyed|not found/i.test(err)) return true;
+    console.warn(`! direct sprite destroy '${name}' failed (exit ${code}): ${err.slice(0, 200)}`);
+    return false;
+  } catch (e) {
+    console.warn(`! direct sprite destroy '${name}' threw: ${e}`);
     return false;
   }
+}
+
+async function cmdDestroyOne(name: string): Promise<boolean> {
+  // Mother's cell-destroy prompt resolves cell-name → sprite-name itself
+  // (via the cell_resolve tool, which reads cells.json + eggs.json), so
+  // a single mother path works for both slow-birth and hatched cells.
+  // We still resolve locally too — purely as a safety net for when
+  // mother dies mid-destroy and we need to call sprite API directly.
+  const spriteName = await spriteNameForCell(name);
+
+  const { outcome } = await runPiWithOutcome("cell-destroy", [name]);
+  let destroyOk = outcome?.success === true;
+  if (!outcome) {
+    console.warn(`! mother did not report outcome for '${name}' — proceeding with local cleanup`);
+  } else if (!outcome.success) {
+    console.warn(`! mother reported destroy failure for '${name}': ${outcome.message} — proceeding with local cleanup`);
+  }
+  if (!destroyOk) {
+    if (await directSpriteDestroy(spriteName)) destroyOk = true;
+  }
+
+  // Local cleanup — always runs. Each helper is best-effort with internal
+  // existsSync / try-catch guards.
   const reg = await loadRegistry();
+  const killedCell = reg.cells.find((c) => c.name === name);
   reg.cells = reg.cells.filter((c) => c.name !== name);
   await saveRegistry(reg);
-
-  // Evict pulse state for the destroyed cell so the scheduler doesn't keep
-  // trying to fire to a non-existent target. Best-effort — pulse tolerates
-  // orphan state, this just keeps the digest clean.
   await evictPulseStateForCell(name);
   await archiveSlackChannelsForCell(name);
   await evictChannelBindingsForCell(name);
   await deleteCellWorker(name);
   await removeVaultEntry(name);
-  return true;
+
+  // If this was a hatched cell, the cell's sprite IS the egg's sprite.
+  // It just got destroyed above, so the eggs.json entry is now stale.
+  // Remove it so `cells egg list` doesn't show a phantom "live" entry.
+  if (killedCell?.hatched_from) {
+    await withEggLock(async () => {
+      const f = await loadEggs();
+      f.eggs = f.eggs.filter((e) => e.id !== killedCell.hatched_from);
+      await saveEggs(f);
+    });
+  }
+
+  return destroyOk;
 }
 
 // Remove the cell's Obsidian vault dir (created by cmdSync at birth) and
@@ -1395,13 +1715,28 @@ async function evictPulseStateForCell(name: string): Promise<void> {
 // One cell can be bound to multiple channels (multiple keys, same .cell).
 // ────────────────────────────────────────────────────────────────────────────
 
-type ChannelKind = "slack"; // future: "imessage" | "telegram" | "email"
+type ChannelKind = "slack" | "email"; // future: "imessage" | "telegram"
 type ChannelBinding = { cell: string; kind: ChannelKind; createdAt: string };
 type ChannelsFile = { version: 1; bindings: Record<string, ChannelBinding> };
 
 const CHANNEL_ID_PATTERNS: Record<ChannelKind, RegExp> = {
   slack: /^[CDG][A-Z0-9]{8,}$/, // C=public, D=DM, G=private/group/mpdm
+  // Email "channel ID" is the address itself. KV key is shaped
+  // "email:<local-part>" downstream so the email worker's lookup namespace
+  // doesn't collide with Slack channel IDs.
+  email: /^[a-z0-9._-]+@cells\.md$/,
 };
+
+// Map a binding to the KV key used by the front-door workers. Slack uses
+// the bare channel ID (Slack worker reads CHANNELS.get(channelId)); email
+// uses an "email:<local-part>" prefix so the namespaces stay separate.
+function kvKeyFor(kind: ChannelKind, channelId: string): string {
+  if (kind === "email") {
+    const local = channelId.split("@")[0]?.toLowerCase() ?? "";
+    return `email:${local}`;
+  }
+  return channelId;
+}
 
 async function loadChannels(): Promise<ChannelsFile> {
   if (!existsSync(CHANNELS_PATH)) return { version: 1, bindings: {} };
@@ -1469,35 +1804,37 @@ async function readWranglerOauthToken(): Promise<string | null> {
   } catch { return null; }
 }
 
-async function kvUpsert(channelId: string, cell: string): Promise<void> {
+async function kvUpsert(kind: ChannelKind, channelId: string, cell: string): Promise<void> {
   const id = await kvChannelsNamespaceId();
   const creds = await cfCreds();
   if (!id || !creds) {
     console.warn(`[kv] missing CLOUDFLARE_KV_CHANNELS_ID or account/token — local channels.json updated but KV is stale`);
     return;
   }
+  const key = kvKeyFor(kind, channelId);
   const r = await fetch(
-    `https://api.cloudflare.com/client/v4/accounts/${creds.accountId}/storage/kv/namespaces/${id}/values/${encodeURIComponent(channelId)}`,
+    `https://api.cloudflare.com/client/v4/accounts/${creds.accountId}/storage/kv/namespaces/${id}/values/${encodeURIComponent(key)}`,
     { method: "PUT", headers: { Authorization: `Bearer ${creds.token}` }, body: cell },
   );
   if (!r.ok) {
-    console.warn(`[kv] put ${channelId}=${cell} failed (${r.status}): ${(await r.text()).slice(0, 200)}`);
+    console.warn(`[kv] put ${key}=${cell} failed (${r.status}): ${(await r.text()).slice(0, 200)}`);
   }
 }
 
-async function kvDelete(channelId: string): Promise<void> {
+async function kvDelete(kind: ChannelKind, channelId: string): Promise<void> {
   const id = await kvChannelsNamespaceId();
   const creds = await cfCreds();
   if (!id || !creds) {
     console.warn(`[kv] missing CLOUDFLARE_KV_CHANNELS_ID or account/token — local channels.json updated but KV is stale`);
     return;
   }
+  const key = kvKeyFor(kind, channelId);
   const r = await fetch(
-    `https://api.cloudflare.com/client/v4/accounts/${creds.accountId}/storage/kv/namespaces/${id}/values/${encodeURIComponent(channelId)}`,
+    `https://api.cloudflare.com/client/v4/accounts/${creds.accountId}/storage/kv/namespaces/${id}/values/${encodeURIComponent(key)}`,
     { method: "DELETE", headers: { Authorization: `Bearer ${creds.token}` } },
   );
   if (!r.ok) {
-    console.warn(`[kv] delete ${channelId} failed (${r.status}): ${(await r.text()).slice(0, 200)}`);
+    console.warn(`[kv] delete ${key} failed (${r.status}): ${(await r.text()).slice(0, 200)}`);
   }
 }
 
@@ -1505,16 +1842,16 @@ async function evictChannelBindingsForCell(name: string): Promise<void> {
   if (!existsSync(CHANNELS_PATH)) return;
   try {
     const file = await loadChannels();
-    const removed: string[] = [];
+    const removed: { id: string; kind: ChannelKind }[] = [];
     for (const [id, b] of Object.entries(file.bindings)) {
       if (b.cell === name) {
+        removed.push({ id, kind: b.kind });
         delete file.bindings[id];
-        removed.push(id);
       }
     }
     if (removed.length > 0) {
       await saveChannels(file);
-      for (const id of removed) await kvDelete(id);
+      for (const r of removed) await kvDelete(r.kind, r.id);
     }
   } catch { /* best-effort */ }
 }
@@ -1529,7 +1866,7 @@ async function cmdChannel(args: string[]) {
     case "sync":   await cmdChannelSync(); break;
     default:
       console.error("usage:");
-      console.error("  cells channel link <cell> <channel-id> [--kind=slack]");
+      console.error("  cells channel link <cell> <channel-id-or-address> [--kind=slack|email]");
       console.error("  cells channel unlink <cell> [<channel-id>]");
       console.error("  cells channel list");
       console.error("  cells channel sync                # re-mirror channels.json → KV");
@@ -1543,8 +1880,8 @@ async function cmdChannelLink(args: string[]) {
   for (const a of args) {
     if (a.startsWith("--kind=")) {
       const v = a.slice("--kind=".length);
-      if (v !== "slack") {
-        console.error(`unsupported kind: ${v} (only 'slack' for now)`);
+      if (v !== "slack" && v !== "email") {
+        console.error(`unsupported kind: ${v} (choose: slack | email)`);
         process.exit(1);
       }
       kind = v;
@@ -1553,11 +1890,15 @@ async function cmdChannelLink(args: string[]) {
       process.exit(1);
     } else positional.push(a);
   }
-  const [cell, channelId] = positional;
+  let [cell, channelId] = positional;
   if (!cell || !channelId) {
-    console.error("usage: cells channel link <cell> <channel-id> [--kind=slack]");
+    console.error("usage: cells channel link <cell> <channel-id-or-address> [--kind=slack|email]");
     process.exit(1);
   }
+  // For email, the "channel ID" is the address itself. Lowercase it so
+  // the regex (and downstream KV key derivation) is consistent regardless
+  // of how Pete typed it.
+  if (kind === "email") channelId = channelId.toLowerCase();
   await requireCell(cell);
   if (!CHANNEL_ID_PATTERNS[kind].test(channelId)) {
     console.error(`bad channel ID for kind=${kind}: ${channelId} (expected ${CHANNEL_ID_PATTERNS[kind]})`);
@@ -1571,7 +1912,7 @@ async function cmdChannelLink(args: string[]) {
     createdAt: prev?.createdAt ?? new Date().toISOString(),
   };
   await saveChannels(file);
-  await kvUpsert(channelId, cell);
+  await kvUpsert(kind, channelId, cell);
   await updateCellStatusChannels(cell);
   if (prev && prev.cell !== cell && prev.cell) {
     // Also refresh the previously-bound cell's status so its bar drops the
@@ -1604,23 +1945,27 @@ async function cmdChannelUnlink(args: string[]) {
       console.error(`binding ${channelId} is for ${b.cell}, not ${cell}`);
       process.exit(1);
     }
+    const removedKind = b.kind;
     delete file.bindings[channelId];
     await saveChannels(file);
-    await kvDelete(channelId);
+    await kvDelete(removedKind, channelId);
     await updateCellStatusChannels(cell);
     console.log(`unlinked ${channelId} (was ${cell})`);
     return;
   }
-  const removed: string[] = [];
+  const removed: { id: string; kind: ChannelKind }[] = [];
   for (const [id, b] of Object.entries(file.bindings)) {
-    if (b.cell === cell) { delete file.bindings[id]; removed.push(id); }
+    if (b.cell === cell) {
+      removed.push({ id, kind: b.kind });
+      delete file.bindings[id];
+    }
   }
   if (removed.length === 0) {
     console.log(`no bindings for ${cell}`);
     return;
   }
   await saveChannels(file);
-  for (const id of removed) await kvDelete(id);
+  for (const r of removed) await kvDelete(r.kind, r.id);
   await updateCellStatusChannels(cell);
   console.log(`unlinked ${removed.length} channel${removed.length === 1 ? "" : "s"} from ${cell}`);
 }
@@ -1699,8 +2044,8 @@ async function cmdChannelSync() {
     return;
   }
   for (const [id, b] of entries) {
-    await kvUpsert(id, b.cell);
-    console.log(`synced ${id} → ${b.cell}`);
+    await kvUpsert(b.kind, id, b.cell);
+    console.log(`synced ${id} → ${b.cell} (${b.kind})`);
   }
   console.log(`✓ synced ${entries.length} binding${entries.length === 1 ? "" : "s"} to KV`);
 }
@@ -2051,16 +2396,32 @@ async function resolveBoundChannel(cellName: string): Promise<string | null> {
 // cell worker's /debug endpoint — faster than `sprite info` and uses
 // the same bearer secret we already have.
 async function resolveSpriteHost(name: string, secret: string): Promise<string | null> {
-  try {
-    const r = await fetch(`https://${name}.cells.md/debug`, {
-      headers: { authorization: `Bearer ${secret}` },
-    });
-    if (!r.ok) return null;
-    const j = (await r.json()) as { sprite?: string };
-    return j.sprite ?? null;
-  } catch {
-    return null;
+  // Retry with backoff — a freshly-deployed CF worker can take 5-15s to
+  // become reachable via <name>.cells.md while DNS / the worker route
+  // propagates. Without this retry, an auto-hatch or slow-birth that
+  // drops directly into `cells talk` races the worker and 404s.
+  const delays = [0, 1000, 2000, 3000, 5000]; // total ~11s
+  let lastErr: unknown = null;
+  for (const ms of delays) {
+    if (ms > 0) await new Promise((r) => setTimeout(r, ms));
+    try {
+      const r = await fetch(`https://${name}.cells.md/debug`, {
+        headers: { authorization: `Bearer ${secret}` },
+      });
+      if (r.ok) {
+        const j = (await r.json()) as { sprite?: string };
+        if (j.sprite) return j.sprite;
+      }
+      lastErr = `${r.status} ${r.statusText}`;
+    } catch (e) {
+      lastErr = e;
+    }
   }
+  // All retries exhausted. Return null so the caller's existing error
+  // path triggers — but the retries have given the worker plenty of
+  // time, so this is now a real failure rather than a race.
+  void lastErr;
+  return null;
 }
 
 // Mirror a CLI prompt into the cell's bound Slack channel as a bot
@@ -2680,7 +3041,17 @@ type SpriteInfo = {
   egress: string;
 };
 
-async function getSpriteInfo(name: string): Promise<SpriteInfo> {
+async function getSpriteInfo(nameOrCell: string): Promise<SpriteInfo> {
+  // Accept either a sprite name or a cell name. For hatched cells, the
+  // sprite name is the egg's permanent name (cell name ≠ sprite name);
+  // resolve here so the API call hits the right sprite. Sprite-only
+  // callers pass a name not in the cell registry — spriteNameForCell
+  // returns the input unchanged in that case.
+  const name = await spriteNameForCell(nameOrCell);
+  return getSpriteInfoBySpriteName(name);
+}
+
+async function getSpriteInfoBySpriteName(name: string): Promise<SpriteInfo> {
   const [sprite, policy] = await Promise.all([
     api(`/v1/sprites/${encodeURIComponent(name)}`),
     api(`/v1/sprites/${encodeURIComponent(name)}/policy/network`).catch(() => null),
@@ -2789,7 +3160,10 @@ async function spriteExecCapture(name: string, script: string): Promise<{ ok: bo
   return { ok: code === 0, stdout, stderr };
 }
 
-async function pullMarkdown(name: string, vaultPath: string): Promise<{ persona: string | null }> {
+async function pullMarkdown(nameOrCell: string, vaultPath: string): Promise<{ persona: string | null }> {
+  // Accept cell name OR sprite name; resolve internally so hatched cells
+  // (cell name ≠ sprite name) sprite_exec hits the right target.
+  const name = await spriteNameForCell(nameOrCell);
   await mkdir(vaultPath, { recursive: true });
   // Pull the agent's anatomy files at the root (AGENTS.md is the entrypoint;
   // SOUL/IDENTITY/TOOLS/CELLS/CONTACTS/MEMORY/HEARTBEAT are the sharded
@@ -2868,7 +3242,9 @@ async function restructureVault(vaultPath: string): Promise<{ persona: string | 
   return { persona };
 }
 
-async function pullExtensionDocs(name: string, vaultPath: string): Promise<Array<{ name: string; meta: ExtensionMeta }>> {
+async function pullExtensionDocs(nameOrCell: string, vaultPath: string): Promise<Array<{ name: string; meta: ExtensionMeta }>> {
+  // Accept cell name OR sprite name; resolve internally for hatched cells.
+  const name = await spriteNameForCell(nameOrCell);
   // List extensions, then cat each index.ts.
   const list = await spriteExecCapture(name, "ls -1 /home/sprite/agent/.pi/extensions/ 2>/dev/null");
   if (!list.ok) return [];
@@ -3375,6 +3751,535 @@ async function cmdSync(name?: string) {
 
 // ───── dispatch ─────
 
+// Resolve a cell name to the underlying Sprite name. For slow-birth
+// cells, sprite name == cell name. For hatched cells, the sprite is
+// the egg's permanent sprite (Sprites doesn't support rename) and the
+// cell name is just our local alias. Anything that touches the
+// Sprites API for a cell — sprite_exec, sprite_destroy, sprite info,
+// the worker's SPRITE_HOST binding — must go through this helper.
+async function spriteNameForCell(name: string): Promise<string> {
+  const reg = await loadRegistry();
+  const cell = reg.cells.find((c) => c.name === name);
+  if (!cell || !cell.hatched_from) return name;
+  const eggs = await loadEggs();
+  const egg = eggs.eggs.find((e) => e.id === cell.hatched_from);
+  return egg?.sprite_name ?? name; // fall back if the egg entry is gone
+}
+
+// ───── hatch — claim an egg, sed identity onto it, start pi ─────
+//
+// Hatching is pure determinism on the Mac: no LLM, no mother. Steps:
+// (1) atomic claim, (2) restore pristine checkpoint, (3) sprite_exec
+// the per-cell substitutions, (4) validate settings.json before pi
+// spawns, (5) register site service (pi starts), (6) write registry
+// entry status="warming", (7) async tail for worker+slack+vault.
+// Target: <20s from `hatchEgg` call to "alive" log line.
+
+async function spriteExecOnEgg(spriteName: string, script: string): Promise<{ ok: boolean; stdout: string; stderr: string }> {
+  return spriteExecCapture(spriteName, script);
+}
+
+// Restore the egg's pristine checkpoint. Eggs have exactly one
+// checkpoint at v1 (taken in birth-egg step 9), so always restore v1.
+// If we ever start taking multiple checkpoints per egg we'll need to
+// track the version-id explicitly.
+async function restoreEggPristine(spriteName: string): Promise<void> {
+  const proc = Bun.spawn(["sprite", "restore", "v1", "-s", spriteName], {
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  const code = await proc.exited;
+  if (code !== 0) {
+    const err = await new Response(proc.stderr).text();
+    throw new Error(`sprite restore v1 -s ${spriteName} failed (exit ${code}): ${err.slice(0, 300)}`);
+  }
+}
+
+// Sed + jq inside the egg's sprite to bake the cell's identity in.
+// Substitutions:
+//   __NAME__         → cellName  (in DNA + tmux.conf)
+//   __THINKING__     → thinking  (in settings.json)
+//   __MODEL_CHAIN__  → JSON array literal of fallback chain (in settings.json)
+//   __CELL_BG__/     → palette colors from scripts/cell-color.sh
+//   __CELL_FG__         (cellName-deterministic)
+// Plus: register chosen optional extensions in settings.json (the egg
+// already has them on disk; just adds them to the extensions array).
+// Plus: write status.json with the cell's harness + initial channels.
+async function applyHatchSubstitutions(
+  spriteName: string,
+  cellName: string,
+  thinking: string,
+  extensions: string[],
+  channels: string[],
+  chain: string[],
+): Promise<void> {
+  // Compute color locally (same as birth step 4b)
+  const colorProc = Bun.spawn(["bash", join(REPO_ROOT, "scripts/cell-color.sh"), cellName], {
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  await colorProc.exited;
+  const colorLine = (await new Response(colorProc.stdout).text()).trim();
+  const [bg, fg] = colorLine.split(/\s+/);
+  if (!bg || !fg) {
+    throw new Error(`cell-color.sh produced unexpected output: '${colorLine}'`);
+  }
+
+  // Build the optional-extensions array as JSON for jq (one entry per
+  // chosen extension). If extensions is empty, skip the registration.
+  const extEntries = extensions.map((e) => `.pi/extensions/${e}/index.ts`);
+
+  // status.json content
+  const status = JSON.stringify({ harness: "pi", channels: channels.slice() });
+
+  // Single sprite_exec batch — each round trip is ~2-5s of overhead, so
+  // we want as few of them as possible. Bash supports multiline heredocs.
+  const script = `
+set -euo pipefail
+cd /home/sprite/agent
+
+# 1. Cell name into DNA + package.json
+sed -i 's/__NAME__/${cellName}/g' \\
+  AGENTS.md SOUL.md IDENTITY.md CELLS.md CONTACTS.md HEARTBEAT.md package.json
+
+# 2. Thinking + fallback chain into settings.json
+sed -i 's/__THINKING__/${thinking}/g' .pi/settings.json
+sed -i 's|__MODEL_CHAIN__|${JSON.stringify(chain)}|g' .pi/settings.json
+
+# 3. Extensions registration (idempotent — only adds if not present)
+${extEntries.length === 0 ? '# (no optional extensions to register)' : extEntries.map((path) => `
+jq --arg p "${path}" '
+  if (.extensions | index($p)) then . else .extensions += [$p] end
+' .pi/settings.json > /tmp/s.json && mv /tmp/s.json .pi/settings.json`).join('')}
+
+# 4. Per-cell color chip + cell name into tmux.conf
+sed -i "s|__CELL_BG__|${bg}|g; s|__CELL_FG__|${fg}|g; s|__NAME__|${cellName}|g" /home/sprite/.tmux.conf
+
+# 5. status.json
+mkdir -p .pi
+cat > .pi/status.json <<'STATUS_EOF'
+${status}
+STATUS_EOF
+
+# 6. Validate settings.json — pi will crash-loop if this fails
+jq . .pi/settings.json > /dev/null
+`;
+
+  const result = await spriteExecOnEgg(spriteName, script);
+  if (!result.ok) {
+    throw new Error(`hatch substitutions failed: ${result.stderr.slice(0, 400)}`);
+  }
+}
+
+// Flip the egg sprite's URL auth from "sprite" (default, login-walled)
+// to "public". Without this, external requests to /agent get redirected
+// to the sprites.dev login flow rather than reaching the cell's site
+// server, and the WS upgrade fails. Egg-birth skips step 7 (per design
+// — eggs aren't user-addressable while in the pool); this happens at
+// hatch instead.
+async function flipSpriteUrlPublic(spriteName: string): Promise<void> {
+  const proc = Bun.spawn(["sprite", "url", "update", "--auth", "public", "-s", spriteName], {
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  const code = await proc.exited;
+  if (code !== 0) {
+    const err = await new Response(proc.stderr).text();
+    throw new Error(`sprite url update --auth public failed for ${spriteName}: ${err.slice(0, 300)}`);
+  }
+}
+
+// Wraps scripts/register-site-service.sh — starts pi as a child of the
+// site service. After this returns, pi will (eventually) be on the WS
+// bridge endpoint. Pass cellName + spriteName so server.ts gets the
+// user-facing cell name as CELL_NAME (its bridge identity) while the
+// sprites API call targets the actual sprite.
+async function registerCellSiteService(cellName: string, spriteName: string): Promise<void> {
+  const proc = Bun.spawn(["bash", join(REPO_ROOT, "scripts/register-site-service.sh"), cellName, spriteName], {
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  const code = await proc.exited;
+  if (code !== 0) {
+    const err = await new Response(proc.stderr).text();
+    throw new Error(`register-site-service.sh ${cellName} ${spriteName} failed (exit ${code}): ${err.slice(0, 300)}`);
+  }
+}
+
+// Async post-birth wiring. Called by both auto-hatch and slow-path
+// cmdCreate. Worker deploy + slack/email channel binding + vault sync
+// + per-cell checkpoint. Best-effort — failures here don't block the
+// "alive" signal and Pete can re-run the relevant cells subcommands.
+async function wirePostBirth(
+  name: string,
+  channels: ChannelValue[],
+  slackChannelHint?: string,
+): Promise<void> {
+  let slackChannel: string | undefined = slackChannelHint;
+
+  if (channels.includes("slack")) {
+    try {
+      if (!slackChannel) {
+        slackChannel = await ensureSlackChannel(name);
+        console.log(`✓ slack channel ${slackChannel} (#cells-${name})`);
+        try {
+          const userId = await resolveSlackUserId();
+          if (userId) {
+            await inviteSlackUser(slackChannel, userId);
+            console.log(`✓ invited ${userId} to #cells-${name}`);
+          }
+        } catch (e) {
+          console.warn(`! could not auto-invite to #cells-${name}: ${e}`);
+        }
+      }
+      const file = await loadChannels();
+      file.bindings[slackChannel] = { cell: name, kind: "slack", createdAt: new Date().toISOString() };
+      await saveChannels(file);
+      await kvUpsert("slack", slackChannel, name);
+      await updateCellStatusChannels(name);
+      console.log(`✓ linked ${slackChannel} → ${name} (slack)`);
+    } catch (e) {
+      console.error(`✗ slack wiring failed: ${e}`);
+      console.error(`  retry: cells channel link ${name} <id>`);
+    }
+  }
+
+  if (channels.includes("email")) {
+    try {
+      const address = `${name}@cells.md`;
+      const file = await loadChannels();
+      file.bindings[address] = { cell: name, kind: "email", createdAt: new Date().toISOString() };
+      await saveChannels(file);
+      await kvUpsert("email", address, name);
+      await updateCellStatusChannels(name);
+      console.log(`✓ linked ${address} → ${name} (email)`);
+    } catch (e) {
+      console.error(`✗ email wiring failed: ${e}`);
+      console.error(`  retry: cells channel link ${name} ${name}@cells.md --kind=email`);
+    }
+  }
+
+  // CF Worker — required for `<name>.cells.md` routing and for
+  // `cells talk` (resolveSpriteHost depends on the worker existing).
+  // Pass sprite name explicitly so hatched cells (cell name ≠ sprite
+  // name) get the right SPRITE_HOST binding.
+  const spriteName = await spriteNameForCell(name);
+  try {
+    const script = join(REPO_ROOT, "scripts/deploy-cell-worker.sh");
+    const proc = Bun.spawn(["bash", script, name, spriteName], { stdout: "inherit", stderr: "inherit" });
+    const code = await proc.exited;
+    if (code !== 0) {
+      console.error(`✗ worker deploy failed (exit ${code})`);
+      console.error(`  retry: scripts/deploy-cell-worker.sh ${name} ${spriteName}`);
+    } else {
+      console.log(`✓ deployed cells-front-${name}`);
+    }
+  } catch (e) {
+    console.error(`✗ worker deploy failed: ${e}`);
+  }
+
+  // Vault sync — best-effort.
+  try {
+    await cmdSync(name);
+  } catch (e) {
+    console.error(`! initial vault sync failed: ${e}`);
+  }
+}
+
+// Flip the cell's status from "warming" → "alive" after wirePostBirth completes.
+async function markCellAlive(name: string): Promise<void> {
+  const reg = await loadRegistry();
+  const c = reg.cells.find((c) => c.name === name);
+  if (c) {
+    c.status = "alive";
+    await saveRegistry(reg);
+  }
+}
+
+// Main hatch entry. Returns true on success (cell alive, async tail
+// kicked off), false on failure (caller falls back to slow birth).
+async function hatchEgg(
+  egg: Egg,
+  cellName: string,
+  thinking: string,
+  extensions: string[],
+  channels: ChannelValue[],
+  chain: string[],
+  slackChannelHint?: string,
+): Promise<{ ok: boolean; tailPromise?: Promise<void>; reason?: string }> {
+  const t0 = Date.now();
+
+  // Atomic claim (state warm → claimed)
+  const claimed = await claimEgg((e) => e.id === egg.id, cellName);
+  if (!claimed) {
+    return { ok: false, reason: `egg ${egg.id} not warm at claim time (raced)` };
+  }
+
+  console.log(`hatching egg ${claimed.sprite_name} → ${cellName}...`);
+
+  try {
+    // Restore pristine checkpoint
+    await restoreEggPristine(claimed.sprite_name);
+
+    // Apply substitutions (sed + jq + status.json)
+    await applyHatchSubstitutions(claimed.sprite_name, cellName, thinking, extensions, channels, chain);
+
+    // Flip URL auth to public so external WS upgrade requests reach
+    // the cell's site server. Egg-birth left it at the sprite default.
+    await flipSpriteUrlPublic(claimed.sprite_name);
+
+    // Register site service — pi starts here as the supervised child.
+    // Cell name is what server.ts uses as bridge identity; sprite name
+    // is the API target.
+    await registerCellSiteService(cellName, claimed.sprite_name);
+
+    // Give pi 6s to come up before declaring alive. Site service start
+    // (~2-4s) + bun + pi --mode rpc startup (~3-5s) = ~10s total. We
+    // sleep ~6s here so the user's first cells talk usually succeeds
+    // on the first WS attempt; resolveSpriteHost's retry-with-backoff
+    // covers the rest.
+    await new Promise((r) => setTimeout(r, 6000));
+
+    // Write registry entry as "warming" — flips to "alive" when
+    // wirePostBirth completes.
+    const reg = await loadRegistry();
+    reg.cells.push({
+      name: cellName,
+      created_at: new Date().toISOString(),
+      status: "warming",
+      hatched_from: claimed.id,
+      modelChain: chain,
+    });
+    await saveRegistry(reg);
+
+    await markEggLive(claimed.id);
+
+    const elapsed = ((Date.now() - t0) / 1000).toFixed(1);
+    console.log(`✓ ${cellName} alive in ${elapsed}s — pi is up; capabilities are warming up async (cf worker, channels, vault).`);
+
+    // Kick off the async tail. Don't await here — the caller can decide
+    // whether to await (non-TTY scripted use) or to drop into a talk
+    // session that will keep the process alive while the tail runs.
+    const tailPromise = (async () => {
+      try {
+        await wirePostBirth(cellName, channels, slackChannelHint);
+        await markCellAlive(cellName);
+      } catch (e) {
+        console.error(`! post-birth wiring failed for ${cellName}: ${e}`);
+      }
+    })();
+
+    return { ok: true, tailPromise };
+  } catch (e) {
+    console.error(`✗ hatch failed: ${e}`);
+    await markEggCulling(claimed.id);
+    return { ok: false, reason: String(e) };
+  }
+}
+
+// ───── eggs CLI ─────
+//
+// `cells egg [--model=X --extensions=A,B --packages=C,D]`  — pre-warm a
+//                                                            new egg
+// `cells egg list`                                          — show pool
+// `cells egg cull <id>`                                     — destroy an
+//                                                            egg by id
+//
+// `--thinking` and `--channels` are deliberately NOT accepted at egg-
+// birth. Eggs are pool stock; thinking and channels are applied at
+// hatch (per cell). Trying to pass them here errors.
+
+async function cmdEgg(args: string[]) {
+  const sub = args[0];
+  if (sub === "list") {
+    await cmdEggList();
+    return;
+  }
+  if (sub === "cull") {
+    if (!args[1]) {
+      console.error("usage: cells egg cull <id>");
+      process.exit(1);
+    }
+    await cmdEggCull(args[1]);
+    return;
+  }
+  await cmdEggCreate(args);
+}
+
+function parseEggCreateArgs(args: string[]): { variant: Variant; payload: object } {
+  let modelKey: ModelKey | undefined;
+  let extensions: string[] = [];
+  let packages: string[] = [...PACKAGE_DEFAULTS];
+  let packagesSet = false;
+
+  for (const a of args) {
+    if (a.startsWith("--model=")) {
+      const v = a.slice("--model=".length);
+      if (!(v in MODEL_IDS)) {
+        console.error(`unknown model: ${v}. choose: ${Object.keys(MODEL_IDS).join(", ")}`);
+        process.exit(1);
+      }
+      modelKey = v as ModelKey;
+    } else if (a.startsWith("--extensions=")) {
+      const v = a.slice("--extensions=".length);
+      const parts = v ? v.split(",").map((s) => s.trim()).filter(Boolean) : [];
+      for (const p of parts) {
+        if (!(OPTIONAL_EXTENSIONS as readonly string[]).includes(p)) {
+          console.error(`unknown extension: ${p}. choose from: ${OPTIONAL_EXTENSIONS.join(", ")}`);
+          process.exit(1);
+        }
+      }
+      extensions = parts;
+    } else if (a.startsWith("--packages=")) {
+      const v = a.slice("--packages=".length);
+      const parts = v ? v.split(",").map((s) => s.trim()).filter(Boolean) : [];
+      for (const p of parts) {
+        if (!PACKAGE_VALUES.includes(p as (typeof PACKAGE_VALUES)[number])) {
+          console.error(`unknown package: ${p}. choose from: ${PACKAGE_VALUES.join(", ")}`);
+          process.exit(1);
+        }
+      }
+      packages = parts;
+      packagesSet = true;
+    } else if (a.startsWith("--thinking=") || a.startsWith("--channels=")) {
+      console.error(`'${a}' is not valid at egg-birth — thinking and channels are applied at hatch (per cell), not baked into the egg`);
+      process.exit(1);
+    } else if (a.startsWith("--")) {
+      console.error(`unknown flag: ${a}`);
+      process.exit(1);
+    } else {
+      console.error(`unexpected arg: ${a}`);
+      process.exit(1);
+    }
+  }
+  // packages defaults to PACKAGE_DEFAULTS unless explicitly overridden;
+  // user can pass --packages= (empty) to opt out.
+  void packagesSet;
+
+  if (!modelKey) {
+    console.error("usage: cells egg --model=opus|sonnet|haiku|gpt-5.5|gpt-5.5-pro|deepseek-v4-flash|deepseek-v4-pro [--extensions=memory,wiki] [--packages=pi-web-access]");
+    process.exit(1);
+  }
+
+  const variant: Variant = {
+    model: modelKey,
+    thinking: "",   // not baked
+    extensions: [...extensions].sort(),
+    packages: [...packages].sort(),
+    channels: [],   // not baked
+  };
+  const choice = MODEL_IDS[modelKey];
+  const payload = {
+    harness: "pi",
+    provider: choice.provider,
+    model: choice.modelId,
+    extensions,
+    packages,
+  };
+  return { variant, payload };
+}
+
+async function cmdEggCreate(args: string[]) {
+  const { variant, payload } = parseEggCreateArgs(args);
+  const sig = poolKey(variant);
+  const spriteName = eggSpriteName(variant);
+  const id = variantHash(variant);
+
+  // One egg per pool key in v1. Multiple eggs of the same variant is a
+  // Phase 3 (pool maintenance) thing — we'd need a counter suffix in
+  // sprite names to avoid collisions.
+  const existing = await loadEggs();
+  const dup = existing.eggs.find((e) => e.variant_signature === sig);
+  if (dup) {
+    console.error(`egg with this variant already exists: ${dup.id} (sprite: ${dup.sprite_name})`);
+    console.error(`use 'cells egg list' to inspect; cull it first if you want to re-bake.`);
+    process.exit(1);
+  }
+
+  console.log(`birthing egg ${spriteName} (variant: ${sig})`);
+
+  const { outcome } = await runPiWithOutcome("egg-birth", [spriteName, JSON.stringify(payload)]);
+  if (!outcome) {
+    console.error("agent did not report outcome — sweeping potential orphan sprite and aborting");
+    await directSpriteDestroy(spriteName);
+    process.exit(1);
+  }
+  if (!outcome.success) {
+    console.error(`egg birth failed: ${outcome.message} — sweeping potential orphan sprite`);
+    await directSpriteDestroy(spriteName);
+    process.exit(1);
+  }
+
+  const now = new Date();
+  const maxAge = new Date(now.getTime() + 7 * 24 * 60 * 60 * 1000); // +7 days
+  await withEggLock(async () => {
+    const file = await loadEggs();
+    file.eggs.push({
+      id,
+      sprite_name: spriteName,
+      variant_signature: sig,
+      state: "warm",
+      born_at: now.toISOString(),
+      claimed_at: null,
+      claimed_by: null,
+      max_age_at: maxAge.toISOString(),
+    });
+    await saveEggs(file);
+  });
+
+  console.log(`✓ egg ${id} (${spriteName}) registered as warm`);
+}
+
+async function cmdEggList() {
+  const file = await loadEggs();
+  if (file.eggs.length === 0) {
+    console.log("(no eggs in pool)");
+    return;
+  }
+  // Header
+  console.log("id      state       variant                                                    age       claimed_by");
+  console.log("------  ----------  ---------------------------------------------------------  --------  -----------");
+  for (const e of file.eggs) {
+    const id = e.id.padEnd(6);
+    const state = e.state.padEnd(10);
+    const sig = e.variant_signature.padEnd(57).slice(0, 57);
+    const age = fmtAge(e.born_at).padEnd(8);
+    const by = e.claimed_by ?? "—";
+    console.log(`${id}  ${state}  ${sig}  ${age}  ${by}`);
+  }
+}
+
+async function cmdEggCull(eggId: string) {
+  const file = await loadEggs();
+  const egg = file.eggs.find((e) => e.id === eggId);
+  if (!egg) {
+    console.error(`egg '${eggId}' not found in registry`);
+    console.error(`run 'cells egg list' to see available ids`);
+    process.exit(1);
+  }
+
+  // Cull is direct-sprite-destroy — no mother in the loop. Eggs have no
+  // CF worker, no Slack channel, no vault dir, no pulse state — there's
+  // nothing for mother to orchestrate. directSpriteDestroy is idempotent
+  // (404 = success).
+  console.log(`culling egg ${egg.sprite_name} (id: ${egg.id})`);
+  const ok = await directSpriteDestroy(egg.sprite_name);
+
+  // Always remove the eggs.json entry — even if sprite destroy failed,
+  // the entry is stale and Pete can manually `sprite destroy` later.
+  await withEggLock(async () => {
+    const f = await loadEggs();
+    f.eggs = f.eggs.filter((e) => e.id !== eggId);
+    await saveEggs(f);
+  });
+
+  if (ok) {
+    console.log(`✓ egg ${eggId} culled and removed from registry`);
+  } else {
+    console.warn(`! egg ${eggId} removed from registry, but sprite destroy was uncertain — verify with 'sprite list'`);
+  }
+}
+
 const [sub, ...rest] = process.argv.slice(2);
 
 switch (sub) {
@@ -3410,6 +4315,7 @@ switch (sub) {
   case "doctor":             await cmdDoctor(); break;
   case "shell":              await cmdShell(needName(rest, "shell")); break;
   case "see":                await cmdSee(needName(rest, "see")); break;
+  case "egg":                await cmdEgg(rest); break;
   default:
     console.log("usage:");
     console.log("  cells pi                    open the mother Pi TUI (alias: cells talk mother)");

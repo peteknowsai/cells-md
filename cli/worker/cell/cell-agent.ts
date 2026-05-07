@@ -30,6 +30,10 @@ interface Env {
 const SLACK_SEND_URL = "https://slack.cells.md/send";
 const SLACK_EDIT_URL = "https://slack.cells.md/edit";
 const SLACK_REPLY_URL = "https://slack.cells.md/reply";
+// Email twin. One-shot send per turn — no streaming edits, no thread
+// replies for tool overflow (the cell-agent skips both branches when
+// channelKind === "email").
+const EMAIL_SEND_URL = "https://email.cells.md/send";
 const ALARM_INTERVAL_MS = 25_000;
 // Default flush cadence. Slack documents 1/sec/message but tolerates
 // faster bursts; we honor 429 + Retry-After dynamically below to back
@@ -59,9 +63,22 @@ type ToolCall = {
   threadTs?: string;
 };
 
+type ChannelKind = "slack" | "email";
+
 type TurnState = {
   channel: string;
   threadTs: string;
+  // Discriminator chosen at agent_start from the inbound event.kind. Drives
+  // whether the final render fans out to slack.cells.md/{send,edit,reply}
+  // or email.cells.md/send.
+  kind: ChannelKind;
+  // Email-only context, captured from the inbound event so the final
+  // flush can build a reply with proper In-Reply-To / Subject. Empty for
+  // slack turns.
+  emailTo: string;
+  emailMsgId: string;
+  emailSubject: string;
+  emailSent: boolean;            // email is one-shot — guard so a re-flush doesn't double-send
   slackTs: string | null;        // ts of the live Slack message we're editing
   thinking: string;
   thinkingActive: boolean;       // true between thinking_start and thinking_end
@@ -88,6 +105,13 @@ export class CellAgent {
   // Pending prompt sent before agent_start arrives — used to seed turn channel
   private pendingChannel = "";
   private pendingThreadTs = "";
+  // Email-only pending context, used so startTurn can copy onto TurnState
+  // before the first delta arrives. Reset each handleAppend so a slack
+  // turn following an email turn doesn't inherit stale fields.
+  private pendingKind: ChannelKind = "slack";
+  private pendingEmailTo = "";
+  private pendingEmailMsgId = "";
+  private pendingEmailSubject = "";
   // Last in-memory activity timestamp. Persisted via storage on every bump
   // so the alarm (which may run in a separate invocation) can read it.
   private lastActivity = 0;
@@ -149,11 +173,20 @@ export class CellAgent {
     const channel = String(event.channel ?? "");
     const user = String(event.user ?? "");
     const threadTs = String(event.thread_ts ?? "");
+    // event.kind discriminates the front-door (slack default for back-compat;
+    // "email" enables the email outbound path). New event fields:
+    //   subject     — email subject line (empty for slack)
+    //   recipient   — the cell's own address ("bob@cells.md") for email
+    const kind: ChannelKind = event.kind === "email" ? "email" : "slack";
+    const subject = String(event.subject ?? "");
+    const recipient = String(event.recipient ?? "");
     // event.text may already include `[voice]: …` transcripts and
     // `[file: …]` markers appended by the slack worker's enrichment step.
     // Newlines need to survive — collapse only \r and avoid stripping \n.
     const text = String(event.text ?? "").replace(/\r/g, "");
-    const message = `from-slack channel=${channel}${user ? ` user=${user}` : ""}${threadTs ? ` thread=${threadTs}` : ""} text=${text}`;
+    const message = kind === "email"
+      ? `from-email from=${user}${recipient ? ` to=${recipient}` : ""}${subject ? ` subject=${subject}` : ""} text=${text}`
+      : `from-slack channel=${channel}${user ? ` user=${user}` : ""}${threadTs ? ` thread=${threadTs}` : ""} text=${text}`;
     // Pi's RPC `prompt` accepts an optional `images: ImageContent[]`; the
     // slack worker base64-encodes image attachments and forwards them here.
     // Vision-capable cell models (Opus/Sonnet) handle them inline; nothing
@@ -162,6 +195,10 @@ export class CellAgent {
 
     this.pendingChannel = channel;
     this.pendingThreadTs = threadTs;
+    this.pendingKind = kind;
+    this.pendingEmailTo = kind === "email" ? user : "";
+    this.pendingEmailMsgId = kind === "email" ? threadTs : "";
+    this.pendingEmailSubject = kind === "email" ? subject : "";
     await this.bumpActivity();
 
     await this.ensureConnection();
@@ -245,7 +282,8 @@ export class CellAgent {
             clearTimeout(t.flushTimer);
             t.flushTimer = null;
           }
-          void this.flushSlack(true);
+          if (t.kind === "email") void this.flushEmail();
+          else void this.flushSlack(true);
         }
       });
       ws.addEventListener("error", (e: any) => {
@@ -339,6 +377,11 @@ export class CellAgent {
     this.currentTurn = {
       channel: this.pendingChannel,
       threadTs: this.pendingThreadTs,
+      kind: this.pendingKind,
+      emailTo: this.pendingEmailTo,
+      emailMsgId: this.pendingEmailMsgId,
+      emailSubject: this.pendingEmailSubject,
+      emailSent: false,
       slackTs: null,
       thinking: "",
       thinkingActive: false,
@@ -351,7 +394,9 @@ export class CellAgent {
       disconnected: false,
       overflow: [],
     };
-    void this.flushSlack(false);
+    // Email turns don't pre-flush — they only emit on agent_end. Skipping
+    // the speculative first flush avoids an empty placeholder send.
+    if (this.currentTurn.kind === "slack") void this.flushSlack(false);
   }
 
   private endTurn() {
@@ -361,7 +406,8 @@ export class CellAgent {
       clearTimeout(this.currentTurn.flushTimer);
       this.currentTurn.flushTimer = null;
     }
-    void this.flushSlack(true);
+    if (this.currentTurn.kind === "email") void this.flushEmail();
+    else void this.flushSlack(true);
   }
 
   // ---- Slack rendering & emission ----
@@ -377,6 +423,10 @@ export class CellAgent {
 
   private scheduleFlush() {
     if (!this.currentTurn || this.currentTurn.ended) return;
+    // Email is one-shot — buffer everything until endTurn. No streaming
+    // edits, no incremental thread replies. The flush at agent_end handles
+    // the single send via flushEmail.
+    if (this.currentTurn.kind === "email") return;
     if (this.currentTurn.flushTimer != null) return;
     const now = Date.now();
     const delay = Math.max(0, this.currentTurn.lastFlushAt + this.currentFlushInterval() - now);
@@ -494,6 +544,47 @@ export class CellAgent {
       return false;
     }
     return true;
+  }
+
+  // ---- Email emission (one-shot) ----
+
+  // Single send per turn. Body is the same renderTurn() output the slack
+  // path uses (markdown), since most modern mail clients render markdown
+  // in plain-text bodies acceptably (and a verbatim quoted-thinking
+  // section is fine either way). The reply chains via In-Reply-To from
+  // the original Message-ID we captured at handleAppend time.
+  private async flushEmail(): Promise<void> {
+    const t = this.currentTurn;
+    if (!t || t.emailSent) return;
+    if (!t.emailTo) {
+      console.error(`[${this.env.CELL_NAME}] email turn has no emailTo — dropping`);
+      t.emailSent = true;
+      return;
+    }
+    const body = renderTurn(t, true);
+    const subject = t.emailSubject
+      ? (t.emailSubject.toLowerCase().startsWith("re:") ? t.emailSubject : `Re: ${t.emailSubject}`)
+      : "(no subject)";
+    try {
+      const res = await fetch(EMAIL_SEND_URL, {
+        method: "POST",
+        headers: { "content-type": "application/json", authorization: `Bearer ${this.env.CELLS_PROXY_SECRET}` },
+        body: JSON.stringify({
+          cell: this.env.CELL_NAME,
+          text: body,
+          to: t.emailTo,
+          inReplyTo: t.emailMsgId || undefined,
+          subject,
+        }),
+      });
+      if (!res.ok) {
+        console.error(`[${this.env.CELL_NAME}] email send failed ${res.status}: ${(await res.text()).slice(0, 200)}`);
+        return;
+      }
+      t.emailSent = true;
+    } catch (e) {
+      console.error(`[${this.env.CELL_NAME}] email send threw: ${String(e).slice(0, 200)}`);
+    }
   }
 
   // Post a thread reply under the parent message. Returns the new ts on

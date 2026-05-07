@@ -26,6 +26,14 @@ Parse the JSON. It has six fields:
 - `packages` — array of npm/git package short names to install via
   `pi install` (e.g. `pi-web-access`). May be empty. This becomes the
   `<PACKAGES>` substitution in the birth ritual.
+- `chain` — array of strings, the cell's model fallback chain in
+  `<provider>/<modelId>:<thinking>` shorthand. The first entry is the
+  primary model (typically matching `provider`/`model`/`thinking`); each
+  subsequent entry is a fallback pi-coding-agent will swap to when the
+  prior tier exhausts retries. May have one entry (no fallback). This
+  becomes the `<CHAIN_JSON>` substitution in the birth ritual — pass it
+  as a literal JSON array string (e.g. `["a","b"]`) into the sed
+  substitution so settings.json ends up with `"modelChain": ["a","b"]`.
 
 ## Routing
 
@@ -54,6 +62,10 @@ patches are harmless on code paths the cell never executes.
    - `<THINKING>` = the parsed `thinking` value
    - `<EXTENSIONS>` = the parsed `extensions` array (may be empty)
    - `<PACKAGES>` = the parsed `packages` array (may be empty)
+   - `<CHAIN_JSON>` = the parsed `chain` array re-serialized as a JSON
+     array literal string (e.g. `["claude-opus-4-7","openai-codex/gpt-5.5:high"]`).
+     Use `jq -c` or equivalent — settings.json must end up with valid JSON
+     in `modelChain`, not a TOML-ish or partial render.
 
 2. **After the birth ritual reports success**, append one line to
    `memory/project_cells_activity.md`:

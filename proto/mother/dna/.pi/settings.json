@@ -19,6 +19,7 @@
   "defaultProvider": "__PROVIDER__",
   "defaultModel": "__MODEL__",
   "defaultThinkingLevel": "__THINKING__",
+  "modelChain": __MODEL_CHAIN__,
   "warnings": {
     "anthropicExtraUsage": false
   },

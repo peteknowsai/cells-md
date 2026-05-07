@@ -1,0 +1,30 @@
+{
+  "$schema": "../node_modules/wrangler/config-schema.json",
+  "name": "cells-front-email",
+  "main": "index.ts",
+  "compatibility_date": "2026-01-01",
+  "observability": { "enabled": true },
+
+  // Workers Custom Domain for the outbound /send endpoint cells call.
+  // wrangler creates the DNS record + binds the Worker on deploy.
+  "routes": [
+    { "pattern": "email.cells.md", "custom_domain": true }
+  ],
+
+  // Same KV namespace bound to the slack worker and every cell worker.
+  // Email bindings live under "email:<local-part>" keys to avoid colliding
+  // with Slack channel IDs (which match /^[CDG][A-Z0-9]{8,}$/).
+  "kv_namespaces": [
+    {
+      "binding": "CHANNELS",
+      "id": "e16e082ccb0549d5b4d039272873cd60"
+    }
+  ],
+
+  // Email Sending binding. No destination_address means we can send to
+  // any recipient (Cloudflare requires the sender domain to be verified
+  // — cells.md DKIM/SPF set up via Email Routing → Settings).
+  "send_email": [
+    { "name": "SEND_EMAIL" }
+  ]
+}

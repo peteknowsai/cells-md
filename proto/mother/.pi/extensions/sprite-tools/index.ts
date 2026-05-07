@@ -8,41 +8,73 @@
 
 import { Type } from "@sinclair/typebox";
 import { spawn } from "node:child_process";
-import { writeFileSync, mkdirSync } from "node:fs";
-import { dirname } from "node:path";
+import { writeFileSync, mkdirSync, readFileSync, existsSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { homedir } from "node:os";
 
-type ShellResult = { ok: boolean; exit: number; stdout: string; stderr: string };
+type ShellResult = { ok: boolean; exit: number; stdout: string; stderr: string; timedOut?: boolean };
+
+// Hard cap on every sprite CLI invocation. Without this, a hung `sprite
+// exec` (e.g. an `npm install` that silently stops streaming) blocks
+// mother indefinitely — observed in the wild on 2026-05-06: a single
+// `pi install -l npm:pi-web-access` ran 54+ minutes inside a birth.
+//
+// Default 10min is generous: the slowest legitimate sprite ops we run are
+// the initial bun + pi-coding-agent install (~90s) and apt baseline
+// (~60s). Anything past 10min is broken, not slow.
+const DEFAULT_SPRITE_TIMEOUT_MS = 10 * 60 * 1000;
+const MAX_SPRITE_TIMEOUT_MS     = 30 * 60 * 1000;
 
 function runCommand(
   cmd: string,
   args: string[],
-  pipeStdin?: NodeJS.ReadableStream,
+  opts?: { timeoutMs?: number; pipeStdin?: NodeJS.ReadableStream },
 ): Promise<ShellResult> {
+  const timeoutMs = Math.min(
+    Math.max(opts?.timeoutMs ?? DEFAULT_SPRITE_TIMEOUT_MS, 1000),
+    MAX_SPRITE_TIMEOUT_MS,
+  );
   return new Promise((resolve) => {
     const proc = spawn(cmd, args, { stdio: ["pipe", "pipe", "pipe"] });
     let stdout = "";
     let stderr = "";
+    let timedOut = false;
+    const timer = setTimeout(() => {
+      timedOut = true;
+      // SIGTERM first; Node will fire 'close' shortly. If the child
+      // ignores it, escalate to SIGKILL after 3s.
+      try { proc.kill("SIGTERM"); } catch {}
+      setTimeout(() => { try { proc.kill("SIGKILL"); } catch {} }, 3000);
+    }, timeoutMs);
     proc.stdout.on("data", (d: Buffer) => {
       stdout += d.toString();
     });
     proc.stderr.on("data", (d: Buffer) => {
       stderr += d.toString();
     });
-    if (pipeStdin) {
-      pipeStdin.pipe(proc.stdin);
+    if (opts?.pipeStdin) {
+      opts.pipeStdin.pipe(proc.stdin);
     } else {
       proc.stdin.end();
     }
     proc.on("close", (code) => {
-      resolve({ ok: code === 0, exit: code ?? -1, stdout, stderr });
+      clearTimeout(timer);
+      if (timedOut) {
+        const tag = `\n[killed by sprite-tools after ${Math.round(timeoutMs / 1000)}s — process never exited]`;
+        resolve({ ok: false, exit: code ?? -1, stdout, stderr: stderr + tag, timedOut: true });
+      } else {
+        resolve({ ok: code === 0, exit: code ?? -1, stdout, stderr });
+      }
     });
     proc.on("error", (e) => {
+      clearTimeout(timer);
       resolve({ ok: false, exit: -1, stdout, stderr: stderr || e.message });
     });
   });
 }
 
-const runSprite = (args: string[]) => runCommand("sprite", args);
+const runSprite = (args: string[], opts?: { timeoutMs?: number }) =>
+  runCommand("sprite", args, opts);
 
 function fmt(label: string, r: ShellResult): string {
   const out = r.stdout.trim();
@@ -88,14 +120,22 @@ export default function (pi: any) {
     name: "sprite_exec",
     label: "Run on Sprite",
     description:
-      "Run a bash command on a Sprite as user `sprite`. Returns stdout and stderr. Use for any setup, install, or one-shot operation on the VM.",
+      "Run a bash command on a Sprite as user `sprite`. Returns stdout and stderr. Use for any setup, install, or one-shot operation on the VM. Default timeout is 10 minutes — pass `timeoutSeconds` for steps that should fail faster (e.g. package installs that often hang on registry stalls).",
     parameters: Type.Object({
       name: Type.String({ description: "Sprite name." }),
       command: Type.String({ description: "Bash command to run on the Sprite." }),
+      timeoutSeconds: Type.Optional(Type.Integer({
+        minimum: 1,
+        maximum: 1800,
+        description: "Kill the command after this many seconds (max 1800 = 30min). Default 600.",
+      })),
     }),
-    async execute(_id: string, params: { name: string; command: string }, signal: AbortSignal) {
+    async execute(_id: string, params: { name: string; command: string; timeoutSeconds?: number }, signal: AbortSignal) {
       if (signal.aborted) throw new Error("aborted");
-      const r = await runSprite(["exec", "-s", params.name, "--", "bash", "-c", params.command]);
+      const r = await runSprite(
+        ["exec", "-s", params.name, "--", "bash", "-c", params.command],
+        params.timeoutSeconds ? { timeoutMs: params.timeoutSeconds * 1000 } : undefined,
+      );
       return { content: [{ type: "text", text: fmt(`sprite_exec ${params.name}`, r) }] };
     },
   });
@@ -123,7 +163,7 @@ export default function (pi: any) {
       const r = await runCommand(
         "sprite",
         ["exec", "-s", params.name, "--", "bash", "-c", remoteCmd],
-        tar.stdout,
+        { pipeStdin: tar.stdout },
       );
       return {
         content: [
@@ -217,15 +257,107 @@ export default function (pi: any) {
   });
 
   pi.registerTool({
-    name: "sprite_checkpoint",
-    label: "Checkpoint Sprite",
-    description: "Take a filesystem checkpoint of a Sprite (~300ms, copy-on-write). Last 5 retained.",
+    name: "cell_resolve",
+    label: "Resolve cell to sprite",
+    description:
+      "Resolve a user-facing cell name to its underlying Sprite name. Slow-birth cells use the same name for both. Hatched cells live on a permanent egg sprite (e.g. 'egg-sonnet-67706a') named differently from the cell. ALWAYS call this before sprite_destroy / sprite_exec / sprite_push when you only know the cell name — the sprite API rejects cell-name lookups for hatched cells.",
     parameters: Type.Object({
-      name: Type.String({ description: "Sprite name." }),
+      name: Type.String({ description: "Cell name (user-facing identity)." }),
     }),
     async execute(_id: string, params: { name: string }) {
-      const r = await runSprite(["checkpoint", "create", "-s", params.name]);
-      return { content: [{ type: "text", text: fmt(`sprite_checkpoint ${params.name}`, r) }] };
+      const cellsPath = join(homedir(), ".cells", "cells.json");
+      const eggsPath = join(homedir(), ".cells", "eggs.json");
+      try {
+        if (!existsSync(cellsPath)) {
+          return {
+            content: [
+              {
+                type: "text",
+                text: `cell_resolve: registry not found at ${cellsPath}. Falling back: sprite_name=${params.name}`,
+              },
+            ],
+          };
+        }
+        const reg = JSON.parse(readFileSync(cellsPath, "utf8")) as {
+          cells: Array<{ name: string; hatched_from?: string; status?: string }>;
+        };
+        const cell = reg.cells.find((c) => c.name === params.name);
+        if (!cell) {
+          return {
+            content: [
+              {
+                type: "text",
+                text: `cell_resolve: no cell named '${params.name}' in registry. Cannot resolve sprite.`,
+              },
+            ],
+          };
+        }
+        if (!cell.hatched_from) {
+          return {
+            content: [
+              {
+                type: "text",
+                text: `cell_resolve: cell '${params.name}' is slow-birth. sprite_name=${params.name}`,
+              },
+            ],
+          };
+        }
+        if (!existsSync(eggsPath)) {
+          return {
+            content: [
+              {
+                type: "text",
+                text: `cell_resolve: cell '${params.name}' references egg ${cell.hatched_from} but ${eggsPath} is missing. Cannot resolve sprite.`,
+              },
+            ],
+          };
+        }
+        const eggs = JSON.parse(readFileSync(eggsPath, "utf8")) as {
+          eggs: Array<{ id: string; sprite_name: string }>;
+        };
+        const egg = eggs.eggs.find((e) => e.id === cell.hatched_from);
+        if (!egg) {
+          return {
+            content: [
+              {
+                type: "text",
+                text: `cell_resolve: cell '${params.name}' references egg ${cell.hatched_from} but no such egg in eggs.json. Sprite likely already destroyed.`,
+              },
+            ],
+          };
+        }
+        return {
+          content: [
+            {
+              type: "text",
+              text: `cell_resolve: cell '${params.name}' is hatched from egg ${egg.id}. sprite_name=${egg.sprite_name}`,
+            },
+          ],
+        };
+      } catch (e: any) {
+        return {
+          content: [{ type: "text", text: `cell_resolve failed: ${e.message}` }],
+        };
+      }
+    },
+  });
+
+  pi.registerTool({
+    name: "sprite_checkpoint",
+    label: "Checkpoint Sprite",
+    description: "Take a filesystem checkpoint of a Sprite (~300ms, copy-on-write). Last 5 retained. Pass `comment` to label the checkpoint (e.g. `phase-tools-v1`, `pristine-v1`) so future restores can target a known-good phase.",
+    parameters: Type.Object({
+      name: Type.String({ description: "Sprite name." }),
+      comment: Type.Optional(Type.String({
+        description: "Short label for this checkpoint. Use kebab-case identifiers like `phase-tools-v1` or `pristine-v1`.",
+      })),
+    }),
+    async execute(_id: string, params: { name: string; comment?: string }) {
+      const args = ["checkpoint", "create", "-s", params.name];
+      if (params.comment) args.push("--comment", params.comment);
+      const r = await runSprite(args);
+      const label = params.comment ? `${params.name} (${params.comment})` : params.name;
+      return { content: [{ type: "text", text: fmt(`sprite_checkpoint ${label}`, r) }] };
     },
   });
 }

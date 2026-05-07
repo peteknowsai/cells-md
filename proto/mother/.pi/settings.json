@@ -14,12 +14,13 @@
     "claude-opus-4-7",
     "claude-sonnet-4-6",
     "claude-haiku-4-5",
-    "openai-codex/gpt-5.5",
+    "openai-codex/gpt-5.5:high",
     "deepseek-v4-flash",
     "deepseek-v4-pro"
   ],
   "defaultProvider": "anthropic",
   "defaultModel": "claude-opus-4-7",
+  "modelChain": ["anthropic/claude-opus-4-7:adaptive", "openai-codex/gpt-5.5:high", "deepseek/deepseek-v4-pro:high"],
   "warnings": {
     "anthropicExtraUsage": false
   }

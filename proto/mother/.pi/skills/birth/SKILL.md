@@ -23,11 +23,43 @@ still available for local-only operations on the Mac (e.g., reading
 - No existing agent with this name (the Bun CLI checks before invoking you)
 - All `bash scripts/...` invocations in this skill are relative to the cells repo root (`~/Projects/cells`). `cd` there before running them, or prefix each call with `cd ~/Projects/cells &&`.
 
+## Timing instrumentation
+
+The very first action of **every** numbered step below is a single local-`bash` call:
+
+```bash
+bash scripts/log-birth-step.sh <NAME> <step-number> <short-label>
+```
+
+This appends a timestamp + step label to `~/.cells/logs/birth-timings/<NAME>.log`. The hardening loop reads it to figure out where birth is spending time — drop a marker even if the step itself fails. Don't skip the timing call; it costs ~1ms and is the only way Pete can see per-step durations.
+
+## Handling transient failures
+
+If a step's command exits non-zero AND the error message looks network-class, **retry the same step once after a 5-second wait** before reporting failure. If the retry also fails, then call `report_outcome` with `success: false, message: "step <N>: <first error> · retry: <retry error>"`.
+
+Network-class errors that warrant a retry:
+- `401 bad bearer` (the subscriptions proxy occasionally returns this on the first call)
+- Any `5xx` from an HTTP call
+- `ECONNRESET`, `ETIMEDOUT`, `dial tcp`, `connection refused`
+- `npm ERR! network`, `fetch failed`, registry timeouts
+- `sprite_exec` returning the timeout-kill tag (`[killed by sprite-tools after Ns]`) — that means the inner command stalled on the network; one retry is worth trying
+
+Do **NOT** retry on:
+- Logic errors (sprite already exists, malformed input, missing file, jq parse error)
+- Authorization errors that aren't transient (403 forbidden, no token in secrets.json)
+- Step 1 (sprite create) — let the CLI handle retry there if it wants to
+
+Retry budget: at most one retry per step. Don't loop. If the second attempt fails the step, escalate to `report_outcome failure` and stop the ritual.
+
 ## 1. Create the Sprite
+
+> _Timing marker (run first via local `bash`):_ `bash scripts/log-birth-step.sh <NAME> 1 create-sprite`
 
 Use `sprite_create` with `name: <NAME>`. Blocks ~15s until ready.
 
 ## 2. Configure egress (allow all)
+
+> _Timing marker (run first via local `bash`):_ `bash scripts/log-birth-step.sh <NAME> 2 egress-allow`
 
 Use `sprite_egress_allow` with `name: <NAME>` and `domains: ["*"]`. This opens
 outbound to any host so the agent can research, fetch, and install freely.
@@ -35,6 +67,8 @@ outbound to any host so the agent can research, fetch, and install freely.
 Don't proceed until this succeeds — every later step depends on egress.
 
 ## 3. Install system tools and configure tmux
+
+> _Timing marker (run first via local `bash`):_ `bash scripts/log-birth-step.sh <NAME> 3 system-tools-tmux`
 
 Bun is not pre-installed on Sprite VMs. tmux often is, but install/upgrade
 it to be safe — useful for interactive shell sessions. (In v2 pi runs
@@ -173,7 +207,11 @@ twice, *stop and surface the error to Pete* with the specific command and
 stderr. Do not enter ad-hoc retry loops. Birth is rare enough that a quick
 hard-fail is always better than a slow silent one.
 
+**Phase checkpoint.** Now that all system tools are installed and verified, take a checkpoint so future birth retries can resume from this known-good phase: `sprite_checkpoint` with `name: <NAME>` and `comment: "phase-tools-v1"`. Cost ~300ms.
+
 ## 4. Push the agent DNA
+
+> _Timing marker (run first via local `bash`):_ `bash scripts/log-birth-step.sh <NAME> 4 dna-push`
 
 Mother's `dna/` directory (at `proto/mother/dna/`) contains the canonical
 recipe-compliant layout — the genetic material every cell is born with.
@@ -220,9 +258,16 @@ sed -i 's/__PROVIDER__/<PROVIDER>/g' \
   /home/sprite/agent/.pi/settings.json
 
 sed -i 's/__THINKING__/<THINKING>/g' /home/sprite/agent/.pi/settings.json
+
+# Substitute the model fallback chain as a literal JSON array. Use `|` as
+# the sed delimiter so the slashes inside `provider/model:thinking` entries
+# don't collide. <CHAIN_JSON> is already a valid JSON array string.
+sed -i 's|__MODEL_CHAIN__|<CHAIN_JSON>|g' /home/sprite/agent/.pi/settings.json
 ```
 
 ### 4b. Per-cell tmux color chip
+
+> _Timing marker (run first via local `bash`):_ `bash scripts/log-birth-step.sh <NAME> 4b tmux-color`
 
 The DNA's `~/.tmux.conf` ships with `__CELL_FG__` / `__CELL_BG__`
 placeholders in the `status-left-style` line. Compute the color
@@ -243,6 +288,8 @@ same palette entry — so retrofits and re-births stay stable.
 
 ### 4c. Write the cell's status file
 
+> _Timing marker (run first via local `bash`):_ `bash scripts/log-birth-step.sh <NAME> 4c status-file`
+
 The right side of the tmux bar reads `~/agent/.pi/status.json`. Write
 it now with the harness baked in and channels empty (the laptop's slack
 binding code populates `channels` later if a slack channel is bound):
@@ -258,6 +305,8 @@ EOF
 ```
 
 ## 5. Run `bun install`, install Pi globally, install web-access, install `cells` CLI
+
+> _Timing marker (run first via local `bash`):_ `bash scripts/log-birth-step.sh <NAME> 5 bun-install-pi-extensions`
 
 `bun install` is mandatory — without `node_modules/`, the use-max extension
 fails to load and the agent silently lands on extra-usage billing.
@@ -312,16 +361,27 @@ jq --arg p ".pi/extensions/<name>/index.ts" \
 
 If `<EXTENSIONS>` is empty, skip this step.
 
-Then run the baseline install:
+Then run the baseline install in **two separate `sprite_exec` calls** so a hang in `bun install` is reportable on its own. Don't chain these together — when the npm registry stalls (it does, observed in the wild), we want the failure attributed to the install step, not buried in a 6-line blob.
+
+**5a. Bun + Pi global install** — `sprite_exec` with `timeoutSeconds: 240`:
 
 ```bash
 export PATH=$HOME/.bun/bin:$PATH
-cd /home/sprite/agent && bun install
+cd /home/sprite/agent && bun install --frozen-lockfile
 bun install -g @mariozechner/pi-coding-agent@latest
+```
+
+Why 240s: legitimate run is ~60–90s. Doubling the budget catches npm-stall hangs without false-positiving on slow networks.
+
+**5b. Cells CLI shim** — `sprite_exec` with `timeoutSeconds: 30`:
+
+```bash
 chmod +x /home/sprite/agent/bin/cells
 mkdir -p /home/sprite/.local/bin
 ln -sf /home/sprite/agent/bin/cells /home/sprite/.local/bin/cells
 ```
+
+Why 30s: file ops only. Anything past 30s here means the VM is stuck.
 
 Then install the optional packages — only those listed in `<PACKAGES>`. If
 `<PACKAGES>` is empty, skip this block entirely.
@@ -332,7 +392,7 @@ For each entry in `<PACKAGES>`, run the matching `pi install`:
 |----------------|---------------------|
 | pi-web-access  | `npm:pi-web-access` |
 
-Example: if `<PACKAGES>` is `["pi-web-access"]`, run via `sprite_exec`:
+Example: if `<PACKAGES>` is `["pi-web-access"]`, run via `sprite_exec` **with `timeoutSeconds: 120`** — npm registry stalls have hung births for 50+ minutes. Fail fast and report the install step as the failure:
 
 ```bash
 pi install -l npm:pi-web-access
@@ -349,7 +409,11 @@ Storage extensions (memory / mentality / wiki) function standalone. Dream is
 the optional accelerant. Pi auto-discovers extensions in `.pi/extensions/`
 on session start.
 
+**Phase checkpoint.** All packages and extensions are now installed. Take a checkpoint: `sprite_checkpoint` with `name: <NAME>` and `comment: "phase-installed-v1"`.
+
 ## 6. Set up the env shim and PATH
+
+> _Timing marker (run first via local `bash`):_ `bash scripts/log-birth-step.sh <NAME> 6 env-shim`
 
 Sprites' Ubuntu non-interactive login shells (`bash -lc 'cmd'`, used by
 `sprite exec`) bail out of `.bashrc` before reaching the end. So we source
@@ -402,6 +466,8 @@ EOF
 
 ## 6b. Inject shared secrets from `~/.cells/secrets.json`
 
+> _Timing marker (run first via local `bash`):_ `bash scripts/log-birth-step.sh <NAME> 6b secrets-inject`
+
 Every cell gets the same shared secrets, read from `~/.cells/secrets.json`
 on the Mac and written one-file-per-key into `/home/sprite/.bashrc.d/` on
 the Sprite. Don't echo any values in your reply.
@@ -431,6 +497,8 @@ The legacy approach was to push a frozen OAuth access token; it expired
 hours after birth.
 
 ## 6c. Wire the cell to the subscriptions proxy
+
+> _Timing marker (run first via local `bash`):_ `bash scripts/log-birth-step.sh <NAME> 6c proxy-wire`
 
 Cells reach both Anthropic (Claude Max) and OpenAI Codex (ChatGPT Plus)
 via `https://proxy.cells.md`, which the mother laptop runs as the single
@@ -478,7 +546,11 @@ if you rotate `CELLS_PROXY_SECRET`.
 Background: see `state/memory/project_mother_proxy.md` and
 `state/memory/reference_pi_internals.md` for why this is necessary.
 
+**Phase checkpoint.** Proxy is wired; the cell can now reach the LLM provider through the subscriptions proxy. Take a checkpoint: `sprite_checkpoint` with `name: <NAME>` and `comment: "phase-proxy-v1"`.
+
 ## 7. Register the `site` service + open the cell URL to mother
+
+> _Timing marker (run first via local `bash`):_ `bash scripts/log-birth-step.sh <NAME> 7 site-service`
 
 The cell's public face at `<NAME>.cells.md` is served by the cell itself,
 not mother — `~/agent/site/server.ts` is a tiny Bun web server that the
@@ -524,6 +596,8 @@ After both pieces register, `cells see <NAME>` should open
 
 ## 8. Login shim — env on interactive login
 
+> _Timing marker (run first via local `bash`):_ `bash scripts/log-birth-step.sh <NAME> 8 login-shim`
+
 Sprite's interactive shell is **zsh** (despite `/etc/passwd` listing /bin/bash
 as the login shell). zsh doesn't auto-source `.bashrc.d`, so we explicitly
 source it from `.zshrc` so an interactive login has the same env (PATH,
@@ -550,9 +624,13 @@ EOF
 
 ## 9. First checkpoint
 
+> _Timing marker (run first via local `bash`):_ `bash scripts/log-birth-step.sh <NAME> 9 checkpoint`
+
 Use `sprite_checkpoint` with `name: <NAME>`.
 
 ## 10. Report outcome (mandatory)
+
+> _Timing marker (run first via local `bash`):_ `bash scripts/log-birth-step.sh <NAME> 10 report-outcome`
 
 Call `report_outcome` to tell the Bun CLI whether the birth succeeded.
 
@@ -563,6 +641,8 @@ Without this call the CLI assumes failure and won't register the agent.
 
 ## 11. Record in memory (success only)
 
+> _Timing marker (run first via local `bash`):_ `bash scripts/log-birth-step.sh <NAME> 11 record-memory`
+
 Log the birth event by appending one line to `state/memory/project_cells_activity.md`:
 
 `<UTC date HH:MM>  born        <NAME>      <terse notes>`
@@ -570,6 +650,8 @@ Log the birth event by appending one line to `state/memory/project_cells_activit
 Use `date -u +"%Y-%m-%d %H:%M"` for the timestamp.
 
 ## 12. Tell the user
+
+> _Timing marker (run first via local `bash`):_ `bash scripts/log-birth-step.sh <NAME> 12 tell-user`
 
 After reporting outcome, tell the user one line:
 

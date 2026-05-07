@@ -1,0 +1,11 @@
+[
+  { "name": "jesus", "displayName": "Jesus of Nazareth" },
+  { "name": "buddha", "displayName": "Gautama Buddha" },
+  { "name": "rumi", "displayName": "Rumi" },
+  { "name": "marcus-aurelius", "displayName": "Marcus Aurelius" },
+  { "name": "lao-tzu", "displayName": "Lao Tzu" },
+  { "name": "confucius", "displayName": "Confucius" },
+  { "name": "tesla", "displayName": "Nikola Tesla" },
+  { "name": "fuller", "displayName": "Buckminster Fuller" },
+  { "name": "gandhi", "displayName": "Mahatma Gandhi" }
+]

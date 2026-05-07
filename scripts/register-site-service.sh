@@ -5,10 +5,17 @@
 #
 # Reads SPRITES_TOKEN from ~/.cells/secrets.json and PUTs the service.
 #
-# Usage: scripts/register-site-service.sh <cell-name>
+# Usage: scripts/register-site-service.sh <cell-name> [sprite-name]
+#
+# For slow-birth cells, sprite name == cell name (omit the second arg).
+# For hatched cells, the sprite name is the egg's permanent sprite
+# (e.g. egg-sonnet-67706a) — different from the cell name. The CELL_NAME
+# env var passed into server.ts is always the user-facing cell name;
+# the sprite API call targets the sprite name.
 set -euo pipefail
 
-NAME="${1:?usage: $0 <cell-name>}"
+NAME="${1:?usage: $0 <cell-name> [sprite-name]}"
+SPRITE_NAME="${2:-$NAME}"
 SECRETS="$HOME/.cells/secrets.json"
 [ -f "$SECRETS" ] || { echo "missing $SECRETS"; exit 1; }
 TOKEN=$(jq -r '.SPRITES_TOKEN // empty' "$SECRETS")
@@ -29,12 +36,12 @@ PAYLOAD=$(jq -n --arg s "$SCRIPT" '{cmd:"bash",args:["-lc",$s],workdir:"/home/sp
 # no-ops on an existing service, leaving stale config in place.
 curl -fsS -X DELETE \
   -H "Authorization: Bearer $TOKEN" \
-  "https://api.sprites.dev/v1/sprites/$NAME/services/site" > /dev/null 2>&1 || true
+  "https://api.sprites.dev/v1/sprites/$SPRITE_NAME/services/site" > /dev/null 2>&1 || true
 
 curl -fsS -X PUT \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -d "$PAYLOAD" \
-  "https://api.sprites.dev/v1/sprites/$NAME/services/site" > /dev/null
+  "https://api.sprites.dev/v1/sprites/$SPRITE_NAME/services/site" > /dev/null
 
-echo "service 'site' registered on $NAME"
+echo "service 'site' registered on $SPRITE_NAME with CELL_NAME=$NAME"
