@@ -85,6 +85,46 @@ What we've actually built that gestures at this thesis:
 - Cells have first-class identity. They're not workloads to be evicted; they're organisms with continuity.
 - The vocabulary itself encodes the thesis.
 
+## Local-first, and the memory floor
+
+The whole architecture is designed to run on hardware you own. Cloud is auxiliary — useful for specific surfaces (R2-backed Frozen tier for long-tail archive, a CF Worker as the edge proxy for `<cell>.cells.md` URLs, maybe a watcher daemon eventually) but never the primary substrate. The reason isn't ideological; it's that the thesis only works on owned hardware.
+
+### Why local
+
+Cooperative pause-on-idle is only economical when *idle cells cost nothing*. On metered cloud (Fly, AWS, anywhere with per-second billing on RAM and storage), keeping a thousand cells durable-but-paused has a price. On a Mac Mini in a closet, it doesn't — the hardware is paid up, electricity is the only marginal cost, and disk is functionally free at human scale. The same pause-resume mechanism that's a cost-saver locally is a wash or worse in the cloud, because cloud pricing assumes you'd just *stop* what you're not using.
+
+So the design that works locally — hundreds of cells durable, ~8 alive at any moment, all the rest hibernated — collapses if you try to run it metered. The cells stack is shaped to a particular substrate, and that substrate is owned hardware.
+
+### Latency
+
+Self-hosted also wins on latency, by physics:
+
+- Cell-to-host RTT on local vmnet bridge: tens of microseconds.
+- Cell-to-host RTT in cloud (cell on a VM, host control plane on another VM in the same datacenter): single-digit milliseconds at best.
+- Cell-to-Pete (when Pete is in his apartment talking to a Mac in the same apartment): wifi + LAN + maybe one switch hop. Single-digit milliseconds.
+
+The off-switch's "boom, off" experience requires the host's response to come back before the agent's next loop iteration. That's a microsecond budget. Only achievable on the same physical machine.
+
+### The memory floor
+
+Combine the off-switch with hot-tier pause and the system reaches the **theoretical minimum memory footprint** for a fleet of agents:
+
+```
+RAM used = Σ (cells currently generating tokens × cell size)
+```
+
+Nothing else. Cells between turns: 0 RAM. Cells hibernated: 0 RAM. Cells frozen in R2: 0 RAM. Cells crashed but not yet noticed: 0 RAM. The only RAM consumed at any given moment is the RAM holding the cells whose LLMs are actively producing output *right now*.
+
+You cannot get below this. It's the floor. Any cell you want to be available has to be either alive (RAM cost = full size) or recoverable from somewhere (disk for hibernated, cloud for frozen). The off-switch ensures that every byte of RAM you're paying for is doing actual work — not waiting, not idling, not preserving "session warmth." Just generating.
+
+This shape is unique to LLM agents because (a) their work is bursty (a turn is ~milliseconds-to-seconds of generation, then nothing for minutes-to-hours), and (b) their state is preservable (RAM contents are valid forever in a paused VM; nothing is "stale"). Both of those properties are the necessary conditions for the floor to be reachable. Outside this domain — say, a webserver that needs to respond to traffic at any moment — the floor is much higher because you can't pause between requests.
+
+### What this implies for hardware planning
+
+If you're spec-ing a host for the cells stack, the question stops being "how many agents do I want?" and becomes "**how many simultaneous turns do I want to support?**" Those are very different numbers. A team running 200 agents might have only 8 actively turning at peak — and 8 cells × 4GB each = 32GB RAM. A 48GB Mac Mini handles it; a 64GB or 128GB scales much further than the agent count would suggest. The cell count is bounded by *disk* (each hibernated cell is ~9GB), not RAM.
+
+Pete's M5 Pro target spec: 48GB RAM, several TB of SSD. Supports ~8 simultaneous turns and hundreds of durable cells in steady state. The cooperation API is what makes this work; without the off-switch, the math collapses to "8 agents total."
+
 ## What this isn't
 
 A few things to be honest about so the thesis doesn't get oversold:
