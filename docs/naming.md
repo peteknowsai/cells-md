@@ -21,6 +21,50 @@ Two families, sharply separated:
 
 **In plain English:** cells are the things that *are alive*. Wells and labs are the things they *live in*. You'd say "I'm working on a cell" but you wouldn't say "I'm working on a well" — you'd say "I'm spinning up a well to put a new cell in." The name signals which side of the metaphor it sits on.
 
+## Cell lifecycle states
+
+Cells have three states. The vocabulary mirrors a biological gradient — body temperature warm down to cryopreserved.
+
+| State | What it means | Cost | Wake from |
+|---|---|---|---|
+| **Alive** | the cell is in RAM and responsive | full RAM (e.g. 4GB) per cell | already up; ~100ms if currently CPU-paused |
+| **Hibernating** | RAM written to disk, memory freed, sleeping | ~9GB local disk (5GB filesystem + 4GB RAM image) | ~1–3s |
+| **Frozen** *(future)* | hibernation file offloaded to remote storage (e.g. R2), local copy gone | ~5GB local disk (filesystem only); RAM image lives in cloud | ~30s+ (download + restore) |
+
+**Alive vs. running vs. paused.** Inside the *Alive* state, the VM might be running (CPU active) or paused (CPU idle, memory still mapped). That's an implementation detail the watchdog uses to free CPU on idle alive cells. From a user perspective there's no difference — both are responsive within sub-second.
+
+**Why no "cold" tier.** Earlier designs had a cold tier (= stopped, only the disk image remains, no preserved agent state). Dropped because:
+- On owned hardware, the disk savings of cold over hibernating (~4GB per cell) are irrelevant — terabytes are cheap.
+- Cold throws away the agent's working memory. For pi cells, that means losing model context, conversation state, in-flight reasoning. Almost never the right call.
+- "I want this cell *truly* gone" is `splite destroy` (with a checkpoint to resurrect later), not a tier.
+
+If you ever need to force-restart a hibernating cell from scratch (kernel update, recovering a wedged process), that's a flag on wake (`--fresh` discards the hibernation image and boots from disk), not a separate tier.
+
+**The Frozen tier (future).** Hibernating cells live on local disk. For long-tail cells you don't need on this machine — months idle, archived state, or migration targets — there's a future tier where the hibernation image gets uploaded to remote storage (R2 or S3-compatible) and the local copy is deleted. Bringing it back is a thaw: download, then restore-from-hibernation. The R2 sync infrastructure landed in Phase A.2 of the splites repo; the watchdog hook to actually move cells frozen-ward hasn't been wired yet.
+
+**Lifecycle picture:**
+
+```
+   create
+     │
+     ▼
+  ┌──────────┐  watchdog idle    ┌─────────────────┐  long-idle (future)  ┌──────────┐
+  │  Alive   │ ─────────────────▶│  Hibernating    │ ─────────────────────▶│  Frozen  │
+  │ (in RAM) │ ◀───────────────  │ (on local disk) │ ◀──────────────────── │ (in R2)  │
+  └──────────┘   wake             └─────────────────┘     thaw              └──────────┘
+       │                                  │
+       │                                  │  destroy
+       │                                  ▼
+       │                            ┌──────────────┐
+       │                            │  Destroyed   │
+       └───────────────────────────▶│  (gone, but  │
+                                    │  checkpoint  │
+                                    │  resurrects) │
+                                    └──────────────┘
+```
+
+**In plain English:** A cell is one of three things: awake and answering you, taking a nap on disk, or shipped off to long-term cold storage in the cloud. There's no fourth "totally off" state because keeping a cell hibernating costs almost nothing and keeps everything it remembers. The only way a cell really goes away is if you destroy it on purpose — and even then, a checkpoint can bring it back.
+
 ## Family A — life forms
 
 ### Cell
