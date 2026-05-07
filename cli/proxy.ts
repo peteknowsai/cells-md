@@ -579,6 +579,7 @@ async function handleCodexProxy(req: Request): Promise<Response> {
   // Strip CF/proxy headers added by cloudflared on the way in. chatgpt.com
   // is also behind Cloudflare, and forwarding these triggers anti-loop
   // protection → 403 with a generic block page.
+  // (Re-verified 2026-05-07: removing this still produces 403 + CF block page.)
   for (const h of [...baseHeaders.keys()]) {
     if (h.startsWith("cf-") || h.startsWith("x-forwarded-") || h === "cdn-loop" || h === "x-real-ip") {
       baseHeaders.delete(h);
