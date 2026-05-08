@@ -1106,9 +1106,9 @@ const BACKEND_VALUES = BACKEND_OPTIONS.map((b) => b.value);
 // Sprite-tools spawns whatever binary the env points it at via SPRITES_BINARY.
 function backendEnv(backend: string): Record<string, string> {
   if (backend !== "well") return {};
-  const tokenPath = join(homedir(), ".splites", "token");
+  const tokenPath = join(homedir(), ".wells", "token");
   if (!existsSync(tokenPath)) {
-    console.error(`backend=well requires welld running with ~/.splites/token present`);
+    console.error(`backend=well requires welld running with ~/.wells/token present`);
     process.exit(1);
   }
   return {
