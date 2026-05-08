@@ -108,6 +108,16 @@ const HARNESS_OPTIONS: SelectOption[] = [
   { value: "codex",       label: "codex",       hint: "(coming soon)", disabled: true },
 ];
 
+// Backend = the substrate the cell lives on. `sprite` is the cloud
+// sprites.dev VM (current default). `well` is a local Lume VM managed
+// by the welld daemon on Pete's Mac — same API contract as sprites,
+// drop-in compatible. New cells default to `well`; sprites stays
+// available for any case that needs it.
+const BACKEND_OPTIONS: SelectOption[] = [
+  { value: "well",   label: "well   (local · low-latency)" },
+  { value: "sprite", label: "sprite (cloud · sprites.dev)" },
+];
+
 const MODEL_OPTIONS: SelectOption[] = [
   { value: "opus",              label: "opus" },
   { value: "sonnet",            label: "sonnet" },
@@ -204,6 +214,11 @@ type Cell = {
   // apply-pi-patches.sh. Mirrored here so harden-birth can verify the
   // birth pipeline wrote it correctly into the cell's settings.json.
   modelChain?: string[];
+  // The substrate the cell lives on. `sprite` = cloud sprites.dev VM,
+  // `well` = local welld VM on Pete's Mac. Older entries (no field) default
+  // to `sprite` at read time. Drives backend-specific routing for talk,
+  // destroy, checkpoint, etc.
+  backend?: "sprite" | "well";
 };
 type Registry = { cells: Cell[] };
 
@@ -721,6 +736,7 @@ async function withMotherLock<T>(label: string, fn: () => Promise<T>): Promise<T
 async function runPiWithOutcome(
   slashCommand: string,
   args: string[],
+  extraEnv?: Record<string, string>,
 ): Promise<{ exit: number; outcome: Outcome | null }> {
   return withMotherLock(`${slashCommand} ${args[0] ?? ""}`.trim(), async () => {
     const outcomeFile = join(
@@ -730,7 +746,7 @@ async function runPiWithOutcome(
     if (existsSync(outcomeFile)) await unlink(outcomeFile);
 
     const message = `/${slashCommand} ${args.join(" ")}`.trim();
-    const proc = spawnInRepo(["pi", "-p", message], { CELL_OUTCOME_FILE: outcomeFile });
+    const proc = spawnInRepo(["pi", "-p", message], { CELL_OUTCOME_FILE: outcomeFile, ...extraEnv });
     const exit = await proc.exited;
 
     let outcome: Outcome | null = null;
@@ -1072,6 +1088,7 @@ async function checkPiPatches(): Promise<{ ok: boolean; detail: string }> {
 // ───── routed through local Pi ─────
 
 type CreateOpts = {
+  backend?: string;
   harness?: string;
   model?: ModelKey;
   thinking?: string;
@@ -1081,13 +1098,40 @@ type CreateOpts = {
   slackChannel?: string;
 };
 
+const BACKEND_VALUES = BACKEND_OPTIONS.map((b) => b.value);
+
+// Build env vars to inject when invoking mother for a given backend.
+// `well` = local welld daemon on :7878 (drop-in for sprites API).
+// `sprite` = cloud sprites.dev (current default; no env override needed).
+// Sprite-tools spawns whatever binary the env points it at via SPRITES_BINARY.
+function backendEnv(backend: string): Record<string, string> {
+  if (backend !== "well") return {};
+  const tokenPath = join(homedir(), ".splites", "token");
+  if (!existsSync(tokenPath)) {
+    console.error(`backend=well requires welld running with ~/.splites/token present`);
+    process.exit(1);
+  }
+  return {
+    SPRITES_API_URL: "http://localhost:7878",
+    SPRITES_TOKEN: readFileSync(tokenPath, "utf-8").trim(),
+    SPRITES_BINARY: "well",
+  };
+}
+
 const PACKAGE_VALUES = OPTIONAL_PACKAGES.map((p) => p.value);
 
 function parseCreateArgs(args: string[]): { name: string; opts: CreateOpts } {
   let name: string | undefined;
   const opts: CreateOpts = {};
   for (const a of args) {
-    if (a.startsWith("--harness=")) {
+    if (a.startsWith("--backend=")) {
+      const v = a.slice("--backend=".length);
+      if (!BACKEND_VALUES.includes(v)) {
+        console.error(`unknown backend: ${v}. choose: ${BACKEND_VALUES.join(", ")}`);
+        process.exit(1);
+      }
+      opts.backend = v;
+    } else if (a.startsWith("--harness=")) {
       opts.harness = a.slice("--harness=".length);
     } else if (a.startsWith("--model=")) {
       const v = a.slice("--model=".length);
@@ -1152,7 +1196,7 @@ function parseCreateArgs(args: string[]): { name: string; opts: CreateOpts } {
   }
   if (!name) {
     console.error(
-      "usage: cells birth <name> [--harness=pi] [--model=opus|sonnet|haiku|gpt-5.5|gpt-5.5-pro|deepseek-v4-flash|deepseek-v4-pro] [--thinking=off|minimal|low|medium|high|xhigh|adaptive] [--extensions=memory,...] [--packages=pi-web-access,...]",
+      "usage: cells birth <name> [--backend=well|sprite] [--harness=pi] [--model=opus|sonnet|haiku|gpt-5.5|gpt-5.5-pro|deepseek-v4-flash|deepseek-v4-pro] [--thinking=off|minimal|low|medium|high|xhigh|adaptive] [--extensions=memory,...] [--packages=pi-web-access,...]",
     );
     process.exit(1);
   }
@@ -1170,6 +1214,7 @@ async function cmdCreate(name: string, opts: CreateOpts) {
   }
 
   const interactive =
+    opts.backend === undefined &&
     opts.harness === undefined &&
     opts.model === undefined &&
     opts.thinking === undefined &&
@@ -1177,6 +1222,7 @@ async function cmdCreate(name: string, opts: CreateOpts) {
     opts.packages === undefined &&
     opts.channels === undefined;
 
+  let backend: string;
   let harness: string;
   let modelKey: ModelKey;
   let thinking: string;
@@ -1191,37 +1237,42 @@ async function cmdCreate(name: string, opts: CreateOpts) {
     // Step machine so the user can ←/⌫ back to a previous prompt mid-flow.
     const answers: (string | string[] | undefined)[] = [];
     let i = 0;
-    while (i < 6) {
+    while (i < 7) {
       const canGoBack = i > 0;
       let result: string | string[] | Back;
       if (i === 0) {
-        result = await selectOne("Harness?", HARNESS_OPTIONS, {
-          initialValue: answers[0] as string | undefined,
+        result = await selectOne("Backend?", BACKEND_OPTIONS, {
+          initialValue: (answers[0] as string | undefined) ?? "well",
         });
       } else if (i === 1) {
-        result = await selectOne("Model?", MODEL_OPTIONS, {
+        result = await selectOne("Harness?", HARNESS_OPTIONS, {
           canGoBack,
           initialValue: answers[1] as string | undefined,
         });
       } else if (i === 2) {
-        result = await selectMany("Extensions?", EXTENSION_OPTIONS, {
+        result = await selectOne("Model?", MODEL_OPTIONS, {
           canGoBack,
-          initialChecked: answers[2] as string[] | undefined,
+          initialValue: answers[2] as string | undefined,
         });
       } else if (i === 3) {
-        result = await selectMany("Packages?", PACKAGE_OPTIONS, {
+        result = await selectMany("Extensions?", EXTENSION_OPTIONS, {
           canGoBack,
-          initialChecked: (answers[3] as string[] | undefined) ?? PACKAGE_DEFAULTS,
+          initialChecked: answers[3] as string[] | undefined,
         });
       } else if (i === 4) {
-        result = await selectOne("Thinking?", thinkingOptionsFor(answers[1] as ModelKey), {
+        result = await selectMany("Packages?", PACKAGE_OPTIONS, {
           canGoBack,
-          initialValue: (answers[4] as string | undefined) ?? defaultThinkingFor(answers[1] as ModelKey),
+          initialChecked: (answers[4] as string[] | undefined) ?? PACKAGE_DEFAULTS,
+        });
+      } else if (i === 5) {
+        result = await selectOne("Thinking?", thinkingOptionsFor(answers[2] as ModelKey), {
+          canGoBack,
+          initialValue: (answers[5] as string | undefined) ?? defaultThinkingFor(answers[2] as ModelKey),
         });
       } else {
         result = await selectMany("Channels?", CHANNEL_OPTIONS, {
           canGoBack,
-          initialChecked: answers[5] as string[] | undefined,
+          initialChecked: answers[6] as string[] | undefined,
         });
       }
       if (result === BACK) {
@@ -1234,14 +1285,16 @@ async function cmdCreate(name: string, opts: CreateOpts) {
         i++;
       }
     }
-    harness = answers[0] as string;
-    modelKey = answers[1] as ModelKey;
-    extensions = answers[2] as string[];
-    packages = answers[3] as string[];
-    thinking = answers[4] as string;
-    const rawChannels = (answers[5] as string[]).filter((c) => (CHANNEL_VALUES as readonly string[]).includes(c));
+    backend = answers[0] as string;
+    harness = answers[1] as string;
+    modelKey = answers[2] as ModelKey;
+    extensions = answers[3] as string[];
+    packages = answers[4] as string[];
+    thinking = answers[5] as string;
+    const rawChannels = (answers[6] as string[]).filter((c) => (CHANNEL_VALUES as readonly string[]).includes(c));
     channels = rawChannels as ChannelValue[];
   } else {
+    backend = opts.backend ?? "well";
     harness = opts.harness ?? "pi";
     modelKey = opts.model ?? "opus";
     thinking = opts.thinking ?? defaultThinkingFor(modelKey);
@@ -1274,6 +1327,7 @@ async function cmdCreate(name: string, opts: CreateOpts) {
   const choice = MODEL_IDS[modelKey];
   const chain = buildDefaultChain({ provider: choice.provider, modelId: choice.modelId, thinking });
   const payload = {
+    backend,
     harness,
     provider: choice.provider,
     model: choice.modelId,
@@ -1328,7 +1382,11 @@ async function cmdCreate(name: string, opts: CreateOpts) {
   }
 
   // ── Slow birth path (no matching egg, or hatch failed) ──
-  const { outcome } = await runPiWithOutcome("cell-create", [name, JSON.stringify(payload)]);
+  const { outcome } = await runPiWithOutcome(
+    "cell-create",
+    [name, JSON.stringify(payload)],
+    backendEnv(backend),
+  );
   if (!outcome) {
     console.error("agent did not report outcome — sweeping potential orphan sprite and aborting");
     await directSpriteDestroy(name);
@@ -1345,7 +1403,13 @@ async function cmdCreate(name: string, opts: CreateOpts) {
   // status to "alive" once wiring lands. resolveSpriteHost has retries
   // for the case where talk happens before the Worker is up.
   const reg = await loadRegistry();
-  reg.cells.push({ name, created_at: new Date().toISOString(), status: "warming", modelChain: chain });
+  reg.cells.push({
+    name,
+    created_at: new Date().toISOString(),
+    status: "warming",
+    modelChain: chain,
+    backend: backend as "sprite" | "well",
+  });
   await saveRegistry(reg);
 
   console.log(`✓ ${name} alive — pi is up; capabilities are warming up async (cf worker, channels, vault).`);
@@ -3021,7 +3085,8 @@ async function spritesToken(): Promise<string> {
 
 async function api(path: string): Promise<any> {
   const token = await spritesToken();
-  const r = await fetch(`https://api.sprites.dev${path}`, {
+  const base = process.env.SPRITES_API_URL ?? "https://api.sprites.dev";
+  const r = await fetch(`${base}${path}`, {
     headers: { Authorization: `Bearer ${token}` },
   });
   const text = await r.text();

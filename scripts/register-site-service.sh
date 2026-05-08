@@ -16,10 +16,17 @@ set -euo pipefail
 
 NAME="${1:?usage: $0 <cell-name> [sprite-name]}"
 SPRITE_NAME="${2:-$NAME}"
-SECRETS="$HOME/.cells/secrets.json"
-[ -f "$SECRETS" ] || { echo "missing $SECRETS"; exit 1; }
-TOKEN=$(jq -r '.SPRITES_TOKEN // empty' "$SECRETS")
-[ -n "$TOKEN" ] || { echo "no SPRITES_TOKEN in $SECRETS"; exit 1; }
+# SPRITES_API_URL + SPRITES_TOKEN may be overridden by env (cells.ts injects
+# these for backend=well to point at welld on localhost). Default = cloud sprites.
+API_URL="${SPRITES_API_URL:-https://api.sprites.dev}"
+if [ -n "${SPRITES_TOKEN:-}" ]; then
+  TOKEN="$SPRITES_TOKEN"
+else
+  SECRETS="$HOME/.cells/secrets.json"
+  [ -f "$SECRETS" ] || { echo "missing $SECRETS"; exit 1; }
+  TOKEN=$(jq -r '.SPRITES_TOKEN // empty' "$SECRETS")
+  [ -n "$TOKEN" ] || { echo "no SPRITES_TOKEN in $SECRETS"; exit 1; }
+fi
 
 # The service command:
 #   1. cd into the site dir.
@@ -36,12 +43,12 @@ PAYLOAD=$(jq -n --arg s "$SCRIPT" '{cmd:"bash",args:["-lc",$s],workdir:"/home/sp
 # no-ops on an existing service, leaving stale config in place.
 curl -fsS -X DELETE \
   -H "Authorization: Bearer $TOKEN" \
-  "https://api.sprites.dev/v1/sprites/$SPRITE_NAME/services/site" > /dev/null 2>&1 || true
+  "$API_URL/v1/sprites/$SPRITE_NAME/services/site" > /dev/null 2>&1 || true
 
 curl -fsS -X PUT \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -d "$PAYLOAD" \
-  "https://api.sprites.dev/v1/sprites/$SPRITE_NAME/services/site" > /dev/null
+  "$API_URL/v1/sprites/$SPRITE_NAME/services/site" > /dev/null
 
 echo "service 'site' registered on $SPRITE_NAME with CELL_NAME=$NAME"

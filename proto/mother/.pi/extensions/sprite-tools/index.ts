@@ -73,8 +73,14 @@ function runCommand(
   });
 }
 
+// `SPRITES_BINARY` lets cells.ts route mother to a different backend without
+// touching this file — set to `splite` for local wells, default `sprite`
+// for cloud sprites.dev. Both CLIs honor the same flag shapes per the
+// splites Phase 10 parity contract.
+const SPRITE_CLI = process.env.SPRITES_BINARY ?? "sprite";
+
 const runSprite = (args: string[], opts?: { timeoutMs?: number }) =>
-  runCommand("sprite", args, opts);
+  runCommand(SPRITE_CLI, args, opts);
 
 function fmt(label: string, r: ShellResult): string {
   const out = r.stdout.trim();
@@ -161,7 +167,7 @@ export default function (pi: any) {
       });
       const remoteCmd = `mkdir -p ${params.remotePath} && cd ${params.remotePath} && tar xzf -`;
       const r = await runCommand(
-        "sprite",
+        SPRITE_CLI,
         ["exec", "-s", params.name, "--", "bash", "-c", remoteCmd],
         { pipeStdin: tar.stdout },
       );

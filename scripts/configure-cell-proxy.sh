@@ -25,7 +25,7 @@ case "$SECRET" in
   *) echo "CELLS_PROXY_SECRET must start with 'sk-ant-oat' (pi auth dispatch); refusing"; exit 1 ;;
 esac
 
-sprite exec -s "$NAME" -- bash -lc "
+"${SPRITES_BINARY:-sprite}" exec -s "$NAME" -- bash -lc "
 set -euo pipefail
 
 # 1a. Anthropic env file: route to subscriptions proxy.
