@@ -5012,12 +5012,39 @@ async function cmdBake(opts: BakeOpts) {
       throw new Error(`write tmux conf failed: ${writeTmux.stderr.slice(0, 200)}`);
     }
 
-    // 4. Patch the pre-installed pi (anthropic baseUrl → proxy.cells.md,
+    // 4a. Install pi globally. Wells's ubuntu-25.10-base used to ship pi
+    //     pre-installed, but the -10g rebake (2026-05-10) dropped it to keep
+    //     the base minimal. Cells owns its agent stack — pi belongs in our
+    //     bake recipe, not in wells's substrate. npm install -g lands the
+    //     binary at /usr/local/bin/pi and modules at /usr/lib/node_modules/.
+    //     Also bun for the well user (cells's CLI uses bun; pi tooling does
+    //     too in places). Bun's installer is a one-liner curl|bash that
+    //     drops a tarball at ~/.bun. Both are best-effort idempotent.
+    console.log(`→ install pi globally + bun for well user`);
+    const installTools = await wellExecCapture(
+      sourceName,
+      `set -euo pipefail
+sudo npm install -g @mariozechner/pi-coding-agent
+# Bun installer wants to run as the target user with their HOME set.
+if [ ! -x /home/well/.bun/bin/bun ]; then
+  sudo -u well bash -lc 'curl -fsSL https://bun.sh/install | bash'
+fi
+# Ubuntu's useradd defaults /home/well to 0750 — cell user (cells-env.sh's
+# PATH assumes /home/well/.bun/bin) can't traverse. Open it to 0755 so
+# cell can exec bun. The bun binary itself stays well:well.
+sudo chmod 0755 /home/well
+echo "pi: $(/usr/bin/pi --version 2>&1 | head -1 || /usr/local/bin/pi --version 2>&1 | head -1 || echo MISSING)"
+echo "bun: $(/home/well/.bun/bin/bun --version 2>&1 | head -1 || echo MISSING)"`,
+    );
+    if (!installTools.ok) {
+      throw new Error(`install pi+bun failed: ${installTools.stderr.slice(0, 400) || installTools.stdout.slice(0, 400)}`);
+    }
+
+    // 4b. Patch the just-installed pi (anthropic baseUrl → proxy.cells.md,
     //    codex extractAccountId neutralized, adaptive thinking unclamped).
-    //    Wells's base installs pi via `npm install -g`, so its source
-    //    lives at /usr/lib/node_modules/@mariozechner/pi-coding-agent —
+    //    Global install lands at /usr/lib/node_modules/@mariozechner/... —
     //    root-owned. Run the patch script with sudo so sed -i works there.
-    console.log(`→ apply pi patches (sudo, against in-base global pi)`);
+    console.log(`→ apply pi patches`);
     const patch = await wellExecCapture(
       sourceName,
       `sudo bash /cell/scripts/apply-pi-patches.sh`,

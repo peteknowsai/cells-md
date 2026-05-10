@@ -14,13 +14,12 @@ Anthropic models (opus / sonnet / haiku) are out-of-bounds for the matrix until 
 
 ## Blocked
 
-(none — W.29 resolved by wells team's entropy fix in wells-stable-2026-05-10f; cells needs to re-bake cell-base on the new ubuntu-25.10-base)
+_(empty)_
 
 ## Todo (priority order)
 
 ### Phase 1 — Birth checklist passes (acceptance gate)
 
-- [ ] **P1.3** Birth + verify `ck-pi-gpt55` (`--model=gpt-5.5`). Run §4 per-birth verification. Owner: `worker`.
 - [ ] **P1.4** Birth + verify `ck-pi-gpt55-pro` (`--model=gpt-5.5-pro`). Run §4. Owner: `worker`.
 - [ ] **P1.5** Birth + verify `ck-pi-deepseek-pro` (`--model=deepseek-v4-pro --thinking=high`). Run §4. Owner: `worker`.
 - [ ] **P1.6** Birth + verify `ck-pi-deepseek-fl` (`--model=deepseek-v4-flash`). Run §4. Owner: `worker`.
@@ -113,6 +112,7 @@ _(empty)_
 
 ## Done
 
+- [x] **P1.3** Birth + verify `ck-pi-gpt55` on `wells-stable-2026-05-10h`. All 8 birth steps stamped; §4 verification green (alive, all steps in birth-timings, /etc/environment has CELLS_PROXY_SECRET, no __NAME__ placeholders, harness=pi, no __CELL_BG__, site service 200, talk smoke replies "ok"). CF Worker remote talk path still fails (separate P5.1 work). Side-effect fixes shipped on the way: cells's bake recipe installs pi+bun (was assumed in wells base, dropped from -10g rebake) + chmod /home/well 0755 (default 0750 blocks cell user traverse). (worker, 2026-05-10 15:32 MT)
 - [x] **W.29** Root cause (per direct cells↔wells Claude-Code chat 2026-05-10 ~14:35–15:03 MT): wells's rinse was `rm /etc/machine-id; touch /etc/machine-id`, leaving a 0-byte file. systemd's `sshd-keygen.service` has `ConditionFirstBoot=yes` which fires precisely when `/etc/machine-id` is empty — so every fork triggered early-boot RSA keygen on cold entropy, hanging sshd. Ubuntu-base forks happened not to hit it because their machine-id was populated. Wells's `wells-stable-2026-05-10g` rinse stops zeroing machine-id and stops deleting `/etc/ssh/ssh_host_*`; well-firstboot regens both per-fork after network-online with haveged-provided entropy. Bake + smoke verified 2026-05-10 15:03 MT — cell-base + --env CELLS_PROXY_SECRET works end-to-end. Earlier "entropy fix in -10f" was a partial fix on the right hypothesis — final fix is in -10g. (closed 2026-05-10 15:03 MT)
 - [x] **W.27** Wells shipped well-firstboot etc-environment.append handler (`splites/templates/well-firstboot.sh:67-76`). Verified on ubuntu-25.10-base + --env: /etc/environment carries the wells-env block. (verified 2026-05-10 10:35 MT)
 

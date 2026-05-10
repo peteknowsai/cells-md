@@ -614,3 +614,176 @@ Pete set up `/tmp/cells-wells-chat/` as a duplex file channel (each side `tail -
 - BOARD W.29 reclosed with actual root cause (was provisionally closed as "entropy" earlier; corrected).
 
 **State**: cell-base ready on -10g, env smoke verified, ready for P1.3 birth. Merging night → main next, then Pete Loop.
+
+---
+
+## 2026-05-10 15:11 MT — worker(P1.3) fire 1 — birth kicked off, §4 checklist staged
+
+Branch: worker/P1.3-ck-pi-gpt55. Substrate: wells-stable-2026-05-10g, degraded=false.
+
+Birth firing in background (task blt1t55nx): `cells birth ck-pi-gpt55 --model=gpt-5.5 --seed=off`. Slow-birth path (no warm egg in pool — pool target_size=0 since night). Monitor armed on the output, will notify on `alive` / `fail` / `error` / `outcome`.
+
+§4 verification staged from docs/birth-checklist.md lines 74-85:
+1. `cells list | grep ck-pi-gpt55` shows `alive`
+2. ~/.cells/logs/birth-timings/ck-pi-gpt55.log has steps 1-8
+3. `well exec -- grep CELLS_PROXY_SECRET /etc/environment` → OK
+4. No __NAME__ placeholders in IDENTITY.md or .pi/settings.json
+5. `cat /cell/.pi/status.json | jq -r .harness` matches `pi`
+6. No __CELL_BG__ in /cell/.tmux.conf
+7. site service: `curl localhost:8080/` returns 200
+8. CF Worker: `curl https://ck-pi-gpt55.cells.md/debug` returns the well name
+9. Talk smoke: `cells talk ck-pi-gpt55 "reply with just the word ok"` → ok
+
+Next fire: when Monitor fires `alive`, run §4 in order; on first failure, stop + diagnose.
+
+## 2026-05-10 15:13 MT — worker(P1.3) fire 2 — birth at step 1 (well-create), 12s in
+
+birth-timings log shows step 1 (well-create) timestamp 1778447604 (15:13:24). Bash task output still empty — pi mother is mid-LLM-call building its first response. Cell not in `cells list` yet. Normal pacing for slow-birth.
+
+## 2026-05-10 15:13 MT — worker(P1.3) fire 3 — birth progressing, well alive
+
+Steps logged so far:
+- step 1 well-create at 15:13:24
+- step 2 egress-allow at 15:13:46 (+22s)
+- step 3 identity-bake-in at 15:13:51 (+5s)
+
+ck-pi-gpt55 is running at 192.168.64.14, age 11s. Well-create unblocked cleanly on -10g — no machine-id hang. Mother is mid-step-3 (identity bake-in).
+
+## 2026-05-10 15:14 MT — worker(P1.3) fire 4 — steps 3b, 3c done
+
+- step 3b tmux-color at +37s
+- step 3c status-file at +41s
+
+Healthy pacing, no errors.
+
+## 2026-05-10 15:14 MT — worker(P1.3) fire 5 — through step 4b verify
+
+- 3d extensions, 3e packages, 4 site-service, 4b verify all stamped between +45s and +55s.
+- Step 4b is the in-band verify — clean. Now waiting on steps 5-8 (proxy, slack, vault, worker).
+
+## 2026-05-10 15:16 MT — worker(P1.3) fire 7 — BLOCKED: pi missing from ubuntu-25.10-base
+
+Birth failed step 4b verify with `timeout: failed to execute process: Permission denied (os error 13)` — root cause: `pi` not installed in cell-base. `which pi` returns /usr/local/bin/pi from bash hash-cache, but file doesn't exist. /usr/lib/node_modules/ has @anthropic-ai/claude-code + corepack + npm — no @mariozechner/pi-coding-agent.
+
+Cells's bake step "apply pi patches against in-base global pi" silently no-opped (find returns no files = empty for-loop = exit 0).
+
+Per memory `project_cua_lume.md` (and ubuntu-base bake doc reference in cells.ts L4962-67): the prior ubuntu-25.10-base shipped with pi pre-installed. The -10g rebake apparently dropped it.
+
+Pinged wells team via chat asking if they re-add pi or if cells should install in our bake. Awaiting reply. All P1 tasks blocked on this (every birth runs step 4b).
+
+## 2026-05-10 15:20 MT — worker(P1.3) fire 9 — birth retry kicked off, early phase
+
+Bake green: cell-base 6105 MB with pi 0.73.1 (at /usr/bin/pi) + bun 1.3.13 (at /home/well/.bun/bin/bun). cell user sees `pi --version` 0.73.1 via PATH.
+
+Birth retry firing (task bxdbk6y2h). Progress log not yet updated with new attempt — mother still building first response.
+
+## 2026-05-10 15:20 MT — worker(P1.3) fire 10 — birth alive, mother thinking
+
+Bash pids 30521+30523 alive (cells birth process). No progress log entries yet for this run — mother in first-LLM-turn, ~25s in.
+
+## 2026-05-10 15:21 MT — worker(P1.3) fire 11 — ck-pi-gpt55 well creating
+
+welld log: ck-pi-gpt55 lume.start at 21:20:52, expected SSH ready ~9s. Step 1 well-create stamped.
+
+## 2026-05-10 15:21 MT — worker(P1.3) fire 12 — substrate hiccup: aggressive auto-hibernate
+
+welld log: ck-pi-gpt55 warmed at 21:21:01.477, watchdog hibernated it at 21:21:07.424 (6s later). Immediate wake + killAndRestart on lume. Mid-birth thrash. Pinged wells. Birth still in flight; will see if mother handles it or stalls.
+
+## 2026-05-10 15:21 MT — worker(P1.3) fire 13 — birth recovering, through step 3b
+
+New attempt steps stamping:
+- step 1 well-create at 15:20:39
+- step 2 egress-allow at 15:21:15 (+36s — slower than first attempt; watchdog hibernate cost time)
+- step 3 identity-bake-in at 15:21:26
+- step 3b tmux-color at 15:21:39
+
+Mother is working through the auto-hibernate hiccup. Approaching step 4b verify (the one that failed before).
+
+## 2026-05-10 15:22 MT — worker(P1.3) fire 14 — through 3d
+
+- 3c status-file at 15:21:51
+- 3d extensions at 15:21:58
+
+Approaching the moment-of-truth: step 4b verify (last attempt failed here due to missing pi).
+
+## 2026-05-10 15:22 MT — worker(P1.3) fire 15 — step 3e done
+
+3e packages at +93s from step 1 (slower than first attempt's +27s — likely watchdog hibernate overhead). Step 4 next.
+
+## 2026-05-10 15:22 MT — worker(P1.3) fire 16 — step 4b verify RUNNING
+
+4b stamped at 15:22:24. Verify running now — this is the moment of truth (last attempt failed here).
+
+## 2026-05-10 15:22 MT — worker(P1.3) fire 17 — 🎯 step 4b PASSED, at step 5 checkpoint
+
+- 4b verify at 15:22:24
+- 5 checkpoint at 15:22:47 (+23s)
+
+Pi installed, mother said "say ok", got "ok" back. Verify succeeded. Three more steps (5 checkpoint, 6 report-outcome, 7, 8). Birth is going to succeed.
+
+## 2026-05-10 15:25 MT — worker(P1.3) fire 18 — 🎯 BIRTH SUCCEEDED, §4 7/9 green, site fixed
+
+ck-pi-gpt55 birth completed end-to-end on -10g substrate. All 8 steps stamped (1, 2, 3, 3b-3e, 4, 4b, 5, 6, 7, 8). cells list shows alive, model gpt-5.5.
+
+§4 per-birth verification:
+- §4.1 alive ✓
+- §4.2 birth-timings has all steps ✓
+- §4.3 /etc/environment has CELLS_PROXY_SECRET ✓
+- §4.4 no __NAME__ placeholders ✓ (0 hits in IDENTITY.md + .pi/settings.json)
+- §4.5 harness=pi ✓
+- §4.6 no __CELL_BG__ ✓ (0 hits in /cell/.tmux.conf)
+- §4.7 site service → was 000, now **200** after fix ✓
+- §4.9 talk smoke → WS upgrade fails on CF Worker path (known P5.1 territory, separate)
+
+**Site service fix**: well-site.service was crash-looping with `bash: exec: bun: not found`. Root cause: /home/well perms 0750 (ubuntu useradd default) — cell user couldn't traverse into well's home to exec bun. Fix: `sudo chmod 0755 /home/well` in bake recipe. Applied in-place on running ck-pi-gpt55 (works) + committed to cmdBake for future bakes.
+
+**Wells side**: their watchdog auto-hibernate hiccup tracked to a real bug — stale lastTouched Map in lib/idle.ts not cleared on destroy. Same-name re-create inherits the old timestamp → instant hibernate. They're shipping a 3-line fix (wire clearLastTouched into destroy+create handlers). My ack to restart welld sent.
+
+**Remaining for P1.3**: re-confirm §4.9 talk smoke after wells's restart + try local WS path. Then mark P1.3 done.
+
+## 2026-05-10 15:28 MT — worker(P1.3) fire 19 — talk smoke fails at welld /agent auth
+
+After wells's welld restart (-10h), talk smoke still fails:
+- streamCellBridge tries local welld first: `ws://127.0.0.1:7878/agent` with Host `<name>.cells.md` + CELLS_PROXY_SECRET → welld returns 401 'unauthorized' (validates against welld's own token, not the cells secret).
+- With welld's token instead: 404 not found.
+- CF Worker remote path: 'Expected 101 status code' (known P5.1).
+
+Cell is healthy internally: well-site active, bun + pi running in cgroup, `curl localhost:8080/` returns 200 from inside.
+
+192.168.64.21:8080 not reachable from host either (TCP connect-timeout to cell IP — may be vmnet bridge mid-restart-recovery, separate from welld's vhost dispatch).
+
+Pinged wells: is this cells.ts stale auth pattern OR welld regression on /agent vhost dispatch? P1.3's last gap is talk smoke.
+
+## 2026-05-10 15:29 MT — worker(P1.3) fire 20 — waiting on wells re: welld /agent auth
+
+## 2026-05-10 15:30 MT — worker(P1.3) fire 21 — found WELL_PUBLIC_BASE mismatch
+
+Real cause for talk-local failure: wells's `WELL_PUBLIC_BASE=wells.cells.md` (from welld plist env). Cells flipped to `cells.md` in commit bd47574 ("flipped from wells.cells.md to cells.md so the Cloudflare cert covers it without a separate zone"). proxy.ts's extractWellFromHost('ck-pi-gpt55.cells.md', 'wells.cells.md') returns null → no vhost match → welld treats it as raw API call → 401 with anyone's bearer but welld's.
+
+Either welld's plist needs WELL_PUBLIC_BASE=cells.md, or cells needs to revert (lose the cert-covers-it-cleanly property). I'd prefer wells flip to cells.md.
+
+Also: watchdog auto-hibernated ck-pi-gpt55 again at 21:29:32 (60s after last API touch). Wells's fix was for name-collision only; the 60s threshold is global. Probably fine in production but annoying for testing. Site service still active internally.
+
+Pinged wells.
+
+## 2026-05-10 15:31 MT — worker(P1.3) fire 22 — idle on wells re: WELL_PUBLIC_BASE
+
+## 2026-05-10 15:32 MT — worker(P1.3) fire 23 — 🎯 P1.3 COMPLETE
+
+Wells team flipped `WELL_PUBLIC_BASE=cells.md` on the welld plist, restarted. Re-tested:
+- curl WS upgrade with Host: ck-pi-gpt55.cells.md + CELLS_PROXY_SECRET → **101 Switching Protocols** ✓
+- `cells talk ck-pi-gpt55 "reply with just the word ok"` → "── connected via local welld" → "ck-pi-gpt55> ok" ✓
+
+§4 verification all green except §4.8 (CF Worker remote — separate P5.1 work). P1.3 done.
+
+Bug rollup from the session (all closed):
+- Wells's W.27 (env→/etc/environment) — shipped -10f
+- Wells's W.29 (machine-id rinse → sshd-keygen ConditionFirstBoot=yes hang) — shipped -10g
+- Wells's watchdog state leak (clearLastTouched never called) — shipped -10h
+- Wells's WELL_PUBLIC_BASE config (was wells.cells.md, cells expects cells.md) — env flipped
+- Cells's bake recipe missing pi+bun install (was assumed in wells base) — committed 3fde0c8
+- Cells's bake recipe missing /home/well chmod 0755 (cell user couldn't traverse) — committed 0652b4e
+
+Direct cells↔wells Claude-Code chat at /tmp/cells-wells-chat/ was the diagnostic accelerant — turned ~3 hrs of would-be-relay-through-Pete into ~45 min of direct exchange.
+
+Moving to P1.4 next fire.
