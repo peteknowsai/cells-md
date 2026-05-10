@@ -120,7 +120,7 @@ These are the calls made up front to avoid mid-build re-architecture:
 - `runPiWithOutcome` (cli/cells.ts:454) — invoke birth-egg / cull-egg same way as cell-create / cell-destroy
 - `directSpriteDestroy` (cli/cells.ts:~1250) — reuse for cull-egg's safety-net layer
 - All cleanup helpers (`evictPulseStateForCell`, `archiveSlackChannelsForCell`, `evictChannelBindingsForCell`, `deleteCellWorker`, `removeVaultEntry`) — these are per-CELL not per-egg, so cull-egg doesn't need them; but **kill-cell after hatch** still does, and the existing cmdDestroyOne path covers that
-- `scripts/configure-cell-proxy.sh` — runs unchanged at egg-birth time (the `<NAME>` arg is the egg's well name; the env files dropped are universal)
+- ~~`scripts/configure-cell-proxy.sh`~~ — **deprecated for /cell cells.** Pi-ai patches bake into `cell-base`; secret lands in `/etc/environment` via `well_create --env=...`. Birth-egg step 6c is now a verify-only check. Legacy script retained for `/home/well/agent` retrofit only.
 - `scripts/register-site-service.sh` — runs unchanged at hatch time with the cell's real name
 - `scripts/cell-color.sh` — deterministic by name, runs at hatch
 - `scripts/deploy-cell-worker.sh` — runs async post-hatch, exactly as it does today after a slow `cells birth`

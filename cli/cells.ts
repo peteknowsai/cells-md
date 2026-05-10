@@ -756,6 +756,7 @@ async function runPiWithOutcome(
   slashCommand: string,
   args: string[],
   extraEnv?: Record<string, string>,
+  opts?: { progressName?: string },
 ): Promise<{ exit: number; outcome: Outcome | null }> {
   return withMotherLock(`${slashCommand} ${args[0] ?? ""}`.trim(), async () => {
     const outcomeFile = join(
@@ -765,8 +766,61 @@ async function runPiWithOutcome(
     if (existsSync(outcomeFile)) await unlink(outcomeFile);
 
     const message = `/${slashCommand} ${args.join(" ")}`.trim();
+
+    // P2.5 streaming chip: when caller passes progressName + stderr is TTY,
+    // tail ~/.cells/logs/birth-timings/<name>.log and render the latest step
+    // marker on a single stderr line (\r overwrite). Skip if not TTY (script
+    // mode keeps clean output) or if no progress file (other slash commands).
+    const chipName = opts?.progressName;
+    const useChip = !!chipName && process.stderr.isTTY;
+    const progressPath = chipName
+      ? join(homedir(), ".cells", "logs", "birth-timings", `${chipName}.log`)
+      : null;
+    const startSize = useChip && progressPath && existsSync(progressPath)
+      ? statSync(progressPath).size
+      : 0;
+
     const proc = spawnInRepo(["pi", "-p", message], { CELL_OUTCOME_FILE: outcomeFile, ...extraEnv });
+
+    let chipStop = false;
+    const chipTask = useChip && progressPath
+      ? (async () => {
+          let lastChip = "";
+          let lastSize = startSize;
+          while (!chipStop) {
+            try {
+              if (existsSync(progressPath)) {
+                const size = statSync(progressPath).size;
+                if (size > lastSize) {
+                  const buf = await readFile(progressPath, "utf-8");
+                  const lines = buf.split("\n").filter(Boolean);
+                  const latest = lines[lines.length - 1];
+                  if (latest) {
+                    // format: <unix-ts>\t<step>\t<label>
+                    const parts = latest.split("\t");
+                    if (parts.length >= 3) {
+                      const chip = `· birthing ${chipName} — step ${parts[1]}: ${parts[2]}…`;
+                      if (chip !== lastChip) {
+                        process.stderr.write(`\r\x1b[2K${chip}`);
+                        lastChip = chip;
+                      }
+                    }
+                  }
+                  lastSize = size;
+                }
+              }
+            } catch {
+              // best-effort — chip is cosmetic
+            }
+            await new Promise((r) => setTimeout(r, 250));
+          }
+          if (lastChip) process.stderr.write("\r\x1b[2K");
+        })()
+      : null;
+
     const exit = await proc.exited;
+    chipStop = true;
+    if (chipTask) await chipTask;
 
     let outcome: Outcome | null = null;
     if (existsSync(outcomeFile)) {
@@ -923,12 +977,15 @@ async function cmdTui(name: string, extra: string[] = []) {
   // once it's running, so the override only affects the outer shell.
   const remote =
     `export TERM=xterm-256color; ` +
-    `mkdir -p ${sessionDir} && cd ~/agent && ${reset}` +
-    `exec tmux new-session -A -s tui -c ~/agent "pi ${piArgs}"`;
+    `mkdir -p ${sessionDir} && cd /cell && ${reset}` +
+    `exec tmux new-session -A -s tui -c /cell "pi ${piArgs}"`;
+  // Run as cell user so pi's session-dir, memory, and tmux conf land
+  // under /cell (sessionDir = ~/.pi/... resolves to /cell/.pi/... with
+  // HOME=/cell). well user is in NOPASSWD sudoers so the wrap is silent.
   const proc = Bun.spawn(
     [
       "well", "exec", "-s", name, "--tty", "--",
-      "bash", "-lc", remote,
+      "sudo", "-u", "cell", "bash", "-lc", remote,
     ],
     { stdin: "inherit", stdout: "inherit", stderr: "inherit" },
   );
@@ -957,13 +1014,16 @@ async function cmdShell(name: string) {
     return;
   }
   await requireCell(name);
-  // Spawn tmux directly under well exec --tty. Bypasses the login-shell
-  // auto-attach shim (which would dump us into pi); inside tmux, the
-  // shim's `[ -z "$TMUX" ]` guard is false, so it no-ops on subsequent
-  // shell invocations.
+  // Spawn tmux directly under well exec --tty as the cell user.
+  // Bypasses the login-shell auto-attach shim (which would dump us
+  // into pi); inside tmux, the shim's `[ -z "$TMUX" ]` guard is false,
+  // so it no-ops on subsequent shell invocations.
   // -A on new-session: attach if "shell" exists, create if not.
-  // bash -l inside tmux loads .profile → .bashrc.d (PATH, mf/mft, env).
-  // Ctrl+D exits bash, ends the tmux session, drops us back to the Mac.
+  // bash -l inside tmux sources /etc/profile → /etc/profile.d/cells-env.sh
+  // (PATH, secrets re-export). Ctrl+D exits bash, ends the tmux session,
+  // drops us back to the Mac.
+  // Wrap in sudo -u cell so the shell lands as the cell user with
+  // HOME=/cell — mirrors what `cells tui` does for the agent's session.
   // Wrap in bash -c to override TERM. Pete's terminal exports things
   // like xterm-ghostty that well VMs don't ship terminfo for; tmux
   // refuses to start with "missing or unsuitable terminal". tmux's
@@ -971,8 +1031,8 @@ async function cmdShell(name: string) {
   const proc = Bun.spawn(
     [
       "well", "exec", "-s", name, "--tty", "--",
-      "bash", "-c",
-      `export TERM=xterm-256color; exec tmux new-session -A -s shell -c ~/agent bash -l`,
+      "sudo", "-u", "cell", "bash", "-c",
+      `export TERM=xterm-256color; exec tmux new-session -A -s shell -c /cell bash -l`,
     ],
     { stdin: "inherit", stdout: "inherit", stderr: "inherit" },
   );
@@ -1163,7 +1223,16 @@ type CreateOpts = {
   packages?: string[];
   channels?: ChannelValue[];
   slackChannel?: string;
+  seed?: string;        // first message auto-sent post-birth (default: introduce-yourself)
+  seedOff?: boolean;    // true if --seed=off — no seed greeting
+  noPool?: boolean;     // true if --no-pool — bypass egg pool, force slow birth (testing)
 };
+
+// Default seed: the cell greets the user back in one sentence + offers help.
+// Surfaces the magical-first-talk wedge — `cells birth bob` returns with bob
+// already saying hi, no keystrokes from the user. Override with --seed=<text>
+// or disable with --seed=off.
+const DEFAULT_SEED = "introduce yourself in one sentence and tell me what you can help with";
 
 // Env vars injected when invoking mother (and any host-side scripts it shells
 // out to). Cells run on local wells (welld daemon on :7878, agent user `well`,
@@ -1244,6 +1313,15 @@ function parseCreateArgs(args: string[]): { name: string; opts: CreateOpts } {
         }
       }
       opts.channels = parts as ChannelValue[];
+    } else if (a.startsWith("--seed=")) {
+      const v = a.slice("--seed=".length);
+      if (v === "off" || v === "false" || v === "no") {
+        opts.seedOff = true;
+      } else {
+        opts.seed = v;
+      }
+    } else if (a === "--no-pool") {
+      opts.noPool = true;
     } else if (a.startsWith("--")) {
       console.error(`unknown flag: ${a}`);
       process.exit(1);
@@ -1391,44 +1469,53 @@ async function cmdCreate(name: string, opts: CreateOpts) {
   // If a matching warm egg exists, hatch it. Sub-20s to "alive". The
   // pool key matches on (model, extensions, packages); thinking and
   // channels are applied at hatch.
-  const fullVariant: Variant = {
-    model: modelKey,
-    thinking,
-    extensions: [...extensions].sort(),
-    packages: [...packages].sort(),
-    channels: [...channels].sort(),
-  };
-  const requestedKey = poolKey(fullVariant);
-  const eggsFile = await loadEggs();
-  const matchingEgg = eggsFile.eggs.find(
-    (e) => e.state === "warm" && e.variant_signature === requestedKey,
-  );
-  if (matchingEgg) {
-    const hatchResult = await hatchEgg(
-      matchingEgg,
-      name,
+  // --no-pool bypasses the pool entirely (testing/perf-baseline use).
+  if (!opts.noPool) {
+    const fullVariant: Variant = {
+      model: modelKey,
       thinking,
-      extensions,
-      channels,
-      chain,
-      slackChannel,
+      extensions: [...extensions].sort(),
+      packages: [...packages].sort(),
+      channels: [...channels].sort(),
+    };
+    const requestedKey = poolKey(fullVariant);
+    const eggsFile = await loadEggs();
+    const matchingEgg = eggsFile.eggs.find(
+      (e) => e.state === "warm" && e.variant_signature === requestedKey,
     );
-    if (hatchResult.ok) {
-      // Magic moment: drop straight into interactive talk if we have a
-      // TTY. The async tail (worker, slack, vault, checkpoint) runs in
-      // parallel — by the time the user has typed their first message,
-      // most of it is done. In non-TTY mode (script invocations), await
-      // the tail instead so the cell is fully provisioned on exit.
-      if (process.stdout.isTTY) {
-        await cmdTalk(name, []);
-      } else if (hatchResult.tailPromise) {
-        await hatchResult.tailPromise;
+    if (matchingEgg) {
+      const hatchResult = await hatchEgg(
+        matchingEgg,
+        name,
+        thinking,
+        extensions,
+        channels,
+        chain,
+        slackChannel,
+      );
+      if (hatchResult.ok) {
+        // Magic moment: drop straight into interactive talk + auto-send
+        // the seed greeting (per --seed flag). The async tail (worker,
+        // slack, vault, checkpoint) runs in parallel — by the time the
+        // greeting finishes streaming, most of the tail is done. In
+        // non-TTY mode (script invocations), await the tail so the cell
+        // is fully provisioned on exit.
+        if (process.stdout.isTTY) {
+          const seedText = opts.seedOff ? undefined : (opts.seed ?? DEFAULT_SEED);
+          if (seedText) {
+            await streamCellBridge(name, { interactive: true, initialMessage: seedText });
+          } else {
+            await cmdTalk(name, []);
+          }
+        } else if (hatchResult.tailPromise) {
+          await hatchResult.tailPromise;
+        }
+        return;
       }
-      return;
+      // hatch failed — fall through to slow birth. The egg has been
+      // marked "culling" by hatchEgg already.
+      console.warn(`! hatch fell back to slow birth: ${hatchResult.reason}`);
     }
-    // hatch failed — fall through to slow birth. The egg has been
-    // marked "culling" by hatchEgg already.
-    console.warn(`! hatch fell back to slow birth: ${hatchResult.reason}`);
   }
 
   // ── Slow birth path (no matching egg, or hatch failed) ──
@@ -1436,6 +1523,7 @@ async function cmdCreate(name: string, opts: CreateOpts) {
     "cell-create",
     [name, JSON.stringify(payload)],
     wellsEnv(),
+    { progressName: name },
   );
   if (!outcome) {
     console.error("agent did not report outcome — sweeping potential orphan well and aborting");
@@ -1473,9 +1561,19 @@ async function cmdCreate(name: string, opts: CreateOpts) {
   })();
 
   if (process.stdout.isTTY) {
-    // Magic moment: drop into talk immediately. Tail runs in background;
-    // bun's event loop keeps the process alive while talk holds it.
-    await cmdTalk(name, []);
+    // Magic moment: drop into talk with the seed greeting auto-sent so the
+    // cell is already saying hi when control returns to the user. The cell
+    // itself answers — pi reads the prompt, generates a one-liner intro,
+    // streams it back, then the user takes over the readline loop.
+    //
+    // --seed=off disables the auto-send (interactive starts blank).
+    // --seed=<text> overrides the default greeting prompt.
+    const seedText = opts.seedOff ? undefined : (opts.seed ?? DEFAULT_SEED);
+    if (seedText) {
+      await streamCellBridge(name, { interactive: true, initialMessage: seedText });
+    } else {
+      await cmdTalk(name, []);
+    }
   } else {
     // Non-TTY (scripted): await the tail so callers see a fully-wired
     // cell when the command exits.
@@ -2112,16 +2210,18 @@ async function updateCellStatusChannels(cell: string): Promise<void> {
   // Use jq on the cell to merge into status.json, preserving harness and
   // tolerating a missing file (start from {harness:"pi"} as a safe default).
   const channelsJson = JSON.stringify(names);
+  // status.json lives under /cell/.pi (cell:cell 0755) so writes need
+  // the cell user. wrap in sudo -u cell.
   const remote = `
 set -e
-F=~/agent/.pi/status.json
+F=/cell/.pi/status.json
 mkdir -p "$(dirname "$F")"
 [ -f "$F" ] || echo '{"harness":"pi","channels":[]}' > "$F"
 tmp=$(mktemp)
 jq --argjson ch '${channelsJson.replace(/'/g, "'\\''")}' '.channels = $ch' "$F" > "$tmp" && mv "$tmp" "$F"
 `.trim();
   try {
-    const proc = Bun.spawn(["well", "exec", "-s", cell, "--", "bash", "-c", remote], {
+    const proc = Bun.spawn(["well", "exec", "-s", cell, "--", "sudo", "-u", "cell", "bash", "-c", remote], {
       stdout: "pipe",
       stderr: "pipe",
     });
@@ -2699,15 +2799,19 @@ async function mirrorPromptToSlack(cellName: string, text: string, secret: strin
 
 async function dreamOne(name: string): Promise<boolean> {
   console.log(`→ dreaming ${name}`);
+  // Run pi as the cell user so memory ext writes (/cell/state/memory/)
+  // succeed and dream's session lands under /cell/.pi/ — mirrors how
+  // pi is invoked elsewhere in the codebase post-/cell migration.
   const proc = Bun.spawn(
     [
       "well",      "exec",
       "-s",
       name,
       "--",
+      "sudo", "-u", "cell",
       "bash",
       "-lc",
-      'cd ~/agent && pi -p "Run the dream tool to consolidate your memory."',
+      'cd /cell && pi -p "Run the dream tool to consolidate your memory."',
     ],
     {
       stdin: "ignore",
@@ -2901,6 +3005,117 @@ async function cmdSchedulePulse() {
   console.log(`  unschedule with: cells unschedule-pulse`);
 }
 
+// ───── egg refill agent — launchd-driven pool maintenance ─────
+//
+// `cells schedule-egg-refill` installs a launchd plist that runs
+// `cells egg refill` every 10 minutes. The plist is owned by Pete's
+// gui session (no root). If the pool's at depth, refill no-ops fast
+// (tens of ms). If it's short, refill bakes 1 egg per fire serially
+// — mother concurrency=1 ensures non-overlap with manual `cells birth`
+// or other refill ticks.
+//
+// 10-min cadence is a compromise: short enough that a drained slot
+// is replenished within a tolerable window for the next birth; long
+// enough that bake-overlap risk is low.
+//
+// `cells unschedule-egg-refill` is the inverse.
+
+const EGG_REFILL_LABEL = "com.pete.cells-egg-refill";
+
+function eggRefillPlistPath(): string {
+  return join(homedir(), "Library/LaunchAgents", `${EGG_REFILL_LABEL}.plist`);
+}
+
+function buildEggRefillPlist(): string {
+  // Resolve cells CLI launcher to an absolute path so launchd doesn't
+  // need a particular shell init. We invoke `bun cli/cells.ts egg refill`
+  // from the repo root directly.
+  const bunBin = `${homedir()}/.bun/bin/bun`;
+  const cellsCli = join(REPO_ROOT, "cli", "cells.ts");
+  const logsDir = join(homedir(), ".cells", "logs");
+  const path = `${homedir()}/.bun/bin:${homedir()}/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin`;
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>${EGG_REFILL_LABEL}</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>${bunBin}</string>
+    <string>${cellsCli}</string>
+    <string>egg</string>
+    <string>refill</string>
+  </array>
+  <key>WorkingDirectory</key>
+  <string>${REPO_ROOT}</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>${path}</string>
+    <key>HOME</key>
+    <string>${homedir()}</string>
+  </dict>
+  <key>StartInterval</key>
+  <integer>600</integer>
+  <key>StandardOutPath</key>
+  <string>${logsDir}/egg-refill.log</string>
+  <key>StandardErrorPath</key>
+  <string>${logsDir}/egg-refill.err</string>
+  <key>RunAtLoad</key>
+  <false/>
+</dict>
+</plist>
+`;
+}
+
+async function cmdScheduleEggRefill() {
+  const logsDir = join(homedir(), ".cells", "logs");
+  await mkdir(logsDir, { recursive: true });
+  await mkdir(dirname(eggRefillPlistPath()), { recursive: true });
+  await writeFile(eggRefillPlistPath(), buildEggRefillPlist());
+  console.log(`✓ wrote plist: ${eggRefillPlistPath()}`);
+
+  const uid = process.getuid?.() ?? 501;
+
+  await Bun.spawn(["launchctl", "bootout", `gui/${uid}/${EGG_REFILL_LABEL}`], {
+    stdin: "ignore",
+    stdout: "ignore",
+    stderr: "ignore",
+  }).exited;
+
+  const proc = Bun.spawn(["launchctl", "bootstrap", `gui/${uid}`, eggRefillPlistPath()], {
+    stdin: "ignore",
+    stdout: "inherit",
+    stderr: "inherit",
+  });
+  const code = await proc.exited;
+  if (code !== 0) {
+    console.error("✗ launchctl bootstrap failed");
+    process.exit(1);
+  }
+
+  console.log(`✓ scheduled: egg refill every 10 minutes`);
+  console.log(`  logs: ${logsDir}/egg-refill.log (stdout), egg-refill.err (stderr)`);
+  console.log(`  unschedule with: cells unschedule-egg-refill`);
+}
+
+async function cmdUnscheduleEggRefill() {
+  const uid = process.getuid?.() ?? 501;
+  await Bun.spawn(["launchctl", "bootout", `gui/${uid}/${EGG_REFILL_LABEL}`], {
+    stdin: "ignore",
+    stdout: "inherit",
+    stderr: "inherit",
+  }).exited;
+  if (existsSync(eggRefillPlistPath())) {
+    await unlink(eggRefillPlistPath());
+    console.log(`✓ removed ${eggRefillPlistPath()}`);
+  } else {
+    console.log("(no plist found)");
+  }
+  console.log("✓ unscheduled");
+}
+
 async function cmdUnschedulePulse() {
   const uid = process.getuid?.() ?? 501;
   await Bun.spawn(["launchctl", "bootout", `gui/${uid}/${PULSE_LABEL}`], {
@@ -2938,13 +3153,17 @@ async function refreshExtensionOnCell(cellName: string, extName: string): Promis
   }
 
   // Push the extension dir via tar pipe.
-  const remoteExtDir = `~/agent/.pi/extensions/${extName}`;
+  const remoteExtDir = `/cell/.pi/extensions/${extName}`;
   const tar = Bun.spawn(["tar", "czf", "-", "-C", join(DNA_DIR, ".pi", "extensions"), extName], {
     stdin: "ignore",
     stdout: "pipe",
     stderr: "pipe",
   });
-  const remoteCmd = `mkdir -p ~/agent/.pi/extensions && rm -rf ${remoteExtDir} && cd ~/agent/.pi/extensions && tar xzf -`;
+  // /cell is cell:cell 0755 — well user can read but not write. Wrap the
+  // tar receive in `sudo -u cell` so files land cell-owned (well is in
+  // NOPASSWD sudoers per the wells base; the sudo is silent). Stdin from
+  // the host tar pipe flows through ssh → bash → sudo → cell's tar xzf.
+  const remoteCmd = `sudo -u cell bash -c 'mkdir -p /cell/.pi/extensions && rm -rf ${remoteExtDir} && cd /cell/.pi/extensions && tar xzf -'`;
   const recv = Bun.spawn(["well", "exec", "-s", cellName, "--", "bash", "-c", remoteCmd], {
     stdin: tar.stdout,
     stdout: "pipe",
@@ -2962,7 +3181,7 @@ async function refreshExtensionOnCell(cellName: string, extName: string): Promis
   const entry = `.pi/extensions/${extName}/index.ts`;
   const updateScript = `
 set -e
-cd ~/agent
+cd /cell
 node -e '
   const fs = require("fs");
   const p = ".pi/settings.json";
@@ -2977,7 +3196,7 @@ node -e '
   }
 '
 `.trim();
-  const settings = await wellExecCapture(cellName, updateScript);
+  const settings = await wellExecCapture(cellName, updateScript, { user: "cell" });
   if (!settings.ok) {
     console.error(`✗ ${cellName}: settings.json update failed — ${settings.stderr.trim()}`);
     return false;
@@ -2995,7 +3214,7 @@ async function removeExtensionOnCell(cellName: string, extName: string): Promise
   const entry = `.pi/extensions/${extName}/index.ts`;
   const script = `
 set -e
-cd ~/agent
+cd /cell
 node -e '
   const fs = require("fs");
   const p = ".pi/settings.json";
@@ -3003,10 +3222,10 @@ node -e '
   s.extensions = (s.extensions || []).filter(x => x !== "${entry}");
   fs.writeFileSync(p, JSON.stringify(s, null, 2) + "\\n");
 '
-rm -rf ~/agent/.pi/extensions/${extName}
+rm -rf /cell/.pi/extensions/${extName}
 echo removed
 `.trim();
-  const r = await wellExecCapture(cellName, script);
+  const r = await wellExecCapture(cellName, script, { user: "cell" });
   if (!r.ok) {
     console.error(`✗ ${cellName}: remove failed — ${r.stderr.trim()}`);
     return false;
@@ -3358,15 +3577,30 @@ function renderExtensionMd(extName: string, meta: ExtensionMeta): string {
   return lines.join("\n");
 }
 
-async function wellExecCapture(name: string, script: string): Promise<{ ok: boolean; stdout: string; stderr: string }> {
+async function wellExecCapture(
+  name: string,
+  script: string,
+  opts?: { user?: "cell" | "well" },
+): Promise<{ ok: boolean; stdout: string; stderr: string }> {
   // Wells's wells (2026-05-09 base) exhibit intermittent SSH resets:
   // `kex_exchange_identification: read: Connection reset by peer` on
   // an otherwise-fine well, no auto-sleep, no OOM. Wells team is
   // investigating. Retry once with a brief backoff on that specific
   // signature so a single flaky connection doesn't fail the whole bake.
+  //
+  // user: defaults to "well" (substrate user, matches `well exec`'s default).
+  // Pass user="cell" for /cell writes — wraps script in `sudo -u cell bash -c ...`
+  // since /cell is cell:cell 0755 and well user can read but not write.
+  // The well user is in NOPASSWD sudoers per the wells base, so the sudo
+  // step is silent. Reads of /cell can stay user="well" — mode 0755 allows it.
   const KEX_RESET = /kex_exchange_identification|Connection reset by peer/i;
+  const user = opts?.user ?? "well";
+  const args =
+    user === "cell"
+      ? ["well", "exec", "-s", name, "--", "sudo", "-u", "cell", "bash", "-lc", script]
+      : ["well", "exec", "-s", name, "--", "bash", "-lc", script];
   for (let attempt = 0; attempt < 2; attempt++) {
-    const proc = Bun.spawn(["well", "exec", "-s", name, "--", "bash", "-lc", script], {
+    const proc = Bun.spawn(args, {
       stdin: "ignore",
       stdout: "pipe",
       stderr: "pipe",
@@ -3395,7 +3629,7 @@ async function pullMarkdown(nameOrCell: string, vaultPath: string): Promise<{ pe
   // observability), plus state/ and the .pi/ markdown trees, plus
   // .pi/settings.json so Pete can browse harness config directly in
   // Obsidian. tar emits two streams (md + json) joined by a single find.
-  const findScript = `cd ~/agent && { find AGENTS.md SOUL.md IDENTITY.md TOOLS.md CELLS.md CONTACTS.md MEMORY.md HEARTBEAT.md state/memory state/wiki .pi/skills .pi/prompts \\( -name '*.md' -o -name 'SKILL.md' \\) -type f 2>/dev/null; [ -f .pi/settings.json ] && echo .pi/settings.json; } | tar czf - -T -`;
+  const findScript = `cd /cell && { find AGENTS.md SOUL.md IDENTITY.md TOOLS.md CELLS.md CONTACTS.md MEMORY.md HEARTBEAT.md state/memory state/wiki .pi/skills .pi/prompts \\( -name '*.md' -o -name 'SKILL.md' \\) -type f 2>/dev/null; [ -f .pi/settings.json ] && echo .pi/settings.json; } | tar czf - -T -`;
   // Post-extract we collapse state/memory -> memory and state/wiki -> wiki so
   // the vault stays flat. Pete reads it in Obsidian; one fewer level to click.
   const send = Bun.spawn(["well", "exec", "-s", name, "--", "bash", "-lc", findScript], {
@@ -3470,7 +3704,7 @@ async function pullExtensionDocs(nameOrCell: string, vaultPath: string): Promise
   // Accept cell name OR well name; resolve internally for hatched cells.
   const name = await wellNameForCell(nameOrCell);
   // List extensions, then cat each index.ts.
-  const list = await wellExecCapture(name, "ls -1 ~/agent/.pi/extensions/ 2>/dev/null");
+  const list = await wellExecCapture(name, "ls -1 /cell/.pi/extensions/ 2>/dev/null");
   if (!list.ok) return [];
   const exts = list.stdout.split("\n").map((s) => s.trim()).filter(Boolean);
   // Mirror the cell layout: synthesized doc lands as .pi/extensions/<name>.md
@@ -3479,7 +3713,7 @@ async function pullExtensionDocs(nameOrCell: string, vaultPath: string): Promise
   await mkdir(extDir, { recursive: true });
   const results: Array<{ name: string; meta: ExtensionMeta }> = [];
   for (const ext of exts) {
-    const cat = await wellExecCapture(name, `cat ~/agent/.pi/extensions/${ext}/index.ts 2>/dev/null`);
+    const cat = await wellExecCapture(name, `cat /cell/.pi/extensions/${ext}/index.ts 2>/dev/null`);
     if (!cat.ok || !cat.stdout) continue;
     const meta = parseExtensionTs(cat.stdout);
     await writeFile(join(extDir, `${ext}.md`), renderExtensionMd(ext, meta));
@@ -4000,7 +4234,10 @@ async function wellNameForCell(name: string): Promise<string> {
 // Target: <20s from `hatchEgg` call to "alive" log line.
 
 async function wellExecOnEgg(wellName: string, script: string): Promise<{ ok: boolean; stdout: string; stderr: string }> {
-  return wellExecCapture(wellName, script);
+  // Hatch substitutions write to /cell extensively (sed -i across DNA,
+  // jq+mv on /cell/.pi/settings.json, cat > /cell/.pi/status.json,
+  // sed -i /cell/.tmux.conf). Must run as cell user.
+  return wellExecCapture(wellName, script, { user: "cell" });
 }
 
 // Restore the egg's pristine checkpoint. Eggs have exactly one
@@ -4060,7 +4297,7 @@ async function applyHatchSubstitutions(
   // we want as few of them as possible. Bash supports multiline heredocs.
   const script = `
 set -euo pipefail
-cd ~/agent
+cd /cell
 
 # 1. Cell name into DNA + package.json
 sed -i 's/__NAME__/${cellName}/g' \\
@@ -4077,7 +4314,7 @@ jq --arg p "${path}" '
 ' .pi/settings.json > /tmp/s.json && mv /tmp/s.json .pi/settings.json`).join('')}
 
 # 4. Per-cell color chip + cell name into tmux.conf
-sed -i "s|__CELL_BG__|${bg}|g; s|__CELL_FG__|${fg}|g; s|__NAME__|${cellName}|g" ~/.tmux.conf
+sed -i "s|__CELL_BG__|${bg}|g; s|__CELL_FG__|${fg}|g; s|__NAME__|${cellName}|g" /cell/.tmux.conf
 
 # 5. status.json
 mkdir -p .pi
@@ -4327,6 +4564,14 @@ async function cmdEgg(args: string[]) {
     await cmdEggCull(args[1]);
     return;
   }
+  if (sub === "refill") {
+    await cmdEggRefill();
+    return;
+  }
+  if (sub === "drain") {
+    await cmdEggDrain(args.slice(1));
+    return;
+  }
   await cmdEggCreate(args);
 }
 
@@ -4504,6 +4749,160 @@ async function cmdEggCull(eggId: string) {
   }
 }
 
+// ───── egg refill / drain — pool maintenance CLI ─────
+//
+// `cells egg refill` reads `~/.cells/eggs-config.json` (or falls back to
+// the default variant matrix from docs/eggs-variants.md), counts warm
+// eggs per variant, and serially bakes any short-stock variants up to
+// configured depth. Per `project_mother_concurrency.md`, mother
+// concurrency=1, so refills serialize naturally.
+//
+// `cells egg drain` culls every warm egg in the registry. Useful before
+// re-baking cell-base or before quitting wells. Idempotent.
+//
+// The variant matrix and rationale are in `docs/eggs-variants.md`.
+
+const EGGS_CONFIG_PATH = join(homedir(), ".cells", "eggs-config.json");
+
+type EggConfigRow = {
+  model: ModelKey;
+  extensions: string[];
+  packages: string[];
+  depth: number;
+};
+
+// Default pool config — matches the variant table in docs/eggs-variants.md.
+// Used when ~/.cells/eggs-config.json doesn't exist. Can be regenerated
+// by `cells egg refill` with --reset (TBD).
+const DEFAULT_EGG_CONFIG: EggConfigRow[] = [
+  { model: "gpt-5.5",         extensions: [],         packages: [], depth: 3 },
+  { model: "gpt-5.5",         extensions: ["memory"], packages: [], depth: 2 },
+  { model: "deepseek-v4-pro", extensions: [],         packages: [], depth: 1 },
+];
+
+async function loadEggConfig(): Promise<EggConfigRow[]> {
+  if (!existsSync(EGGS_CONFIG_PATH)) return DEFAULT_EGG_CONFIG;
+  try {
+    const raw = await readFile(EGGS_CONFIG_PATH, "utf-8");
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) {
+      console.warn(`! ${EGGS_CONFIG_PATH} is not an array — using defaults`);
+      return DEFAULT_EGG_CONFIG;
+    }
+    return parsed as EggConfigRow[];
+  } catch (e) {
+    console.warn(`! ${EGGS_CONFIG_PATH} parse failed (${e}) — using defaults`);
+    return DEFAULT_EGG_CONFIG;
+  }
+}
+
+function configRowToVariant(row: EggConfigRow): Variant {
+  return {
+    model: row.model,
+    thinking: "",
+    extensions: [...row.extensions].sort(),
+    packages: [...row.packages].sort(),
+    channels: [],
+  };
+}
+
+async function cmdEggRefill() {
+  const config = await loadEggConfig();
+  if (config.length === 0) {
+    console.log("(eggs-config.json has no rows — nothing to refill)");
+    return;
+  }
+
+  // Count warm eggs per pool key in a single load. Phase 3-future: also
+  // surface claimed/live for the operator's read.
+  const file = await loadEggs();
+  const warmByKey = new Map<string, number>();
+  for (const e of file.eggs) {
+    if (e.state !== "warm") continue;
+    warmByKey.set(e.variant_signature, (warmByKey.get(e.variant_signature) ?? 0) + 1);
+  }
+
+  // Build the work list before doing any bakes — surface what's about to
+  // happen so the operator can Ctrl-C if surprised.
+  type Need = { variant: Variant; need: number; have: number; key: string };
+  const needs: Need[] = [];
+  for (const row of config) {
+    const v = configRowToVariant(row);
+    const key = poolKey(v);
+    const have = warmByKey.get(key) ?? 0;
+    const need = Math.max(0, row.depth - have);
+    if (need > 0) needs.push({ variant: v, need, have, key });
+  }
+
+  if (needs.length === 0) {
+    console.log("✓ pool is at target depth — nothing to refill");
+    return;
+  }
+
+  const total = needs.reduce((s, n) => s + n.need, 0);
+  console.log(`refilling ${total} egg${total === 1 ? "" : "s"} across ${needs.length} variant${needs.length === 1 ? "" : "s"}:`);
+  for (const n of needs) {
+    console.log(`  ${n.key}  (have ${n.have}, need ${n.have + n.need})`);
+  }
+
+  // Bake serially. parseEggCreateArgs takes a string[]; reuse via the
+  // public CLI shape so config rows feed the same path as `cells egg`.
+  let baked = 0;
+  for (const n of needs) {
+    for (let i = 0; i < n.need; i++) {
+      const args = [
+        `--model=${n.variant.model}`,
+        `--extensions=${n.variant.extensions.join(",")}`,
+        `--packages=${n.variant.packages.join(",")}`,
+      ];
+      console.log(`\n[${++baked}/${total}] cells egg ${args.join(" ")}`);
+      try {
+        await cmdEggCreate(args);
+      } catch (e) {
+        console.error(`! egg-bake failed for ${n.key}: ${e}`);
+        console.error(`  continuing with remaining variants — re-run 'cells egg refill' to retry`);
+      }
+    }
+  }
+
+  console.log(`\n✓ refill complete — ${baked} egg${baked === 1 ? "" : "s"} baked`);
+}
+
+async function cmdEggDrain(args: string[]) {
+  const yes = args.includes("-y") || args.includes("--yes");
+  const file = await loadEggs();
+  const warm = file.eggs.filter((e) => e.state === "warm");
+
+  if (warm.length === 0) {
+    console.log("(no warm eggs to drain)");
+    return;
+  }
+
+  if (!yes) {
+    console.log(`about to cull ${warm.length} warm egg${warm.length === 1 ? "" : "s"}:`);
+    for (const e of warm) {
+      console.log(`  ${e.id}  ${e.variant_signature}`);
+    }
+    console.log(`\nrun with -y to confirm`);
+    return;
+  }
+
+  let culled = 0;
+  for (const e of warm) {
+    console.log(`culling ${e.well_name} (id: ${e.id})`);
+    const ok = await directWellDestroy(e.well_name);
+    await withEggLock(async () => {
+      const f = await loadEggs();
+      f.eggs = f.eggs.filter((x) => x.id !== e.id);
+      await saveEggs(f);
+    });
+    if (ok) culled++;
+    else console.warn(`! ${e.id} registry-removed but well destroy was uncertain`);
+  }
+
+  console.log(`✓ drained ${culled}/${warm.length} egg${warm.length === 1 ? "" : "s"}`);
+}
+
 // ───── bake — produce a forkable cell-base image ─────
 //
 // `cells bake [--name=cell-base]` spins up a fresh well, runs the full
@@ -4526,6 +4925,7 @@ type BakeOpts = {
   // Verify forks a temp well from the new image, waits for DHCP + SSH,
   // and destroys it — catches broken images before birth fails on them.
   noVerify?: boolean;
+  noSave?: boolean;
 };
 
 function parseBakeArgs(args: string[]): BakeOpts {
@@ -4536,9 +4936,10 @@ function parseBakeArgs(args: string[]): BakeOpts {
     else if (a === "--keep-source") opts.keepSource = true;
     else if (a === "--force") opts.force = true;
     else if (a === "--no-verify") opts.noVerify = true;
+    else if (a === "--no-save") opts.noSave = true;
     else {
       console.error(`unknown flag: ${a}`);
-      console.error("usage: cells bake [--name=cell-base] [--source=<temp-well>] [--keep-source] [--force] [--no-verify]");
+      console.error("usage: cells bake [--name=cell-base] [--source=<temp-well>] [--keep-source] [--force] [--no-verify] [--no-save]");
       process.exit(1);
     }
   }
@@ -4581,19 +4982,31 @@ async function cmdBake(opts: BakeOpts) {
     console.log(`→ wait for well-firstboot done`);
     await waitForCloudInit(sourceName);
 
+    // 2b. Create user `cell` with HOME=/cell. Wells's substrate ships user
+    //     `well` for its own bookkeeping; the cell is a separate tenant
+    //     and gets its own user + top-level home. SSH to a cell lands here
+    //     directly. /cell sits outside /home so wells's per-fork rinse
+    //     (which scopes to /home/) leaves cells's image content alone.
+    //     See docs/cell-filesystem.md for the layout rationale.
+    console.log(`→ create user cell + /cell home`);
+    await bakeCreateCellUser(sourceName);
+
     // 3. Push DNA — cells-specific package.json, .pi/, scripts/, site/, etc.
-    console.log(`→ push DNA → ~/agent`);
-    await pushLocalDirToWell(sourceName, join(REPO_ROOT, "proto/mother/dna"), "~/agent");
+    console.log(`→ push DNA → /cell`);
+    await pushLocalDirToWellAsCell(sourceName, join(REPO_ROOT, "proto/mother/dna"), "/cell");
 
     // 3b. Write the per-cell tmux config template (placeholders for cell
     //     name + bg/fg color get filled in at birth time, step 3b of the
     //     mother skill). The template lives in the cells repo so we don't
     //     ship it via DNA — DNA is the agent's data, this is its terminal.
-    console.log(`→ write ~/.tmux.conf template`);
+    console.log(`→ write /cell/.tmux.conf template`);
     const tmuxConf = await readFile(join(REPO_ROOT, "scripts/cell-tmux.conf"), "utf-8");
+    // Write as root via tee, then chown to cell. Avoids quoting hell —
+    // tmux conf contains single quotes (in comments and bind-key strings)
+    // that fight `sudo -u cell bash -c '...'` wrapping.
     const writeTmux = await wellExecCapture(
       sourceName,
-      `cat > ~/.tmux.conf <<'__TMUX_EOF__'\n${tmuxConf}\n__TMUX_EOF__`,
+      `sudo tee /cell/.tmux.conf >/dev/null <<'__TMUX_EOF__'\n${tmuxConf}\n__TMUX_EOF__\nsudo chown cell:cell /cell/.tmux.conf`,
     );
     if (!writeTmux.ok) {
       throw new Error(`write tmux conf failed: ${writeTmux.stderr.slice(0, 200)}`);
@@ -4607,29 +5020,46 @@ async function cmdBake(opts: BakeOpts) {
     console.log(`→ apply pi patches (sudo, against in-base global pi)`);
     const patch = await wellExecCapture(
       sourceName,
-      `sudo bash ~/agent/scripts/apply-pi-patches.sh`,
+      `sudo bash /cell/scripts/apply-pi-patches.sh`,
     );
     if (!patch.ok) {
       throw new Error(`apply-pi-patches failed: ${patch.stderr.slice(0, 400) || patch.stdout.slice(0, 400)}`);
     }
 
-    // 5. Static bashrc.d shims (env propagation; no secrets in image)
-    console.log(`→ write ~/.bashrc.d/ env shims`);
-    await bakeWriteBashrcd(sourceName);
+    // 5. System-wide env shim at /etc/profile.d/cells-env.sh (replaces the
+    //    old per-user ~/.bashrc.d/ shims). /etc/profile.d is sourced by
+    //    every login shell automatically — no .profile dance, no per-user
+    //    install, survives any /home rinse, works for both `well` and
+    //    `cell` users.
+    console.log(`→ write /etc/profile.d/cells-env.sh`);
+    await bakeWriteProfileD(sourceName);
 
-    // 6. Login shim (~/.profile sources ~/.bashrc.d)
-    console.log(`→ install login shim`);
-    await bakeWriteLoginShim(sourceName);
-
-    // 7. Make ~/agent/bin/cells executable and link onto the user PATH.
-    //    (Was previously bundled into bakeRunBunInstall; broken out so
-    //    skipping bun install doesn't lose this step.)
+    // 7. Make /cell/bin/cells executable. /cell/bin is on the cell user's
+    //    PATH via /etc/profile.d/cells-env.sh, so no symlink needed.
     const linkRes = await wellExecCapture(
       sourceName,
-      `chmod +x ~/agent/bin/cells && mkdir -p ~/.local/bin && ln -sf ~/agent/bin/cells ~/.local/bin/cells`,
+      `sudo chmod +x /cell/bin/cells`,
     );
     if (!linkRes.ok) {
-      throw new Error(`cells bin link failed: ${linkRes.stderr.slice(0, 200) || linkRes.stdout.slice(0, 200)}`);
+      throw new Error(`cells bin chmod failed: ${linkRes.stderr.slice(0, 200) || linkRes.stdout.slice(0, 200)}`);
+    }
+
+    // 7b. Force fs journal commit before save. Empirically (2026-05-10)
+    //     wells's server-side `stop+save` can hard-kill the guest before
+    //     ext4's commit=30 timer fires, dropping unsync'd writes. /etc/passwd
+    //     survives (PAM fsyncs) but our /cell tree, /etc/profile.d shim,
+    //     and pi-patch sed-edits do not. Explicit `sync` here flushes.
+    console.log(`→ sync filesystem before save`);
+    const syncRes = await wellExecCapture(sourceName, `sudo sync && sudo sync`);
+    if (!syncRes.ok) {
+      throw new Error(`sync failed: ${syncRes.stderr.slice(0, 200)}`);
+    }
+    // --no-save: bail before the wells-side rinse fires. Used to debug the
+    // recipe's interaction with rinse — source stays alive with full
+    // identity bits so we can ssh in and audit state pre-rinse.
+    if (opts.noSave) {
+      console.log(`(--no-save: stopping before rinse+clonefile. Source well '${sourceName}' kept with full identity. SSH it with: well exec -s ${sourceName} -- …)`);
+      return;
     }
     // Identity rinse runs server-side now via POST /v1/wells/images
     // {validate:true} — wells team's 335c86b ships rinseGuest +
@@ -4825,6 +5255,60 @@ async function pushLocalDirToWell(name: string, localPath: string, remotePath: s
   }
 }
 
+// Push a local dir to a well, untarring as user `cell` so files land
+// owned by cell:cell at a /cell-rooted path. Used by the bake to lay
+// down DNA at /cell — `well exec` connects as user `well`, so we pipe
+// through `sudo -u cell` for the untar.
+async function pushLocalDirToWellAsCell(name: string, localPath: string, remotePath: string): Promise<void> {
+  const tar = Bun.spawn(["tar", "czf", "-", "-C", localPath, "."], {
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  const proc = Bun.spawn(
+    ["well", "exec", "-s", name, "--", "bash", "-c",
+      `sudo mkdir -p ${remotePath} && sudo chown cell:cell ${remotePath} && sudo -u cell bash -c 'cd ${remotePath} && tar xzf -'`],
+    { stdin: tar.stdout, stdout: "pipe", stderr: "pipe" },
+  );
+  const code = await proc.exited;
+  if (code !== 0) {
+    const err = await new Response(proc.stderr).text();
+    throw new Error(`push ${localPath} → ${name}:${remotePath} (as cell) failed: ${err.slice(0, 300)}`);
+  }
+}
+
+// Create user `cell` with HOME=/cell on the bake source well. Idempotent
+// (safe to re-run — the `id cell` short-circuit prevents useradd from
+// erroring on a re-bake against an already-set-up source).
+async function bakeCreateCellUser(name: string): Promise<void> {
+  const r = await wellExecCapture(name, `set -euo pipefail
+# Already set up? bail clean.
+if id cell >/dev/null 2>&1; then
+  echo "user cell already exists"
+else
+  sudo useradd -d /cell -m -s /bin/bash -G sudo cell
+  echo "cell ALL=(ALL) NOPASSWD:ALL" | sudo tee /etc/sudoers.d/90-cell >/dev/null
+  sudo chmod 440 /etc/sudoers.d/90-cell
+fi
+# Grant ubuntu user NOPASSWD sudo to cell. Wells's services API hardcodes
+# User=ubuntu in the systemd unit (see W.28); cells's site service body
+# wraps in \`sudo -u cell\` so pi runs as cell. ubuntu's general sudo via
+# cloud-init default is unreliable to count on, so we set this explicitly.
+echo "ubuntu ALL=(cell) NOPASSWD:ALL" | sudo tee /etc/sudoers.d/91-ubuntu-to-cell >/dev/null
+sudo chmod 440 /etc/sudoers.d/91-ubuntu-to-cell
+# Ensure /cell exists, owned by cell. useradd -m only creates HOME if
+# it doesn't already exist; chown is belt-and-suspenders.
+sudo mkdir -p /cell
+sudo chown cell:cell /cell
+# authorized_keys: cell shares well's host-side keys so SSH-as-cell
+# works the same as SSH-as-well from the host bridge.
+sudo install -d -o cell -g cell -m 0700 /cell/.ssh
+if [ -f /home/well/.ssh/authorized_keys ]; then
+  sudo install -o cell -g cell -m 0600 /home/well/.ssh/authorized_keys /cell/.ssh/authorized_keys
+fi`);
+  if (!r.ok) {
+    throw new Error(`create cell user failed: ${r.stderr.slice(0, 400) || r.stdout.slice(0, 400)}`);
+  }
+}
+
 async function bakeRunBunInstall(name: string): Promise<void> {
   // pi is installed via npm -g (sudo) so its launcher lands at
   // /usr/local/bin/pi — on the default system PATH for every shell,
@@ -4837,69 +5321,48 @@ async function bakeRunBunInstall(name: string): Promise<void> {
   // the default cell — no per-cell npm install round-trip needed.
   const r = await wellExecCapture(name, `set -euo pipefail
 export PATH="$HOME/.bun/bin:/usr/local/bin:$PATH"
-cd ~/agent
+cd /cell
 bun install --frozen-lockfile
 sudo npm install -g @mariozechner/pi-coding-agent@latest
 # Sanity-check: pi must be runnable from a non-interactive shell.
 which pi >/dev/null && pi --version
 # Pre-load common pi extension into the image (default-checked in the CLI).
 pi install -l npm:pi-web-access
-chmod +x ~/agent/bin/cells
-ln -sf ~/agent/bin/cells ~/.local/bin/cells`);
+chmod +x /cell/bin/cells
+ln -sf /cell/bin/cells ~/.local/bin/cells`);
   if (!r.ok) {
     throw new Error(`bun install failed: ${r.stderr.slice(0, 400) || r.stdout.slice(0, 400)}`);
   }
 }
 
-async function bakeWriteBashrcd(name: string): Promise<void> {
-  // The image stays secret-free. CELLS_PROXY_SECRET is injected at
-  // birth time via `well create --env CELLS_PROXY_SECRET=…`, which
-  // welld writes to /etc/environment (PAM auto-loads on every shell).
-  // These shims re-export under the names pi-ai's auth dispatch + the
-  // codex-proxy extension expect.
+async function bakeWriteProfileD(name: string): Promise<void> {
+  // System-wide env shim. Replaces the old per-user ~/.bashrc.d/ +
+  // ~/.profile dance. /etc/profile.d/*.sh is sourced automatically by
+  // every login shell (bash, sh, dash) via /etc/profile, so works for
+  // cell, well, and anyone else who logs in. Survives any /home rinse
+  // since it lives at /etc/. Image stays secret-free; CELLS_PROXY_SECRET
+  // is injected at birth time via `well create --env CELLS_PROXY_SECRET=…`,
+  // which welld writes to /etc/environment.
   const r = await wellExecCapture(name, `set -euo pipefail
-mkdir -p ~/.bashrc.d
-
-cat > ~/.bashrc.d/anthropic_proxy <<'EOF'
-# CELLS_PROXY_SECRET is set by /etc/environment at boot (cloud-init --env).
-# Re-export under the names pi-ai's auth dispatch looks for.
+sudo tee /etc/profile.d/cells-env.sh >/dev/null <<'EOF'
+# CELLS_PROXY_SECRET is set by /etc/environment at boot (well-firstboot).
+# Re-export under the names pi-ai's auth dispatch + codex-proxy expect.
 if [ -n "\${CELLS_PROXY_SECRET:-}" ]; then
   export ANTHROPIC_OAUTH_TOKEN="\$CELLS_PROXY_SECRET"
   export ANTHROPIC_AUTH_TOKEN="\$CELLS_PROXY_SECRET"
+  export OPENAI_CODEX_API_KEY="\$CELLS_PROXY_SECRET"
   unset ANTHROPIC_API_KEY
 fi
+# /cell/bin on PATH for the cells CLI. Bun was installed for the well
+# user at bake time (~/.bun for well = /home/well/.bun); /home/well is
+# mode 0755 so cell can execute. Include both \$HOME/.bun/bin (well's
+# own login shells) and the absolute /home/well/.bun/bin (cell's login
+# shells, where \$HOME=/cell — \$HOME/.bun is empty).
+export PATH="\$HOME/.bun/bin:/home/well/.bun/bin:/cell/bin:\$PATH"
 EOF
-chmod 600 ~/.bashrc.d/anthropic_proxy
-
-cat > ~/.bashrc.d/codex_proxy <<'EOF'
-# CELLS_PROXY_SECRET via /etc/environment. Codex-proxy extension reads
-# OPENAI_CODEX_API_KEY at pi startup.
-if [ -n "\${CELLS_PROXY_SECRET:-}" ]; then
-  export OPENAI_CODEX_API_KEY="\$CELLS_PROXY_SECRET"
-fi
-EOF
-chmod 600 ~/.bashrc.d/codex_proxy
-
-cat > ~/.bashrc.d/bun <<'EOF'
-export PATH="\$HOME/.bun/bin:\$HOME/.local/bin:\$PATH"
-EOF
-chmod 644 ~/.bashrc.d/bun`);
+sudo chmod 644 /etc/profile.d/cells-env.sh`);
   if (!r.ok) {
-    throw new Error(`write bashrc.d shims failed: ${r.stderr.slice(0, 400)}`);
-  }
-}
-
-async function bakeWriteLoginShim(name: string): Promise<void> {
-  const r = await wellExecCapture(name, `set -euo pipefail
-grep -q bashrc.d ~/.profile 2>/dev/null || cat >> ~/.profile <<'EOF'
-
-# Source ~/.bashrc.d/* on shell start (env shims for pi-ai/codex routing).
-if [ -d "\$HOME/.bashrc.d" ]; then
-  for f in "\$HOME/.bashrc.d/"*; do [ -r "\$f" ] && . "\$f"; done
-fi
-EOF`);
-  if (!r.ok) {
-    throw new Error(`write login shim failed: ${r.stderr.slice(0, 400)}`);
+    throw new Error(`write /etc/profile.d/cells-env.sh failed: ${r.stderr.slice(0, 400)}`);
   }
 }
 
@@ -4932,6 +5395,8 @@ switch (sub) {
   case "unschedule-pi-patches": await cmdUnschedulePiPatches(); break;
   case "schedule-pulse":        await cmdSchedulePulse(); break;
   case "unschedule-pulse":      await cmdUnschedulePulse(); break;
+  case "schedule-egg-refill":   await cmdScheduleEggRefill(); break;
+  case "unschedule-egg-refill": await cmdUnscheduleEggRefill(); break;
   case "refresh-extensions":    await cmdRefreshExtensions(rest); break;
   case "heartbeat":             await cmdHeartbeat(rest); break;
   case "channel":
@@ -4952,6 +5417,8 @@ switch (sub) {
     console.log("                                     --packages=pi-web-access");
     console.log("                                     --channels=slack         (auto-creates #cells-<name>, binds, deploys worker)");
     console.log("                                     --slack-channel=C0123456789  (legacy: bind to existing channel by ID)");
+    console.log("                                     --seed=<text>            (first message auto-sent post-birth; default greeting on, --seed=off disables)");
+    console.log("                                     --no-pool                (skip warm-egg lookup, force slow birth — testing/perf-baseline)");
     console.log("                              no flags = interactive TUI; any flag = non-interactive (defaults fill the rest)");
     console.log("  cells talk <name> [msg]     interactive bridge chat (no msg) or one-shot (with msg).");
     console.log("                              Reply streams in this terminal AND mirrors to Slack — same session as Slack.");
@@ -4971,6 +5438,8 @@ switch (sub) {
     console.log("  cells unschedule-pi-patches remove launchd watcher");
     console.log("  cells schedule-pulse        install launchd plist (pulse ticks every 60s)");
     console.log("  cells unschedule-pulse      remove pulse launchd plist");
+    console.log("  cells schedule-egg-refill   install launchd plist (egg refill ticks every 10min)");
+    console.log("  cells unschedule-egg-refill remove egg refill launchd plist");
     console.log("  cells refresh-extensions <name|--all> [ext...] [--restart] [--remove]");
     console.log("                              push DNA extension(s) onto existing cell(s) (default: heartbeat-watch)");
     console.log("                              --restart kicks pi on the cell so new extensions load (otherwise dormant until next pi start)");

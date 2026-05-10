@@ -144,9 +144,10 @@ async function cmdTalk(name: string, message: string) {
   // server is running there — `send-keys` would fail. Start one if missing.
   const escaped = message.replace(/'/g, "'\\''");
   const script = [
-    // Env (PATH, secrets) comes from ~/.profile sourcing .bashrc.d/*
-    // for any login shell, including non-interactive `bash -lc`.
-    `tmux has-session -t agent 2>/dev/null || tmux new-session -d -s agent -c ~/agent pi`,
+    // Env (PATH, secrets) comes from /etc/profile.d/cells-env.sh sourced
+    // automatically by /etc/profile for any login shell, including
+    // non-interactive `bash -lc`.
+    `tmux has-session -t agent 2>/dev/null || tmux new-session -d -s agent -c /cell pi`,
     `sleep 1`,
     `tmux send-keys -t agent '${escaped}' Enter`,
     `sleep 8`,

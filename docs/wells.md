@@ -15,12 +15,13 @@ The wells team also exposes everything under `/v1/sprites/...` as an alias — c
 
 ## The agent user inside a well
 
-Every well boots with two SSH users:
+Every well boots with the substrate user, and `cells bake` adds a tenant user on top:
 
-- **`well`** (uid 1001, NOPASSWD sudo). The agent user. `/home/well/.ssh/authorized_keys` is populated with the operator's host key on first boot. Cells's birth flow targets `/home/well/agent`, `/home/well/.bashrc.d/`, etc. `well exec`, `well console`, and the daemon's `/v1/wells/{n}/exec` HTTP/WS endpoints all default to `well@<ip>`.
+- **`well`** (uid 1001, NOPASSWD sudo). The substrate user. `/home/well/.ssh/authorized_keys` is populated with the operator's host key on first boot. `well exec`, `well console`, and the daemon's `/v1/wells/{n}/exec` HTTP/WS endpoints all default to `well@<ip>`. Use this user for substrate-level ops (bake, install, sudo bookkeeping).
+- **`cell`** (uid 1002, sudo group). The tenant user. Created by `cells bake`'s `bakeCreateCellUser`; HOME is `/cell` (not `/home/cell`). Pi runs as `cell`, the agent's DNA + memory + site + node_modules all live under `/cell/`. SSH'ing into a cell with `cells shell <name>` targets the `cell` user. `well exec ... -- sudo -u cell bash -c '...'` is the canonical way to run as cell from the substrate side; `wellExecCapture(name, script, {user: "cell"})` and the mother's `well_exec` tool both default to user=cell.
 - **`ubuntu`** — cloud-image default, kept for raw-VM debug. Override with `well exec --user ubuntu …` on the CLI or `{"user":"ubuntu"}` in an HTTP exec body.
 
-Paths in remote command bodies should use `~` or `$HOME` so they resolve correctly under the agent user. Don't hardcode `/home/well/...`.
+Paths in remote command bodies should be absolute (`/cell/...` for tenant content, `/home/well/...` only for substrate bookkeeping). Tilde expansion depends on which user runs the shell — prefer explicit paths.
 
 ## API surface (sprites-shaped, sprite-compatible)
 

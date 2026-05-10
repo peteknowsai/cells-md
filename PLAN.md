@@ -18,6 +18,10 @@ Run the `docs/birth-checklist.md` matrix end-to-end with no failures. 11 rows ×
 
 This phase must come first — there's no point optimizing first-talk latency on a flow that doesn't reliably finish.
 
+### Phase 1b — Full CLI smoke
+
+Walk every `cells` subcommand against a real alive cell. Phase 1 confirms birth across the flag matrix; Phase 1b confirms `talk`, `sleep`, `wake`, `stop`, `checkpoint`, `tui`, `shell`, `sync`, `dream`, `refresh-extensions`, `heartbeat`, `channel`, `see`, `doctor`, `schedule-pulse`, `schedule-pi-patches`, `kill --all-but`, `pi` (mother TUI). Includes visual checks inside `cells tui`: status bar color chip, harness rendering, `mft` launching cleanly, key bindings, persistent session on detach. Done when every CLI verb has been exercised against a live cell and the assertions pass.
+
 ### Phase 2 — Auto-seed first message
 
 `cells birth bob` no longer drops Pete into an empty prompt. The moment the cell can answer (post-step-4b verify), the CLI auto-sends `"introduce yourself"` (or a configurable seed) so Pete sees Bob greeting him as soon as the talk session opens. Streaming works the same as a manual prompt.
@@ -38,13 +42,13 @@ Wells team's `pool_size` config makes well-create sub-3s. Cells layers an agent-
 - Common configurations pre-applied (the most-frequent harness × model × extensions combos baked in)
 - "Hatching" = bind a name to a pre-warmed well, substitute identity, attach to the talk session
 
-See `docs/eggs.md` and `docs/eggs-phase-1.md` for prior thinking.
+See `docs/eggs-spec.md` for the consolidated v2 architecture (with `docs/eggs.md` + `docs/eggs-phase-1.md` retained as prior context). Initial pool sizing in `docs/eggs-variants.md`.
 
 Done when:
 
 - Hatching from a pool is the default path for `cells birth` when a compatible egg exists
 - `cells birth <name> --no-pool` opt-out for testing
-- `cells pool list/refill/drain` CLI surfaces depth + types
+- `cells egg list/refill/drain` CLI surfaces depth + types
 - p50 birth-to-greeting drops by at least 4× vs Phase 2 baseline
 
 ### Phase 4 — Capability-deferred install

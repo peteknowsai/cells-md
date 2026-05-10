@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Register the `site` service on a cell so the cell's web server (~/agent/site/)
+# Register the `site` service on a cell so the cell's web server (/cell/site/)
 # auto-starts on VM boot. Mother proxies <name>.cells.md to this server's
 # port 8080 inside the well.
 #
@@ -16,11 +16,10 @@ set -euo pipefail
 
 NAME="${1:?usage: $0 <cell-name> [well-name]}"
 SPRITE_NAME="${2:-$NAME}"
-# WELL_API_URL + WELL_TOKEN + AGENT_HOME may be overridden by env
-# (cells.ts injects these for backend=well to point at welld on localhost
-# and to set the well's home dir). Defaults match the wells layout.
+# WELL_API_URL + WELL_TOKEN may be overridden by env (cells.ts injects
+# these for backend=well to point at welld on localhost). Default
+# matches the legacy hosted-wells API.
 API_URL="${WELL_API_URL:-https://api.sprites.dev}"
-AGENT_HOME="${AGENT_HOME:-/home/well}"
 if [ -n "${WELL_TOKEN:-}" ]; then
   TOKEN="$WELL_TOKEN"
 else
@@ -30,19 +29,25 @@ else
   [ -n "$TOKEN" ] || { echo "no WELL_TOKEN in $SECRETS"; exit 1; }
 fi
 
-# The service command:
-#   1. cd into the site dir.
-#   2. Source env files (.bashrc.d/*) so CELLS_PROXY_SECRET is set.
-#   3. Put bun on PATH.
+# Wells's services API hardcodes the systemd unit's User=ubuntu (see
+# splites/lib/services.ts). To get pi running as the cell user (which
+# owns /cell, mode 0755 — ubuntu can read but not write), wrap the
+# service body in `sudo -u cell bash -c '...'`. ubuntu has NOPASSWD
+# sudo via cloud-init default, so the sudo step is silent. The cell
+# user inherits HOME=/cell from the sudo, so $HOME-relative paths
+# resolve correctly inside the wrapped script.
+#
+# Inner (cell-user) script:
+#   1. cd into /cell/site (server.ts lives there).
+#   2. Source /etc/profile.d/cells-env.sh (env shim re-exports secret).
+#   3. Prepend /home/well/.bun/bin to PATH (bun installed there at bake;
+#      cell user's $HOME/.bun is empty).
 #   4. Export CELL_NAME + PORT for server.ts.
-#   5. exec bun in foreground; if it crashes the service exits and the
-#      well platform restarts it.
-# Paths use $HOME so the in-VM agent user's shell resolves them (works for
-# the agent home (currently /home/well)). The PUT payload's workdir field below
-# needs an absolute path — that's where AGENT_HOME applies.
-SCRIPT='cd "$HOME/agent/site" && for f in "$HOME/.bashrc.d/"*; do . "$f"; done; export PATH="$HOME/.local/bin:$HOME/.bun/bin:$PATH"; export CELL_NAME='"$NAME"'; export PORT=8080; exec bun run server.ts'
+#   5. exec bun in foreground; if it crashes systemd restarts it.
+INNER='cd /cell/site && . /etc/profile.d/cells-env.sh; export PATH="/home/well/.bun/bin:$PATH"; export CELL_NAME='"'$NAME'"'; export PORT=8080; exec bun run server.ts'
+SCRIPT="sudo -u cell bash -c $(printf '%q' "$INNER")"
 
-PAYLOAD=$(jq -n --arg s "$SCRIPT" --arg w "$AGENT_HOME/agent/site" '{cmd:"bash",args:["-lc",$s],workdir:$w}')
+PAYLOAD=$(jq -n --arg s "$SCRIPT" '{cmd:"bash",args:["-lc",$s],workdir:"/cell"}')
 
 # Delete first — the wells API treats PUT as create-only and silently
 # no-ops on an existing service, leaving stale config in place.

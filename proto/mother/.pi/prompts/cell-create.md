@@ -42,17 +42,21 @@ branching:
 
 - **Subscription-routed** (`anthropic`, `openai-codex`): traffic goes
   through the local subscriptions proxy at `proxy.cells.md` so cells
-  share Pete's Claude Max + ChatGPT Plus subs. Set up by birth step 6c
-  (`scripts/configure-cell-proxy.sh`) — proxy bashrc files plus the
-  `apply-pi-patches.sh` URL rewrite.
+  share Pete's Claude Max + ChatGPT Plus subs. Wired by the bake:
+  `cells bake` patches `pi-ai`'s `models.generated.js` to point at
+  `proxy.cells.md` and stubs the codex `extractAccountId` so OAuth-
+  rejected calls don't crash. Patches re-apply via `bun install`'s
+  postinstall hook (`/cell/scripts/apply-pi-patches.sh`) on every
+  extension install.
 - **Direct-API** (`openai`, `deepseek`, anything else pi-ai natively
   supports): pi-ai reads the upstream key from env (e.g.
-  `DEEPSEEK_API_KEY`). Birth step 6b already injects every key in
-  `~/.cells/secrets.json` as a per-key `~/.bashrc.d/*` file, so direct-
-  API providers Just Work without further configuration.
+  `DEEPSEEK_API_KEY`). Birth step 6b already passes every key in
+  `~/.cells/secrets.json` to `well_create --env=KEY=VAL`, welld lands
+  them in `/etc/environment`, and `/etc/profile.d/cells-env.sh`
+  re-exports under pi-ai's expected names — no per-key files.
 
-Step 6c still runs for direct-API cells; the proxy env files and pi
-patches are harmless on code paths the cell never executes.
+Both modes share the same wiring path (env into `/etc/environment`,
+patches in `cell-base`), so neither mode needs a per-cell retrofit.
 
 1. Invoke the `birth` skill with these substitutions throughout the ritual:
    - `<NAME>` = `$1`

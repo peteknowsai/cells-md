@@ -17,7 +17,8 @@ These check welld + lume + the cell-base image are alive and the operator's mach
 - [ ] `curl -s http://127.0.0.1:7878/healthz | jq` → `ok: true`, `degraded: false`, `respawns_last_5min: 0`
 - [ ] `well doctor` exits 0 (`RESULT: wells is HEALTHY`)
 - [ ] `well image list` shows `cell-base` (any age, any size)
-- [ ] `~/.cells/secrets.json` exists and has at minimum `CELLS_PROXY_SECRET`, `WELL_TOKEN`, `CLOUDFLARE_API_TOKEN`, `CLOUDFLARE_ACCOUNT_ID`
+- [ ] `~/.cells/secrets.json` exists and has at minimum `CELLS_PROXY_SECRET`, `CLOUDFLARE_API_TOKEN`, `CLOUDFLARE_ACCOUNT_ID` (Slack tokens too if you'll exercise the slack row in §3)
+- [ ] `~/.wells/token` exists (welld API bearer; auto-generated on welld first-start, separate from secrets.json)
 - [ ] `cat ~/.cells/config.json` shows `well_public_base: "cells.md"`
 - [ ] Cloudflared tunnel running: `pgrep -f cloudflared`
 - [ ] Mother cell talkable: `bun cli/cells.ts talk mother "say ok" -p` returns within 30s
@@ -26,17 +27,19 @@ If any of these fail, fix substrate before touching birth.
 
 ## 2. Bake verification — cell-base actually has what birth assumes
 
-Birth's prose says cell-base ships "bun, pi-coding-agent, terminal toolkit, the DNA at `~/agent` (with placeholders intact), `bun install` done, pi-ai patches applied, and `~/.bashrc.d/` env shims in place." That has historically lied. Verify before betting on it.
+Birth's prose says cell-base ships "bun, pi-coding-agent, terminal toolkit, the DNA at `/cell` (with placeholders intact), `bun install` done, pi-ai patches applied, and `/etc/profile.d/cells-env.sh` shim in place." That has historically lied. Verify before betting on it.
 
 Fork a throwaway well from cell-base and inspect:
 
 - [ ] `well create bake-verify --from-image cell-base --env CELLS_PROXY_SECRET=$SECRET` succeeds
-- [ ] `well exec -s bake-verify -- bash -c 'cat /etc/environment | grep CELLS_PROXY_SECRET'` returns the secret (cloud-init re-runs on fork and lands env)
-- [ ] `well exec -s bake-verify -- bash -c 'ls ~/.bashrc.d/ | sort'` shows at least `anthropic_proxy`, `bun`, `codex_proxy` (and ideally `site_proxy`)
-- [ ] `well exec -s bake-verify -- bash -c 'ls ~/agent/'` shows the DNA root (AGENTS.md, SOUL.md, IDENTITY.md, .pi/, site/, scripts/, package.json, node_modules/)
-- [ ] `well exec -s bake-verify -- bash -c 'ls ~/agent/node_modules/@mariozechner/' | wc -l` is non-zero (bun install was done in bake)
-- [ ] `well exec -s bake-verify -- bash -c 'grep -c "" ~/agent/.pi/settings.json'` shows `__NAME__` / `__MODEL__` / `__PROVIDER__` placeholders intact
-- [ ] `well exec -s bake-verify -- bash -lc 'cd ~/agent && for f in ~/.bashrc.d/*; do . "$f"; done; echo OPENAI_CODEX_API_KEY=${OPENAI_CODEX_API_KEY:0:14}'` — should print 14 chars (not empty)
+- [ ] `well exec -s bake-verify -- bash -c 'cat /etc/environment | grep CELLS_PROXY_SECRET'` returns the secret (well-firstboot lands `--env` passthroughs into `/etc/environment` — gated on W.27 today)
+- [ ] `well exec -s bake-verify -- bash -c 'test -f /etc/profile.d/cells-env.sh && echo OK'` prints `OK` (env shim that re-exports CELLS_PROXY_SECRET as ANTHROPIC_OAUTH_TOKEN / ANTHROPIC_AUTH_TOKEN / OPENAI_CODEX_API_KEY)
+- [ ] `well exec -s bake-verify -- bash -c 'ls /cell/'` shows the DNA root (AGENTS.md, SOUL.md, IDENTITY.md, .pi/, site/, scripts/, package.json, node_modules/, .tmux.conf, bin/)
+- [ ] `well exec -s bake-verify -- id cell` returns `uid=1002(cell) gid=1002(cell) groups=1002(cell),27(sudo)` (the tenant user)
+- [ ] `well exec -s bake-verify -- stat -c '%U:%G %a' /cell` returns `cell:cell 755` (cell-owned, others-readable)
+- [ ] `well exec -s bake-verify -- bash -c 'ls /cell/node_modules/@mariozechner/' | wc -l` is non-zero (bun install was done in bake)
+- [ ] `well exec -s bake-verify -- bash -c 'grep -c "" /cell/.pi/settings.json'` shows `__NAME__` / `__MODEL__` / `__PROVIDER__` placeholders intact
+- [ ] `well exec -s bake-verify -- bash -lc 'source /etc/profile.d/cells-env.sh && echo OPENAI_CODEX_API_KEY=${OPENAI_CODEX_API_KEY:0:14}'` — should print 14 chars (not empty), gated on W.27 landing
 
 Cleanup: `well destroy bake-verify --yes`
 
@@ -71,14 +74,14 @@ Run for each cell birthed in §3, in order:
 - [ ] Outcome reported: `cells list | grep <name>` shows status `alive`
 - [ ] Step 4b verify hit (re-read `~/.cells/logs/birth-timings/<name>.log`) — should include lines for steps 1, 2, 3, 3b-3e, 4, 4b, 5, 6, 7, 8 in order. No step skipped
 - [ ] Env landed: `well exec -s <name> -- bash -c 'grep -q CELLS_PROXY_SECRET /etc/environment && echo OK'` prints `OK`
-- [ ] Identity substituted: `well exec -s <name> -- bash -c 'grep -c __NAME__ ~/agent/IDENTITY.md ~/agent/.pi/settings.json'` returns `0` for both files (no leftover placeholders)
-- [ ] `well exec -s <name> -- bash -c 'cat ~/agent/.pi/status.json | jq -r .harness'` matches the requested harness
-- [ ] Tmux color set: `well exec -s <name> -- bash -c 'grep -c __CELL_BG__ ~/.tmux.conf'` returns `0`
+- [ ] Identity substituted: `well exec -s <name> -- bash -c 'grep -c __NAME__ /cell/IDENTITY.md /cell/.pi/settings.json'` returns `0` for both files (no leftover placeholders)
+- [ ] `well exec -s <name> -- bash -c 'cat /cell/.pi/status.json | jq -r .harness'` matches the requested harness
+- [ ] Tmux color set: `well exec -s <name> -- bash -c 'grep -c __CELL_BG__ /cell/.tmux.conf'` returns `0`
 - [ ] Site service running: `well exec -s <name> -- bash -c 'curl -s -o /dev/null -w "%{http_code}\n" http://localhost:8080/'` returns `200`
 - [ ] CF Worker deployed: `curl -s -H "Authorization: Bearer $SECRET" https://<name>.cells.md/debug | jq -r .well` returns `<name>.cells.md`
 - [ ] **Talk smoke**: `bun cli/cells.ts talk <name> "reply with just the word ok" 2>&1 | tail -3` shows `<name>> ok` within 30s
 - [ ] If row has `--channels=slack`: Slack channel `#cells-<name>` exists; channel binding visible in `cells channel list`
-- [ ] If row has `--extensions=...`: `well exec -s <name> -- bash -c 'jq .extensions ~/agent/.pi/settings.json'` includes only the requested extensions plus the always-on five (`use-max`, `codex-proxy`, `self`, `thinking`, `heartbeat-watch`)
+- [ ] If row has `--extensions=...`: `well exec -s <name> -- bash -c 'jq .extensions /cell/.pi/settings.json'` includes only the requested extensions plus the always-on five (`use-max`, `codex-proxy`, `self`, `thinking`, `heartbeat-watch`)
 - [ ] If row has `--packages=pi-web-access`: `well exec -s <name> -- bash -c 'pi list 2>&1 | grep pi-web-access'` shows it installed
 
 ## 5. Lifecycle

@@ -1,14 +1,23 @@
 #!/usr/bin/env bash
-# Wire a cell to the subscriptions proxy at https://proxy.cells.md.
+# DEPRECATED for new /cell cells. Retained for legacy /home/well/agent retrofit.
 #
-# Drops two ~/.bashrc.d/ env files (the only piece that needs the shared
-# secret), then triggers the cell-side apply-pi-patches.sh which does the
-# JS-file surgery on pi-ai / pi-coding-agent. The patches script is also
-# wired as the cell's bun-install postinstall hook, so future `bun install`
-# runs in ~/agent re-apply automatically — adding a dep doesn't silently
-# break anthropic/codex/adaptive routing.
+# Old (legacy /home/well/agent) flow this script implements:
+#   - Drops three ~/.bashrc.d/* files with the shared secret.
+#   - Runs cell-side apply-pi-patches.sh.
 #
-# Idempotent — safe to re-run any time.
+# New (/cell) flow this script SKIPS:
+#   - Secret lives in /etc/environment (set by `well create --env=...`).
+#   - /etc/profile.d/cells-env.sh re-exports under pi-ai's expected names.
+#   - pi-ai patches bake into cell-base; bun-install postinstall re-applies.
+#   - Re-running this script on a /cell cell creates orphan ~/.bashrc.d/ files
+#     under the WELL user's home, which the cell user (HOME=/cell) ignores —
+#     a no-op-but-confusing outcome. Don't run it on /cell cells.
+#
+# For secret rotation on a /cell cell:
+#   well exec -s <name> -- sudo tee /etc/environment <<<"CELLS_PROXY_SECRET=<new>"
+#   well exec -s <name> -- sudo systemctl restart well-firstboot.service  # if needed
+#
+# Idempotent — safe to re-run any time on legacy cells.
 #
 # Reads CELLS_PROXY_SECRET from ~/.cells/secrets.json (host side, before exec).
 #

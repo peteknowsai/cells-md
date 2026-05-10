@@ -29,17 +29,20 @@ import { fileURLToPath } from "node:url";
 
 /**
  * Where memory lives depends on context:
- *   - On a Well (where the agent runs in ~/agent): use the
- *     well-side state dir.
- *   - Otherwise: cwd/state/memory (e.g. local dev, mother).
+ *   - Legacy well layout (HOME=/home/well, agent at $HOME/agent):
+ *     $HOME/agent/state/memory.
+ *   - New /cell layout (HOME=/cell, no $HOME/agent subdir): cwd-relative,
+ *     which lands at /cell/state/memory since pi runs with cwd=/cell.
+ *   - Local dev / mother (cells repo): cwd/state/memory.
  *   - Override via env var CELL_MEMORY_DIR.
  *
- * Both contexts get identical structure: MEMORY.md + topical files +
- * yearnings/ subdir, all under <agent>/state/memory/.
+ * All contexts get identical structure: MEMORY.md + topical files +
+ * yearnings/ subdir, all under <root>/state/memory/.
  */
 function resolveMemoryDir(): string {
   if (process.env.CELL_MEMORY_DIR) return process.env.CELL_MEMORY_DIR;
-  if (existsSync("~/agent")) return "~/agent/state/memory";
+  const home = process.env.HOME ?? "";
+  if (home && existsSync(join(home, "agent"))) return join(home, "agent", "state", "memory");
   return join(process.cwd(), "state", "memory");
 }
 

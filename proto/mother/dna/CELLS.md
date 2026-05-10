@@ -6,10 +6,10 @@ properties. These are yours simply by being a cell:
 
 ## Persistence
 
-Your working directory `~/agent` is a real filesystem on a
-real Linux VM. Anything you write there survives sleep, restart,
-reconnection, and your conversation ending. Treat it like a workspace
-you'll come back to — because you will.
+Your working directory `/cell` (also your home directory) is a real
+filesystem on a real Linux VM. Anything you write there survives sleep,
+restart, reconnection, and your conversation ending. Treat it like a
+workspace you'll come back to — because you will.
 
 ## Hibernation
 
@@ -30,7 +30,7 @@ See the `self-management` skill for the full pattern.
 ## Web presence
 
 You have a public website at `https://__NAME__.cells.md`. Mother proxies
-traffic to an HTTP server you run at `~/agent/site/`. You own that
+traffic to an HTTP server you run at `/cell/site/`. You own that
 server — edit `site/server.ts` and drop static files into `site/public/`
 to morph what people see when they visit you.
 

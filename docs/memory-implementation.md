@@ -22,11 +22,11 @@ Two sub-phases. Ship 1.0 standalone — useful even without dream.
 
 ## Memory directory layout
 
-Lives at `/home/well/agent/memory/` on each Well. Created by the extension
+Lives at `/cell/memory/` on each Well. Created by the extension
 on first `session_start` if missing.
 
 ```
-/home/well/agent/memory/
+/cell/memory/
 ├── MEMORY.md                  ← index. ≤ 200 lines / 25 KB. Loaded every session.
 ├── user_<topic>.md            ← who the user is (role, expertise, preferences)
 ├── feedback_<topic>.md        ← rules / corrections the user gave
@@ -48,7 +48,7 @@ whatever the `identity` extension produced:
 ```
 # Memory
 
-You have a persistent memory directory at /home/well/agent/memory/. Your
+You have a persistent memory directory at /cell/memory/. Your
 index is below — full content lives in topical files you can read on demand.
 
 ## MEMORY.md
@@ -99,7 +99,7 @@ proto/mother/dna/.pi/extensions/memory/
 | `proto/mother/dna/.gitignore` | Add `memory/` |
 | `ROADMAP.md` | Mark Phase 1.0 in progress, link this doc |
 
-Birth ritual already pushes the whole `proto/mother/dna/` to `/home/well/agent/`,
+Birth ritual already pushes the whole `proto/mother/dna/` to `/cell/`,
 so the extension comes along for free. No birth.md changes required.
 
 ### Extension shape (`proto/mother/dna/.pi/extensions/memory/index.ts`)
@@ -109,7 +109,7 @@ import { Type } from "@sinclair/typebox";
 import { existsSync, mkdirSync, readFileSync, writeFileSync, readdirSync, unlinkSync, statSync } from "node:fs";
 import { join, basename, normalize, sep } from "node:path";
 
-const MEMORY_DIR = "/home/well/agent/memory";
+const MEMORY_DIR = "/cell/memory";
 const YEARNINGS_DIR = join(MEMORY_DIR, "yearnings");
 const INDEX_FILE = join(MEMORY_DIR, "MEMORY.md");
 const PROMPT_TEMPLATE = join(__dirname, "auto-memory-prompt.md");
@@ -274,7 +274,7 @@ Append a one-paragraph section to `proto/mother/dna/AGENTS.md`:
 ```markdown
 ## Memory
 
-You have a memory directory at /home/well/agent/memory/. The index is
+You have a memory directory at /cell/memory/. The index is
 loaded into your system prompt at every session start. Use write_memory
 when you learn something durable, write_yearning for open questions, and
 dream when memory feels messy. Full instructions live in the system prompt
@@ -286,7 +286,7 @@ itself.
 1. `bun build proto/mother/dna/.pi/extensions/memory/index.ts --target=node` — clean.
 2. `cells kill <name> && cells birth <name>` — fresh agent.
 3. `cells talk <name>` — agent should mention having a memory directory.
-4. `well exec -s <name> -- ls /home/well/agent/memory/` — should show MEMORY.md and yearnings/.
+4. `well exec -s <name> -- ls /cell/memory/` — should show MEMORY.md and yearnings/.
 5. Tell agent something durable (e.g. "I'm a solo dev, prefer terse responses").
 6. Verify `feedback_*.md` exists and `MEMORY.md` indexes it.
 7. Disconnect, reconnect, ask agent about preference. Should recall.

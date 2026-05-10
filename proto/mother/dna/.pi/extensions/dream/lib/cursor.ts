@@ -14,7 +14,8 @@ import { join } from "node:path";
 
 function resolveAgentRoot(): string {
   if (process.env.CELL_AGENT_ROOT) return process.env.CELL_AGENT_ROOT;
-  if (existsSync("~/agent")) return "~/agent";
+  const home = process.env.HOME ?? "";
+  if (home && existsSync(join(home, "agent"))) return join(home, "agent");
   return process.cwd();
 }
 

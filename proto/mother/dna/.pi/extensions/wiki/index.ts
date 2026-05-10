@@ -29,13 +29,16 @@ import { fileURLToPath } from "node:url";
 
 /**
  * Where the wiki lives:
- *   - On a Well: ~/agent/state/wiki/
- *   - Otherwise: cwd/state/wiki/
+ *   - Legacy well (HOME=/home/well, $HOME/agent exists): $HOME/agent/state/wiki/
+ *   - New /cell layout (HOME=/cell, no $HOME/agent): cwd/state/wiki/
+ *     (cwd=/cell when pi runs on a cell)
+ *   - Local dev / mother: cwd/state/wiki/
  *   - Override via env var CELL_WIKI_DIR.
  */
 function resolveWikiDir(): string {
   if (process.env.CELL_WIKI_DIR) return process.env.CELL_WIKI_DIR;
-  if (existsSync("~/agent")) return "~/agent/state/wiki";
+  const home = process.env.HOME ?? "";
+  if (home && existsSync(join(home, "agent"))) return join(home, "agent", "state", "wiki");
   return join(process.cwd(), "state", "wiki");
 }
 

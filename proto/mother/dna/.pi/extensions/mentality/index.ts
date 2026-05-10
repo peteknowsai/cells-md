@@ -27,13 +27,16 @@ import { fileURLToPath } from "node:url";
 
 /**
  * Where mentality lives:
- *   - On a Well: ~/agent/state/mentality.md
- *   - Otherwise: cwd/state/mentality.md
+ *   - Legacy well (HOME=/home/well, $HOME/agent exists): $HOME/agent/state/mentality.md
+ *   - New /cell layout (HOME=/cell, no $HOME/agent): cwd/state/mentality.md
+ *     (cwd=/cell when pi runs on a cell)
+ *   - Local dev / mother: cwd/state/mentality.md
  *   - Override via env var CELL_MENTALITY_FILE.
  */
 function resolveMentalityFile(): string {
   if (process.env.CELL_MENTALITY_FILE) return process.env.CELL_MENTALITY_FILE;
-  if (existsSync("~/agent")) return "~/agent/state/mentality.md";
+  const home = process.env.HOME ?? "";
+  if (home && existsSync(join(home, "agent"))) return join(home, "agent", "state", "mentality.md");
   return join(process.cwd(), "state", "mentality.md");
 }
 

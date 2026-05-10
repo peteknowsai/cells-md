@@ -264,7 +264,7 @@ function spawnPi() {
   console.log(`[bridge] spawning pi --mode rpc`);
   piStdoutBuffer = "";
   pi = spawn(["pi", "--mode", "rpc", "--session-dir", SESSION_DIR], {
-    cwd: `${HOME}/agent`,
+    cwd: "/cell",
     stdin: "pipe",
     stdout: "pipe",
     stderr: "pipe",

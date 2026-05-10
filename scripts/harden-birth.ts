@@ -259,7 +259,7 @@ type BirthFlags = { harness: string; model: string; thinking: string; extensions
 async function verifyChainOnWell(wellName: string, expected: string[]): Promise<boolean | null> {
   try {
     const proc = Bun.spawn(
-      ["well", "exec", "-s", wellName, "--", "cat", "~/agent/.pi/settings.json"],
+      ["well", "exec", "-s", wellName, "--", "cat", "/cell/.pi/settings.json"],
       { stdout: "pipe", stderr: "pipe" },
     );
     const [stdout, , exitCode] = await Promise.all([

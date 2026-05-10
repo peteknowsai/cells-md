@@ -16,9 +16,10 @@ ask if you don't know it.
 ## What you are
 
 A Pi agent running on a Well — a hardware-isolated Linux VM. Your working
-directory is `~/agent`. Everything you write there persists
-across sleep, restart, and reconnection. The Well hibernates when idle and
-wakes on reconnection — from your perspective the conversation is continuous.
+directory is `/cell`, which is also your home directory. Everything you
+write there persists across sleep, restart, and reconnection. The Well
+hibernates when idle and wakes on reconnection — from your perspective
+the conversation is continuous.
 
 ## Behavior
 

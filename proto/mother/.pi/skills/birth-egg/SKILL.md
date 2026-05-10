@@ -79,7 +79,7 @@ Use `well_egress_allow` with `name: <NAME>` and `domains: ["*"]`.
 
 Identical to birth step 3 — installs bun, wells CLI, gh, the
 terminal-editing toolkit (`micro`, `fzf`, `ripgrep`, `bat`), and writes
-the standard `~/.tmux.conf`. The tmux conf has `__CELL_BG__`,
+the standard `/cell/.tmux.conf`. The tmux conf has `__CELL_BG__`,
 `__CELL_FG__`, and `__NAME__` placeholders — those stay until hatch.
 
 Use `well_exec` for the curl installs and tmux config:
@@ -117,7 +117,7 @@ Verify every required binary is on PATH on the well:
 Use `well_push` with:
 - `name: <NAME>`
 - `localPath: /Users/pete/Projects/cells/proto/mother/dna`
-- `remotePath: ~/agent`
+- `remotePath: /cell`
 
 Then substitute **only `__MODEL__` and `__PROVIDER__`** — these are
 egg-time bake-ins. Leave `__NAME__` and `__THINKING__` as placeholders
@@ -125,13 +125,13 @@ for hatch.
 
 ```bash
 sed -i 's/__MODEL__/<MODEL>/g' \
-  ~/agent/SOUL.md \
-  ~/agent/IDENTITY.md \
-  ~/agent/.pi/settings.json
+  /cell/SOUL.md \
+  /cell/IDENTITY.md \
+  /cell/.pi/settings.json
 
 sed -i 's/__PROVIDER__/<PROVIDER>/g' \
-  ~/agent/IDENTITY.md \
-  ~/agent/.pi/settings.json
+  /cell/IDENTITY.md \
+  /cell/.pi/settings.json
 ```
 
 **Skip the `__NAME__`, `__THINKING__`, and `__MODEL_CHAIN__`
@@ -150,7 +150,7 @@ Run the baseline install in **three separate `well_exec` calls** so a hang in an
 
 ```bash
 export PATH=$HOME/.bun/bin:$PATH
-cd ~/agent && bun install --frozen-lockfile
+cd /cell && bun install --frozen-lockfile
 bun install -g @mariozechner/pi-coding-agent@latest
 ```
 
@@ -159,9 +159,9 @@ Why 240s: legitimate run is ~60–90s. Doubling the budget catches npm-stall han
 **5b. Cells CLI shim** — `well_exec` with `timeoutSeconds: 30`:
 
 ```bash
-chmod +x ~/agent/bin/cells
+chmod +x /cell/bin/cells
 mkdir -p ~/.local/bin
-ln -sf ~/agent/bin/cells ~/.local/bin/cells
+ln -sf /cell/bin/cells ~/.local/bin/cells
 ```
 
 Why 30s: file ops only. Anything past 30s here means the VM is stuck.
@@ -169,7 +169,7 @@ Why 30s: file ops only. Anything past 30s here means the VM is stuck.
 **5c. Prune in-tree extensions per the egg's variant** — `well_exec` with `timeoutSeconds: 60`. For each name in `["memory", "mentality", "wiki", "dream"]` that is NOT in `<EXTENSIONS>`, delete the directory:
 
 ```bash
-rm -rf ~/agent/.pi/extensions/<name>
+rm -rf /cell/.pi/extensions/<name>
 ```
 
 **Do NOT register the optional extensions in `.pi/settings.json` here.**
@@ -194,26 +194,34 @@ Skip if `<PACKAGES>` is empty.
 
 > _Timing marker:_ `bash scripts/log-birth-step.sh <NAME> 6 env-shim`
 
-Identical to birth step 6 — universal env loading from `~/.bashrc.d/`.
+The system-wide env shim now lives at `/etc/profile.d/cells-env.sh` (root-owned, 0644). It's written by `cells bake` into every cell-base, so the egg already has it from the bake — this step is a no-op for eggs unless the bake regressed. Verify presence: `well_exec` `test -f /etc/profile.d/cells-env.sh && echo OK`.
 
 ## 6b. Inject shared secrets
 
 > _Timing marker:_ `bash scripts/log-birth-step.sh <NAME> 6b secrets-inject`
 
-Identical to birth step 6b — read `~/.cells/secrets.json` and write
-each key as a `~/.bashrc.d/<key>` file in the well. Universal across
-cells.
+Read `~/.cells/secrets.json` on the Mac and pass each key as a `well_create --env KEY=VALUE` pair (egg-bake time) — welld lands them in `/etc/environment`, PAM auto-loads on every shell, and `/etc/profile.d/cells-env.sh` re-exports under pi-ai's expected names. Universal across cells. **Don't write per-key files inside the well** — the bashrc.d-style approach was retired with the /cell migration.
 
-## 6c. Wire to subscriptions proxy
+## 6c. Verify pi-ai patches landed
 
 > _Timing marker:_ `bash scripts/log-birth-step.sh <NAME> 6c proxy-wire`
 
+The proxy URL rewrites + codex `extractAccountId` stub are baked into
+`cell-base` by `cells bake` and survive forks. Verify presence rather
+than re-apply:
+
 ```bash
-scripts/configure-cell-proxy.sh <NAME>
+well_exec '
+grep -q "https://proxy.cells.md" /cell/node_modules/@mariozechner/pi-ai/dist/models.generated.js \
+  && grep -q "function extractAccountId(token) { return \"\"" /cell/node_modules/@mariozechner/pi-ai/dist/providers/openai-codex-responses.js \
+  && echo OK
+'
 ```
 
-The script's content is universal (env files + pi-ai patches). The
-`<NAME>` arg only selects the well to target.
+If the verify fails, the bake regressed — re-bake `cell-base` (don't try
+to re-apply per-cell). The historical `scripts/configure-cell-proxy.sh`
+host-side retrofit is retained for legacy `/home/well/agent` cells; new
+`/cell` cells get patches at bake time.
 
 **Phase checkpoint.** Proxy is wired. Take a checkpoint: `well_checkpoint` with `name: <NAME>` and `comment: "phase-proxy-v1"`.
 
@@ -221,8 +229,7 @@ The script's content is universal (env files + pi-ai patches). The
 
 > _Timing marker:_ `bash scripts/log-birth-step.sh <NAME> 8 login-shim`
 
-Identical to birth step 8 — append the bashrc.d sourcing to
-`~/.zshrc` so interactive logins inherit the env.
+No-op under the /cell layout — `/etc/profile.d/cells-env.sh` is sourced automatically by `/etc/profile` on every login shell (bash/sh/dash). Skip this step entirely.
 
 **Skip step 7 (site service registration).** Pi only starts at hatch.
 Without site service, the egg's pi process never spawns, and the

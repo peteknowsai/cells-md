@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Render the right-hand side of the cell's tmux status bar.
-# Reads ~/agent/.pi/status.json (written at birth, updated on channel
+# Reads /cell/.pi/status.json (written at birth, updated on channel
 # link/unlink from the laptop side via well_exec). Output is single-
 # line, picked up by tmux's status-right via #(...).
 #
@@ -10,7 +10,7 @@
 # tmux just shows nothing rather than an error string.
 set -euo pipefail
 
-STATUS="${HOME}/agent/.pi/status.json"
+STATUS="/cell/.pi/status.json"
 [ -f "$STATUS" ] || exit 0
 
 jq -r '
