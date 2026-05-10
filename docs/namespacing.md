@@ -1,19 +1,19 @@
-# Namespacing — multiple cell pools per Sprites org
+# Namespacing — multiple cell pools per Wells org
 
 **Status:** design only, not implemented. Captured 2026-05-01.
 
 ## The problem
 
 Today there is exactly one cell pool: the `cells` repo, talking to one
-Sprites org, on the `cells.md` domain. That works as long as you only
+Wells org, on the `cells.md` domain. That works as long as you only
 ever run one pool. The moment you want a *second* — say a `zero` pool
 for a home-zero project, or a `personal` pool for personal stuff — three
 things collide:
 
-1. **Sprite name collisions.** Sprites belong to an org, not a pool.
-   You can't have two sprites named `mother` in one org.
-2. **On-sprite `cells list` is unfiltered.** It hits
-   `GET /v1/sprites` and returns *every* sprite in the org. Today on
+1. **Well name collisions.** Wells belong to an org, not a pool.
+   You can't have two wells named `mother` in one org.
+2. **On-well `cells list` is unfiltered.** It hits
+   `GET /v1/wells` and returns *every* well in the org. Today on
    `pete`, that means `desk-pool-7`, `hz-advisor-pete`, the
    philosophers — none of which are part of this cell pool.
 3. **One CLI, one mental model.** `cells` is a global verb, but a user
@@ -25,16 +25,16 @@ things collide:
 Each clone of this repo is a *cell installation* with its own
 namespace. The namespace is the CLI's binary name. Bootstrap renames
 the binary; the renamed CLI uses its own basename as the prefix for
-sprite names and for filtering.
+well names and for filtering.
 
 ```
-canonical install:   cells repo  → `cells` CLI → sprites named cells-pete, cells-mother
-forked install:      zero repo   → `zero`  CLI → sprites named zero-foo, zero-bar
-forked install:      personal    → `personal`  → sprites named personal-spouse, ...
+canonical install:   cells repo  → `cells` CLI → wells named cells-pete, cells-mother
+forked install:      zero repo   → `zero`  CLI → wells named zero-foo, zero-bar
+forked install:      personal    → `personal`  → wells named personal-spouse, ...
 ```
 
 User-facing names stay clean. You still type `cells talk pete`. The
-CLI translates `pete ↔ cells-pete` at the Sprites API boundary.
+CLI translates `pete ↔ cells-pete` at the Wells API boundary.
 
 ### The bootstrap script
 
@@ -43,7 +43,7 @@ A one-time `./bootstrap <namespace> <domain>` at first clone:
 - `mv cli/cells.ts cli/<namespace>.ts`
 - update `package.json` `bin` entry
 - `mv proto/mother/dna/bin/cells proto/mother/dna/bin/<namespace>`
-- update internal references (the birth skill, the on-sprite symlink
+- update internal references (the birth skill, the on-well symlink
   path, anywhere `bin/cells` is hardcoded)
 - bake the domain into the renamed CLI as a constant (mother host
   becomes `mother.<domain>`, wildcard `*.<domain>`)
@@ -52,7 +52,7 @@ Skip bootstrap → defaults stay (`cells`, `cells.md`).
 
 ### How the binary knows its namespace
 
-Both CLIs (`cli/<ns>.ts` on Mac, `proto/mother/dna/bin/<ns>` on each sprite)
+Both CLIs (`cli/<ns>.ts` on Mac, `proto/mother/dna/bin/<ns>` on each well)
 read their own basename via `argv[1]` at startup. No config file
 needed — the filename *is* the configuration.
 
@@ -65,15 +65,15 @@ const fromSpriteName = (s: string) =>
 
 ### What changes in the code
 
-- `cli/<ns>.ts`: every Sprites API call wraps name in `toSpriteName`;
+- `cli/<ns>.ts`: every Wells API call wraps name in `toSpriteName`;
   every response unwraps via `fromSpriteName`. Registry stays in
   user-facing form (still keyed by `pete`, not `cells-pete`).
 - `proto/mother/dna/bin/<ns>`: same translation. `cells list` filters API
   output to entries that start with `<NAMESPACE>-`. Optionally a
-  second section "other sprites in org" for visibility, or just hide
+  second section "other wells in org" for visibility, or just hide
   them.
 - Birth: passes the namespace into the cell at birth time (env var
-  `CELL_NAMESPACE`, OR the on-sprite binary just reads its own
+  `CELL_NAMESPACE`, OR the on-well binary just reads its own
   basename — likely cleaner).
 - Reserved-name check (`mother`) is per-namespace.
 
@@ -97,10 +97,10 @@ need to run rather than execute them itself.
 
 Single install per Mac. Bootstrap renames code + bakes domain. User
 manually configures DNS and the cloudflared tunnel for the new domain.
-On-sprite `<ns> list` filters to namespace.
+On-well `<ns> list` filters to namespace.
 
 Footprint: small. Mostly mechanical renames + a `NAMESPACE` constant
-threaded through Sprites API calls.
+threaded through Wells API calls.
 
 ### Phase B (later) — multi-install on one Mac
 
@@ -123,12 +123,12 @@ second install on this Mac.
 ## Migration cost
 
 Zero — current state is one pool, "cells", and we're fine destroying
-existing sprites. The first commit of Phase A becomes the cutover.
+existing wells. The first commit of Phase A becomes the cutover.
 
 ## Out of scope
 
 - Sharing memory or knowledge across pools. Pools are independent.
 - Cross-pool messaging. Out of scope.
-- Sprites-side tags/labels for filtering. Could be cleaner than name
-  prefixes if Sprites adds first-class label support, but until then
+- Wells-side tags/labels for filtering. Could be cleaner than name
+  prefixes if Wells adds first-class label support, but until then
   the prefix is portable and works today.

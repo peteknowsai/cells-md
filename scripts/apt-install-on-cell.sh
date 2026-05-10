@@ -2,7 +2,7 @@
 # Install apt packages on a cell with dpkg-lock recovery.
 #
 # Why this exists: birth's step 3 used to do `apt-get update && apt-get
-# install ...` inside one big sprite_exec heredoc. When the network hiccupped
+# install ...` inside one big well_exec heredoc. When the network hiccupped
 # mid-install, /var/lib/dpkg/lock-frontend stayed held and mother had no
 # prescribed recovery — she'd improvise polling loops and wait ~16 minutes.
 # This helper handles the lock case once, deterministically.
@@ -24,7 +24,7 @@ PKGS="$*"
 # runs `clear_console -q` and returns non-zero with no TTY, overriding our
 # exit code and making every successful run look like a failure. Default
 # PATH is fine here — all packages we install land in /usr/bin.
-sprite exec -s "$NAME" -- bash -c "
+well exec -s "$NAME" -- bash -c "
 set -euo pipefail
 PKGS='$PKGS'
 
@@ -47,7 +47,7 @@ if [ \"\$all_present\" = 1 ]; then
 fi
 
 # Wait up to 30s for dpkg locks to free naturally.
-# Sprite VMs don't have fuser/lsof — use flock to probe. If flock can't grab
+# well VMs don't have fuser/lsof — use flock to probe. If flock can't grab
 # the lock non-blocking, something else holds it.
 LOCKS='/var/lib/dpkg/lock-frontend /var/lib/dpkg/lock /var/cache/apt/archives/lock'
 probe_held() {
@@ -79,7 +79,7 @@ fi
 
 run_apt() {
   # \$1 = extra apt-get flags. Empty by default; retry forces IPv4 because
-  # archive.ubuntu.com sometimes returns only AAAA records on sprites and
+  # archive.ubuntu.com sometimes returns only AAAA records on wells and
   # the IPv6 path is degraded — apt then bleeds at <1KB/s for many minutes.
   sudo apt-get \$1 update -y && sudo apt-get \$1 install -y \$PKGS
 }

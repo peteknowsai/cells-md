@@ -1,39 +1,39 @@
 # Cell — Roadmap
 
-Cell is a Pi agent living on a Sprite. This is what we build in what order.
+Cell is a Pi agent living on a Well. This is what we build in what order.
 
 ## Principle
 
 Always markdown. Every install, ritual, and recovery procedure is a `.md` file —
 either a Pi skill, a Pi prompt template, or a doc the cell (or the `cell` CLI)
 reads top-to-bottom. The local CLI (Bun on Mac, bash inside markdown on the
-Sprite) is the only exception, and exists to be plumbing for the cell's body.
+Well) is the only exception, and exists to be plumbing for the cell's body.
 
 ## Phase 0 — Hello, Cell
 
 A minimum-viable cell. No memory, no wiki, no DB, no backup. Just Pi running on
-a Sprite, reachable via `cells talk`. Get the substrate working before we put
+a Well, reachable via `cells talk`. Get the substrate working before we put
 anything inside it.
 
 **Includes:**
 
 - `cell` CLI: `pi`, `create`, `talk`, `list`, `sleep`, `wake`, `checkpoint`, `destroy`
 - Local mother Pi project at `proto/mother/` (`SOUL.md` + sharded anatomy files + use-max extension + `package.json`) so it bills against Pro/Max via the first-party billing recipe
-- `proto/mother/dna/` — recipe-compliant cell-on-Sprite layout that birth pushes onto each Sprite
+- `proto/mother/dna/` — recipe-compliant cell-on-Well layout that birth pushes onto each Well
 - `proto/mother/.pi/skills/birth/SKILL.md` — birth ritual the mother follows:
-  - create the Sprite + configure egress (anthropic, bun.sh, npm, github)
-  - install Bun on the Sprite
+  - create the Well + configure egress (anthropic, bun.sh, npm, github)
+  - install Bun on the Well
   - tar+push `proto/mother/dna/` to `/root/cell`, `sed` substitute `__NAME__`
-  - run `bun install` on the Sprite
-  - inject shared keys (`CELLS_PROXY_SECRET`, `EXA_API_KEY`, `SPRITES_TOKEN`) from `~/.cells/secrets.json` and patch pi-ai's model registry to route through `proxy.cells.md`
-  - register the `site` sprite service (it serves `<cell>.cells.md` and
+  - run `bun install` on the Well
+  - inject shared keys (`CELLS_PROXY_SECRET`, `EXA_API_KEY`, `WELL_TOKEN`) from `~/.cells/secrets.json` and patch pi-ai's model registry to route through `proxy.cells.md`
+  - register the `site` well service (it serves `<cell>.cells.md` and
     spawns `pi --mode rpc` as a child; the per-cell CF Worker holds a
     persistent WebSocket to it as the prompt/event bridge)
   - take the first checkpoint
 - `.pi/prompts/` — slash commands the CLI invokes (`cell-create`, `cell-destroy`, `cell-checkpoint`)
 
 **Done when:** `cells birth Pete` works end-to-end. `cells talk Pete` reaches
-the cell over the bridge. I have a conversation. I disconnect. The Sprite
+the cell over the bridge. I have a conversation. I disconnect. The Well
 hibernates. I come back days later. Conversation is still there. The cell
 is the same cell.
 
@@ -54,7 +54,7 @@ The cell gains short-term episodic memory.
 - `~/cell/memory/<topic>.md` — individual notes the cell writes during life
 - `rituals/dream.md` — consolidation pass running as a forked Pi subagent,
   restricted to `~/cell/memory/` (read/write only there). Triggered on
-  Sprite wake, not on a polling loop.
+  Well wake, not on a polling loop.
 - Base `AGENTS.md` updated to teach the cell to journal during conversation
 
 ## Phase 2 — Obsidian vault sync
@@ -69,9 +69,9 @@ the actual readable surface Pete wants.
   single vault at `~/Obsidian/cells/<name>/`. Top-level `README.md`
   is a roster across all cells.
 - Per-cell `README.md` is a generated dashboard: live status from the
-  Sprites API, persona link, extensions (with their tools), skills,
+  Wells API, persona link, extensions (with their tools), skills,
   memory stats.
-- Mechanism: `sprite exec` + tar pipe over allowlist (anatomy files at the
+- Mechanism: `well exec` + tar pipe over allowlist (anatomy files at the
   agent root — `AGENTS.md`, `SOUL.md`, `IDENTITY.md`, `TOOLS.md`, `CELLS.md`,
   `CONTACTS.md`, `MEMORY.md`, `HEARTBEAT.md` — plus `state/memory/`,
   `state/wiki/`, `.pi/skills/`, `.pi/prompts/`, restricted to `*.md` and
@@ -110,7 +110,7 @@ conversation-distilled knowledge from the agent's own past sessions.
 
 Structured records + semantic search.
 
-- Stoolap installed on the Sprite (single Rust binary, embedded)
+- Stoolap installed on the Well (single Rust binary, embedded)
 - Schema: conversations, events, tasks, anything that benefits from queries
 - Vector index over L1 + L2 markdown using Stoolap's built-in EMBED()
   (sentence-transformers, no external API)
@@ -121,7 +121,7 @@ Offsite cold backup of the cell's body.
 
 - Nightly ritual: tarball `~/cell/` and push to Cloudflare R2
 - Versioned bucket — R2 handles history
-- Restore ritual for resurrecting the cell onto a fresh Sprite if needed
+- Restore ritual for resurrecting the cell onto a fresh well if needed
 
 ## Out of scope, for now
 
@@ -131,6 +131,6 @@ Offsite cold backup of the cell's body.
 - Self-modification beyond memory and wiki
 - ~~L2 wiki / Karpathy-style distilled knowledge — earns its keep when a cell has a job; until then `cells sync` (Phase 2) covers the readable-surface need~~ — moved into Phase 2.5 (`pi-cell-wiki`), reframed as conversation-distilled rather than external-corpus-ingested
 - Bidirectional vault sync — pull-only for now; if Pete actually wants to edit in Obsidian, we'll add `cells sync push` with a git-style conflict pre-flight
-- Multiple cell pools per Sprites org (namespace + CLI rename + per-pool domain) — design captured in `docs/namespacing.md`; build when we actually want a second install
+- Multiple cell pools per Wells org (namespace + CLI rename + per-pool domain) — design captured in `docs/namespacing.md`; build when we actually want a second install
 
 These may come later. For now, we build the singular unit.

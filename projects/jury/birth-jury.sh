@@ -114,14 +114,14 @@ $persona
 EOF
 }
 
-# Push a string as a file to a cell via sprite exec (avoids size limits of
+# Push a string as a file to a cell via well exec (avoids size limits of
 # arg passing — write to /tmp first via stdin redirection).
 push_string() {
   local name="$1"
   local remote="$2"
   local content="$3"
-  # Use sprite exec with stdin
-  printf '%s' "$content" | sprite exec -s "$name" -- bash -c "cat > $remote"
+  # Use well exec with stdin
+  printf '%s' "$content" | well exec -s "$name" -- bash -c "cat > $remote"
 }
 
 customize_juror() {

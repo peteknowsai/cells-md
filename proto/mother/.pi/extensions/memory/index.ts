@@ -33,9 +33,11 @@ import { tmpdir } from "node:os";
 
 /**
  * Where memory lives depends on context:
- *   - On a Sprite (where the agent runs in /home/sprite/agent): use the
- *     sprite-side state dir.
- *   - On Pete's Mac (mother running in ~/Projects/cells/proto/mother, pulse in ~/Projects/cells/proto/pulse): cwd/state/memory.
+ *   - Inside a cell (the agent runs in $HOME/agent — that's /home/well/agent
+ *     on local wells, historically /home/well/agent on retired wells):
+ *     use the in-VM state dir.
+ *   - On Pete's Mac (mother running in ~/Projects/cells/proto/mother, pulse
+ *     in ~/Projects/cells/proto/pulse): cwd/state/memory.
  *   - Override via env var CELL_MEMORY_DIR.
  *
  * Both contexts get identical structure: MEMORY.md + topical files +
@@ -43,7 +45,8 @@ import { tmpdir } from "node:os";
  */
 function resolveMemoryDir(): string {
   if (process.env.CELL_MEMORY_DIR) return process.env.CELL_MEMORY_DIR;
-  if (existsSync("/home/sprite/agent")) return "/home/sprite/agent/state/memory";
+  const home = process.env.HOME ?? "";
+  if (home && existsSync(join(home, "agent"))) return join(home, "agent", "state", "memory");
   return join(process.cwd(), "state", "memory");
 }
 

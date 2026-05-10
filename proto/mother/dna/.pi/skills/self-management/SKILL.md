@@ -6,7 +6,7 @@ allowed-tools: [bash, read, write, write_memory]
 
 # Self-management
 
-You are a Pi agent on a Sprite. Your filesystem is yours — you can extend
+You are a Pi agent on a Well. Your filesystem is yours — you can extend
 your own capabilities at runtime. This skill describes how.
 
 ## 1. Install Pi packages
@@ -21,7 +21,7 @@ pi remove npm:<package-name>           # uninstall
 pi update                              # update everything
 ```
 
-`-l` makes it project-local (lives in `/home/sprite/agent/.pi/npm/`). Drop
+`-l` makes it project-local (lives in `~/agent/.pi/npm/`). Drop
 the flag for global install.
 
 After installing, **restart yourself** so Pi loads the new extension:
@@ -136,7 +136,7 @@ When this skill says "the Pi docs," there are three places to go, in order
 of speed:
 
 1. **Local docs (preferred — no network).** Bundled with every cell at
-   `/home/sprite/agent/node_modules/@mariozechner/pi-coding-agent/docs/`.
+   `~/agent/node_modules/@mariozechner/pi-coding-agent/docs/`.
    Read with the `read` tool. Topics worth knowing:
    - `extensions.md` — hooks, `registerTool`, `registerProvider`, full API surface
    - `skills.md` — skill format, frontmatter, discovery rules

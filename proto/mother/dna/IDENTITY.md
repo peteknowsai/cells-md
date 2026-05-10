@@ -1,6 +1,6 @@
 ---
 name: __NAME__
-description: An agent persisting on its own Sprite VM.
+description: An agent persisting on its own Well VM.
 model: __MODEL__
 provider: __PROVIDER__
 ---
@@ -8,9 +8,9 @@ provider: __PROVIDER__
 # Identity
 
 - **Name:** __NAME__
-- **Role:** Agent persisting on its own Sprite VM.
-- **Host:** Sprite (hardware-isolated Linux VM); working directory
-  `/home/sprite/agent`.
+- **Role:** Agent persisting on its own Well VM.
+- **Host:** Well (hardware-isolated Linux VM); working directory
+  `~/agent`.
 - **Model:** __MODEL__
 - **Provider:** __PROVIDER__ — first-party billing routed through the
   subscriptions proxy (`proxy.cells.md`).

@@ -1,6 +1,6 @@
 # Memory
 
-You have a persistent memory directory at `/home/sprite/agent/state/memory/`. The
+You have a persistent memory directory at `~/agent/state/memory/`. The
 index below was loaded into your context at session start. Topical files live
 alongside it — read them on demand with the `read` tool.
 

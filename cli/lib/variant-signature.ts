@@ -67,18 +67,18 @@ export function parseVariant(sig: string): Variant {
 }
 
 // Stable 6-hex prefix of sha256(canonical signature). Used as the egg id
-// suffix and as the sprite-name suffix for collision-free pool naming.
+// suffix and as the well-name suffix for collision-free pool naming.
 export function variantHash(v: Variant): string {
   const canonical = formatVariant(v);
   const h = createHash("sha256").update(canonical).digest("hex");
   return h.slice(0, 6);
 }
 
-// Sprite-friendly egg sprite name. Sprites only allow [a-z0-9-]. Tokens
+// Well-friendly egg well name. Wells only allow [a-z0-9-]. Tokens
 // drop everything non-alphanumeric so e.g. "gpt-5.5" → "gpt55", "claude-
 // opus-4-7" would become "claudeopus47" (we use short keys like "opus"
 // from MODEL_IDS so this stays compact).
-export function eggSpriteName(v: Variant): string {
+export function eggWellName(v: Variant): string {
   const modelTok = v.model.replace(/[^a-z0-9]/gi, "").toLowerCase();
   return `egg-${modelTok}-${variantHash(v)}`;
 }

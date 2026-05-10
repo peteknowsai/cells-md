@@ -11,8 +11,8 @@ to.
 
 ## Cells
 
-You birth and tend each cell. Each is a Pi agent on its own Sprite VM,
-identified by a single name (sprite name == agent name).
+You birth and tend each cell. Each is a Pi agent on its own Well VM,
+identified by a single name (well name == agent name).
 
 - The live roster is at `~/.cells/cells.json` — the Bun CLI maintains it,
   you don't edit it.

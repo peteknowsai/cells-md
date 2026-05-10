@@ -1,12 +1,12 @@
 /**
  * CellAgent — per-cell Durable Object.
  *
- * Holds a persistent outbound WebSocket to the sprite's site server at
- * wss://${SPRITE_HOST}/agent. That inbound TCP keeps the sprite warm
+ * Holds a persistent outbound WebSocket to the well's site server at
+ * wss://${WELL_HOST}/agent. That inbound TCP keeps the well warm
  * continuously. Same connection serves as the bidirectional bridge:
  *
- *   - DO → sprite:  pi RPC commands ({type:"prompt"}, {type:"switch_session"})
- *   - sprite → DO:  pi RPC events (agent_start, message_update, agent_end, …)
+ *   - DO → well:  pi RPC commands ({type:"prompt"}, {type:"switch_session"})
+ *   - well → DO:  pi RPC events (agent_start, message_update, agent_end, …)
  *
  * For each pi turn, the DO maintains one Slack message that it edits
  * as events arrive. agent_start posts the initial message; deltas are
@@ -16,13 +16,13 @@
  * Slack-mrkdwn and ships it.
  *
  * Liveness: a 25s alarm checks the WS, reconnects if dead, and pings
- * the sprite. Each reconnect is also activity that keeps the sprite
+ * the well. Each reconnect is also activity that keeps the well
  * warm if it had drifted.
  */
 
 interface Env {
   CELL_NAME: string;
-  SPRITE_HOST: string;
+  WELL_HOST: string;
   CELLS_PROXY_SECRET: string;
   CELL_AGENT: DurableObjectNamespace;
 }
@@ -41,7 +41,7 @@ const ALARM_INTERVAL_MS = 25_000;
 const FLUSH_INTERVAL_MS = 400;
 const FLUSH_BACKOFF_DECAY_MS = 60_000; // decay 429 backoff after 60s clean
 const FLUSH_BACKOFF_CAP_MS = 5_000;
-const IDLE_WINDOW_MS = 60_000;         // close WS and let sprite hibernate after 60s idle
+const IDLE_WINDOW_MS = 60_000;         // close WS and let well hibernate after 60s idle
 // Slack enforces 40,000 chars on chat.postMessage and chat.update; we
 // cap our rendered chunks at 35k to leave headroom for the
 // "…continued ↓" footer + a small streaming delta between flushes.
@@ -88,6 +88,10 @@ type TurnState = {
   flushTimer: number | null;
   lastFlushAt: number;
   ended: boolean;
+  // Set when the final flush failed (429s, upstream errors). The alarm
+  // re-runs flushSlack/flushEmail on each fire while this is true; clears
+  // on confirmed delivery, at which point the keep-warm chain can stop.
+  pendingDelivery: boolean;
   disconnected: boolean;         // bridge WS dropped mid-turn — append a footer on final flush
   // Continuation thread replies in order, posted under slackTs when the
   // rendered text exceeds SLACK_MSG_CAP. Each entry holds the ts of the
@@ -140,14 +144,29 @@ export class CellAgent {
   // ---- alarm-driven liveness ----
 
   async alarm() {
+    // First: any pending delivery from a stranded final flush takes
+    // priority. Retry before touching the WS or considering idle close.
+    if (this.currentTurn?.pendingDelivery) {
+      await this.retryPendingDelivery();
+      // If retry confirmed delivery, drop the alarm chain — we're done.
+      if (!this.currentTurn?.pendingDelivery) {
+        try { this.ws?.close(1000, "delivered"); } catch {}
+        this.ws = null;
+        return;
+      }
+      // Still pending — reschedule and let the next tick try again.
+      await this.state.storage.setAlarm(Date.now() + ALARM_INTERVAL_MS);
+      return;
+    }
+
     const last = (await this.state.storage.get<number>("lastActivity")) ?? 0;
     const idleFor = Date.now() - last;
     const midTurn = this.currentTurn !== null && !this.currentTurn.ended;
     if (idleFor > IDLE_WINDOW_MS && !midTurn) {
       // Idle long enough AND no turn in flight — close the WS and stop
-      // the alarm chain so the sprite is allowed to hibernate. The next
+      // the alarm chain so the well is allowed to hibernate. The next
       // /append will reopen.
-      console.log(`[${this.env.CELL_NAME}] idle ${Math.round(idleFor / 1000)}s, closing ws so sprite can hibernate`);
+      console.log(`[${this.env.CELL_NAME}] idle ${Math.round(idleFor / 1000)}s, closing ws so well can hibernate`);
       try { this.ws?.close(1000, "idle"); } catch {}
       this.ws = null;
       return;
@@ -224,7 +243,7 @@ export class CellAgent {
   private handleDebug(): Response {
     return Response.json({
       cell: this.env.CELL_NAME,
-      sprite: this.env.SPRITE_HOST,
+      well: this.env.WELL_HOST,
       wsState: this.ws ? this.ws.readyState : null,
       turn: this.currentTurn ? {
         channel: this.currentTurn.channel,
@@ -237,14 +256,14 @@ export class CellAgent {
     });
   }
 
-  // ---- WebSocket to sprite ----
+  // ---- WebSocket to well ----
 
   private async ensureConnection(): Promise<void> {
     if (this.ws && this.ws.readyState === WebSocket.OPEN) return;
     if (this.wsConnecting) return;
     this.wsConnecting = true;
     try {
-      const url = `https://${this.env.SPRITE_HOST}/agent`;
+      const url = `https://${this.env.WELL_HOST}/agent`;
       const resp = await fetch(url, {
         headers: {
           upgrade: "websocket",
@@ -272,7 +291,7 @@ export class CellAgent {
         // If a turn was streaming when the WS dropped, the user sees a
         // frozen Slack message with no clue why. Finalize it with a
         // footer so they know to retry. Pi's session continuity is
-        // preserved on the sprite — the next /append starts a clean
+        // preserved on the well — the next /append starts a clean
         // new turn.
         const t = this.currentTurn;
         if (t && !t.ended) {
@@ -290,7 +309,7 @@ export class CellAgent {
         console.error(`[${this.env.CELL_NAME}] ws error: ${String(e).slice(0, 120)}`);
       });
       this.ws = ws;
-      console.log(`[${this.env.CELL_NAME}] ws connected to ${this.env.SPRITE_HOST}`);
+      console.log(`[${this.env.CELL_NAME}] ws connected to ${this.env.WELL_HOST}`);
     } finally {
       this.wsConnecting = false;
     }
@@ -391,6 +410,7 @@ export class CellAgent {
       flushTimer: null,
       lastFlushAt: 0,
       ended: false,
+      pendingDelivery: false,
       disconnected: false,
       overflow: [],
     };
@@ -400,14 +420,55 @@ export class CellAgent {
   }
 
   private endTurn() {
-    if (!this.currentTurn) return;
-    this.currentTurn.ended = true;
-    if (this.currentTurn.flushTimer != null) {
-      clearTimeout(this.currentTurn.flushTimer);
-      this.currentTurn.flushTimer = null;
+    const t = this.currentTurn;
+    if (!t) return;
+    t.ended = true;
+    if (t.flushTimer != null) {
+      clearTimeout(t.flushTimer);
+      t.flushTimer = null;
     }
-    if (this.currentTurn.kind === "email") void this.flushEmail();
-    else void this.flushSlack(true);
+    // Final delivery + drop the WS bridge as soon as the cell side is done.
+    // The cell can hibernate even if Slack/email delivery is still being
+    // retried; the alarm chain handles those retries until confirmed.
+    void (async () => {
+      const delivered = t.kind === "email"
+        ? await this.flushEmail()
+        : await this.flushSlack(true);
+      // If a new turn arrived during the final flush, leave the WS alone —
+      // it's now serving the new turn. The next agent_end will close.
+      if (this.currentTurn !== t) return;
+      try { this.ws?.close(1000, "turn-complete"); } catch {}
+      this.ws = null;
+      if (delivered) {
+        // Clean exit — drop the alarm chain. handleAppend re-arms on next
+        // inbound. Storing alarm=null cancels any scheduled fire.
+        try { await this.state.storage.deleteAlarm(); } catch {}
+      } else {
+        // Delivery stranded (429s, upstream failure). Keep the alarm
+        // running so retryPendingDelivery() fires on the next tick.
+        t.pendingDelivery = true;
+        await this.state.storage.put("pendingDelivery", true);
+        const existing = await this.state.storage.getAlarm();
+        if (existing === null) {
+          await this.state.storage.setAlarm(Date.now() + ALARM_INTERVAL_MS);
+        }
+      }
+    })();
+  }
+
+  // Re-attempt the final flush from the alarm. Slack/email post helpers
+  // are already idempotent on slackTs / emailSent, so a retry just re-edits
+  // the parent and re-posts any missing thread replies.
+  private async retryPendingDelivery(): Promise<void> {
+    const t = this.currentTurn;
+    if (!t || !t.pendingDelivery) return;
+    const delivered = t.kind === "email"
+      ? await this.flushEmail()
+      : await this.flushSlack(true);
+    if (delivered) {
+      t.pendingDelivery = false;
+      try { await this.state.storage.delete("pendingDelivery"); } catch {}
+    }
   }
 
   // ---- Slack rendering & emission ----
@@ -450,9 +511,12 @@ export class CellAgent {
     this.last429At = Date.now();
   }
 
-  private async flushSlack(final: boolean): Promise<void> {
+  // Returns true iff every chunk + tool-thread reply landed cleanly. Caller
+  // uses this on the final flush to decide whether to keep an alarm chain
+  // running for retry.
+  private async flushSlack(final: boolean): Promise<boolean> {
     const t = this.currentTurn;
-    if (!t) return;
+    if (!t) return true;
     t.lastFlushAt = Date.now();
 
     const fullText = renderTurn(t, final);
@@ -468,7 +532,7 @@ export class CellAgent {
 
         if (i === 0) {
           if (await this.postOrEditParent(t, chunkText)) continue;
-          return; // 429 or upstream failure — abort this flush
+          return false; // 429 or upstream failure — abort this flush
         }
 
         const overflowIdx = i - 1;
@@ -476,13 +540,13 @@ export class CellAgent {
           // Existing continuation — edit it.
           if (chunkText === t.overflow[overflowIdx].text) continue; // unchanged, skip
           const ok = await this.postSlackEdit(t.channel, t.overflow[overflowIdx].ts, chunkText);
-          if (!ok) return;
+          if (!ok) return false;
           t.overflow[overflowIdx].text = chunkText;
         } else {
           // New continuation — post into the thread under the parent.
-          if (!t.slackTs) return; // shouldn't happen: parent posted above
+          if (!t.slackTs) return false; // shouldn't happen: parent posted above
           const ts = await this.postSlackReply(t.channel, t.slackTs, chunkText);
-          if (!ts) return;
+          if (!ts) return false;
           t.overflow.push({ ts, text: chunkText });
         }
       }
@@ -490,6 +554,7 @@ export class CellAgent {
       // Post full-result thread replies for tools whose unwrapped result
       // exceeds TOOL_PREVIEW_CAP. Idempotent via tc.threadTs guard. Done
       // after parent/overflow so we know slackTs exists.
+      let toolThreadsOk = true;
       if (t.slackTs) {
         for (const tc of t.tools) {
           if (tc.threadTs || !tc.result) continue;
@@ -503,14 +568,16 @@ export class CellAgent {
           let firstTs: string | null = null;
           for (const chunk of chunks) {
             const ts = await this.postSlackReply(t.channel, t.slackTs, chunk);
-            if (!ts) break;
+            if (!ts) { toolThreadsOk = false; break; }
             if (!firstTs) firstTs = ts;
           }
           if (firstTs) tc.threadTs = firstTs;
         }
       }
+      return toolThreadsOk;
     } catch (e) {
       console.error(`[${this.env.CELL_NAME}] flush error: ${String(e).slice(0, 200)}`);
+      return false;
     }
   }
 
@@ -553,13 +620,15 @@ export class CellAgent {
   // in plain-text bodies acceptably (and a verbatim quoted-thinking
   // section is fine either way). The reply chains via In-Reply-To from
   // the original Message-ID we captured at handleAppend time.
-  private async flushEmail(): Promise<void> {
+  // Returns true iff the email landed (or was already sent — idempotent).
+  private async flushEmail(): Promise<boolean> {
     const t = this.currentTurn;
-    if (!t || t.emailSent) return;
+    if (!t) return true;
+    if (t.emailSent) return true;
     if (!t.emailTo) {
       console.error(`[${this.env.CELL_NAME}] email turn has no emailTo — dropping`);
       t.emailSent = true;
-      return;
+      return true; // there's nothing to retry
     }
     const body = renderTurn(t, true);
     const subject = t.emailSubject
@@ -579,11 +648,13 @@ export class CellAgent {
       });
       if (!res.ok) {
         console.error(`[${this.env.CELL_NAME}] email send failed ${res.status}: ${(await res.text()).slice(0, 200)}`);
-        return;
+        return false;
       }
       t.emailSent = true;
+      return true;
     } catch (e) {
       console.error(`[${this.env.CELL_NAME}] email send threw: ${String(e).slice(0, 200)}`);
+      return false;
     }
   }
 

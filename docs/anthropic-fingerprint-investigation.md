@@ -161,7 +161,7 @@ moment we see another wave of terminations.
 **Probes that DID succeed (no terminations across 40+ calls)**:
 
 - 10 pairs of `cell-flavored` system block (mentions souls, mother,
-  proxy.cells.md, /home/sprite/agent) vs `bland-helper` block. Both 0/10.
+  proxy.cells.md, /home/well/agent) vs `bland-helper` block. Both 0/10.
 - 10 pairs of `thinking enabled` (budget 2048) vs `thinking disabled`,
   cell-flavored prompt. Both 0/10.
 - 5 sequential `pi -p` runs from `proto/mother/` on opus. All clean.

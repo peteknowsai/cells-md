@@ -20,7 +20,7 @@ Procedures live in `.pi/skills/`. The Bun CLI is `cli/cells.ts`.
 ## For humans
 
 This repo is the **mother**: a local Pi agent + Bun CLI that provisions and
-manages Cells (each cell = a Pi agent on its own Sprite). See
+manages Cells (each cell = a Pi agent on its own Well). See
 [`docs/ROADMAP.md`](docs/ROADMAP.md) for what we're building.
 
 Pi (the harness mother runs under) would auto-load this file as a system

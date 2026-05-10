@@ -29,8 +29,8 @@ import { fileURLToPath } from "node:url";
 
 /**
  * Where memory lives depends on context:
- *   - On a Sprite (where the agent runs in /home/sprite/agent): use the
- *     sprite-side state dir.
+ *   - On a Well (where the agent runs in ~/agent): use the
+ *     well-side state dir.
  *   - Otherwise: cwd/state/memory (e.g. local dev, mother).
  *   - Override via env var CELL_MEMORY_DIR.
  *
@@ -39,7 +39,7 @@ import { fileURLToPath } from "node:url";
  */
 function resolveMemoryDir(): string {
   if (process.env.CELL_MEMORY_DIR) return process.env.CELL_MEMORY_DIR;
-  if (existsSync("/home/sprite/agent")) return "/home/sprite/agent/state/memory";
+  if (existsSync("~/agent")) return "~/agent/state/memory";
   return join(process.cwd(), "state", "memory");
 }
 

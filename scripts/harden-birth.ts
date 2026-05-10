@@ -172,20 +172,20 @@ async function loadChannels(): Promise<ChannelsFile> {
   catch { return { version: 1, bindings: {} }; }
 }
 
-async function spritesToken(): Promise<string | null> {
-  if (process.env.SPRITES_TOKEN) return process.env.SPRITES_TOKEN;
+async function wellsToken(): Promise<string | null> {
+  if (process.env.WELL_TOKEN) return process.env.WELL_TOKEN;
   if (!existsSync(SECRETS_PATH)) return null;
   try {
     const s = JSON.parse(await readFile(SECRETS_PATH, "utf-8"));
-    return typeof s.SPRITES_TOKEN === "string" ? s.SPRITES_TOKEN : null;
+    return typeof s.WELL_TOKEN === "string" ? s.WELL_TOKEN : null;
   } catch { return null; }
 }
 
-type SpriteCheck = { exists: boolean; status: string | null; httpStatus: number; error?: string };
+type WellCheck = { exists: boolean; status: string | null; httpStatus: number; error?: string };
 
-async function spriteCheck(name: string): Promise<SpriteCheck> {
-  const token = await spritesToken();
-  if (!token) return { exists: false, status: null, httpStatus: 0, error: "no SPRITES_TOKEN" };
+async function wellCheck(name: string): Promise<WellCheck> {
+  const token = await wellsToken();
+  if (!token) return { exists: false, status: null, httpStatus: 0, error: "no WELL_TOKEN" };
   try {
     const r = await fetch(`https://api.sprites.dev/v1/sprites/${encodeURIComponent(name)}`, {
       headers: { Authorization: `Bearer ${token}` },
@@ -249,17 +249,17 @@ async function runCells(args: string[]): Promise<CmdResult> {
 
 type BirthFlags = { harness: string; model: string; thinking: string; extensions: string[]; packages: string[]; channels: string[] };
 
-// Read the cell's settings.json on the sprite via `sprite exec` and compare
+// Read the cell's settings.json on the well via `well exec` and compare
 // its `modelChain` to the expected chain (the one we wrote into the
 // laptop-side registry). Returns:
-//   true  → chain on sprite matches expected exactly (same length, same order)
-//   false → chain present but differs, OR missing/null on the sprite
-// On any error (sprite CLI missing, exec fails, JSON malformed) the caller
+//   true  → chain on well matches expected exactly (same length, same order)
+//   false → chain present but differs, OR missing/null on the well
+// On any error (well CLI missing, exec fails, JSON malformed) the caller
 // gets `null` via the wrapper above — we don't fail birth on infra hiccups.
-async function verifyChainOnSprite(spriteName: string, expected: string[]): Promise<boolean | null> {
+async function verifyChainOnWell(wellName: string, expected: string[]): Promise<boolean | null> {
   try {
     const proc = Bun.spawn(
-      ["sprite", "exec", "-s", spriteName, "--", "cat", "/home/sprite/agent/.pi/settings.json"],
+      ["well", "exec", "-s", wellName, "--", "cat", "~/agent/.pi/settings.json"],
       { stdout: "pipe", stderr: "pipe" },
     );
     const [stdout, , exitCode] = await Promise.all([
@@ -269,11 +269,11 @@ async function verifyChainOnSprite(spriteName: string, expected: string[]): Prom
     ]);
     if (exitCode !== 0) return null;
     const parsed = JSON.parse(stdout);
-    const onSprite = parsed?.modelChain;
-    if (!Array.isArray(onSprite)) return false;
-    if (onSprite.length !== expected.length) return false;
+    const onWell = parsed?.modelChain;
+    if (!Array.isArray(onWell)) return false;
+    if (onWell.length !== expected.length) return false;
     for (let i = 0; i < expected.length; i++) {
-      if (onSprite[i] !== expected[i]) return false;
+      if (onWell[i] !== expected[i]) return false;
     }
     return true;
   } catch {
@@ -337,19 +337,19 @@ async function bakeEgg(combo: Combo): Promise<EggBakeRecord> {
 
 type BirthVerify = {
   registry: boolean;
-  sprite: SpriteCheck;
+  well: WellCheck;
   slackBinding: boolean | null; // null = combo didn't request slack
   vault: boolean;
   // Did `cli/cells.ts` write a non-empty modelChain into the cell's
   // registry entry? Catches DNA-substitution drift on the laptop side.
   // Null = no registry entry to check (already covered by `registry: false`).
   modelChain: boolean | null;
-  // Deep verify: does the cell's settings.json on the sprite contain
+  // Deep verify: does the cell's settings.json on the well contain
   // the SAME chain as the registry mirror? Catches DNA-substitution drift
   // on the cell side (placeholder didn't get sed'd, jq didn't validate
-  // properly, etc). Null = sprite unreachable or `sprite exec` not
+  // properly, etc). Null = well unreachable or `well exec` not
   // available (don't fail the birth on this — it's an extra check).
-  modelChainOnSprite: boolean | null;
+  modelChainOnWell: boolean | null;
 };
 
 type StepTiming = { step: string; label: string; startedAt: number; durationSec: number | null };
@@ -519,31 +519,31 @@ async function birthOne(name: string, combo: Combo): Promise<BirthRecord> {
   const wantsSlack = combo.channels.includes("slack");
   const reg = await loadRegistry();
   const regEntry = reg.cells.find((c) => c.name === name);
-  const sprite = await spriteCheck(name);
-  // Deep verify of chain on the sprite. Only attempt when the sprite is
+  const well = await wellCheck(name);
+  // Deep verify of chain on the well. Only attempt when the well is
   // reachable; otherwise mark null and move on. The registry mirror should
-  // match what's on the sprite — if it doesn't, the substitution pipeline
+  // match what's on the well — if it doesn't, the substitution pipeline
   // dropped or corrupted the chain at some step.
   const expectedChain = Array.isArray(regEntry?.modelChain) ? regEntry.modelChain : null;
-  const modelChainOnSprite = (expectedChain && sprite.exists)
-    ? await verifyChainOnSprite(name, expectedChain)
+  const modelChainOnWell = (expectedChain && well.exists)
+    ? await verifyChainOnWell(name, expectedChain)
     : null;
   const verify: BirthVerify = {
     registry: regEntry !== undefined,
-    sprite,
+    well,
     slackBinding: wantsSlack ? (await bindingsForCell(name)).length > 0 : null,
     vault: vaultExists(name),
     modelChain: regEntry === undefined ? null : Array.isArray(regEntry.modelChain) && regEntry.modelChain.length > 0,
-    modelChainOnSprite,
+    modelChainOnWell,
   };
 
   const ok =
     r.exitCode === 0 &&
     verify.registry &&
-    verify.sprite.exists &&
+    verify.well.exists &&
     (verify.slackBinding === null || verify.slackBinding === true) &&
     verify.modelChain !== false &&
-    verify.modelChainOnSprite !== false;
+    verify.modelChainOnWell !== false;
 
   const timings = await readBirthTimings(name);
   const { fallbacks, usage: motherUsage } = await readMotherDataDuringWindow(t0, t1);
@@ -560,7 +560,7 @@ async function birthOne(name: string, combo: Combo): Promise<BirthRecord> {
 
 type KillVerify = {
   registry: boolean;       // true = correctly absent
-  sprite: boolean;         // true = correctly absent (404)
+  well: boolean;         // true = correctly absent (404)
   slackBindings: boolean;  // true = correctly absent
   vault: boolean;          // true = correctly absent
   pulseCache: boolean;     // true = correctly absent
@@ -569,7 +569,7 @@ type KillVerify = {
 
 type KillRecoveryAction =
   | { kind: "retry-cells-kill"; ok: boolean }
-  | { kind: "direct-sprite-destroy"; httpStatus: number; ok: boolean };
+  | { kind: "direct-well-destroy"; httpStatus: number; ok: boolean };
 
 type KillRecord = {
   name: string;
@@ -584,11 +584,11 @@ type KillRecord = {
   reason: "paired" | "orphan" | "aged";
 };
 
-// Direct sprite destroy via the Sprites API. Used as a last-ditch recovery
-// when `cells kill` failed to remove the sprite (e.g. mother's destroy
-// session crashed mid-flight, registry got cleaned but sprite is still up).
-async function directSpriteDestroyApi(name: string): Promise<{ ok: boolean; httpStatus: number }> {
-  const token = await spritesToken();
+// Direct well destroy via the wells API. Used as a last-ditch recovery
+// when `cells kill` failed to remove the well (e.g. mother's destroy
+// session crashed mid-flight, registry got cleaned but well is still up).
+async function directWellDestroyApi(name: string): Promise<{ ok: boolean; httpStatus: number }> {
+  const token = await wellsToken();
   if (!token) return { ok: false, httpStatus: 0 };
   try {
     const r = await fetch(`https://api.sprites.dev/v1/sprites/${encodeURIComponent(name)}`, {
@@ -603,7 +603,7 @@ async function directSpriteDestroyApi(name: string): Promise<{ ok: boolean; http
 }
 
 // Run `cells kill` once and verify; if anything is left dirty, attempt an
-// idempotent retry (cells kill is safe to re-run). If sprite is STILL up
+// idempotent retry (cells kill is safe to re-run). If well is STILL up
 // after retry, fall through to direct API destroy. Each recovery attempt
 // is recorded so the report can attribute "this kill needed 2 retries +
 // direct API hit" rather than just saying "ok".
@@ -615,10 +615,10 @@ async function killOne(name: string, reason: KillRecord["reason"]): Promise<Kill
 
   const computeVerify = async (): Promise<KillVerify> => {
     const inbox = await pulseInboxFiles(name);
-    const sprite = await spriteCheck(name);
+    const well = await wellCheck(name);
     return {
       registry:      !(await inRegistry(name)),
-      sprite:        !sprite.exists,
+      well: !well.exists,
       slackBindings: (await bindingsForCell(name)).length === 0,
       vault:         !vaultExists(name),
       pulseCache:    !(await pulseCacheExists(name)),
@@ -626,7 +626,7 @@ async function killOne(name: string, reason: KillRecord["reason"]): Promise<Kill
     };
   };
   const verifyOk = (v: KillVerify) =>
-    v.registry && v.sprite && v.slackBindings && v.vault && v.pulseCache && v.pulseInbox;
+    v.registry && v.well && v.slackBindings && v.vault && v.pulseCache && v.pulseInbox;
 
   let verify = await computeVerify();
   const recoveries: KillRecoveryAction[] = [];
@@ -640,10 +640,10 @@ async function killOne(name: string, reason: KillRecord["reason"]): Promise<Kill
     verify = await computeVerify();
   }
 
-  // Last-ditch: sprite still live → direct DELETE via the sprite API.
-  if (!verify.sprite) {
-    const direct = await directSpriteDestroyApi(name);
-    recoveries.push({ kind: "direct-sprite-destroy", httpStatus: direct.httpStatus, ok: direct.ok });
+  // Last-ditch: well still live → direct DELETE via the well API.
+  if (!verify.well) {
+    const direct = await directWellDestroyApi(name);
+    recoveries.push({ kind: "direct-well-destroy", httpStatus: direct.httpStatus, ok: direct.ok });
     verify = await computeVerify();
   }
 
@@ -757,13 +757,13 @@ async function main() {
 
   // Birth sequentially. Parallel mothers contend for the same OAuth /
   // proxy and time out at ~3 minutes — a one-mother bottleneck, not a
-  // sprite-side race. Reliability is the goal; trading wall-clock for
+  // well-side race. Reliability is the goal; trading wall-clock for
   // success rate is the right call.
   console.log(`\nbirthing ${plan.length} cell(s) sequentially...`);
   const birthRecords: BirthRecord[] = [];
   for (const p of plan) birthRecords.push(await birthOne(p.name, p.combo));
   for (const b of birthRecords) {
-    console.log(`  birth ${b.name} → ${b.ok ? "OK" : "FAIL"}  exit=${b.exitCode}  ${b.durationMs}ms  sprite=${b.verify.sprite.exists ? b.verify.sprite.status : "absent"}`);
+    console.log(`  birth ${b.name} → ${b.ok ? "OK" : "FAIL"}  exit=${b.exitCode}  ${b.durationMs}ms  well=${b.verify.well.exists ? b.verify.well.status : "absent"}`);
     if (b.fallbacks.length > 0) {
       for (const fb of b.fallbacks) {
         console.log(`    ↩ fallback: ${fb.fromModel} → ${fb.toModel}  (trigger: ${fb.triggerError})`);
@@ -801,7 +801,7 @@ async function main() {
     const failed = Object.entries(k.verify).filter(([, ok]) => !ok).map(([key]) => key);
     console.log(`  kill ${k.name} (${k.reason}) → ${k.ok ? "OK" : "FAIL"}  exit=${k.exitCode}  ${k.durationMs}ms  ${failed.length === 0 ? "" : "failed: " + failed.join(",")}`);
     for (const r of k.recoveries) {
-      const status = r.kind === "direct-sprite-destroy" ? `http=${r.httpStatus}` : "";
+      const status = r.kind === "direct-well-destroy" ? `http=${r.httpStatus}` : "";
       console.log(`    ↻ recovery: ${r.kind} ${status} → ${r.ok ? "OK" : "FAIL"}`);
     }
   }

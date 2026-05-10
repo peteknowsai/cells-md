@@ -7,7 +7,7 @@
  *  1. Static site at /  (homepage, public/ overrides)
  *  2. WebSocket bridge at /agent
  *     - The cell Worker (Cloudflare DO) opens an outbound WS to this
- *       server and holds it open. That inbound TCP keeps the sprite
+ *       server and holds it open. That inbound TCP keeps the well
  *       warm continuously (per sprites.dev hibernation rules).
  *     - We spawn `pi --mode rpc` as a child process. WS frames going
  *       down become lines on pi's stdin (e.g. {type:"prompt"}). Pi's
@@ -29,7 +29,11 @@ import { fileURLToPath } from "node:url";
 const PORT = Number(process.env.PORT ?? 8080);
 const NAME = process.env.CELL_NAME ?? "unknown";
 const SECRET = process.env.CELLS_PROXY_SECRET ?? "";
-const HOME = process.env.HOME ?? "/home/sprite";
+const HOME = process.env.HOME ?? "/home/well";
+
+// Wells bridge gateway (from inside the VM). host.well resolves to the host
+// 192.168.64.1; welld serves cooperation endpoints on :7879.
+const HOST_WELL = process.env.HOST_WELL_URL ?? "http://host.well:7879";
 
 // Stable per-cell session file. We pin pi to this on every spawn so
 // conversations survive pi restarts.
@@ -104,6 +108,74 @@ const PI_RESPAWN_DELAY_MS = 1000;
 type WsClient = { ws: any /* ServerWebSocket */ };
 const wsClients = new Set<WsClient>();
 
+// ---------------------------------------------------------------------------
+// Lifecycle signaling.
+//
+// Two complementary signals to welld's bridge gateway (host.well:7879):
+//
+//   POST /lifecycle {state:"busy"|"idle"}   informational hint. busy =
+//                                            don't try to hibernate me;
+//                                            idle = no agent in flight.
+//                                            Welld may use this with WS
+//                                            bridge state for eligibility.
+//
+//   POST /sleep                              explicit "release my RAM
+//                                            now." Fired after agent_end
+//                                            once a short grace window
+//                                            elapses with no new turn —
+//                                            gives WS clients time to
+//                                            drain the final stream.
+//
+// Fire-and-forget; failures are logged and swallowed so older welld
+// builds (or transient bridge hiccups) don't break the cell.
+// ---------------------------------------------------------------------------
+
+const SLEEP_GRACE_MS = 1500;
+
+let lastLifecycleState: "busy" | "idle" | null = null;
+let pendingSleepTimer: Timer | null = null;
+
+async function signalLifecycle(state: "busy" | "idle") {
+  if (lastLifecycleState === state) return;
+  lastLifecycleState = state;
+  try {
+    await fetch(`${HOST_WELL}/lifecycle`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ state }),
+      signal: AbortSignal.timeout(2000),
+    });
+  } catch (e) {
+    console.error(`[bridge] lifecycle ${state} signal failed: ${String(e).slice(0, 120)}`);
+  }
+}
+
+async function signalSleep() {
+  try {
+    await fetch(`${HOST_WELL}/sleep`, {
+      method: "POST",
+      signal: AbortSignal.timeout(2000),
+    });
+  } catch (e) {
+    console.error(`[bridge] sleep signal failed: ${String(e).slice(0, 120)}`);
+  }
+}
+
+function scheduleSleepAfterGrace() {
+  if (pendingSleepTimer) clearTimeout(pendingSleepTimer);
+  pendingSleepTimer = setTimeout(() => {
+    pendingSleepTimer = null;
+    void signalSleep();
+  }, SLEEP_GRACE_MS);
+}
+
+function cancelPendingSleep() {
+  if (pendingSleepTimer) {
+    clearTimeout(pendingSleepTimer);
+    pendingSleepTimer = null;
+  }
+}
+
 function broadcastToClients(line: string) {
   for (const c of wsClients) {
     try { c.ws.send(line); } catch (e) { console.error(`[bridge] ws send failed: ${String(e).slice(0, 120)}`); }
@@ -118,6 +190,23 @@ function onPiStdoutChunk(chunk: string) {
     const trimmed = line.replace(/\r$/, "");
     if (!trimmed.trim()) continue;
     broadcastToClients(trimmed);
+
+    // Sniff for lifecycle events. Pi emits agent_start at the top of a turn
+    // and agent_end after the final stream chunk has flushed.
+    //   agent_start → cancel any pending sleep, signal busy
+    //   agent_end   → signal idle, schedule explicit sleep after grace
+    try {
+      const evt = JSON.parse(trimmed);
+      if (evt?.type === "agent_start") {
+        cancelPendingSleep();
+        void signalLifecycle("busy");
+      } else if (evt?.type === "agent_end") {
+        void signalLifecycle("idle");
+        scheduleSleepAfterGrace();
+      }
+    } catch {
+      // not JSON or partial — broadcast already happened, lifecycle skipped
+    }
   }
 }
 
@@ -188,6 +277,9 @@ function spawnPi() {
   void pi.exited.then((code) => {
     console.error(`[bridge] pi exited code=${code}; respawning in ${PI_RESPAWN_DELAY_MS}ms`);
     pi = null;
+    // If pi died mid-turn welld would otherwise wait forever for agent_end.
+    // Force-clear the busy state so the well is hibernate-eligible.
+    void signalLifecycle("idle");
     piRespawnTimer = setTimeout(() => {
       piRespawnTimer = null;
       spawnPi();

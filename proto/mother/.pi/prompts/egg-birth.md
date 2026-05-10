@@ -1,10 +1,10 @@
 ---
 name: egg-birth
-description: Pre-warm a Sprite into an "egg" — fully-installed, no agent identity yet. The CLI later "hatches" the egg into a named cell in seconds.
+description: Pre-warm a well into an "egg" — fully-installed, no agent identity yet. The CLI later "hatches" the egg into a named cell in seconds.
 ---
 
-The user wants to birth an egg. Sprite name (immutable, becomes the egg's
-permanent sprite id): $1
+The user wants to birth an egg. well name (immutable, becomes the egg's
+permanent well id): $1
 
 Egg variant (JSON): $2
 
@@ -38,7 +38,7 @@ direct-API providers (`openai`, `deepseek`) read keys from
 `~/.cells/secrets.json`. The birth-egg ritual handles both transparently.
 
 1. Invoke the `birth-egg` skill with these substitutions:
-   - `<NAME>` = `$1` (the SPRITE name — used by sprite_create only)
+   - `<NAME>` = `$1` (the SPRITE name — used by well_create only)
    - `<PROVIDER>` = the parsed `provider` value
    - `<MODEL>` = the parsed `model` value
    - `<EXTENSIONS>` = the parsed `extensions` array (may be empty)

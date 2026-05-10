@@ -11,7 +11,7 @@ After Phase 1 is done, Pete can:
 ```bash
 # Born once, takes ~5 min — the slow apt+bun+gh+DNA work
 cells egg birth opus-mem
-  → egg-7f3a created (sprite: egg-opus-mem-7f3a)
+  → egg-7f3a created (well: egg-opus-mem-7f3a)
 
 # See pool inventory
 cells egg list
@@ -35,7 +35,7 @@ Backwards compat preserved: existing `cells birth`, `cells kill`, `cells talk` a
 These are the calls made up front to avoid mid-build re-architecture:
 
 1. **Hatch is on the Mac, not on mother.** Pure determinism — sed, jq, file writes, a few API calls. Adding mother's LLM overhead would only slow it down without benefit. Per `feedback_skill_structure` memory.
-2. **Pi runs on the cell, not on the egg.** Eggs have no pi process — they're sprites with the toolchain installed but no agent running. Pi starts at hatch when the site service registers and CELL_NAME is finally known.
+2. **Pi runs on the cell, not on the egg.** Eggs have no pi process — they're wells with the toolchain installed but no agent running. Pi starts at hatch when the site service registers and CELL_NAME is finally known.
 3. **Variant signature is a stable string.** Format: `v1:model=opus,thinking=high,extensions=memory|wiki,packages=pi-web-access,channels=slack`. Multi-value fields use `|`. Empty values written as `key=`. Keys always alphabetical so the string round-trips. A short hash (sha256 first 6 hex) becomes the egg-id suffix.
 4. **Eggs bake `--packages` in.** The package install is heavy (`pi install pi-web-access`); doing it at hatch would blow the 15s target. Eggs split by `(model, extensions, packages)`. `thinking` and `channels` are hatch-time-cheap and don't shard the pool.
 5. **Atomic claim via filesystem lock.** `eggs.json` writes go through a write-temp-then-rename pattern under a `flock` on a sentinel file. Race losers re-read and pick another egg.
@@ -52,7 +52,7 @@ These are the calls made up front to avoid mid-build re-architecture:
   export function parseVariant(sig: string): Variant
   export function formatVariant(v: Variant): string  // canonical, sorted
   export function variantHash(v: Variant): string   // 6-hex sha256 prefix
-  export function eggSpritePool(v: Variant): string // 'egg-<short-token>' for sprite naming
+  export function eggSpritePool(v: Variant): string // 'egg-<short-token>' for well naming
   ```
   Pure function — no IO. Unit-testable.
 - **`proto/mother/.pi/skills/birth-egg/SKILL.md`** — fork of `birth/SKILL.md` minus identity steps:
@@ -63,15 +63,15 @@ These are the calls made up front to avoid mid-build re-architecture:
   - Step 9 — checkpoint named `pristine-v1`.
   - Step 10 — `report_outcome(success, "egg <SPRITE> ready · variant=<SIG>")`.
   - Skip step 11 (no cells_activity log for eggs).
-- **`proto/mother/.pi/skills/cull-egg/SKILL.md`** — `sprite_destroy` + `report_outcome`. ~10 lines.
+- **`proto/mother/.pi/skills/cull-egg/SKILL.md`** — `well_destroy` + `report_outcome`. ~10 lines.
 - **`proto/mother/.pi/prompts/egg-birth.md`** — entry prompt for `birth-egg`. Receives variant signature, parses, calls birth-egg skill with substitutions. Mirrors `cell-create.md`.
 - **`proto/mother/.pi/prompts/egg-cull.md`** — mirrors `cell-destroy.md`.
 - **`scripts/hatch.ts`** — Bun TS, ~150 lines:
   ```ts
   // CLI: hatch <egg-id> --as <name> --variant <sig>
   // 1. Atomic claim: flock eggs.json sentinel, transition warm→claimed
-  // 2. If state != pristine, sprite restore <egg.sprite_name> pristine-v1 (~300ms)
-  // 3. Sprite_exec on egg's sprite:
+  // 2. If state != pristine, well restore <egg.well_name> pristine-v1 (~300ms)
+  // 3. Sprite_exec on egg's well:
   //    - sed substitute NAME, MODEL, PROVIDER, THINKING in DNA files
   //    - rm -rf .pi/extensions/<unselected>
   //    - jq edit settings.json to register chosen optional extensions
@@ -94,7 +94,7 @@ These are the calls made up front to avoid mid-build re-architecture:
     "version": 1,
     "eggs": [
       { "id": "egg-7f3a",
-        "sprite_name": "egg-opus-mem-7f3a",
+        "well_name": "egg-opus-mem-7f3a",
         "variant_signature": "v1:model=opus,...",
         "state": "warm" | "claimed" | "live" | "culling",
         "born_at": "iso",
@@ -120,7 +120,7 @@ These are the calls made up front to avoid mid-build re-architecture:
 - `runPiWithOutcome` (cli/cells.ts:454) — invoke birth-egg / cull-egg same way as cell-create / cell-destroy
 - `directSpriteDestroy` (cli/cells.ts:~1250) — reuse for cull-egg's safety-net layer
 - All cleanup helpers (`evictPulseStateForCell`, `archiveSlackChannelsForCell`, `evictChannelBindingsForCell`, `deleteCellWorker`, `removeVaultEntry`) — these are per-CELL not per-egg, so cull-egg doesn't need them; but **kill-cell after hatch** still does, and the existing cmdDestroyOne path covers that
-- `scripts/configure-cell-proxy.sh` — runs unchanged at egg-birth time (the `<NAME>` arg is the egg's sprite name; the env files dropped are universal)
+- `scripts/configure-cell-proxy.sh` — runs unchanged at egg-birth time (the `<NAME>` arg is the egg's well name; the env files dropped are universal)
 - `scripts/register-site-service.sh` — runs unchanged at hatch time with the cell's real name
 - `scripts/cell-color.sh` — deterministic by name, runs at hatch
 - `scripts/deploy-cell-worker.sh` — runs async post-hatch, exactly as it does today after a slow `cells birth`
@@ -133,7 +133,7 @@ Tight sequence so each step is verifiable independently:
 1. **Variant signature library + tests.** `cli/lib/variant-signature.ts`. Round-trip parse/format for ~10 sample variants. ~1 hour.
 2. **eggs.json registry helpers in cli/cells.ts.** `loadEggs`, `saveEggs`, `claimEgg`, `releaseEgg`. Atomic write via tmp+rename. ~30 min.
 3. **`birth-egg` skill + `egg-birth` prompt.** Fork birth/SKILL.md, drop per-cell steps. ~1.5 hours.
-4. **`cells egg birth <variant>` CLI.** Invokes birth-egg via runPiWithOutcome, registers in eggs.json on success. ~30 min. **First end-to-end milestone:** `cells egg birth opus-mem` produces a warm egg in ~5 min. Verify with `sprite list` and `cells egg list`.
+4. **`cells egg birth <variant>` CLI.** Invokes birth-egg via runPiWithOutcome, registers in eggs.json on success. ~30 min. **First end-to-end milestone:** `cells egg birth opus-mem` produces a warm egg in ~5 min. Verify with `well list` and `cells egg list`.
 5. **`scripts/hatch.ts`.** Pure determinism, no LLM. Read egg, claim, sed-substitute on cell, register site service, write registry, fire-and-forget async tail. ~3 hours including the async coordination.
 6. **`cells hatch <egg-id> --as <name> --variant <sig>` CLI.** Thin wrapper over hatch.ts. ~30 min. **Second end-to-end milestone:** `cells hatch egg-7f3a --as testcell --variant ...` produces an alive cell in <20s; `cells talk testcell` works immediately; CF worker / slack / vault converge within 60s in background.
 7. **`cull-egg` skill + `cells egg cull` CLI.** ~45 min. Idempotent — works on already-destroyed eggs.
@@ -171,15 +171,15 @@ cells kill testcell --yes
 
 # 6. Cull what's left of the egg
 cells egg cull egg-<hash>
-# expect: sprite gone, eggs.json entry removed
+# expect: well gone, eggs.json entry removed
 ```
 
 If all six steps pass, Phase 1 is done.
 
 ## Open questions to settle before starting
 
-1. **Pool sprite naming convention.** Proposal: `egg-<short-variant-token>-<6-hex-hash>`. e.g. `egg-opus-mem-7f3a2b`. Sprite name max length and `[a-z0-9-]` constraint both honored.
-2. **Where exactly does `claim-and-restore` happen?** If we always sprite-restore the pristine checkpoint at hatch, we get repeatability but pay ~300ms every time (per Sprites docs). If we trust the egg is clean from prior hatch's cleanup, we save the 300ms but risk a dirty hatch. Recommendation: **always restore**. 300ms is invisible vs the talk-roundtrip.
+1. **Pool well naming convention.** Proposal: `egg-<short-variant-token>-<6-hex-hash>`. e.g. `egg-opus-mem-7f3a2b`. Well name max length and `[a-z0-9-]` constraint both honored.
+2. **Where exactly does `claim-and-restore` happen?** If we always sprite-restore the pristine checkpoint at hatch, we get repeatability but pay ~300ms every time (per Wells docs). If we trust the egg is clean from prior hatch's cleanup, we save the 300ms but risk a dirty hatch. Recommendation: **always restore**. 300ms is invisible vs the talk-roundtrip.
 3. **What does hatch do if pi fails to start on the cell?** Site service supervises with auto-restart, but if there's a real config bug the cell stays in `warming` forever. Need a hatch-side timeout (e.g., 30s of waiting for the WS bridge to come up); on timeout, declare hatch failed, mark the egg `culling`, surface the error.
 4. **Backwards compat with existing cells in `cells.json`.** They have `{name, created_at}` only — no `status` field. Reads should treat missing `status` as `"alive"`. ✓ already in the plan above; just call it out so future-me doesn't break it.
 5. **Phase 2 scope check.** Auto-hatch on `cells birth` is Phase 2. We should *not* drift into it during Phase 1, even when tempted. Phase 1 ends when the manual operator path works reliably.
@@ -197,7 +197,7 @@ These all have real designs in `~/.claude/plans/okay-i-want-to-giggly-flute.md` 
 
 ## Risk register
 
-- **Site service "stop the world" semantics.** When register-site-service.sh runs on an existing egg sprite that's already had a service registered (shouldn't happen on first hatch since eggs don't have site service registered, but during a re-hatch after a cull+rebirth could hit this), the DELETE-then-PUT pattern in the script handles it. Watch for races if hatching the same egg sprite twice.
+- **Site service "stop the world" semantics.** When register-site-service.sh runs on an existing egg well that's already had a service registered (shouldn't happen on first hatch since eggs don't have site service registered, but during a re-hatch after a cull+rebirth could hit this), the DELETE-then-PUT pattern in the script handles it. Watch for races if hatching the same egg well twice.
 - **Pi startup timing on first hatch.** Pi reads `.pi/settings.json` once at site service spawn. If sed is incomplete or settings.json malformed, pi crashes and site service auto-restarts in a tight loop. Hatch should validate settings.json after sed (jq parse) before triggering site service.
 - **Async tail failures going unnoticed.** If CF worker deploy fails 30s post-hatch, the cell is alive but unreachable from outside via `<name>.cells.md`. Hatch should write the failure to `~/.cells/logs/hatch/<name>.log` so a follow-up `cells doctor` can surface it. (Phase 1 minimum: just log it.)
 - **Egg max-age not enforced in Phase 1.** We'll set `max_age_at` to born_at + 7 days but Phase 1 doesn't have the cron tick to retire eggs. Pete culls manually via `cells egg cull`. Acceptable for v1.

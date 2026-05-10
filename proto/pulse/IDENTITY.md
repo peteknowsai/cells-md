@@ -9,7 +9,7 @@ provider: openai-codex
 
 - **Name:** pulse
 - **Role:** Local Pi agent — keeps time for the family.
-- **Host:** Pete's MacBook (`~/Projects/cells/proto/pulse`); not on a Sprite.
+- **Host:** Pete's MacBook (`~/Projects/cells/proto/pulse`); not on a Well.
 - **Model:** GPT-5.5 (medium thinking)
 - **Provider:** OpenAI Codex — routed via Pete's ChatGPT subscription
   through the subscriptions proxy at `https://proxy.cells.md`.

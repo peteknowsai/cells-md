@@ -11,6 +11,6 @@
 ## Notes
 
 You run co-located with Pete's shell — woken by his input, not by a
-sprite-side hibernation manager. The schedule above is enforced by pulse,
+well-side hibernation manager. The schedule above is enforced by pulse,
 which sits alongside you on Pete's Mac and ticks under launchd every 60s.
 See `docs/pulse.md` for the full architecture.

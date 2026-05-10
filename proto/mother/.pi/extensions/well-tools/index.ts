@@ -1,8 +1,8 @@
 /**
- * sprite-tools — Pi extension that exposes Sprite VM operations as LLM-callable
+ * well-tools — Pi extension that exposes well VM operations as LLM-callable
  * tools for the mother agent.
  *
- * Wraps the local `sprite` CLI via node:child_process. The CLI handles auth
+ * Wraps the local `well` CLI via node:child_process. The CLI handles auth
  * via the macOS keyring, so we don't manage tokens here.
  */
 
@@ -14,12 +14,12 @@ import { homedir } from "node:os";
 
 type ShellResult = { ok: boolean; exit: number; stdout: string; stderr: string; timedOut?: boolean };
 
-// Hard cap on every sprite CLI invocation. Without this, a hung `sprite
+// Hard cap on every well CLI invocation. Without this, a hung `well
 // exec` (e.g. an `npm install` that silently stops streaming) blocks
 // mother indefinitely — observed in the wild on 2026-05-06: a single
 // `pi install -l npm:pi-web-access` ran 54+ minutes inside a birth.
 //
-// Default 10min is generous: the slowest legitimate sprite ops we run are
+// Default 10min is generous: the slowest legitimate well ops we run are
 // the initial bun + pi-coding-agent install (~90s) and apt baseline
 // (~60s). Anything past 10min is broken, not slow.
 const DEFAULT_SPRITE_TIMEOUT_MS = 10 * 60 * 1000;
@@ -60,7 +60,7 @@ function runCommand(
     proc.on("close", (code) => {
       clearTimeout(timer);
       if (timedOut) {
-        const tag = `\n[killed by sprite-tools after ${Math.round(timeoutMs / 1000)}s — process never exited]`;
+        const tag = `\n[killed by well-tools after ${Math.round(timeoutMs / 1000)}s — process never exited]`;
         resolve({ ok: false, exit: code ?? -1, stdout, stderr: stderr + tag, timedOut: true });
       } else {
         resolve({ ok: code === 0, exit: code ?? -1, stdout, stderr });
@@ -73,13 +73,16 @@ function runCommand(
   });
 }
 
-// `SPRITES_BINARY` lets cells.ts route mother to a different backend without
-// touching this file — set to `splite` for local wells, default `sprite`
-// for cloud sprites.dev. Both CLIs honor the same flag shapes per the
-// splites Phase 10 parity contract.
-const SPRITE_CLI = process.env.SPRITES_BINARY ?? "sprite";
+// `WELL_BINARY` lets cells.ts route mother to a different backend without
+// touching this file — set to `well` for local wells, default `well` for
+// cloud sprites.dev. Both CLIs honor the same flag shapes per the wells
+// wells-API parity contract. The agent user inside the VM is named
+// after the substrate (`well` on wells, `well` on wells); paths in
+// remote command bodies should use `~` / `$HOME` so the in-VM shell
+// resolves them per the substrate's user.
+const SPRITE_CLI = process.env.WELL_BINARY ?? "well";
 
-const runSprite = (args: string[], opts?: { timeoutMs?: number }) =>
+const runWell = (args: string[], opts?: { timeoutMs?: number }) =>
   runCommand(SPRITE_CLI, args, opts);
 
 function fmt(label: string, r: ShellResult): string {
@@ -94,42 +97,49 @@ function fmt(label: string, r: ShellResult): string {
 
 export default function (pi: any) {
   pi.registerTool({
-    name: "sprite_create",
-    label: "Create Sprite",
+    name: "well_create",
+    label: "Create well",
     description:
-      "Create a new Sprite VM with the given name. Blocks ~15 seconds until the VM is ready. The Sprite name doubles as the agent's identity.",
+      "Create a new well VM with the given name. The well name doubles as the agent's identity. Pass `fromImage` to fork from a saved image (sub-millisecond clonefile + ~5s boot — preferred for cell birth, see `cell-base`); without it, builds from `ubuntu-25.10-base` and runs full cloud-init (~30-60s). Pass `env` to inject env vars into the well's `/etc/environment` at first boot via cloud-init — PAM auto-loads on every shell. Use this for `CELLS_PROXY_SECRET` and other shared secrets so they're present from boot with no post-create round-trip.",
     parameters: Type.Object({
-      name: Type.String({ description: "Name for the Sprite (also the agent's name)." }),
+      name: Type.String({ description: "Name for the well (also the agent's name)." }),
+      fromImage: Type.Optional(Type.String({ description: "Saved image to fork from (e.g. 'cell-base'). Default: 'ubuntu-25.10-base' (slow path, full cloud-init bake)." })),
+      env: Type.Optional(Type.Array(Type.String(), {
+        description: "List of 'KEY=VALUE' strings injected via cloud-init's --env (lands in /etc/environment, PAM-loaded on every shell).",
+      })),
     }),
-    async execute(_id: string, params: { name: string }, signal: AbortSignal) {
+    async execute(_id: string, params: { name: string; fromImage?: string; env?: string[] }, signal: AbortSignal) {
       if (signal.aborted) throw new Error("aborted");
-      const r = await runSprite(["create", params.name]);
-      return { content: [{ type: "text", text: fmt(`sprite_create ${params.name}`, r) }] };
+      const args = ["create", params.name];
+      if (params.fromImage) args.push(`--from-image=${params.fromImage}`);
+      for (const kv of params.env ?? []) args.push("--env", kv);
+      const r = await runWell(args);
+      return { content: [{ type: "text", text: fmt(`well_create ${params.name}`, r) }] };
     },
   });
 
   pi.registerTool({
-    name: "sprite_destroy",
-    label: "Destroy Sprite",
+    name: "well_destroy",
+    label: "Destroy well",
     description:
-      "Destroy a Sprite VM. Irreversible — all filesystem state is lost. Use only after the user has confirmed.",
+      "Destroy a well VM. Irreversible — all filesystem state is lost. Use only after the user has confirmed.",
     parameters: Type.Object({
-      name: Type.String({ description: "Sprite name to destroy." }),
+      name: Type.String({ description: "well name to destroy." }),
     }),
     async execute(_id: string, params: { name: string }) {
-      const r = await runSprite(["destroy", "-s", params.name, "--force"]);
-      return { content: [{ type: "text", text: fmt(`sprite_destroy ${params.name}`, r) }] };
+      const r = await runWell(["destroy", "-s", params.name, "--force"]);
+      return { content: [{ type: "text", text: fmt(`well_destroy ${params.name}`, r) }] };
     },
   });
 
   pi.registerTool({
-    name: "sprite_exec",
-    label: "Run on Sprite",
+    name: "well_exec",
+    label: "Run on well",
     description:
-      "Run a bash command on a Sprite as user `sprite`. Returns stdout and stderr. Use for any setup, install, or one-shot operation on the VM. Default timeout is 10 minutes — pass `timeoutSeconds` for steps that should fail faster (e.g. package installs that often hang on registry stalls).",
+      "Run a bash command on a well as the agent user (`well` on cloud wells, `well` on local wells). Returns stdout and stderr. Use for any setup, install, or one-shot operation on the VM. Paths in your command should use `~` or `$HOME` so they resolve to the right home dir (e.g. `~/agent` not `/home/well/agent`). Default timeout is 10 minutes — pass `timeoutSeconds` for steps that should fail faster (e.g. package installs that often hang on registry stalls).",
     parameters: Type.Object({
-      name: Type.String({ description: "Sprite name." }),
-      command: Type.String({ description: "Bash command to run on the Sprite." }),
+      name: Type.String({ description: "well name." }),
+      command: Type.String({ description: "Bash command to run on the well." }),
       timeoutSeconds: Type.Optional(Type.Integer({
         minimum: 1,
         maximum: 1800,
@@ -138,23 +148,23 @@ export default function (pi: any) {
     }),
     async execute(_id: string, params: { name: string; command: string; timeoutSeconds?: number }, signal: AbortSignal) {
       if (signal.aborted) throw new Error("aborted");
-      const r = await runSprite(
+      const r = await runWell(
         ["exec", "-s", params.name, "--", "bash", "-c", params.command],
         params.timeoutSeconds ? { timeoutMs: params.timeoutSeconds * 1000 } : undefined,
       );
-      return { content: [{ type: "text", text: fmt(`sprite_exec ${params.name}`, r) }] };
+      return { content: [{ type: "text", text: fmt(`well_exec ${params.name}`, r) }] };
     },
   });
 
   pi.registerTool({
-    name: "sprite_push",
-    label: "Push directory to Sprite",
+    name: "well_push",
+    label: "Push directory to well",
     description:
-      "Push a local directory's contents to a path on the Sprite via tar pipe. Creates the destination if missing. Use for shipping the agent DNA.",
+      "Push a local directory's contents to a path on the well via tar pipe. Creates the destination if missing. Use for shipping the agent DNA.",
     parameters: Type.Object({
-      name: Type.String({ description: "Sprite name." }),
+      name: Type.String({ description: "well name." }),
       localPath: Type.String({ description: "Absolute local path to the directory whose contents will be pushed." }),
-      remotePath: Type.String({ description: "Absolute path on the Sprite where contents will land." }),
+      remotePath: Type.String({ description: "Path on the well where contents will land. Prefer `~/agent` (resolved by the agent user's shell) over `/home/well/agent` so the same call works on both well and well backends." }),
     }),
     async execute(
       _id: string,
@@ -175,7 +185,7 @@ export default function (pi: any) {
         content: [
           {
             type: "text",
-            text: fmt(`sprite_push ${params.localPath} → ${params.name}:${params.remotePath}`, r),
+            text: fmt(`well_push ${params.localPath} → ${params.name}:${params.remotePath}`, r),
           },
         ],
       };
@@ -183,23 +193,23 @@ export default function (pi: any) {
   });
 
   pi.registerTool({
-    name: "sprite_egress_allow",
-    label: "Set Sprite egress",
+    name: "well_egress_allow",
+    label: "Set well egress",
     description:
-      "Replace a Sprite's egress allowlist. Pass ['*'] to allow all outbound. Each domain is a hostname or wildcard like '*.example.com'.",
+      "Replace a well's egress allowlist. Pass ['*'] to allow all outbound. Each domain is a hostname or wildcard like '*.example.com'.",
     parameters: Type.Object({
-      name: Type.String({ description: "Sprite name." }),
+      name: Type.String({ description: "well name." }),
       domains: Type.Array(Type.String(), { description: "Domains to allow." }),
     }),
     async execute(_id: string, params: { name: string; domains: string[] }) {
       const body = JSON.stringify({
         rules: params.domains.map((d) => ({ action: "allow", domain: d })),
       });
-      const r = await runSprite([
+      const r = await runWell([
         "api",
         "-s",
         params.name,
-        `/v1/sprites/${params.name}/policy/network`,
+        `/v1/wells/${params.name}/policy/network`,
         "-X",
         "POST",
         "-H",
@@ -211,7 +221,7 @@ export default function (pi: any) {
         content: [
           {
             type: "text",
-            text: fmt(`sprite_egress_allow ${params.name} [${params.domains.join(", ")}]`, r),
+            text: fmt(`well_egress_allow ${params.name} [${params.domains.join(", ")}]`, r),
           },
         ],
       };
@@ -264,9 +274,9 @@ export default function (pi: any) {
 
   pi.registerTool({
     name: "cell_resolve",
-    label: "Resolve cell to sprite",
+    label: "Resolve cell to well",
     description:
-      "Resolve a user-facing cell name to its underlying Sprite name. Slow-birth cells use the same name for both. Hatched cells live on a permanent egg sprite (e.g. 'egg-sonnet-67706a') named differently from the cell. ALWAYS call this before sprite_destroy / sprite_exec / sprite_push when you only know the cell name — the sprite API rejects cell-name lookups for hatched cells.",
+      "Resolve a user-facing cell name to its underlying well name. Slow-birth cells use the same name for both. Hatched cells live on a permanent egg well (e.g. 'egg-sonnet-67706a') named differently from the cell. ALWAYS call this before well_destroy / well_exec / well_push when you only know the cell name — the well API rejects cell-name lookups for hatched cells.",
     parameters: Type.Object({
       name: Type.String({ description: "Cell name (user-facing identity)." }),
     }),
@@ -279,7 +289,7 @@ export default function (pi: any) {
             content: [
               {
                 type: "text",
-                text: `cell_resolve: registry not found at ${cellsPath}. Falling back: sprite_name=${params.name}`,
+                text: `cell_resolve: registry not found at ${cellsPath}. Falling back: well_name=${params.name}`,
               },
             ],
           };
@@ -293,7 +303,7 @@ export default function (pi: any) {
             content: [
               {
                 type: "text",
-                text: `cell_resolve: no cell named '${params.name}' in registry. Cannot resolve sprite.`,
+                text: `cell_resolve: no cell named '${params.name}' in registry. Cannot resolve well.`,
               },
             ],
           };
@@ -303,7 +313,7 @@ export default function (pi: any) {
             content: [
               {
                 type: "text",
-                text: `cell_resolve: cell '${params.name}' is slow-birth. sprite_name=${params.name}`,
+                text: `cell_resolve: cell '${params.name}' is slow-birth. well_name=${params.name}`,
               },
             ],
           };
@@ -313,13 +323,13 @@ export default function (pi: any) {
             content: [
               {
                 type: "text",
-                text: `cell_resolve: cell '${params.name}' references egg ${cell.hatched_from} but ${eggsPath} is missing. Cannot resolve sprite.`,
+                text: `cell_resolve: cell '${params.name}' references egg ${cell.hatched_from} but ${eggsPath} is missing. Cannot resolve well.`,
               },
             ],
           };
         }
         const eggs = JSON.parse(readFileSync(eggsPath, "utf8")) as {
-          eggs: Array<{ id: string; sprite_name: string }>;
+          eggs: Array<{ id: string; well_name: string }>;
         };
         const egg = eggs.eggs.find((e) => e.id === cell.hatched_from);
         if (!egg) {
@@ -327,7 +337,7 @@ export default function (pi: any) {
             content: [
               {
                 type: "text",
-                text: `cell_resolve: cell '${params.name}' references egg ${cell.hatched_from} but no such egg in eggs.json. Sprite likely already destroyed.`,
+                text: `cell_resolve: cell '${params.name}' references egg ${cell.hatched_from} but no such egg in eggs.json. well likely already destroyed.`,
               },
             ],
           };
@@ -336,7 +346,7 @@ export default function (pi: any) {
           content: [
             {
               type: "text",
-              text: `cell_resolve: cell '${params.name}' is hatched from egg ${egg.id}. sprite_name=${egg.sprite_name}`,
+              text: `cell_resolve: cell '${params.name}' is hatched from egg ${egg.id}. well_name=${egg.well_name}`,
             },
           ],
         };
@@ -349,11 +359,11 @@ export default function (pi: any) {
   });
 
   pi.registerTool({
-    name: "sprite_checkpoint",
-    label: "Checkpoint Sprite",
-    description: "Take a filesystem checkpoint of a Sprite (~300ms, copy-on-write). Last 5 retained. Pass `comment` to label the checkpoint (e.g. `phase-tools-v1`, `pristine-v1`) so future restores can target a known-good phase.",
+    name: "well_checkpoint",
+    label: "Checkpoint well",
+    description: "Take a filesystem checkpoint of a well (~300ms, copy-on-write). Last 5 retained. Pass `comment` to label the checkpoint (e.g. `phase-tools-v1`, `pristine-v1`) so future restores can target a known-good phase.",
     parameters: Type.Object({
-      name: Type.String({ description: "Sprite name." }),
+      name: Type.String({ description: "well name." }),
       comment: Type.Optional(Type.String({
         description: "Short label for this checkpoint. Use kebab-case identifiers like `phase-tools-v1` or `pristine-v1`.",
       })),
@@ -361,9 +371,9 @@ export default function (pi: any) {
     async execute(_id: string, params: { name: string; comment?: string }) {
       const args = ["checkpoint", "create", "-s", params.name];
       if (params.comment) args.push("--comment", params.comment);
-      const r = await runSprite(args);
+      const r = await runWell(args);
       const label = params.comment ? `${params.name} (${params.comment})` : params.name;
-      return { content: [{ type: "text", text: fmt(`sprite_checkpoint ${label}`, r) }] };
+      return { content: [{ type: "text", text: fmt(`well_checkpoint ${label}`, r) }] };
     },
   });
 }

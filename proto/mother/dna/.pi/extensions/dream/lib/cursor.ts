@@ -14,7 +14,7 @@ import { join } from "node:path";
 
 function resolveAgentRoot(): string {
   if (process.env.CELL_AGENT_ROOT) return process.env.CELL_AGENT_ROOT;
-  if (existsSync("/home/sprite/agent")) return "/home/sprite/agent";
+  if (existsSync("~/agent")) return "~/agent";
   return process.cwd();
 }
 

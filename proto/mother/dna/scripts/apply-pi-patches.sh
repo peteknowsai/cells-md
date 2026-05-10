@@ -28,11 +28,15 @@ else
   SED_INPLACE=(sed -i "")
 fi
 
-# Search both the project node_modules (this script's $PWD when run via
-# bun postinstall is the project root) and the user's global bun cache.
+# Search project node_modules (script's $PWD when run via bun postinstall
+# is the project root), the user's global bun cache, AND the system npm
+# global install paths (where wells's ubuntu-25.10-base ships pi as of
+# 2026-05-09 — pi pre-installed via `npm install -g`, not bun -g).
 SEARCH_ROOTS=(
   "./node_modules/@mariozechner"
   "$HOME/.bun/install/global/node_modules/@mariozechner"
+  "/usr/lib/node_modules/@mariozechner"
+  "/usr/local/lib/node_modules/@mariozechner"
 )
 
 patched_url=0

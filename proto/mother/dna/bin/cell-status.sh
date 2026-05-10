@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Render the right-hand side of the cell's tmux status bar.
 # Reads ~/agent/.pi/status.json (written at birth, updated on channel
-# link/unlink from the laptop side via sprite_exec). Output is single-
+# link/unlink from the laptop side via well_exec). Output is single-
 # line, picked up by tmux's status-right via #(...).
 #
 #   🤖 pi    💬 #cells-pete

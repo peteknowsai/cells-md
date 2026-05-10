@@ -43,7 +43,7 @@ history.
 
 If recovery is wanted, a one-time copy:
 ```sh
-sprite exec -s <cell> -- bash -lc \
+well exec -s <cell> -- bash -lc \
   'latest=$(ls -t ~/.pi/agent/sessions/--home-sprite-agent--/*.jsonl | head -1); \
    mkdir -p ~/.pi/agent/sessions/cell-<name>; \
    cp "$latest" ~/.pi/agent/sessions/cell-<name>/main.jsonl'

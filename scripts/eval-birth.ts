@@ -3,11 +3,11 @@
 // Targeted eval for birth/kill changes. Runs a chosen combo N times in
 // either slow-birth or --hatch mode and asserts:
 //   - per-phase checkpoints landed (phase-tools-v1, phase-installed-v1,
-//     phase-proxy-v1) on the cell's sprite (slow-birth) OR on the egg's
-//     sprite (hatch — egg-bake is what writes those)
+//     phase-proxy-v1) on the cells well (slow-birth) OR on the egg's
+//     well (hatch — egg-bake is what writes those)
 //   - registry status flips warming → alive within ALIVE_TIMEOUT_MS
 //   - cells talk <name> "ping" returns 0 with non-empty stdout (--talk-verify)
-//   - kill leaves the cell absent from registry and sprite layer
+//   - kill leaves the cell absent from registry and well layer
 //
 // Usage:
 //   bun scripts/eval-birth.ts --combo=<id> [--repeat=N] [--hatch]
@@ -141,8 +141,8 @@ function printUsage() {
 combos: ${COMBOS.map((c) => c.id).join(", ")}
 
 modes:
-  default  slow-birth path (no warm egg matched). Asserts per-phase checkpoints on the cell's sprite.
-  --hatch  bakes an egg first, then births (auto-hatches). Asserts per-phase checkpoints on the egg's sprite.
+  default  slow-birth path (no warm egg matched). Asserts per-phase checkpoints on the cells well.
+  --hatch  bakes an egg first, then births (auto-hatches). Asserts per-phase checkpoints on the eggs well.
 
 flags:
   --repeat=N        run N iterations (default 1). Sequential — mother concurrency = 1.
@@ -196,7 +196,7 @@ async function loadRegistry(): Promise<Registry> {
   catch { return { cells: [] }; }
 }
 
-type Egg = { id: string; sprite_name: string; state: string; claimed_by?: string | null };
+type Egg = { id: string; well_name: string; state: string; claimed_by?: string | null };
 type EggsFile = { eggs: Egg[] };
 
 async function loadEggs(): Promise<EggsFile> {
@@ -205,20 +205,20 @@ async function loadEggs(): Promise<EggsFile> {
   catch { return { eggs: [] }; }
 }
 
-async function spritesToken(): Promise<string | null> {
-  if (process.env.SPRITES_TOKEN) return process.env.SPRITES_TOKEN;
+async function wellsToken(): Promise<string | null> {
+  if (process.env.WELL_TOKEN) return process.env.WELL_TOKEN;
   if (!existsSync(SECRETS_PATH)) return null;
   try {
     const s = JSON.parse(await readFile(SECRETS_PATH, "utf-8"));
-    return typeof s.SPRITES_TOKEN === "string" ? s.SPRITES_TOKEN : null;
+    return typeof s.WELL_TOKEN === "string" ? s.WELL_TOKEN : null;
   } catch { return null; }
 }
 
-async function spriteExists(name: string): Promise<boolean> {
-  const token = await spritesToken();
+async function wellExists(name: string): Promise<boolean> {
+  const token = await wellsToken();
   if (!token) return false;
   try {
-    const r = await fetch(`https://api.sprites.dev/v1/sprites/${encodeURIComponent(name)}`, {
+    const r = await fetch(`https://api.sprites.dev/v1/wells/${encodeURIComponent(name)}`, {
       headers: { Authorization: `Bearer ${token}` },
     });
     if (r.status === 404) return false;
@@ -226,10 +226,10 @@ async function spriteExists(name: string): Promise<boolean> {
   } catch { return false; }
 }
 
-async function checkpointComments(spriteName: string): Promise<string[]> {
-  // `sprite checkpoint list -s <name>` prints a human table; we just grep
+async function checkpointComments(wellName: string): Promise<string[]> {
+  // `well checkpoint list -s <name>` prints a human table; we just grep
   // for the kebab-case phase markers. No JSON output flag exists today.
-  const r = await runCmd(["sprite", "checkpoint", "list", "-s", spriteName], { timeoutMs: 30_000 });
+  const r = await runCmd(["well", "checkpoint", "list", "-s", wellName], { timeoutMs: 30_000 });
   if (r.exitCode !== 0) return [];
   const found: string[] = [];
   for (const cp of PHASE_CHECKPOINTS) {
@@ -243,12 +243,12 @@ async function findCell(name: string): Promise<RegistryCell | null> {
   return reg.cells.find((c) => c.name === name) ?? null;
 }
 
-async function spriteForCell(name: string): Promise<string> {
+async function wellForCell(name: string): Promise<string> {
   const cell = await findCell(name);
-  if (!cell?.hatched_from) return name; // slow-birth: sprite name == cell name
+  if (!cell?.hatched_from) return name; // slow-birth: well name == cell name
   const eggs = await loadEggs();
   const egg = eggs.eggs.find((e) => e.id === cell.hatched_from);
-  return egg?.sprite_name ?? name;
+  return egg?.well_name ?? name;
 }
 
 async function waitForAlive(name: string, deadline: number): Promise<{ ok: boolean; elapsedMs: number; lastStatus: string | null }> {
@@ -355,12 +355,12 @@ async function runIteration(iter: number, total: number, args: Args): Promise<It
   result.birthOk = true;
   process.stdout.write(`✓ (${(birth.durationMs / 1000).toFixed(0)}s) · `);
 
-  // Verify per-phase checkpoints on the appropriate sprite.
-  const sprite = await spriteForCell(name);
-  result.checkpointsFound = await checkpointComments(sprite);
+  // Verify per-phase checkpoints on the appropriate well.
+  const well = await wellForCell(name);
+  result.checkpointsFound = await checkpointComments(well);
   const missing = PHASE_CHECKPOINTS.filter((c) => !result.checkpointsFound.includes(c));
   if (missing.length > 0) {
-    result.failure = `missing phase checkpoints on sprite=${sprite}: ${missing.join(", ")}`;
+    result.failure = `missing phase checkpoints on well=${well}: ${missing.join(", ")}`;
     process.stdout.write(`checkpoints ✗ (missing: ${missing.join(",")}) · `);
   } else {
     process.stdout.write(`checkpoints ✓ · `);
@@ -409,9 +409,9 @@ async function runIteration(iter: number, total: number, args: Args): Promise<It
   }
   // Verify cleanup.
   const stillRegistered = (await findCell(name)) !== null;
-  const stillSprite = await spriteExists(sprite);
-  if (stillRegistered || stillSprite) {
-    result.failure = `kill left orphans: ${stillRegistered ? "registry" : ""}${stillRegistered && stillSprite ? "+" : ""}${stillSprite ? "sprite" : ""}`;
+  const stillWell = await wellExists(well);
+  if (stillRegistered || stillWell) {
+    result.failure = `kill left orphans: ${stillRegistered ? "registry" : ""}${stillRegistered && stillWell ? "+" : ""}${stillWell ? "well" : ""}`;
     process.stdout.write(`kill ✗ (orphans)`);
     console.log();
     return result;

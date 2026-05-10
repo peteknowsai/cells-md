@@ -68,7 +68,7 @@ extension shipped in their DNA. The extension `fs.watch`es the file with
 a 2s debounce and POSTs the new content to `pulse.cells.md/heartbeat-changed`,
 which pulse authenticates (`CELLS_PROXY_SECRET` bearer) and writes
 to `~/.cells/pulse-inbox/<cell>-<ts>.md`. Pulse drains the inbox each
-pulse. No `sprite exec` reads — hibernating cells stay hibernating.
+pulse. No `well exec` reads — hibernating cells stay hibernating.
 
 To retrofit existing cells with the extension: `cells refresh-extensions <name|--all>`.
 

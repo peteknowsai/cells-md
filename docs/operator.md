@@ -8,7 +8,7 @@
 >   `/edit` (chat.update) routes.
 > - Each cell has its own Worker `cells-front-<cell>` with a
 >   `CellAgent` Durable Object that holds a **persistent outbound
->   WebSocket** to the cell's site server at `<sprite>.sprites.app/agent`.
+>   WebSocket** to the cell's site server at `<well>.wells.app/agent`.
 > - The cell's `site/server.ts` spawns `pi --mode rpc` as a child
 >   process. The DO ↔ site WS pipes pi's RPC event stream into
 >   live-edited Slack messages (thinking, tool calls, text — all
@@ -46,7 +46,7 @@ retirement, kept for historical context.
    └─────────────────────────────────────┘
         │ shell: cells talk pete "..."   ▲
         ▼                                │
-   pete (sprite)                         │
+   pete (well)                         │
    slack-channel ext: slack_post(text,   │
                       thread_ts?, channel?)
         │                                │
@@ -166,7 +166,7 @@ is selected in the **Channels** step:
 2. CLI binds the channel ID → cell mapping in `~/.cells/channels.json`
    and the `CHANNELS` KV namespace.
 3. `scripts/deploy-cell-worker.sh <NAME>` deploys the per-cell CF worker
-   (the `CellAgent` DO that holds the persistent WS to the sprite).
+   (the `CellAgent` DO that holds the persistent WS to the well).
 4. Bot is auto-added as channel creator. Humans join the channel from
    the Slack sidebar (one click) — no `/invite` needed.
 

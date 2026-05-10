@@ -22,11 +22,11 @@ Two sub-phases. Ship 1.0 standalone — useful even without dream.
 
 ## Memory directory layout
 
-Lives at `/home/sprite/agent/memory/` on each Sprite. Created by the extension
+Lives at `/home/well/agent/memory/` on each Well. Created by the extension
 on first `session_start` if missing.
 
 ```
-/home/sprite/agent/memory/
+/home/well/agent/memory/
 ├── MEMORY.md                  ← index. ≤ 200 lines / 25 KB. Loaded every session.
 ├── user_<topic>.md            ← who the user is (role, expertise, preferences)
 ├── feedback_<topic>.md        ← rules / corrections the user gave
@@ -48,7 +48,7 @@ whatever the `identity` extension produced:
 ```
 # Memory
 
-You have a persistent memory directory at /home/sprite/agent/memory/. Your
+You have a persistent memory directory at /home/well/agent/memory/. Your
 index is below — full content lives in topical files you can read on demand.
 
 ## MEMORY.md
@@ -99,7 +99,7 @@ proto/mother/dna/.pi/extensions/memory/
 | `proto/mother/dna/.gitignore` | Add `memory/` |
 | `ROADMAP.md` | Mark Phase 1.0 in progress, link this doc |
 
-Birth ritual already pushes the whole `proto/mother/dna/` to `/home/sprite/agent/`,
+Birth ritual already pushes the whole `proto/mother/dna/` to `/home/well/agent/`,
 so the extension comes along for free. No birth.md changes required.
 
 ### Extension shape (`proto/mother/dna/.pi/extensions/memory/index.ts`)
@@ -109,7 +109,7 @@ import { Type } from "@sinclair/typebox";
 import { existsSync, mkdirSync, readFileSync, writeFileSync, readdirSync, unlinkSync, statSync } from "node:fs";
 import { join, basename, normalize, sep } from "node:path";
 
-const MEMORY_DIR = "/home/sprite/agent/memory";
+const MEMORY_DIR = "/home/well/agent/memory";
 const YEARNINGS_DIR = join(MEMORY_DIR, "yearnings");
 const INDEX_FILE = join(MEMORY_DIR, "MEMORY.md");
 const PROMPT_TEMPLATE = join(__dirname, "auto-memory-prompt.md");
@@ -274,7 +274,7 @@ Append a one-paragraph section to `proto/mother/dna/AGENTS.md`:
 ```markdown
 ## Memory
 
-You have a memory directory at /home/sprite/agent/memory/. The index is
+You have a memory directory at /home/well/agent/memory/. The index is
 loaded into your system prompt at every session start. Use write_memory
 when you learn something durable, write_yearning for open questions, and
 dream when memory feels messy. Full instructions live in the system prompt
@@ -286,7 +286,7 @@ itself.
 1. `bun build proto/mother/dna/.pi/extensions/memory/index.ts --target=node` — clean.
 2. `cells kill <name> && cells birth <name>` — fresh agent.
 3. `cells talk <name>` — agent should mention having a memory directory.
-4. `sprite exec -s <name> -- ls /home/sprite/agent/memory/` — should show MEMORY.md and yearnings/.
+4. `well exec -s <name> -- ls /home/well/agent/memory/` — should show MEMORY.md and yearnings/.
 5. Tell agent something durable (e.g. "I'm a solo dev, prefer terse responses").
 6. Verify `feedback_*.md` exists and `MEMORY.md` indexes it.
 7. Disconnect, reconnect, ask agent about preference. Should recall.
@@ -335,7 +335,7 @@ pi.registerTool({
 ### Dream ritual (`dream-ritual.md`)
 
 System prompt for the subagent. Lifted/adapted from Swain's
-`sprite/skills/dream/SKILL.md` (per the guidelines doc). Five phases:
+`well/skills/dream/SKILL.md` (per the guidelines doc). Five phases:
 
 ```markdown
 You are running the dream ritual on a Cell agent's memory directory.
@@ -394,7 +394,7 @@ network. No identity — you are not the agent itself, you are its consolidator.
   prompt is the dream ritual — not the agent's identity. Otherwise the dream
   sees itself as the agent and writes self-referential garbage.
 - **Manual dream only for v1.** No cron, no idle-trigger, no
-  session_shutdown firing. Sprites hibernate when idle and we don't want to
+  session_shutdown firing. Wells hibernate when idle and we don't want to
   pin them awake.
 
 ## Order of work
@@ -405,10 +405,10 @@ network. No identity — you are not the agent itself, you are its consolidator.
 4. Update `proto/mother/dna/AGENTS.md` with memory paragraph.
 5. Update `proto/mother/dna/.gitignore` to exclude `memory/`.
 6. `bun build` to verify compile.
-7. `cells kill <name> && cells birth <name>` against a clean Sprite.
+7. `cells kill <name> && cells birth <name>` against a clean Well.
 8. Run Phase 1.0 verification steps.
 9. Once 1.0 passes: write `dream-ritual.md`.
 10. Add `dream` tool to `index.ts`.
-11. Rebuild, redeploy (or push the file directly via `sprite_push` and reload).
+11. Rebuild, redeploy (or push the file directly via `well_push` and reload).
 12. Run Phase 1.1 verification.
 13. Update `ROADMAP.md` to mark Phase 1 complete.

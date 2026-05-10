@@ -8,11 +8,11 @@ compatibility_date = "2026-01-01"
 
 [vars]
 CELL_NAME = "{{CELL}}"
-# Substituted at deploy time from `sprite info -s {{CELL}}` —
-# e.g. "bob-bas32.sprites.app". The CellAgent DO opens a persistent
-# WebSocket to wss://${SPRITE_HOST}/agent for prompt push + event
+# Substituted at deploy time from `well info -s {{CELL}}` —
+# e.g. "bob-bas32.wells.app". The CellAgent DO opens a persistent
+# WebSocket to wss://${WELL_HOST}/agent for prompt push + event
 # stream from pi --mode rpc.
-SPRITE_HOST = "{{SPRITE_HOST}}"
+WELL_HOST = "{{WELL_HOST}}"
 
 # Workers Custom Domain (per cell). wrangler creates the DNS record on deploy.
 [[routes]]

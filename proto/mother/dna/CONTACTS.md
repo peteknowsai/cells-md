@@ -20,7 +20,7 @@ You don't talk to her directly today; you tell Pete and he relays.
 
 ## Sibling cells
 
-Other agents like you, each on their own Sprite. List them with
+Other agents like you, each on their own Well. List them with
 `cells list`. Talk to one with:
 
 ```

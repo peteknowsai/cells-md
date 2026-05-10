@@ -68,7 +68,7 @@ Whatever ritual the cell writes should hit these phases. Order matters.
 5. **Daily note** — append-only stream of what was learned today.
 
 The full Swain version of this ritual is at
-`~/Projects/ProjectSwain/swain-agents/sprite/skills/dream/SKILL.md` if
+`~/Projects/ProjectSwain/swain-agents/well/skills/dream/SKILL.md` if
 the cell wants to read the canonical phrasing.
 
 ## Triggering
@@ -78,10 +78,10 @@ Two viable shapes; pick one.
 - **Time-based** — the agent dreams nightly at a fixed local hour. Swain
   uses `0 2 * * *` in the agent's local TZ. Predictable cadence, runs
   even when the agent is otherwise idle.
-- **Event-based** — the agent dreams when something happens (Sprite
+- **Event-based** — the agent dreams when something happens (Well
   wake, conversation end, N new daily notes). Cheaper if the agent
   isn't continuously active. Roadmap Phase 1 chose this — dream on
-  Sprite wake, not on a polling loop. Good call for hibernating cells.
+  Well wake, not on a polling loop. Good call for hibernating cells.
 
 Either way: the dream **must not be in the main conversation loop**.
 Fork it. Swain runs it as a scheduled cron job; the roadmap calls for a
@@ -102,9 +102,9 @@ a narrow tool surface and let it return when done.
 
 ## What to read in swain-agents for examples
 
-- `sprite/skills/dream/SKILL.md` — the canonical ritual prose
+- `well/skills/dream/SKILL.md` — the canonical ritual prose
 - `api/schedules.ts` — how it's scheduled (cron + agent-local TZ)
-- `api/provision-sprite.ts` — how `dream` ships as part of the default
+- `api/provision-well.ts` — how `dream` ships as part of the default
   skill set every advisor gets
 
 The cell project decides everything else: where memory lives, what

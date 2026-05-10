@@ -98,7 +98,7 @@ This is forward-looking. The cells stack today is single-org and doesn't surface
 A well is the deterministic structure that holds exactly one cell. In real microbiology, a well is the slot on a multi-well plate where you drop one specimen — the term is precise about the one-to-one shape. That's our shape: one VM, one cell, one well.
 
 Things to know about wells:
-- A well is what splites used to be called. The new name corrects two things: "splites" was a portmanteau (split-from-sprites) that doesn't carry on its own, and the old name implied many-cells-per-thing when in practice we run one cell per VM.
+- A well is what splites used to be called. The new name corrects two things: "splites" was a portmanteau (split-from-wells) that doesn't carry on its own, and the old name implied many-cells-per-thing when in practice we run one cell per VM.
 - The runtime is *built*, not alive. It boots, it stops, it gets cloned, but it doesn't grow or morph the way a cell does. The name reflects that — "well" is hardware, "cell" is the resident.
 - Wells are stackable / interchangeable / clonable. The cell inside is the precious bit. Wells get spun up and torn down freely.
 
@@ -158,7 +158,7 @@ If you read older docs in this repo, in the `splites` repo, or in scratchpad com
 | Old term | New term | Notes |
 |---|---|---|
 | splite / splites | well / Well | A "splite" was always a single-cell VM. "Well" is more precise. |
-| sprite / sprites | (no rename) | "Sprites" is Fly.io's product, an external dependency. We don't rename someone else's product. |
+| well / wells | (no rename) | "Wells" is Fly.io's product, an external dependency. We don't rename someone else's product. |
 | Mac mini host | lab | "Lab" is the new word for any deployment target, including the Mac Mini. |
 | host machine / VPS / cloud target | lab | All deployment targets are labs. |
 | cell pool | (was already pool, may become "pod" if refactored) | The internal data structure for "cells managed together" hasn't been renamed yet; doing so is a future cleanup. |

@@ -49,7 +49,7 @@ export default function (pi: any) {
     description:
       "Send a message to a remote agent's running Pi TUI and capture what shows up in the next few seconds. The agent receives this as if Pete typed it — so the message lands in the same conversation Pete is having with that agent. Use for diagnostics, debugging, or relaying. Returns the captured pane content (the agent's response, plus surrounding context).",
     parameters: Type.Object({
-      name: Type.String({ description: "Remote agent name (Sprite name)." }),
+      name: Type.String({ description: "Remote agent name (Well name)." }),
       message: Type.String({ description: "Text to send. Enter is appended automatically." }),
       wait_seconds: Type.Optional(
         Type.Number({
@@ -70,11 +70,11 @@ export default function (pi: any) {
       // Env (PATH, secrets) comes from ~/.profile sourcing .bashrc.d.
       const escaped = params.message.replace(/'/g, "'\\''");
       const sendScript = [
-        `tmux has-session -t ${TMUX_TARGET} 2>/dev/null || tmux new-session -d -s ${TMUX_TARGET} -c /home/sprite/agent pi`,
+        `tmux has-session -t ${TMUX_TARGET} 2>/dev/null || tmux new-session -d -s ${TMUX_TARGET} -c ~/agent pi`,
         `sleep 1`,
         `tmux send-keys -t ${TMUX_TARGET} '${escaped}' Enter`,
       ].join(" && ");
-      const send = await runShell("sprite", [
+      const send = await runShell("well", [
         "exec",
         "-s",
         params.name,
@@ -96,7 +96,7 @@ export default function (pi: any) {
 
       await sleep(wait * 1000);
 
-      const capture = await runShell("sprite", [
+      const capture = await runShell("well", [
         "exec",
         "-s",
         params.name,
@@ -146,7 +146,7 @@ export default function (pi: any) {
     }),
     async execute(_id: string, params: { name: string; lines?: number }) {
       const lines = params.lines ?? DEFAULT_PEEK_LINES;
-      const r = await runShell("sprite", [
+      const r = await runShell("well", [
         "exec",
         "-s",
         params.name,
@@ -179,7 +179,7 @@ export default function (pi: any) {
     name: "read_agent_memory",
     label: "Read agent's memory",
     description:
-      "Read a file from a remote agent's memory directory (/home/sprite/agent/state/memory/). Pass a filename like 'MEMORY.md' or 'feedback_response_style.md', or omit to list the directory.",
+      "Read a file from a remote agent's memory directory (~/agent/state/memory/). Pass a filename like 'MEMORY.md' or 'feedback_response_style.md', or omit to list the directory.",
     parameters: Type.Object({
       name: Type.String({ description: "Remote agent name." }),
       file: Type.Optional(
@@ -190,14 +190,14 @@ export default function (pi: any) {
     }),
     async execute(_id: string, params: { name: string; file?: string }) {
       if (!params.file) {
-        const r = await runShell("sprite", [
+        const r = await runShell("well", [
           "exec",
           "-s",
           params.name,
           "--",
           "ls",
           "-la",
-          "/home/sprite/agent/state/memory/",
+          "~/agent/state/memory/",
         ]);
         return {
           content: [
@@ -212,13 +212,13 @@ export default function (pi: any) {
       if (params.file.includes("..") || params.file.startsWith("/")) {
         return { content: [{ type: "text", text: "rejected: invalid filename" }] };
       }
-      const r = await runShell("sprite", [
+      const r = await runShell("well", [
         "exec",
         "-s",
         params.name,
         "--",
         "cat",
-        `/home/sprite/agent/state/memory/${params.file}`,
+        `~/agent/state/memory/${params.file}`,
       ]);
       return {
         content: [

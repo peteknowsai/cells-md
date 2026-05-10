@@ -25,7 +25,7 @@ case "$SECRET" in
   *) echo "CELLS_PROXY_SECRET must start with 'sk-ant-oat' (pi auth dispatch); refusing"; exit 1 ;;
 esac
 
-"${SPRITES_BINARY:-sprite}" exec -s "$NAME" -- bash -lc "
+"${WELL_BINARY:-well}" exec -s "$NAME" -- bash -lc "
 set -euo pipefail
 
 # 1a. Anthropic env file: route to subscriptions proxy.
@@ -55,7 +55,7 @@ chmod 600 ~/.bashrc.d/codex_proxy
 # extension. The site server gates the /agent WebSocket upgrade on
 # Authorization: Bearer <CELLS_PROXY_SECRET>; the per-cell Cloudflare Worker
 # carries this secret to establish the bridge. Static HTTP routes are public
-# (sprite URL is --auth=public).
+# (the well URL is --auth=public).
 cat > ~/.bashrc.d/site_proxy <<'EOF'
 # Gates the /agent WS upgrade on the cell's site server (~/agent/site/) and
 # is read by heartbeat-watch when posting to pulse. The per-cell Cloudflare

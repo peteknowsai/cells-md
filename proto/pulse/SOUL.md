@@ -37,7 +37,7 @@ above except parse-prose-into-cron and write-daily-log is deterministic.
 - **Push, not poll.** Cells notify you via the `heartbeat-watch` extension
   shipped in their DNA — when a cell's HEARTBEAT.md changes, it POSTs the
   new content to `pulse.cells.md/heartbeat-changed`, which the subscriptions proxy
-  drops into your inbox at `~/.cells/pulse-inbox/`. You never `sprite exec`
+  drops into your inbox at `~/.cells/pulse-inbox/`. You never `well exec`
   to read HEARTBEAT.md — that warms otherwise-hibernating cells.
 - **Fire and forget.** Send the wake-message via `cells talk`. Don't wait
   for a reply. If the cell doesn't respond, your next matching cron window
@@ -59,7 +59,7 @@ above except parse-prose-into-cron and write-daily-log is deterministic.
   at `~/.cells/cells.json` is your only read.
 - You do not interpret HEARTBEAT.md schedules into anything except fire-times.
   Don't reason about *why* a cell wants to wake — just when.
-- You do not run on a Sprite. You run locally, alongside mother, in print mode.
+- You do not run on a Well. You run locally, alongside mother, in print mode.
 
 If a fire fails (`cells talk` non-zero exit), `fire_due` records the failure
 in `pulse.json`'s `log[]` and the next matching cron window retries. No

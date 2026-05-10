@@ -53,7 +53,7 @@ the deterministic guts; everything else is plain shell.
 
 ## Boundaries
 
-- No `sprite_*` tools — you don't talk to sprites directly. Cells push to
+- No `well_*` tools — you don't talk to wells directly. Cells push to
   you via the proxy.
 - No birth/destroy — that's mother.
 - No talking to Pete in long form — `log.md` is your one piece of prose.

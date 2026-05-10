@@ -1,10 +1,10 @@
 /**
- * self — operate on your own Sprite from inside the agent.
+ * self — operate on your own Well from inside the agent.
  *
  * Scoped intentionally:
  *   - `talk_to_self` forks a fresh Pi locally (no API needed).
  *   - `info_self` shells out to the on-cell `cell` CLI which talks to the
- *     Sprites HTTP API directly (bypasses the broken local `sprite` CLI).
+ *     Wells HTTP API directly (bypasses the broken local `well` CLI).
  *
  * `checkpoint_self` snapshots only this cell's own filesystem — also via
  * the on-cell `cell` CLI → HTTP API. Lifecycle ops on *other* cells
@@ -14,7 +14,7 @@
 import { Type } from "@sinclair/typebox";
 import { spawn } from "node:child_process";
 
-const AGENT_DIR = "/home/sprite/agent";
+const AGENT_DIR = "~/agent";
 
 type ShellResult = { ok: boolean; exit: number; stdout: string; stderr: string };
 
@@ -84,7 +84,7 @@ export default function (pi: any) {
     name: "info_self",
     label: "Info about self",
     description:
-      "Report your sprite's current state: name, status, egress allowlist, organization. Backed by the on-cell `cell` CLI which talks to the Sprites HTTP API. Use to debug capability or environment issues.",
+      "Report your well's current state: name, status, egress allowlist, organization. Backed by the on-cell `cell` CLI which talks to the Wells HTTP API. Use to debug capability or environment issues.",
     parameters: Type.Object({}),
     async execute(_id: string, _params: any) {
       const r = await runShell("cell", ["info", "self"]);

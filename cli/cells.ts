@@ -10,7 +10,7 @@ import { createHash } from "node:crypto";
 import {
   formatVariant,
   variantHash,
-  eggSpriteName,
+  eggWellName,
   poolKey,
   type Variant,
 } from "./lib/variant-signature";
@@ -24,9 +24,40 @@ const DNA_DIR = join(MOTHER_ROOT, "dna");
 const REGISTRY_DIR = join(homedir(), ".cells");
 const REGISTRY_PATH = join(REGISTRY_DIR, "cells.json");
 const CHANNELS_PATH = join(REGISTRY_DIR, "channels.json");
+const CONFIG_PATH = join(REGISTRY_DIR, "config.json");
 const EGGS_PATH = join(REGISTRY_DIR, "eggs.json");
 const EGGS_LOCK_PATH = join(REGISTRY_DIR, ".eggs.lock");
 const MOTHER_LOCK_PATH = join(REGISTRY_DIR, "mother.lock");
+
+// Cells-side control-panel for the wells substrate. Operator-owned.
+// We tell wells what suffix to dispatch on (welld's WELL_PUBLIC_BASE)
+// and we use that same suffix everywhere we construct a per-well
+// hostname (deploy-cell-worker.sh, tryConnectLocalWelld, etc.). One
+// source of truth on disk so a misalignment is visible.
+type CellsConfig = {
+  /** Host suffix welld dispatches on. <well-name>.<this> resolves to the well's site server. */
+  well_public_base: string;
+};
+const DEFAULT_CONFIG: CellsConfig = {
+  well_public_base: "cells.md",
+};
+async function loadCellsConfig(): Promise<CellsConfig> {
+  if (!existsSync(CONFIG_PATH)) return { ...DEFAULT_CONFIG };
+  try {
+    const j = JSON.parse(await readFile(CONFIG_PATH, "utf-8")) as Partial<CellsConfig>;
+    return { ...DEFAULT_CONFIG, ...j };
+  } catch {
+    return { ...DEFAULT_CONFIG };
+  }
+}
+async function saveCellsConfig(cfg: CellsConfig): Promise<void> {
+  const { mkdir } = await import("node:fs/promises");
+  await mkdir(REGISTRY_DIR, { recursive: true });
+  await writeFile(CONFIG_PATH, JSON.stringify(cfg, null, 2) + "\n");
+}
+async function wellPublicBase(): Promise<string> {
+  return process.env.WELL_PUBLIC_BASE ?? (await loadCellsConfig()).well_public_base;
+}
 
 // Model registry — short name → { provider, modelId }. Anthropic doesn't
 // provide a floating "claude-opus-latest" alias; the major-version-stamped
@@ -76,18 +107,21 @@ function buildDefaultChain(primary: { provider: string; modelId: string; thinkin
 const OPTIONAL_EXTENSIONS = ["memory", "mentality", "wiki", "dream"] as const;
 type OptionalExtension = (typeof OPTIONAL_EXTENSIONS)[number];
 
-// Curated list of npm/git packages a cell can install via `pi install`.
-// Default-checked entries are pre-selected when the user enters the TUI.
+// Curated list of npm/git packages a cell CAN install via `pi install` at
+// birth time. Most common extensions are now pre-loaded onto cell-base
+// during bake, so this list is for things that need per-cell choice.
+// `defaultChecked` is for when this list grows again — none of the
+// current entries are auto-selected since they're already in the image.
 const OPTIONAL_PACKAGES = [
-  { value: "pi-web-access", label: "pi-web-access", hint: "web search · fetch · code search", defaultChecked: true },
+  { value: "pi-web-access", label: "pi-web-access", hint: "web search · fetch · code search (pre-installed)", defaultChecked: false },
 ] as const;
 
 const RESERVED_NAMES = new Set([
   "mother", "keeper",
-  // Names that collide with tmux/sprite plumbing.
-  "tmux", "shell", "agent", "pi", "sprite", "localhost",
+  // Names that collide with tmux/well plumbing.
+  "tmux", "shell", "agent", "pi", "sprite", "well", "localhost",
   // Names that collide with cells subcommands.
-  "create", "birth", "talk", "list", "sleep", "wake",
+  "create", "birth", "talk", "list", "sleep", "stop", "wake",
   "checkpoint", "destroy", "kill", "dream", "tui", "sync", "doctor",
   "schedule-pi-patches", "unschedule-pi-patches",
   "schedule-pulse", "unschedule-pulse",
@@ -106,16 +140,6 @@ const HARNESS_OPTIONS: SelectOption[] = [
   { value: "pi",          label: "pi" },
   { value: "claude-code", label: "claude-code", hint: "(coming soon)", disabled: true },
   { value: "codex",       label: "codex",       hint: "(coming soon)", disabled: true },
-];
-
-// Backend = the substrate the cell lives on. `sprite` is the cloud
-// sprites.dev VM (current default). `well` is a local Lume VM managed
-// by the welld daemon on Pete's Mac — same API contract as sprites,
-// drop-in compatible. New cells default to `well`; sprites stays
-// available for any case that needs it.
-const BACKEND_OPTIONS: SelectOption[] = [
-  { value: "well",   label: "well   (local · low-latency)" },
-  { value: "sprite", label: "sprite (cloud · sprites.dev)" },
 ];
 
 const MODEL_OPTIONS: SelectOption[] = [
@@ -214,11 +238,6 @@ type Cell = {
   // apply-pi-patches.sh. Mirrored here so harden-birth can verify the
   // birth pipeline wrote it correctly into the cell's settings.json.
   modelChain?: string[];
-  // The substrate the cell lives on. `sprite` = cloud sprites.dev VM,
-  // `well` = local welld VM on Pete's Mac. Older entries (no field) default
-  // to `sprite` at read time. Drives backend-specific routing for talk,
-  // destroy, checkpoint, etc.
-  backend?: "sprite" | "well";
 };
 type Registry = { cells: Cell[] };
 
@@ -234,7 +253,7 @@ async function saveRegistry(reg: Registry): Promise<void> {
 
 // ───── eggs.json — pre-warmed cell pool ─────
 //
-// Eggs are sprites with the toolchain installed but no agent identity.
+// Eggs are wells with the toolchain installed but no agent identity.
 // Hatching = claiming an egg, sed-substituting (NAME, MODEL, PROVIDER,
 // THINKING) onto it, registering its site service, and starting pi.
 // Auto-hatch in cmdCreate looks for a warm egg matching the requested
@@ -245,7 +264,7 @@ type EggState = "warm" | "claimed" | "live" | "culling";
 
 type Egg = {
   id: string;                  // 6-hex hash of variant signature
-  sprite_name: string;         // egg-<modeltoken>-<id>
+  well_name: string;         // egg-<modeltoken>-<id>
   variant_signature: string;   // canonical "v1:..." per cli/lib/variant-signature.ts
   state: EggState;
   born_at: string;
@@ -864,7 +883,7 @@ async function cmdTalk(name: string, args: string[]) {
   }
   if (args[0]!.startsWith("-")) {
     console.error(
-      `flag '${args[0]}' isn't supported on cell talk. Use 'cells talk ${name}' for an interactive chat, 'cells talk ${name} "<msg>"' for one-shot, or 'cells tui ${name}' to drop into the sprite shell.`,
+      `flag '${args[0]}' isn't supported on cell talk. Use 'cells talk ${name}' for an interactive chat, 'cells talk ${name} "<msg>"' for one-shot, or 'cells tui ${name}' to drop into the well shell.`,
     );
     process.exit(1);
   }
@@ -877,7 +896,7 @@ async function cmdTui(name: string, extra: string[] = []) {
   await requireCell(name);
   // Open pi's TUI inside the cell, wrapped in tmux so:
   //   - the per-cell status bar (~/.tmux.conf) is visible
-  //   - reattach across sprite hibernate is automatic — same pi process,
+  //   - reattach across well hibernate is automatic — same pi process,
   //     same in-flight conversation, no /resume needed
   //
   // Session-dir + flag passthrough preserved from the bare-pi version:
@@ -893,22 +912,22 @@ async function cmdTui(name: string, extra: string[] = []) {
   //     command on attach and the flags would be a no-op.
   //
   // For shell access (no pi), use `cells shell <name>`.
-  const sessionDir = `/home/sprite/.pi/agent/sessions/cell-${name}/tui`;
+  const sessionDir = `~/.pi/agent/sessions/cell-${name}/tui`;
   const piArgs = ["--session-dir", sessionDir, ...extra]
     .map((a) => `'${a.replace(/'/g, "'\\''")}'`).join(" ");
   const reset = extra.length > 0 ? "tmux kill-session -t tui 2>/dev/null; " : "";
   // Force TERM to a value the cell's terminfo definitely has. Pete's
   // local terminal exports things like xterm-ghostty / xterm-kitty that
-  // sprite VMs don't ship terminfo for, which makes tmux refuse to
+  // well VMs don't ship terminfo for, which makes tmux refuse to
   // start. tmux's own `default-terminal "tmux-256color"` takes over
   // once it's running, so the override only affects the outer shell.
   const remote =
     `export TERM=xterm-256color; ` +
-    `mkdir -p ${sessionDir} && cd /home/sprite/agent && ${reset}` +
-    `exec tmux new-session -A -s tui -c /home/sprite/agent "pi ${piArgs}"`;
+    `mkdir -p ${sessionDir} && cd ~/agent && ${reset}` +
+    `exec tmux new-session -A -s tui -c ~/agent "pi ${piArgs}"`;
   const proc = Bun.spawn(
     [
-      "sprite", "exec", "-s", name, "--tty", "--",
+      "well", "exec", "-s", name, "--tty", "--",
       "bash", "-lc", remote,
     ],
     { stdin: "inherit", stdout: "inherit", stderr: "inherit" },
@@ -938,7 +957,7 @@ async function cmdShell(name: string) {
     return;
   }
   await requireCell(name);
-  // Spawn tmux directly under sprite exec --tty. Bypasses the login-shell
+  // Spawn tmux directly under well exec --tty. Bypasses the login-shell
   // auto-attach shim (which would dump us into pi); inside tmux, the
   // shim's `[ -z "$TMUX" ]` guard is false, so it no-ops on subsequent
   // shell invocations.
@@ -946,14 +965,14 @@ async function cmdShell(name: string) {
   // bash -l inside tmux loads .profile → .bashrc.d (PATH, mf/mft, env).
   // Ctrl+D exits bash, ends the tmux session, drops us back to the Mac.
   // Wrap in bash -c to override TERM. Pete's terminal exports things
-  // like xterm-ghostty that sprite VMs don't ship terminfo for; tmux
+  // like xterm-ghostty that well VMs don't ship terminfo for; tmux
   // refuses to start with "missing or unsuitable terminal". tmux's
   // own default-terminal takes over once it's running.
   const proc = Bun.spawn(
     [
-      "sprite", "exec", "-s", name, "--tty", "--",
+      "well", "exec", "-s", name, "--tty", "--",
       "bash", "-c",
-      `export TERM=xterm-256color; exec tmux new-session -A -s shell -c /home/sprite/agent bash -l`,
+      `export TERM=xterm-256color; exec tmux new-session -A -s shell -c ~/agent bash -l`,
     ],
     { stdin: "inherit", stdout: "inherit", stderr: "inherit" },
   );
@@ -961,13 +980,62 @@ async function cmdShell(name: string) {
 }
 
 async function cmdSleep(name: string) {
+  // `cells sleep` = hibernate the agent (release VM RAM, restore on inbound
+  // traffic). Distinct from `cells stop`, which is an explicit power-off
+  // intended for reset/recovery.
   await requireCell(name);
-  await $`sprite stop -s ${name}`;
+  const wellName = await wellNameForCell(name);
+  let res: Response;
+  try {
+    res = await fetch(
+      `http://127.0.0.1:7878/v1/wells/${encodeURIComponent(wellName)}/hibernate`,
+      {
+        method: "POST",
+        headers: { Authorization: `Bearer ${await wellsToken()}` },
+      },
+    );
+  } catch (e) {
+    if (String(e).includes("ECONNREFUSED")) {
+      throw new Error(`welld unreachable on 127.0.0.1:7878 — start it first`);
+    }
+    throw e;
+  }
+  if (res.ok) {
+    console.log(`✓ ${name} hibernated`);
+    return;
+  }
+  // Idempotency: hibernating an already-stopped well returns 500
+  // `hibernate_failed: Virtual machine not running`. Treat as no-op.
+  const body = await res.text();
+  if (/not running|already stopped/i.test(body)) {
+    console.log(`✓ ${name} already asleep`);
+    return;
+  }
+  // Hibernate-not-supported (older welld) is its own state. Don't silently
+  // fall back to a cold stop — that throws away in-VM state, which is the
+  // exact semantic `cells stop` exists for. Tell the user to make the call.
+  if (res.status === 404) {
+    throw new Error(
+      `welld has no /hibernate endpoint (404). 'cells stop ${name}' will cold-stop the well — that loses in-VM state, so we don't do it implicitly.`,
+    );
+  }
+  throw new Error(`hibernate failed: ${res.status} ${body}`);
+}
+
+async function cmdStop(name: string) {
+  // `cells stop` = explicit VM power-off. Reserved for reset/recovery —
+  // when you want to clear in-VM state, not just release RAM. Use
+  // `cells sleep` for normal pause-the-agent semantics.
+  await requireCell(name);
+  const wellName = await wellNameForCell(name);
+  await $`well stop -s ${wellName}`;
+  console.log(`✓ ${name} stopped (cold). Use 'cells wake ${name}' to bring it back.`);
 }
 
 async function cmdWake(name: string) {
   await requireCell(name);
-  await $`sprite start -s ${name}`;
+  const wellName = await wellNameForCell(name);
+  await $`well start -s ${wellName}`;
 }
 
 // First-line diagnostic for "auth feels broken." See docs/oauth-refresh.md.
@@ -1088,7 +1156,6 @@ async function checkPiPatches(): Promise<{ ok: boolean; detail: string }> {
 // ───── routed through local Pi ─────
 
 type CreateOpts = {
-  backend?: string;
   harness?: string;
   model?: ModelKey;
   thinking?: string;
@@ -1098,23 +1165,23 @@ type CreateOpts = {
   slackChannel?: string;
 };
 
-const BACKEND_VALUES = BACKEND_OPTIONS.map((b) => b.value);
-
-// Build env vars to inject when invoking mother for a given backend.
-// `well` = local welld daemon on :7878 (drop-in for sprites API).
-// `sprite` = cloud sprites.dev (current default; no env override needed).
-// Sprite-tools spawns whatever binary the env points it at via SPRITES_BINARY.
-function backendEnv(backend: string): Record<string, string> {
-  if (backend !== "well") return {};
+// Env vars injected when invoking mother (and any host-side scripts it shells
+// out to). Cells run on local wells (welld daemon on :7878, agent user `well`,
+// home /home/well). The SPRITES_* names are kept as the env-var contract for
+// scripts and mother's tools — they were established when wells was a wells
+// drop-in. Internally, everything points at welld.
+function wellsEnv(): Record<string, string> {
   const tokenPath = join(homedir(), ".wells", "token");
   if (!existsSync(tokenPath)) {
-    console.error(`backend=well requires welld running with ~/.wells/token present`);
+    console.error(`welld is required: ~/.wells/token missing — start welld and retry`);
     process.exit(1);
   }
   return {
-    SPRITES_API_URL: "http://localhost:7878",
-    SPRITES_TOKEN: readFileSync(tokenPath, "utf-8").trim(),
-    SPRITES_BINARY: "well",
+    WELL_API_URL: "http://localhost:7878",
+    WELL_TOKEN: readFileSync(tokenPath, "utf-8").trim(),
+    WELL_BINARY: "well",
+    AGENT_USER: "well",
+    AGENT_HOME: "/home/well",
   };
 }
 
@@ -1124,14 +1191,7 @@ function parseCreateArgs(args: string[]): { name: string; opts: CreateOpts } {
   let name: string | undefined;
   const opts: CreateOpts = {};
   for (const a of args) {
-    if (a.startsWith("--backend=")) {
-      const v = a.slice("--backend=".length);
-      if (!BACKEND_VALUES.includes(v)) {
-        console.error(`unknown backend: ${v}. choose: ${BACKEND_VALUES.join(", ")}`);
-        process.exit(1);
-      }
-      opts.backend = v;
-    } else if (a.startsWith("--harness=")) {
+    if (a.startsWith("--harness=")) {
       opts.harness = a.slice("--harness=".length);
     } else if (a.startsWith("--model=")) {
       const v = a.slice("--model=".length);
@@ -1196,7 +1256,7 @@ function parseCreateArgs(args: string[]): { name: string; opts: CreateOpts } {
   }
   if (!name) {
     console.error(
-      "usage: cells birth <name> [--backend=well|sprite] [--harness=pi] [--model=opus|sonnet|haiku|gpt-5.5|gpt-5.5-pro|deepseek-v4-flash|deepseek-v4-pro] [--thinking=off|minimal|low|medium|high|xhigh|adaptive] [--extensions=memory,...] [--packages=pi-web-access,...]",
+      "usage: cells birth <name> [--harness=pi] [--model=opus|sonnet|haiku|gpt-5.5|gpt-5.5-pro|deepseek-v4-flash|deepseek-v4-pro] [--thinking=off|minimal|low|medium|high|xhigh|adaptive] [--extensions=memory,...] [--packages=pi-web-access,...]",
     );
     process.exit(1);
   }
@@ -1214,7 +1274,6 @@ async function cmdCreate(name: string, opts: CreateOpts) {
   }
 
   const interactive =
-    opts.backend === undefined &&
     opts.harness === undefined &&
     opts.model === undefined &&
     opts.thinking === undefined &&
@@ -1222,7 +1281,6 @@ async function cmdCreate(name: string, opts: CreateOpts) {
     opts.packages === undefined &&
     opts.channels === undefined;
 
-  let backend: string;
   let harness: string;
   let modelKey: ModelKey;
   let thinking: string;
@@ -1237,42 +1295,37 @@ async function cmdCreate(name: string, opts: CreateOpts) {
     // Step machine so the user can ←/⌫ back to a previous prompt mid-flow.
     const answers: (string | string[] | undefined)[] = [];
     let i = 0;
-    while (i < 7) {
+    while (i < 6) {
       const canGoBack = i > 0;
       let result: string | string[] | Back;
       if (i === 0) {
-        result = await selectOne("Backend?", BACKEND_OPTIONS, {
-          initialValue: (answers[0] as string | undefined) ?? "well",
+        result = await selectOne("Harness?", HARNESS_OPTIONS, {
+          initialValue: answers[0] as string | undefined,
         });
       } else if (i === 1) {
-        result = await selectOne("Harness?", HARNESS_OPTIONS, {
+        result = await selectOne("Model?", MODEL_OPTIONS, {
           canGoBack,
           initialValue: answers[1] as string | undefined,
         });
       } else if (i === 2) {
-        result = await selectOne("Model?", MODEL_OPTIONS, {
-          canGoBack,
-          initialValue: answers[2] as string | undefined,
-        });
-      } else if (i === 3) {
         result = await selectMany("Extensions?", EXTENSION_OPTIONS, {
           canGoBack,
-          initialChecked: answers[3] as string[] | undefined,
+          initialChecked: answers[2] as string[] | undefined,
         });
-      } else if (i === 4) {
+      } else if (i === 3) {
         result = await selectMany("Packages?", PACKAGE_OPTIONS, {
           canGoBack,
-          initialChecked: (answers[4] as string[] | undefined) ?? PACKAGE_DEFAULTS,
+          initialChecked: (answers[3] as string[] | undefined) ?? PACKAGE_DEFAULTS,
         });
-      } else if (i === 5) {
-        result = await selectOne("Thinking?", thinkingOptionsFor(answers[2] as ModelKey), {
+      } else if (i === 4) {
+        result = await selectOne("Thinking?", thinkingOptionsFor(answers[1] as ModelKey), {
           canGoBack,
-          initialValue: (answers[5] as string | undefined) ?? defaultThinkingFor(answers[2] as ModelKey),
+          initialValue: (answers[4] as string | undefined) ?? defaultThinkingFor(answers[1] as ModelKey),
         });
       } else {
         result = await selectMany("Channels?", CHANNEL_OPTIONS, {
           canGoBack,
-          initialChecked: answers[6] as string[] | undefined,
+          initialChecked: answers[5] as string[] | undefined,
         });
       }
       if (result === BACK) {
@@ -1285,16 +1338,14 @@ async function cmdCreate(name: string, opts: CreateOpts) {
         i++;
       }
     }
-    backend = answers[0] as string;
-    harness = answers[1] as string;
-    modelKey = answers[2] as ModelKey;
-    extensions = answers[3] as string[];
-    packages = answers[4] as string[];
-    thinking = answers[5] as string;
-    const rawChannels = (answers[6] as string[]).filter((c) => (CHANNEL_VALUES as readonly string[]).includes(c));
+    harness = answers[0] as string;
+    modelKey = answers[1] as ModelKey;
+    extensions = answers[2] as string[];
+    packages = answers[3] as string[];
+    thinking = answers[4] as string;
+    const rawChannels = (answers[5] as string[]).filter((c) => (CHANNEL_VALUES as readonly string[]).includes(c));
     channels = rawChannels as ChannelValue[];
   } else {
-    backend = opts.backend ?? "well";
     harness = opts.harness ?? "pi";
     modelKey = opts.model ?? "opus";
     thinking = opts.thinking ?? defaultThinkingFor(modelKey);
@@ -1327,7 +1378,6 @@ async function cmdCreate(name: string, opts: CreateOpts) {
   const choice = MODEL_IDS[modelKey];
   const chain = buildDefaultChain({ provider: choice.provider, modelId: choice.modelId, thinking });
   const payload = {
-    backend,
     harness,
     provider: choice.provider,
     model: choice.modelId,
@@ -1385,22 +1435,22 @@ async function cmdCreate(name: string, opts: CreateOpts) {
   const { outcome } = await runPiWithOutcome(
     "cell-create",
     [name, JSON.stringify(payload)],
-    backendEnv(backend),
+    wellsEnv(),
   );
   if (!outcome) {
-    console.error("agent did not report outcome — sweeping potential orphan sprite and aborting");
-    await directSpriteDestroy(name);
+    console.error("agent did not report outcome — sweeping potential orphan well and aborting");
+    await directWellDestroy(name);
     process.exit(1);
   }
   if (!outcome.success) {
-    console.error(`birth failed: ${outcome.message} — sweeping potential orphan sprite`);
-    await directSpriteDestroy(name);
+    console.error(`birth failed: ${outcome.message} — sweeping potential orphan well`);
+    await directWellDestroy(name);
     process.exit(1);
   }
   // Mirror the hatch flow: register as "warming", then fire-and-forget
   // the post-birth tail (Slack, email, Worker, vault) so the user can
   // drop into talk immediately. wirePostBirth → markCellAlive flips the
-  // status to "alive" once wiring lands. resolveSpriteHost has retries
+  // status to "alive" once wiring lands. resolveWellHost has retries
   // for the case where talk happens before the Worker is up.
   const reg = await loadRegistry();
   reg.cells.push({
@@ -1408,7 +1458,6 @@ async function cmdCreate(name: string, opts: CreateOpts) {
     created_at: new Date().toISOString(),
     status: "warming",
     modelChain: chain,
-    backend: backend as "sprite" | "well",
   });
   await saveRegistry(reg);
 
@@ -1561,35 +1610,35 @@ async function readSecret(key: string): Promise<string | null> {
   }
 }
 
-// Destroy a sprite directly via the sprite CLI, bypassing the mother
+// Destroy a well directly via the well CLI, bypassing the mother
 // agent. Safety net for when mother dies mid-destroy or mid-birth — the
-// sprite may be live but our mother-driven path has no way to clean it
-// up. Idempotent: 'sprite not found' counts as success.
-async function directSpriteDestroy(name: string): Promise<boolean> {
+// well may be live but our mother-driven path has no way to clean it
+// up. Idempotent: 'well not found' counts as success.
+async function directWellDestroy(name: string): Promise<boolean> {
   try {
-    const proc = Bun.spawn(["sprite", "destroy", name, "--force"], {
+    const proc = Bun.spawn(["well", "destroy", name, "--force"], {
       stdout: "pipe",
       stderr: "pipe",
     });
     const code = await proc.exited;
     if (code === 0) return true;
     const err = await new Response(proc.stderr).text();
-    if (/sprite not found|already destroyed|not found/i.test(err)) return true;
-    console.warn(`! direct sprite destroy '${name}' failed (exit ${code}): ${err.slice(0, 200)}`);
+    if (/well not found|already destroyed|not found/i.test(err)) return true;
+    console.warn(`! direct well destroy '${name}' failed (exit ${code}): ${err.slice(0, 200)}`);
     return false;
   } catch (e) {
-    console.warn(`! direct sprite destroy '${name}' threw: ${e}`);
+    console.warn(`! direct well destroy '${name}' threw: ${e}`);
     return false;
   }
 }
 
 async function cmdDestroyOne(name: string): Promise<boolean> {
-  // Mother's cell-destroy prompt resolves cell-name → sprite-name itself
+  // Mother's cell-destroy prompt resolves cell-name → well-name itself
   // (via the cell_resolve tool, which reads cells.json + eggs.json), so
   // a single mother path works for both slow-birth and hatched cells.
   // We still resolve locally too — purely as a safety net for when
-  // mother dies mid-destroy and we need to call sprite API directly.
-  const spriteName = await spriteNameForCell(name);
+  // mother dies mid-destroy and we need to call well API directly.
+  const wellName = await wellNameForCell(name);
 
   const { outcome } = await runPiWithOutcome("cell-destroy", [name]);
   let destroyOk = outcome?.success === true;
@@ -1599,7 +1648,7 @@ async function cmdDestroyOne(name: string): Promise<boolean> {
     console.warn(`! mother reported destroy failure for '${name}': ${outcome.message} — proceeding with local cleanup`);
   }
   if (!destroyOk) {
-    if (await directSpriteDestroy(spriteName)) destroyOk = true;
+    if (await directWellDestroy(wellName)) destroyOk = true;
   }
 
   // Local cleanup — always runs. Each helper is best-effort with internal
@@ -1614,7 +1663,7 @@ async function cmdDestroyOne(name: string): Promise<boolean> {
   await deleteCellWorker(name);
   await removeVaultEntry(name);
 
-  // If this was a hatched cell, the cell's sprite IS the egg's sprite.
+  // If this was a hatched cell, the cell's well IS the egg's well.
   // It just got destroyed above, so the eggs.json entry is now stale.
   // Remove it so `cells egg list` doesn't show a phantom "live" entry.
   if (killedCell?.hatched_from) {
@@ -1648,7 +1697,7 @@ async function removeVaultEntry(name: string): Promise<void> {
     const reg = await loadRegistry();
     const rows = await Promise.all(
       reg.cells.map(async (c) => {
-        const info = await getSpriteInfo(c.name).catch(() => null);
+        const info = await getWellInfo(c.name).catch(() => null);
         return { name: c.name, status: info?.status ?? "?", lastRunningAt: info?.last_running_at ?? null };
       }),
     );
@@ -1702,9 +1751,9 @@ async function deleteCellWorker(name: string): Promise<void> {
   if (!existsSync(template)) return;
   try {
     const tpl = await readFile(template, "utf-8");
-    // SPRITE_HOST doesn't matter for delete, but the placeholder must be
+    // WELL_HOST doesn't matter for delete, but the placeholder must be
     // substituted or wrangler chokes on the unrendered TOML.
-    const rendered = tpl.replaceAll("{{CELL}}", name).replaceAll("{{SPRITE_HOST}}", "ignored.sprites.app");
+    const rendered = tpl.replaceAll("{{CELL}}", name).replaceAll("{{WELL_HOST}}", "ignored.wells.app");
     const renderedPath = join(REPO_ROOT, "cli/worker/cell", `.wrangler.${name}.toml`);
     await Bun.write(renderedPath, rendered);
     try {
@@ -2065,14 +2114,14 @@ async function updateCellStatusChannels(cell: string): Promise<void> {
   const channelsJson = JSON.stringify(names);
   const remote = `
 set -e
-F=/home/sprite/agent/.pi/status.json
+F=~/agent/.pi/status.json
 mkdir -p "$(dirname "$F")"
 [ -f "$F" ] || echo '{"harness":"pi","channels":[]}' > "$F"
 tmp=$(mktemp)
 jq --argjson ch '${channelsJson.replace(/'/g, "'\\''")}' '.channels = $ch' "$F" > "$tmp" && mv "$tmp" "$F"
 `.trim();
   try {
-    const proc = Bun.spawn(["sprite", "exec", "-s", cell, "--", "bash", "-c", remote], {
+    const proc = Bun.spawn(["well", "exec", "-s", cell, "--", "bash", "-c", remote], {
       stdout: "pipe",
       stderr: "pipe",
     });
@@ -2182,7 +2231,7 @@ async function cmdCheckpoint(name: string) {
 /**
  * Multi-turn streaming conversation with a remote cell over the v2
  * bridge — opens a WebSocket directly to the cell's site server
- * (wss://<sprite-host>/agent), shares the same pi process and session
+ * (wss://<well-host>/agent), shares the same pi process and session
  * file Slack uses, renders pi's RPC events into the terminal as they
  * stream.
  *
@@ -2202,33 +2251,57 @@ async function streamCellBridge(name: string, opts: StreamOpts): Promise<void> {
     console.error("CELLS_PROXY_SECRET missing from ~/.cells/secrets.json");
     process.exit(1);
   }
-  const host = await resolveSpriteHost(name, secret);
-  if (!host) {
-    console.error(`could not resolve sprite host for ${name}`);
-    process.exit(1);
+
+  // Try the local-Mac shortcut first: dial welld directly via 127.0.0.1
+  // with the cell's virtual host. Skips CF, the per-cell Worker, and the
+  // cloudflared tunnel entirely. If welld isn't running or doesn't know
+  // this cell, falls through to the remote (cloud) path.
+  process.stdout.write(`\x1b[2m── connecting to ${name}…\x1b[0m`);
+  let ws: WebSocket | null = await tryConnectLocalWelld(name, secret);
+  let connectedLocally = ws !== null;
+  if (ws) {
+    process.stdout.write("\r\x1b[K");
+    process.stdout.write(`\x1b[2m── connected via local welld\x1b[0m\n`);
+  } else {
+    const host = await resolveWellHost(name, secret);
+    if (!host) {
+      process.stdout.write("\r\x1b[K");
+      console.error(`could not resolve well host for ${name}`);
+      process.exit(1);
+    }
+    process.stdout.write(`\r\x1b[2m── connecting to ${host}…\x1b[0m`);
+    ws = await connectBridgeWS(host, secret).catch((e) => {
+      process.stdout.write("\r\x1b[K");
+      console.error(`✗ ${e instanceof Error ? e.message : String(e)}`);
+      process.exit(1);
+    }) as WebSocket;
   }
 
-  // Sprites hibernate. The first WS attempt against a cold sprite often
-  // stalls (Fly hands the upgrade to a VM that isn't ready yet). Retry
-  // up to 4 times with exponential backoff — typical cold-start
-  // resolves on attempt 2 or 3 within ~30s.
-  process.stdout.write(`\x1b[2m── connecting to ${host}…\x1b[0m`);
-  const ws = await connectBridgeWS(host, secret).catch((e) => {
-    process.stdout.write("\r\x1b[K");
-    console.error(`✗ ${e instanceof Error ? e.message : String(e)}`);
-    process.exit(1);
-  });
-
   // Resolve the cell's bound Slack channel + the Mac user's Slack uid.
-  // When both exist, prompts route through /inbox/append: the DO sees a
-  // synthetic Slack-shaped event, which (a) wakes the DO so it renders
-  // pi's reply into Slack, and (b) embeds the right channel in pi's
-  // prompt prefix so the bridge keeps Slack threading consistent. If
-  // either is missing, fall back to direct WS send (cell still answers
-  // in this terminal, just not in Slack).
+  // When both exist, the prompt has a Slack home — but where it gets
+  // routed depends on whether we're connected locally:
+  //
+  //   - localDrivenSlack: connected locally + Slack bound. Drive pi via
+  //     local WS for lowest Mac latency; mirror prompt + final reply to
+  //     Slack asynchronously (no streaming Slack edits — Slack gets the
+  //     final answer once).
+  //
+  //   - useInboxPath: connected via cloud + Slack bound. Prompts route
+  //     through /inbox/append, the DO drives pi over its own WS and
+  //     does the streaming Slack render. The local WS here is a viewer.
+  //
+  //   - direct: no Slack channel. Prompts go via the WS, no Slack mirror.
   const channel = await resolveBoundChannel(name);
   const slackUserId = channel ? await resolveSlackUserId().catch(() => null) : null;
-  const useInboxPath = !!(channel && slackUserId);
+  const slackBound = !!(channel && slackUserId);
+  // Local-driven Slack path (low-latency Mac → cell, async Slack mirror)
+  // wins when we have local welld; cloud /inbox/append is the fallback.
+  const useLocalDrive = connectedLocally && slackBound;
+  const useInboxPath = !connectedLocally && slackBound;
+  // Per-turn accumulator for the local-drive Slack mirror. Captures
+  // pi's text_delta stream so we can post one final Slack message on
+  // agent_end. Reset at agent_start of each turn.
+  let replyAccum = "";
   let inFlight = false;
   let agentEnded = false;
   let promptOpen = opts.interactive;
@@ -2252,12 +2325,19 @@ async function streamCellBridge(name: string, opts: StreamOpts): Promise<void> {
   const sendPrompt = async (message: string) => {
     inFlight = true;
     activeText = false;
-    if (useInboxPath) {
-      // Mirror the human's voice into the bound channel (bot_message
-      // subtype, filtered by the Slack edge so it doesn't re-route),
-      // then poke the DO via /inbox/append so it drives pi and renders
-      // the reply into Slack. The local WS connection here is purely a
-      // viewer for the same event stream.
+    replyAccum = "";
+    if (useLocalDrive) {
+      // Low-latency local path: mirror prompt to Slack as a bot_message
+      // (bot_message subtype is filtered by the Slack edge so it won't
+      // re-route into the cell), then drive pi directly via local WS.
+      // The agent_end handler posts the accumulated reply to Slack so
+      // the channel still has a record of the turn.
+      await mirrorPromptToSlack(name, message, secret).catch(() => {});
+      ws.send(JSON.stringify({ type: "prompt", message, streamingBehavior: "steer" }));
+    } else if (useInboxPath) {
+      // Cloud-routed Slack: prompt goes through /inbox/append; the DO
+      // drives pi over its own WS and does the streaming Slack render.
+      // Local WS here is purely a viewer for the same event stream.
       await mirrorPromptToSlack(name, message, secret).catch(() => {});
       await fetch(`https://${name}.cells.md/inbox/append`, {
         method: "POST",
@@ -2289,6 +2369,7 @@ async function streamCellBridge(name: string, opts: StreamOpts): Promise<void> {
         if (!activeText) process.stdout.write(`\x1b[1m${name}>\x1b[0m `);
         process.stdout.write(ev.delta);
         activeText = true;
+        if (useLocalDrive) replyAccum += ev.delta;
       } else if (ev?.type === "thinking_start") {
         // Mark "thinking" with a static label, not the streaming text —
         // the body is intentionally hidden so the conversation stays
@@ -2342,6 +2423,19 @@ async function streamCellBridge(name: string, opts: StreamOpts): Promise<void> {
       closeActiveBlock();
       inFlight = false;
       agentEnded = true;
+      // Local-drive Slack mirror — post the accumulated reply as the cell.
+      // Best-effort: failure logs but doesn't block UX, and there's no
+      // streaming retry (the alarm-driven retry path lives in the DO,
+      // which is bypassed here by design).
+      if (useLocalDrive && replyAccum.trim()) {
+        const finalText = replyAccum;
+        const replyChannel = channel!;
+        void fetch("https://slack.cells.md/send", {
+          method: "POST",
+          headers: { "content-type": "application/json", authorization: `Bearer ${secret}` },
+          body: JSON.stringify({ cell: name, text: finalText, channel: replyChannel }),
+        }).catch((e) => console.error(`[mirror] reply post failed: ${String(e).slice(0, 200)}`));
+      }
       if (opts.interactive) showPrompt();
       else { try { ws.close(); } catch {} }
     } else if (event.type === "response" && event.success === false) {
@@ -2411,6 +2505,55 @@ async function streamCellBridge(name: string, opts: StreamOpts): Promise<void> {
   }
 }
 
+// Try the local-Mac shortcut: ws://127.0.0.1:7878/agent with the cell's
+// virtual host in the Host header. Welld dispatches by Host suffix
+// (<well-name>.${WELL_PUBLIC_BASE}) and reverse-proxies to the cell's
+// site server on :8080 inside the well — same path Cloudflared takes
+// remotely, but skipping the cloud round-trip entirely. Returns null
+// (not throws) on any failure so the caller falls through to the cloud
+// path without surprise.
+//
+// IMPORTANT: hatched cells have cell_name != well_name (egg pool wells
+// keep their original `egg-<harness>-<hash>` name). Welld dispatches by
+// well name, so we resolve the well-name first via wellNameForCell.
+async function tryConnectLocalWelld(name: string, secret: string): Promise<WebSocket | null> {
+  // Quick liveness probe — if welld isn't running we shouldn't burn the
+  // WS upgrade timeout to find out.
+  try {
+    const probe = await fetch("http://127.0.0.1:7878/healthz", {
+      signal: AbortSignal.timeout(500),
+    });
+    if (!probe.ok) return null;
+  } catch {
+    return null;
+  }
+  let wellName: string;
+  try {
+    wellName = await wellNameForCell(name);
+  } catch {
+    return null;
+  }
+  const base = await wellPublicBase();
+  const virtualHost = `${wellName}.${base}`;
+  try {
+    const ws = new WebSocket("ws://127.0.0.1:7878/agent", {
+      headers: {
+        host: virtualHost,
+        authorization: `Bearer ${secret}`,
+      },
+    } as any);
+    await new Promise<void>((resolve, reject) => {
+      const t = setTimeout(() => reject(new Error("local-welld timeout")), 4000);
+      ws.addEventListener("open", () => { clearTimeout(t); resolve(); }, { once: true });
+      ws.addEventListener("error", (e: any) => { clearTimeout(t); reject(new Error(String(e?.message ?? e).slice(0, 120))); }, { once: true });
+      ws.addEventListener("close", (e: any) => { clearTimeout(t); reject(new Error(`closed ${e?.code ?? "?"}`)); }, { once: true });
+    });
+    return ws;
+  } catch {
+    return null;
+  }
+}
+
 // Open a WebSocket to wss://<host>/agent with bearer auth, retrying
 // on cold-start stalls. Each attempt waits up to 12s for `open`;
 // retries back off (3s, 6s, 12s) for up to ~30s total.
@@ -2456,10 +2599,10 @@ async function resolveBoundChannel(cellName: string): Promise<string | null> {
   }
 }
 
-// Resolve a cell's sprite host (e.g. "ned-bas32.sprites.app") via the
-// cell worker's /debug endpoint — faster than `sprite info` and uses
+// Resolve a cell's well host (e.g. "ned-bas32.wells.app") via the
+// cell worker's /debug endpoint — faster than `well info` and uses
 // the same bearer secret we already have.
-async function resolveSpriteHost(name: string, secret: string): Promise<string | null> {
+async function resolveWellHost(name: string, secret: string): Promise<string | null> {
   // Retry with backoff — a freshly-deployed CF worker can take 5-15s to
   // become reachable via <name>.cells.md while DNS / the worker route
   // propagates. Without this retry, an auto-hatch or slow-birth that
@@ -2473,8 +2616,8 @@ async function resolveSpriteHost(name: string, secret: string): Promise<string |
         headers: { authorization: `Bearer ${secret}` },
       });
       if (r.ok) {
-        const j = (await r.json()) as { sprite?: string };
-        if (j.sprite) return j.sprite;
+        const j = (await r.json()) as { well?: string };
+        if (j.well) return j.well;
       }
       lastErr = `${r.status} ${r.statusText}`;
     } catch (e) {
@@ -2558,14 +2701,13 @@ async function dreamOne(name: string): Promise<boolean> {
   console.log(`→ dreaming ${name}`);
   const proc = Bun.spawn(
     [
-      "sprite",
-      "exec",
+      "well",      "exec",
       "-s",
       name,
       "--",
       "bash",
       "-lc",
-      'cd /home/sprite/agent && pi -p "Run the dream tool to consolidate your memory."',
+      'cd ~/agent && pi -p "Run the dream tool to consolidate your memory."',
     ],
     {
       stdin: "ignore",
@@ -2796,14 +2938,14 @@ async function refreshExtensionOnCell(cellName: string, extName: string): Promis
   }
 
   // Push the extension dir via tar pipe.
-  const remoteExtDir = `/home/sprite/agent/.pi/extensions/${extName}`;
+  const remoteExtDir = `~/agent/.pi/extensions/${extName}`;
   const tar = Bun.spawn(["tar", "czf", "-", "-C", join(DNA_DIR, ".pi", "extensions"), extName], {
     stdin: "ignore",
     stdout: "pipe",
     stderr: "pipe",
   });
-  const remoteCmd = `mkdir -p /home/sprite/agent/.pi/extensions && rm -rf ${remoteExtDir} && cd /home/sprite/agent/.pi/extensions && tar xzf -`;
-  const recv = Bun.spawn(["sprite", "exec", "-s", cellName, "--", "bash", "-c", remoteCmd], {
+  const remoteCmd = `mkdir -p ~/agent/.pi/extensions && rm -rf ${remoteExtDir} && cd ~/agent/.pi/extensions && tar xzf -`;
+  const recv = Bun.spawn(["well", "exec", "-s", cellName, "--", "bash", "-c", remoteCmd], {
     stdin: tar.stdout,
     stdout: "pipe",
     stderr: "pipe",
@@ -2816,11 +2958,11 @@ async function refreshExtensionOnCell(cellName: string, extName: string): Promis
   }
 
   // Idempotent settings.json update — read JSON, add the extension entry if
-  // missing, write back. No `jq` dep on the sprite (busybox base).
+  // missing, write back. No `jq` dep on the well (busybox base).
   const entry = `.pi/extensions/${extName}/index.ts`;
   const updateScript = `
 set -e
-cd /home/sprite/agent
+cd ~/agent
 node -e '
   const fs = require("fs");
   const p = ".pi/settings.json";
@@ -2835,7 +2977,7 @@ node -e '
   }
 '
 `.trim();
-  const settings = await spriteExecCapture(cellName, updateScript);
+  const settings = await wellExecCapture(cellName, updateScript);
   if (!settings.ok) {
     console.error(`✗ ${cellName}: settings.json update failed — ${settings.stderr.trim()}`);
     return false;
@@ -2853,7 +2995,7 @@ async function removeExtensionOnCell(cellName: string, extName: string): Promise
   const entry = `.pi/extensions/${extName}/index.ts`;
   const script = `
 set -e
-cd /home/sprite/agent
+cd ~/agent
 node -e '
   const fs = require("fs");
   const p = ".pi/settings.json";
@@ -2861,10 +3003,10 @@ node -e '
   s.extensions = (s.extensions || []).filter(x => x !== "${entry}");
   fs.writeFileSync(p, JSON.stringify(s, null, 2) + "\\n");
 '
-rm -rf /home/sprite/agent/.pi/extensions/${extName}
+rm -rf ~/agent/.pi/extensions/${extName}
 echo removed
 `.trim();
-  const r = await spriteExecCapture(cellName, script);
+  const r = await wellExecCapture(cellName, script);
   if (!r.ok) {
     console.error(`✗ ${cellName}: remove failed — ${r.stderr.trim()}`);
     return false;
@@ -2879,7 +3021,7 @@ echo removed
  * v2: pi runs as a child of the site server (proto/mother/dna/site/server.ts).
  * Killing pi is enough — the site server's `pi.exited` handler respawns
  * it after PI_RESPAWN_DELAY_MS (1s) and pi re-reads extensions on boot.
- * No need to restart the sprite service itself.
+ * No need to restart the well service itself.
  */
 async function restartPiOnCell(cellName: string): Promise<boolean> {
   const script = `
@@ -2887,7 +3029,7 @@ pkill -f "pi --mode rpc" 2>/dev/null || true
 sleep 2
 pgrep -f "pi --mode rpc" >/dev/null && echo restarted || { echo "✗ pi not running after kill — site service may be down"; exit 1; }
 `.trim();
-  const r = await spriteExecCapture(cellName, script);
+  const r = await wellExecCapture(cellName, script);
   if (!r.ok) {
     console.error(`✗ ${cellName}: restart failed — ${r.stderr.trim() || r.stdout.trim()}`);
     return false;
@@ -3073,19 +3215,22 @@ async function cmdDream(arg: string) {
 const VAULT_DIR = join(homedir(), "Obsidian", "cells");
 const SECRETS_PATH = join(homedir(), ".cells", "secrets.json");
 
-async function spritesToken(): Promise<string> {
-  if (process.env.SPRITES_TOKEN) return process.env.SPRITES_TOKEN;
-  if (existsSync(SECRETS_PATH)) {
-    const s = JSON.parse(await readFile(SECRETS_PATH, "utf-8"));
-    if (s.SPRITES_TOKEN) return s.SPRITES_TOKEN;
+async function wellsToken(): Promise<string> {
+  // Cells run on welld locally; the bearer token welld writes at first start
+  // is the source of truth. WELL_TOKEN env override is honored mainly for
+  // host-side scripts that already had it injected (e.g. mother's wellsEnv).
+  if (process.env.WELL_TOKEN) return process.env.WELL_TOKEN;
+  const tokenPath = join(homedir(), ".wells", "token");
+  if (existsSync(tokenPath)) {
+    return readFileSync(tokenPath, "utf-8").trim();
   }
-  console.error("SPRITES_TOKEN not set (env or ~/.cells/secrets.json)");
+  console.error("welld token not found at ~/.wells/token — start welld first");
   process.exit(1);
 }
 
 async function api(path: string): Promise<any> {
-  const token = await spritesToken();
-  const base = process.env.SPRITES_API_URL ?? "https://api.sprites.dev";
+  const token = await wellsToken();
+  const base = process.env.WELL_API_URL ?? "http://127.0.0.1:7878";
   const r = await fetch(`${base}${path}`, {
     headers: { Authorization: `Bearer ${token}` },
   });
@@ -3098,7 +3243,7 @@ async function api(path: string): Promise<any> {
   }
 }
 
-type SpriteInfo = {
+type WellInfo = {
   status: string;
   url: string | null;
   created_at: string;
@@ -3106,29 +3251,29 @@ type SpriteInfo = {
   egress: string;
 };
 
-async function getSpriteInfo(nameOrCell: string): Promise<SpriteInfo> {
-  // Accept either a sprite name or a cell name. For hatched cells, the
-  // sprite name is the egg's permanent name (cell name ≠ sprite name);
-  // resolve here so the API call hits the right sprite. Sprite-only
-  // callers pass a name not in the cell registry — spriteNameForCell
+async function getWellInfo(nameOrCell: string): Promise<WellInfo> {
+  // Accept either a well name or a cell name. For hatched cells, the
+  // well name is the egg's permanent name (cell name ≠ well name);
+  // resolve here so the API call hits the right well. Well-only
+  // callers pass a name not in the cell registry — wellNameForCell
   // returns the input unchanged in that case.
-  const name = await spriteNameForCell(nameOrCell);
-  return getSpriteInfoBySpriteName(name);
+  const name = await wellNameForCell(nameOrCell);
+  return getWellInfoByWellName(name);
 }
 
-async function getSpriteInfoBySpriteName(name: string): Promise<SpriteInfo> {
-  const [sprite, policy] = await Promise.all([
-    api(`/v1/sprites/${encodeURIComponent(name)}`),
-    api(`/v1/sprites/${encodeURIComponent(name)}/policy/network`).catch(() => null),
+async function getWellInfoByWellName(name: string): Promise<WellInfo> {
+  const [well, policy] = await Promise.all([
+    api(`/v1/wells/${encodeURIComponent(name)}`),
+    api(`/v1/wells/${encodeURIComponent(name)}/policy/network`).catch(() => null),
   ]);
   const egress = policy?.rules
     ? policy.rules.map((r: any) => `${r.action} ${r.domain}`).join(", ")
     : "(unknown)";
   return {
-    status: sprite.status ?? "?",
-    url: sprite.url ?? null,
-    created_at: sprite.created_at,
-    last_running_at: sprite.last_running_at ?? null,
+    status: well.status ?? "?",
+    url: well.url ?? null,
+    created_at: well.created_at,
+    last_running_at: well.last_running_at ?? null,
     egress,
   };
 }
@@ -3213,22 +3358,36 @@ function renderExtensionMd(extName: string, meta: ExtensionMeta): string {
   return lines.join("\n");
 }
 
-async function spriteExecCapture(name: string, script: string): Promise<{ ok: boolean; stdout: string; stderr: string }> {
-  const proc = Bun.spawn(["sprite", "exec", "-s", name, "--", "bash", "-lc", script], {
-    stdin: "ignore",
-    stdout: "pipe",
-    stderr: "pipe",
-  });
-  const stdout = await new Response(proc.stdout).text();
-  const stderr = await new Response(proc.stderr).text();
-  const code = await proc.exited;
-  return { ok: code === 0, stdout, stderr };
+async function wellExecCapture(name: string, script: string): Promise<{ ok: boolean; stdout: string; stderr: string }> {
+  // Wells's wells (2026-05-09 base) exhibit intermittent SSH resets:
+  // `kex_exchange_identification: read: Connection reset by peer` on
+  // an otherwise-fine well, no auto-sleep, no OOM. Wells team is
+  // investigating. Retry once with a brief backoff on that specific
+  // signature so a single flaky connection doesn't fail the whole bake.
+  const KEX_RESET = /kex_exchange_identification|Connection reset by peer/i;
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const proc = Bun.spawn(["well", "exec", "-s", name, "--", "bash", "-lc", script], {
+      stdin: "ignore",
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    const stdout = await new Response(proc.stdout).text();
+    const stderr = await new Response(proc.stderr).text();
+    const code = await proc.exited;
+    if (code === 0) return { ok: true, stdout, stderr };
+    if (attempt === 0 && KEX_RESET.test(stderr)) {
+      await new Promise((r) => setTimeout(r, 1500));
+      continue;
+    }
+    return { ok: false, stdout, stderr };
+  }
+  return { ok: false, stdout: "", stderr: "wellExecCapture: unreachable" };
 }
 
 async function pullMarkdown(nameOrCell: string, vaultPath: string): Promise<{ persona: string | null }> {
-  // Accept cell name OR sprite name; resolve internally so hatched cells
-  // (cell name ≠ sprite name) sprite_exec hits the right target.
-  const name = await spriteNameForCell(nameOrCell);
+  // Accept cell name OR well name; resolve internally so hatched cells
+  // (cell name ≠ well name) well_exec hits the right target.
+  const name = await wellNameForCell(nameOrCell);
   await mkdir(vaultPath, { recursive: true });
   // Pull the agent's anatomy files at the root (AGENTS.md is the entrypoint;
   // SOUL/IDENTITY/TOOLS/CELLS/CONTACTS/MEMORY/HEARTBEAT are the sharded
@@ -3236,10 +3395,10 @@ async function pullMarkdown(nameOrCell: string, vaultPath: string): Promise<{ pe
   // observability), plus state/ and the .pi/ markdown trees, plus
   // .pi/settings.json so Pete can browse harness config directly in
   // Obsidian. tar emits two streams (md + json) joined by a single find.
-  const findScript = `cd /home/sprite/agent && { find AGENTS.md SOUL.md IDENTITY.md TOOLS.md CELLS.md CONTACTS.md MEMORY.md HEARTBEAT.md state/memory state/wiki .pi/skills .pi/prompts \\( -name '*.md' -o -name 'SKILL.md' \\) -type f 2>/dev/null; [ -f .pi/settings.json ] && echo .pi/settings.json; } | tar czf - -T -`;
+  const findScript = `cd ~/agent && { find AGENTS.md SOUL.md IDENTITY.md TOOLS.md CELLS.md CONTACTS.md MEMORY.md HEARTBEAT.md state/memory state/wiki .pi/skills .pi/prompts \\( -name '*.md' -o -name 'SKILL.md' \\) -type f 2>/dev/null; [ -f .pi/settings.json ] && echo .pi/settings.json; } | tar czf - -T -`;
   // Post-extract we collapse state/memory -> memory and state/wiki -> wiki so
   // the vault stays flat. Pete reads it in Obsidian; one fewer level to click.
-  const send = Bun.spawn(["sprite", "exec", "-s", name, "--", "bash", "-lc", findScript], {
+  const send = Bun.spawn(["well", "exec", "-s", name, "--", "bash", "-lc", findScript], {
     stdin: "ignore",
     stdout: "pipe",
     stderr: "pipe",
@@ -3252,7 +3411,7 @@ async function pullMarkdown(nameOrCell: string, vaultPath: string): Promise<{ pe
   const [sendCode, recvCode] = await Promise.all([send.exited, recv.exited]);
   if (sendCode !== 0) {
     const err = await new Response(send.stderr).text();
-    throw new Error(`sprite exec for ${name} failed: ${err.trim() || `exit ${sendCode}`}`);
+    throw new Error(`well exec for ${name} failed: ${err.trim() || `exit ${sendCode}`}`);
   }
   if (recvCode !== 0) {
     const err = await new Response(recv.stderr).text();
@@ -3308,10 +3467,10 @@ async function restructureVault(vaultPath: string): Promise<{ persona: string | 
 }
 
 async function pullExtensionDocs(nameOrCell: string, vaultPath: string): Promise<Array<{ name: string; meta: ExtensionMeta }>> {
-  // Accept cell name OR sprite name; resolve internally for hatched cells.
-  const name = await spriteNameForCell(nameOrCell);
+  // Accept cell name OR well name; resolve internally for hatched cells.
+  const name = await wellNameForCell(nameOrCell);
   // List extensions, then cat each index.ts.
-  const list = await spriteExecCapture(name, "ls -1 /home/sprite/agent/.pi/extensions/ 2>/dev/null");
+  const list = await wellExecCapture(name, "ls -1 ~/agent/.pi/extensions/ 2>/dev/null");
   if (!list.ok) return [];
   const exts = list.stdout.split("\n").map((s) => s.trim()).filter(Boolean);
   // Mirror the cell layout: synthesized doc lands as .pi/extensions/<name>.md
@@ -3320,7 +3479,7 @@ async function pullExtensionDocs(nameOrCell: string, vaultPath: string): Promise
   await mkdir(extDir, { recursive: true });
   const results: Array<{ name: string; meta: ExtensionMeta }> = [];
   for (const ext of exts) {
-    const cat = await spriteExecCapture(name, `cat /home/sprite/agent/.pi/extensions/${ext}/index.ts 2>/dev/null`);
+    const cat = await wellExecCapture(name, `cat ~/agent/.pi/extensions/${ext}/index.ts 2>/dev/null`);
     if (!cat.ok || !cat.stdout) continue;
     const meta = parseExtensionTs(cat.stdout);
     await writeFile(join(extDir, `${ext}.md`), renderExtensionMd(ext, meta));
@@ -3431,7 +3590,7 @@ async function gatherMemoryContext(memDir: string): Promise<MemoryContext> {
 
 function renderAgents(
   name: string,
-  info: SpriteInfo | null,
+  info: WellInfo | null,
   persona: string | null,
   exts: Array<{ name: string; meta: ExtensionMeta }>,
   skills: string[],
@@ -3714,7 +3873,7 @@ async function syncOneCell(name: string): Promise<{ name: string; status: string
 
   const { persona } = await pullMarkdown(name, vault);
   const exts = await pullExtensionDocs(name, vault);
-  const info = await getSpriteInfo(name).catch((e) => {
+  const info = await getWellInfo(name).catch((e) => {
     console.error(`  warn: api failed for ${name}: ${(e as Error).message}`);
     return null;
   });
@@ -3764,7 +3923,7 @@ async function cmdSync(name?: string) {
       if (c.name === name) rows.push(row);
       else {
         // Cheap: just probe live status without re-pulling files.
-        const info = await getSpriteInfo(c.name).catch(() => null);
+        const info = await getWellInfo(c.name).catch(() => null);
         rows.push({ name: c.name, status: info?.status ?? "?", lastRunningAt: info?.last_running_at ?? null });
       }
     }
@@ -3816,51 +3975,51 @@ async function cmdSync(name?: string) {
 
 // ───── dispatch ─────
 
-// Resolve a cell name to the underlying Sprite name. For slow-birth
-// cells, sprite name == cell name. For hatched cells, the sprite is
-// the egg's permanent sprite (Sprites doesn't support rename) and the
+// Resolve a cell name to the underlying Well name. For slow-birth
+// cells, well name == cell name. For hatched cells, the well is
+// the eggs permanent well (Wells doesn't support rename) and the
 // cell name is just our local alias. Anything that touches the
-// Sprites API for a cell — sprite_exec, sprite_destroy, sprite info,
-// the worker's SPRITE_HOST binding — must go through this helper.
-async function spriteNameForCell(name: string): Promise<string> {
+// Wells API for a cell — well_exec, well_destroy, well info,
+// the worker's WELL_HOST binding — must go through this helper.
+async function wellNameForCell(name: string): Promise<string> {
   const reg = await loadRegistry();
   const cell = reg.cells.find((c) => c.name === name);
   if (!cell || !cell.hatched_from) return name;
   const eggs = await loadEggs();
   const egg = eggs.eggs.find((e) => e.id === cell.hatched_from);
-  return egg?.sprite_name ?? name; // fall back if the egg entry is gone
+  return egg?.well_name ?? name; // fall back if the egg entry is gone
 }
 
 // ───── hatch — claim an egg, sed identity onto it, start pi ─────
 //
 // Hatching is pure determinism on the Mac: no LLM, no mother. Steps:
-// (1) atomic claim, (2) restore pristine checkpoint, (3) sprite_exec
+// (1) atomic claim, (2) restore pristine checkpoint, (3) well_exec
 // the per-cell substitutions, (4) validate settings.json before pi
 // spawns, (5) register site service (pi starts), (6) write registry
 // entry status="warming", (7) async tail for worker+slack+vault.
 // Target: <20s from `hatchEgg` call to "alive" log line.
 
-async function spriteExecOnEgg(spriteName: string, script: string): Promise<{ ok: boolean; stdout: string; stderr: string }> {
-  return spriteExecCapture(spriteName, script);
+async function wellExecOnEgg(wellName: string, script: string): Promise<{ ok: boolean; stdout: string; stderr: string }> {
+  return wellExecCapture(wellName, script);
 }
 
 // Restore the egg's pristine checkpoint. Eggs have exactly one
 // checkpoint at v1 (taken in birth-egg step 9), so always restore v1.
 // If we ever start taking multiple checkpoints per egg we'll need to
 // track the version-id explicitly.
-async function restoreEggPristine(spriteName: string): Promise<void> {
-  const proc = Bun.spawn(["sprite", "restore", "v1", "-s", spriteName], {
+async function restoreEggPristine(wellName: string): Promise<void> {
+  const proc = Bun.spawn(["well", "restore", "v1", "-s", wellName], {
     stdout: "pipe",
     stderr: "pipe",
   });
   const code = await proc.exited;
   if (code !== 0) {
     const err = await new Response(proc.stderr).text();
-    throw new Error(`sprite restore v1 -s ${spriteName} failed (exit ${code}): ${err.slice(0, 300)}`);
+    throw new Error(`well restore v1 -s ${wellName} failed (exit ${code}): ${err.slice(0, 300)}`);
   }
 }
 
-// Sed + jq inside the egg's sprite to bake the cell's identity in.
+// Sed + jq inside the eggs well to bake the cell's identity in.
 // Substitutions:
 //   __NAME__         → cellName  (in DNA + tmux.conf)
 //   __THINKING__     → thinking  (in settings.json)
@@ -3871,7 +4030,7 @@ async function restoreEggPristine(spriteName: string): Promise<void> {
 // already has them on disk; just adds them to the extensions array).
 // Plus: write status.json with the cell's harness + initial channels.
 async function applyHatchSubstitutions(
-  spriteName: string,
+  wellName: string,
   cellName: string,
   thinking: string,
   extensions: string[],
@@ -3897,11 +4056,11 @@ async function applyHatchSubstitutions(
   // status.json content
   const status = JSON.stringify({ harness: "pi", channels: channels.slice() });
 
-  // Single sprite_exec batch — each round trip is ~2-5s of overhead, so
+  // Single well_exec batch — each round trip is ~2-5s of overhead, so
   // we want as few of them as possible. Bash supports multiline heredocs.
   const script = `
 set -euo pipefail
-cd /home/sprite/agent
+cd ~/agent
 
 # 1. Cell name into DNA + package.json
 sed -i 's/__NAME__/${cellName}/g' \\
@@ -3918,7 +4077,7 @@ jq --arg p "${path}" '
 ' .pi/settings.json > /tmp/s.json && mv /tmp/s.json .pi/settings.json`).join('')}
 
 # 4. Per-cell color chip + cell name into tmux.conf
-sed -i "s|__CELL_BG__|${bg}|g; s|__CELL_FG__|${fg}|g; s|__NAME__|${cellName}|g" /home/sprite/.tmux.conf
+sed -i "s|__CELL_BG__|${bg}|g; s|__CELL_FG__|${fg}|g; s|__NAME__|${cellName}|g" ~/.tmux.conf
 
 # 5. status.json
 mkdir -p .pi
@@ -3930,44 +4089,44 @@ STATUS_EOF
 jq . .pi/settings.json > /dev/null
 `;
 
-  const result = await spriteExecOnEgg(spriteName, script);
+  const result = await wellExecOnEgg(wellName, script);
   if (!result.ok) {
     throw new Error(`hatch substitutions failed: ${result.stderr.slice(0, 400)}`);
   }
 }
 
-// Flip the egg sprite's URL auth from "sprite" (default, login-walled)
+// Flip the eggs well URL auth from "well" (default, login-walled)
 // to "public". Without this, external requests to /agent get redirected
 // to the sprites.dev login flow rather than reaching the cell's site
 // server, and the WS upgrade fails. Egg-birth skips step 7 (per design
 // — eggs aren't user-addressable while in the pool); this happens at
 // hatch instead.
-async function flipSpriteUrlPublic(spriteName: string): Promise<void> {
-  const proc = Bun.spawn(["sprite", "url", "update", "--auth", "public", "-s", spriteName], {
+async function flipWellUrlPublic(wellName: string): Promise<void> {
+  const proc = Bun.spawn(["well", "url", "update", "--auth", "public", "-s", wellName], {
     stdout: "pipe",
     stderr: "pipe",
   });
   const code = await proc.exited;
   if (code !== 0) {
     const err = await new Response(proc.stderr).text();
-    throw new Error(`sprite url update --auth public failed for ${spriteName}: ${err.slice(0, 300)}`);
+    throw new Error(`well url update --auth public failed for ${wellName}: ${err.slice(0, 300)}`);
   }
 }
 
 // Wraps scripts/register-site-service.sh — starts pi as a child of the
 // site service. After this returns, pi will (eventually) be on the WS
-// bridge endpoint. Pass cellName + spriteName so server.ts gets the
+// bridge endpoint. Pass cellName + wellName so server.ts gets the
 // user-facing cell name as CELL_NAME (its bridge identity) while the
-// sprites API call targets the actual sprite.
-async function registerCellSiteService(cellName: string, spriteName: string): Promise<void> {
-  const proc = Bun.spawn(["bash", join(REPO_ROOT, "scripts/register-site-service.sh"), cellName, spriteName], {
+// wells API call targets the actual well.
+async function registerCellSiteService(cellName: string, wellName: string): Promise<void> {
+  const proc = Bun.spawn(["bash", join(REPO_ROOT, "scripts/register-site-service.sh"), cellName, wellName], {
     stdout: "pipe",
     stderr: "pipe",
   });
   const code = await proc.exited;
   if (code !== 0) {
     const err = await new Response(proc.stderr).text();
-    throw new Error(`register-site-service.sh ${cellName} ${spriteName} failed (exit ${code}): ${err.slice(0, 300)}`);
+    throw new Error(`register-site-service.sh ${cellName} ${wellName} failed (exit ${code}): ${err.slice(0, 300)}`);
   }
 }
 
@@ -4025,17 +4184,17 @@ async function wirePostBirth(
   }
 
   // CF Worker — required for `<name>.cells.md` routing and for
-  // `cells talk` (resolveSpriteHost depends on the worker existing).
-  // Pass sprite name explicitly so hatched cells (cell name ≠ sprite
-  // name) get the right SPRITE_HOST binding.
-  const spriteName = await spriteNameForCell(name);
+  // `cells talk` (resolveWellHost depends on the worker existing).
+  // Pass well name explicitly so hatched cells (cell name ≠ well
+  // name) get the right WELL_HOST binding.
+  const wellName = await wellNameForCell(name);
   try {
     const script = join(REPO_ROOT, "scripts/deploy-cell-worker.sh");
-    const proc = Bun.spawn(["bash", script, name, spriteName], { stdout: "inherit", stderr: "inherit" });
+    const proc = Bun.spawn(["bash", script, name, wellName], { stdout: "inherit", stderr: "inherit" });
     const code = await proc.exited;
     if (code !== 0) {
       console.error(`✗ worker deploy failed (exit ${code})`);
-      console.error(`  retry: scripts/deploy-cell-worker.sh ${name} ${spriteName}`);
+      console.error(`  retry: scripts/deploy-cell-worker.sh ${name} ${wellName}`);
     } else {
       console.log(`✓ deployed cells-front-${name}`);
     }
@@ -4080,28 +4239,28 @@ async function hatchEgg(
     return { ok: false, reason: `egg ${egg.id} not warm at claim time (raced)` };
   }
 
-  console.log(`hatching egg ${claimed.sprite_name} → ${cellName}...`);
+  console.log(`hatching egg ${claimed.well_name} → ${cellName}...`);
 
   try {
     // Restore pristine checkpoint
-    await restoreEggPristine(claimed.sprite_name);
+    await restoreEggPristine(claimed.well_name);
 
     // Apply substitutions (sed + jq + status.json)
-    await applyHatchSubstitutions(claimed.sprite_name, cellName, thinking, extensions, channels, chain);
+    await applyHatchSubstitutions(claimed.well_name, cellName, thinking, extensions, channels, chain);
 
     // Flip URL auth to public so external WS upgrade requests reach
-    // the cell's site server. Egg-birth left it at the sprite default.
-    await flipSpriteUrlPublic(claimed.sprite_name);
+    // the cell's site server. Egg-birth left it at the well default.
+    await flipWellUrlPublic(claimed.well_name);
 
     // Register site service — pi starts here as the supervised child.
-    // Cell name is what server.ts uses as bridge identity; sprite name
+    // Cell name is what server.ts uses as bridge identity; well name
     // is the API target.
-    await registerCellSiteService(cellName, claimed.sprite_name);
+    await registerCellSiteService(cellName, claimed.well_name);
 
     // Give pi 6s to come up before declaring alive. Site service start
     // (~2-4s) + bun + pi --mode rpc startup (~3-5s) = ~10s total. We
     // sleep ~6s here so the user's first cells talk usually succeeds
-    // on the first WS attempt; resolveSpriteHost's retry-with-backoff
+    // on the first WS attempt; resolveWellHost's retry-with-backoff
     // covers the rest.
     await new Promise((r) => setTimeout(r, 6000));
 
@@ -4247,31 +4406,31 @@ function parseEggCreateArgs(args: string[]): { variant: Variant; payload: object
 async function cmdEggCreate(args: string[]) {
   const { variant, payload } = parseEggCreateArgs(args);
   const sig = poolKey(variant);
-  const spriteName = eggSpriteName(variant);
+  const wellName = eggWellName(variant);
   const id = variantHash(variant);
 
   // One egg per pool key in v1. Multiple eggs of the same variant is a
   // Phase 3 (pool maintenance) thing — we'd need a counter suffix in
-  // sprite names to avoid collisions.
+  // well names to avoid collisions.
   const existing = await loadEggs();
   const dup = existing.eggs.find((e) => e.variant_signature === sig);
   if (dup) {
-    console.error(`egg with this variant already exists: ${dup.id} (sprite: ${dup.sprite_name})`);
+    console.error(`egg with this variant already exists: ${dup.id} (well: )`);
     console.error(`use 'cells egg list' to inspect; cull it first if you want to re-bake.`);
     process.exit(1);
   }
 
-  console.log(`birthing egg ${spriteName} (variant: ${sig})`);
+  console.log(`birthing egg ${wellName} (variant: ${sig})`);
 
-  const { outcome } = await runPiWithOutcome("egg-birth", [spriteName, JSON.stringify(payload)]);
+  const { outcome } = await runPiWithOutcome("egg-birth", [wellName, JSON.stringify(payload)]);
   if (!outcome) {
-    console.error("agent did not report outcome — sweeping potential orphan sprite and aborting");
-    await directSpriteDestroy(spriteName);
+    console.error("agent did not report outcome — sweeping potential orphan well and aborting");
+    await directWellDestroy(wellName);
     process.exit(1);
   }
   if (!outcome.success) {
-    console.error(`egg birth failed: ${outcome.message} — sweeping potential orphan sprite`);
-    await directSpriteDestroy(spriteName);
+    console.error(`egg birth failed: ${outcome.message} — sweeping potential orphan well`);
+    await directWellDestroy(wellName);
     process.exit(1);
   }
 
@@ -4281,7 +4440,7 @@ async function cmdEggCreate(args: string[]) {
     const file = await loadEggs();
     file.eggs.push({
       id,
-      sprite_name: spriteName,
+      well_name: wellName,
       variant_signature: sig,
       state: "warm",
       born_at: now.toISOString(),
@@ -4292,7 +4451,7 @@ async function cmdEggCreate(args: string[]) {
     await saveEggs(file);
   });
 
-  console.log(`✓ egg ${id} (${spriteName}) registered as warm`);
+  console.log(`✓ egg ${id} (${wellName}) registered as warm`);
 }
 
 async function cmdEggList() {
@@ -4323,15 +4482,15 @@ async function cmdEggCull(eggId: string) {
     process.exit(1);
   }
 
-  // Cull is direct-sprite-destroy — no mother in the loop. Eggs have no
+  // Cull is direct-well-destroy — no mother in the loop. Eggs have no
   // CF worker, no Slack channel, no vault dir, no pulse state — there's
-  // nothing for mother to orchestrate. directSpriteDestroy is idempotent
+  // nothing for mother to orchestrate. directWellDestroy is idempotent
   // (404 = success).
-  console.log(`culling egg ${egg.sprite_name} (id: ${egg.id})`);
-  const ok = await directSpriteDestroy(egg.sprite_name);
+  console.log(`culling egg ${egg.well_name} (id: ${egg.id})`);
+  const ok = await directWellDestroy(egg.well_name);
 
-  // Always remove the eggs.json entry — even if sprite destroy failed,
-  // the entry is stale and Pete can manually `sprite destroy` later.
+  // Always remove the eggs.json entry — even if well destroy failed,
+  // the entry is stale and Pete can manually `well destroy` later.
   await withEggLock(async () => {
     const f = await loadEggs();
     f.eggs = f.eggs.filter((e) => e.id !== eggId);
@@ -4341,7 +4500,406 @@ async function cmdEggCull(eggId: string) {
   if (ok) {
     console.log(`✓ egg ${eggId} culled and removed from registry`);
   } else {
-    console.warn(`! egg ${eggId} removed from registry, but sprite destroy was uncertain — verify with 'sprite list'`);
+    console.warn(`! egg ${eggId} removed from registry, but well destroy was uncertain — verify with 'well list'`);
+  }
+}
+
+// ───── bake — produce a forkable cell-base image ─────
+//
+// `cells bake [--name=cell-base]` spins up a fresh well, runs the full
+// cell provision (bun, pi, terminal toolkit, DNA push, pi-ai patches,
+// bashrc.d shims, login shim), rinses identity, stops the well, and
+// `well image save`s the disk as a reusable image. Birth then forks from
+// the saved image via `well create --from-image=<name>` — APFS clonefile
+// is sub-millisecond regardless of size, so per-cell birth shrinks from
+// ~5min to ~15s.
+//
+// Re-run when DNA or the toolchain materially changes (e.g. pi-ai bump,
+// new extension default, new helper script).
+
+type BakeOpts = {
+  name?: string;
+  sourceName?: string;
+  keepSource?: boolean;
+  force?: boolean;
+  // Verify defaults true. `--no-verify` to skip the post-save fork test.
+  // Verify forks a temp well from the new image, waits for DHCP + SSH,
+  // and destroys it — catches broken images before birth fails on them.
+  noVerify?: boolean;
+};
+
+function parseBakeArgs(args: string[]): BakeOpts {
+  const opts: BakeOpts = {};
+  for (const a of args) {
+    if (a.startsWith("--name=")) opts.name = a.slice("--name=".length);
+    else if (a.startsWith("--source=")) opts.sourceName = a.slice("--source=".length);
+    else if (a === "--keep-source") opts.keepSource = true;
+    else if (a === "--force") opts.force = true;
+    else if (a === "--no-verify") opts.noVerify = true;
+    else {
+      console.error(`unknown flag: ${a}`);
+      console.error("usage: cells bake [--name=cell-base] [--source=<temp-well>] [--keep-source] [--force] [--no-verify]");
+      process.exit(1);
+    }
+  }
+  return opts;
+}
+
+async function cmdBake(opts: BakeOpts) {
+  const imageName = opts.name ?? "cell-base";
+  const sourceName = opts.sourceName ?? `bake-${Math.floor(Date.now() / 1000)}`;
+
+  console.log(`baking image '${imageName}' via temp well '${sourceName}'`);
+
+  // Pre-flight: welld up + image conflict
+  await api("/healthz");
+  const existing = await api("/v1/wells/images").catch(() => null);
+  const conflict = existing?.images?.find?.((i: any) => i.name === imageName);
+  if (conflict && !opts.force) {
+    console.error(`image '${imageName}' already exists. Pass --force to overwrite.`);
+    process.exit(1);
+  }
+
+  // 1. Create the temp well from the ubuntu base. Wells team's
+  //    ubuntu-25.10-base (2026-05-09 onward) ships with bun, node, npm,
+  //    pi, pi-web-access, and the apt baseline (tmux/micro/fzf/rg/bat)
+  //    pre-installed — so bake's job collapsed to "push cells-specific
+  //    DNA + apply patches + save." Default 1GB memory is fine since
+  //    we no longer run installs.
+  console.log(`→ create well ${sourceName} (from ubuntu base)`);
+  const create = Bun.spawn(["well", "create", sourceName], {
+    stdout: "inherit", stderr: "inherit",
+  });
+  if (await create.exited !== 0) {
+    console.error(`well create failed`);
+    process.exit(1);
+  }
+
+  let imageWasSaved = false;
+  try {
+    // 2. Wait for first-boot identity injection to complete
+    console.log(`→ wait for well-firstboot done`);
+    await waitForCloudInit(sourceName);
+
+    // 3. Push DNA — cells-specific package.json, .pi/, scripts/, site/, etc.
+    console.log(`→ push DNA → ~/agent`);
+    await pushLocalDirToWell(sourceName, join(REPO_ROOT, "proto/mother/dna"), "~/agent");
+
+    // 3b. Write the per-cell tmux config template (placeholders for cell
+    //     name + bg/fg color get filled in at birth time, step 3b of the
+    //     mother skill). The template lives in the cells repo so we don't
+    //     ship it via DNA — DNA is the agent's data, this is its terminal.
+    console.log(`→ write ~/.tmux.conf template`);
+    const tmuxConf = await readFile(join(REPO_ROOT, "scripts/cell-tmux.conf"), "utf-8");
+    const writeTmux = await wellExecCapture(
+      sourceName,
+      `cat > ~/.tmux.conf <<'__TMUX_EOF__'\n${tmuxConf}\n__TMUX_EOF__`,
+    );
+    if (!writeTmux.ok) {
+      throw new Error(`write tmux conf failed: ${writeTmux.stderr.slice(0, 200)}`);
+    }
+
+    // 4. Patch the pre-installed pi (anthropic baseUrl → proxy.cells.md,
+    //    codex extractAccountId neutralized, adaptive thinking unclamped).
+    //    Wells's base installs pi via `npm install -g`, so its source
+    //    lives at /usr/lib/node_modules/@mariozechner/pi-coding-agent —
+    //    root-owned. Run the patch script with sudo so sed -i works there.
+    console.log(`→ apply pi patches (sudo, against in-base global pi)`);
+    const patch = await wellExecCapture(
+      sourceName,
+      `sudo bash ~/agent/scripts/apply-pi-patches.sh`,
+    );
+    if (!patch.ok) {
+      throw new Error(`apply-pi-patches failed: ${patch.stderr.slice(0, 400) || patch.stdout.slice(0, 400)}`);
+    }
+
+    // 5. Static bashrc.d shims (env propagation; no secrets in image)
+    console.log(`→ write ~/.bashrc.d/ env shims`);
+    await bakeWriteBashrcd(sourceName);
+
+    // 6. Login shim (~/.profile sources ~/.bashrc.d)
+    console.log(`→ install login shim`);
+    await bakeWriteLoginShim(sourceName);
+
+    // 7. Make ~/agent/bin/cells executable and link onto the user PATH.
+    //    (Was previously bundled into bakeRunBunInstall; broken out so
+    //    skipping bun install doesn't lose this step.)
+    const linkRes = await wellExecCapture(
+      sourceName,
+      `chmod +x ~/agent/bin/cells && mkdir -p ~/.local/bin && ln -sf ~/agent/bin/cells ~/.local/bin/cells`,
+    );
+    if (!linkRes.ok) {
+      throw new Error(`cells bin link failed: ${linkRes.stderr.slice(0, 200) || linkRes.stdout.slice(0, 200)}`);
+    }
+    // Identity rinse runs server-side now via POST /v1/wells/images
+    // {validate:true} — wells team's 335c86b ships rinseGuest +
+    // shutdownGuest. Wipes machine-id, /etc/.well-ready, network state,
+    // host SSH keys, and authorized_keys before clonefile. Cells doesn't
+    // need a manual `rm /etc/.well-ready` anymore.
+
+    // 8. Stop the source well, then snapshot it. Wells team retired the
+    //    SSH-side rinse (the old `clean:true` flag); identity reset on fork
+    //    is now handled by cloud-init's instance-id detection re-running
+    //    runcmd on the cloned VM. POST /v1/wells/images requires the source
+    //    to be stopped (409 well_running otherwise) — clonefile of a hot
+    //    disk would tear.
+    if (conflict && opts.force) {
+      console.log(`→ delete existing image '${imageName}' (--force)`);
+      const del = await fetch(`http://127.0.0.1:7878/v1/wells/images/${encodeURIComponent(imageName)}`, {
+        method: "DELETE",
+        headers: { Authorization: `Bearer ${await wellsToken()}` },
+      });
+      if (!del.ok && del.status !== 404) {
+        throw new Error(`image delete failed: ${del.status} ${await del.text()}`);
+      }
+    }
+    // POST /v1/wells/images {validate:true} (wells 335c86b) does the
+    // rinse + SSH-shutdown + wait-for-disk-release + clonefile in one
+    // server-side step. We don't need a separate /stop call anymore;
+    // welld handles the lifecycle internally and only returns once the
+    // image is fork-ready.
+    console.log(`→ save image '${imageName}' (with validate=true rinse)`);
+    const saveRes = await fetch(`http://127.0.0.1:7878/v1/wells/images`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${await wellsToken()}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ name: imageName, from_well: sourceName, validate: true }),
+    });
+    if (!saveRes.ok) {
+      throw new Error(`image save failed: ${saveRes.status} ${await saveRes.text()}`);
+    }
+    imageWasSaved = true;
+
+    const meta = await saveRes.json().catch(() => null);
+    console.log(`✓ image '${imageName}' saved` + (meta?.size_bytes ? ` (${Math.round(meta.size_bytes / 1024 / 1024)} MB)` : ""));
+  } finally {
+    if (!opts.keepSource) {
+      console.log(`→ destroying temp well ${sourceName}`);
+      await directWellDestroy(sourceName);
+    } else {
+      console.log(`(keeping temp well ${sourceName} per --keep-source)`);
+    }
+  }
+
+  // Verify the freshly-saved image actually forks: spin up a temp well from
+  // it, require DHCP + SSH, then destroy. Catches images whose internal
+  // state breaks fork-time identity reset (cloud-init runcmd missing,
+  // stale machine-id, etc.) before they break a real birth.
+  if (imageWasSaved && !opts.noVerify) {
+    const probeName = `verify-${Math.floor(Date.now() / 1000)}`;
+    console.log(`→ verify: fork '${probeName}' from '${imageName}'`);
+    let verifyOk = false;
+    try {
+      const createRes = await fetch(`http://127.0.0.1:7878/v1/wells`, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${await wellsToken()}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ name: probeName, from_image: imageName }),
+      });
+      if (!createRes.ok) {
+        throw new Error(`verify fork failed at create: ${createRes.status} ${await createRes.text()}`);
+      }
+      // well create returns once DHCP + SSH are confirmed (per welld
+      // semantics — see "create: ssh ready" in welld.log). If we got 200,
+      // the substrate is healthy. Belt-and-suspenders: poll status briefly.
+      let running = false;
+      for (let i = 0; i < 10; i++) {
+        const info = await fetch(`http://127.0.0.1:7878/v1/wells/${encodeURIComponent(probeName)}`, {
+          headers: { Authorization: `Bearer ${await wellsToken()}` },
+        });
+        if (info.ok) {
+          const j: any = await info.json().catch(() => ({}));
+          if (j?.status === "running" && j?.ip) { running = true; break; }
+        }
+        await new Promise((r) => setTimeout(r, 500));
+      }
+      if (!running) throw new Error(`verify fork '${probeName}' never reached running+ip status`);
+      console.log(`✓ verify: '${imageName}' forks cleanly`);
+      verifyOk = true;
+    } catch (e) {
+      console.error(`✗ verify failed: ${e instanceof Error ? e.message : String(e)}`);
+      console.error(`  image '${imageName}' is saved but unverified — births from it may fail.`);
+      console.error(`  Inspect with 'well image info ${imageName}' or re-bake.`);
+    } finally {
+      console.log(`→ destroying verify well ${probeName}`);
+      await directWellDestroy(probeName);
+    }
+    if (!verifyOk) process.exit(1);
+  }
+
+  if (!imageWasSaved) {
+    process.exit(1);
+  }
+}
+
+async function waitForCloudInit(name: string): Promise<void> {
+  // Wells switched from cloud-init to well-firstboot.service (2026-05-09):
+  //   /etc/.well-ready exists once well-firstboot has injected identity
+  //   (hostname, machine-id, ssh host keys, well user, authorized_keys)
+  // /var/lib/cloud/instance/boot-finished isn't written by the new path.
+  // We still confirm authorized_keys to catch a mid-boot race where the
+  // marker landed before SSH key injection completed (defensive).
+  const deadlineMs = Date.now() + 5 * 60 * 1000;
+  let lastErr = "";
+  while (Date.now() < deadlineMs) {
+    const r = await wellExecCapture(
+      name,
+      "test -f /etc/.well-ready && test -s /home/well/.ssh/authorized_keys && echo ready || echo not-ready",
+    ).catch((e) => ({ ok: false, stdout: "", stderr: String(e) }));
+    if (r.ok && r.stdout.trim() === "ready") {
+      return;
+    }
+    lastErr = r.stderr || r.stdout;
+    await new Promise((res) => setTimeout(res, 3000));
+  }
+  throw new Error(`well-firstboot did not finish within 5min on '${name}' (last: ${lastErr.slice(0, 200)})`);
+}
+
+async function bakeInstallSystemTools(name: string): Promise<void> {
+  // Bun + Node + gh tarball install. apt baseline goes through the host
+  // script (handles dpkg locks + retries). Tmux config copied from the
+  // in-repo template.
+  //
+  // Node is required for pi (#!/usr/bin/env node shebang in pi's launcher).
+  // We install via the official tarball into /usr/local so node + npm land
+  // on the default system PATH — works in well_exec without any shell init.
+  const installScript = `set -euo pipefail
+
+# Bun (for the agent's own bun install + pi-ai's package.json scripts)
+curl -fsSL https://bun.sh/install | bash
+
+# Node 22 LTS — pi needs node>=20.6 per its package.json engines field.
+# Tarball into /usr/local so node + npm sit on default PATH.
+NODE_VERSION=v22.11.0
+curl -fsSL "https://nodejs.org/dist/\${NODE_VERSION}/node-\${NODE_VERSION}-linux-arm64.tar.xz" \\
+  | sudo tar -xJ -C /usr/local --strip-components=1
+
+# gh CLI (matches arm64 — wells run on Apple Silicon Virtualization.framework)
+GH_VERSION=2.62.0
+curl -fsSL "https://github.com/cli/cli/releases/download/v\${GH_VERSION}/gh_\${GH_VERSION}_linux_arm64.tar.gz" \\
+  | sudo tar -xz -C /usr/local --strip-components=1 \\
+    "gh_\${GH_VERSION}_linux_arm64/bin/gh"
+
+mkdir -p ~/.local/bin
+ln -sf /usr/bin/batcat ~/.local/bin/bat 2>/dev/null || true`;
+  const r = await wellExecCapture(name, installScript);
+  if (!r.ok) {
+    throw new Error(`install bun/gh failed: ${r.stderr.slice(0, 400) || r.stdout.slice(0, 400)}`);
+  }
+
+  const apt = Bun.spawn(
+    ["bash", join(REPO_ROOT, "scripts/apt-install-on-cell.sh"), name, "tmux", "micro", "fzf", "ripgrep", "bat"],
+    { stdout: "inherit", stderr: "inherit" },
+  );
+  if (await apt.exited !== 0) {
+    throw new Error(`apt-install-on-cell failed`);
+  }
+
+  const tmuxConf = await readFile(join(REPO_ROOT, "scripts/cell-tmux.conf"), "utf-8");
+  const writeConf = await wellExecCapture(
+    name,
+    `cat > ~/.tmux.conf <<'__TMUX_EOF__'\n${tmuxConf}\n__TMUX_EOF__`,
+  );
+  if (!writeConf.ok) {
+    throw new Error(`write tmux conf failed: ${writeConf.stderr}`);
+  }
+}
+
+async function pushLocalDirToWell(name: string, localPath: string, remotePath: string): Promise<void> {
+  const tar = Bun.spawn(["tar", "czf", "-", "-C", localPath, "."], {
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  const proc = Bun.spawn(
+    ["well", "exec", "-s", name, "--", "bash", "-c",
+      `mkdir -p ${remotePath} && cd ${remotePath} && tar xzf -`],
+    { stdin: tar.stdout, stdout: "pipe", stderr: "pipe" },
+  );
+  const code = await proc.exited;
+  if (code !== 0) {
+    const err = await new Response(proc.stderr).text();
+    throw new Error(`push ${localPath} → ${name}:${remotePath} failed: ${err.slice(0, 300)}`);
+  }
+}
+
+async function bakeRunBunInstall(name: string): Promise<void> {
+  // pi is installed via npm -g (sudo) so its launcher lands at
+  // /usr/local/bin/pi — on the default system PATH for every shell,
+  // including non-interactive well_exec sessions. Bun's -g install
+  // landed pi in ~/.bun/bin which isn't on PATH unless the user
+  // sources their shell init, and that doesn't happen in well_exec.
+  //
+  // We also pre-install pi-web-access here (the only optional package
+  // in OPTIONAL_PACKAGES today) so birth's step 3e is a no-op for
+  // the default cell — no per-cell npm install round-trip needed.
+  const r = await wellExecCapture(name, `set -euo pipefail
+export PATH="$HOME/.bun/bin:/usr/local/bin:$PATH"
+cd ~/agent
+bun install --frozen-lockfile
+sudo npm install -g @mariozechner/pi-coding-agent@latest
+# Sanity-check: pi must be runnable from a non-interactive shell.
+which pi >/dev/null && pi --version
+# Pre-load common pi extension into the image (default-checked in the CLI).
+pi install -l npm:pi-web-access
+chmod +x ~/agent/bin/cells
+ln -sf ~/agent/bin/cells ~/.local/bin/cells`);
+  if (!r.ok) {
+    throw new Error(`bun install failed: ${r.stderr.slice(0, 400) || r.stdout.slice(0, 400)}`);
+  }
+}
+
+async function bakeWriteBashrcd(name: string): Promise<void> {
+  // The image stays secret-free. CELLS_PROXY_SECRET is injected at
+  // birth time via `well create --env CELLS_PROXY_SECRET=…`, which
+  // welld writes to /etc/environment (PAM auto-loads on every shell).
+  // These shims re-export under the names pi-ai's auth dispatch + the
+  // codex-proxy extension expect.
+  const r = await wellExecCapture(name, `set -euo pipefail
+mkdir -p ~/.bashrc.d
+
+cat > ~/.bashrc.d/anthropic_proxy <<'EOF'
+# CELLS_PROXY_SECRET is set by /etc/environment at boot (cloud-init --env).
+# Re-export under the names pi-ai's auth dispatch looks for.
+if [ -n "\${CELLS_PROXY_SECRET:-}" ]; then
+  export ANTHROPIC_OAUTH_TOKEN="\$CELLS_PROXY_SECRET"
+  export ANTHROPIC_AUTH_TOKEN="\$CELLS_PROXY_SECRET"
+  unset ANTHROPIC_API_KEY
+fi
+EOF
+chmod 600 ~/.bashrc.d/anthropic_proxy
+
+cat > ~/.bashrc.d/codex_proxy <<'EOF'
+# CELLS_PROXY_SECRET via /etc/environment. Codex-proxy extension reads
+# OPENAI_CODEX_API_KEY at pi startup.
+if [ -n "\${CELLS_PROXY_SECRET:-}" ]; then
+  export OPENAI_CODEX_API_KEY="\$CELLS_PROXY_SECRET"
+fi
+EOF
+chmod 600 ~/.bashrc.d/codex_proxy
+
+cat > ~/.bashrc.d/bun <<'EOF'
+export PATH="\$HOME/.bun/bin:\$HOME/.local/bin:\$PATH"
+EOF
+chmod 644 ~/.bashrc.d/bun`);
+  if (!r.ok) {
+    throw new Error(`write bashrc.d shims failed: ${r.stderr.slice(0, 400)}`);
+  }
+}
+
+async function bakeWriteLoginShim(name: string): Promise<void> {
+  const r = await wellExecCapture(name, `set -euo pipefail
+grep -q bashrc.d ~/.profile 2>/dev/null || cat >> ~/.profile <<'EOF'
+
+# Source ~/.bashrc.d/* on shell start (env shims for pi-ai/codex routing).
+if [ -d "\$HOME/.bashrc.d" ]; then
+  for f in "\$HOME/.bashrc.d/"*; do [ -r "\$f" ] && . "\$f"; done
+fi
+EOF`);
+  if (!r.ok) {
+    throw new Error(`write login shim failed: ${r.stderr.slice(0, 400)}`);
   }
 }
 
@@ -4362,6 +4920,7 @@ switch (sub) {
   }
   case "list":       await cmdList(); break;
   case "sleep":      await cmdSleep(needName(rest, "sleep")); break;
+  case "stop":       await cmdStop(needName(rest, "stop")); break;
   case "wake":       await cmdWake(needName(rest, "wake")); break;
   case "checkpoint": await cmdCheckpoint(needName(rest, "checkpoint")); break;
   case "kill":
@@ -4381,10 +4940,12 @@ switch (sub) {
   case "shell":              await cmdShell(needName(rest, "shell")); break;
   case "see":                await cmdSee(needName(rest, "see")); break;
   case "egg":                await cmdEgg(rest); break;
+  case "bake":               await cmdBake(parseBakeArgs(rest)); break;
   default:
     console.log("usage:");
     console.log("  cells pi                    open the mother Pi TUI (alias: cells talk mother)");
-    console.log("  cells birth <name> [flags]  provision a new cell on a Sprite (alias: create)");
+    console.log("  cells bake [--name=cell-base] [--force]  bake the cell-base image (one-time, ~5min)");
+    console.log("  cells birth <name> [flags]  provision a new cell in a local well (alias: create)");
     console.log("                              flags: --harness=pi --model=opus|sonnet|haiku|gpt-5.5|gpt-5.5-pro|deepseek-v4-flash|deepseek-v4-pro");
     console.log("                                     --thinking=off|minimal|low|medium|high|xhigh|adaptive");
     console.log("                                     --extensions=memory,mentality,wiki,dream");
@@ -4395,10 +4956,11 @@ switch (sub) {
     console.log("  cells talk <name> [msg]     interactive bridge chat (no msg) or one-shot (with msg).");
     console.log("                              Reply streams in this terminal AND mirrors to Slack — same session as Slack.");
     console.log("                              'mother' is special: accepts any pi flag (-c, -r, --session=<id>, -p ...).");
-    console.log("  cells tui <name>            drop into a sprite-side tmux shell (debug, file poking, etc).");
+    console.log("  cells tui <name>            drop into a well-side tmux shell (debug, file poking, etc).");
     console.log("  cells list                  list known cells");
-    console.log("  cells sleep <name>          force-hibernate a Sprite");
-    console.log("  cells wake <name>           force-wake a Sprite");
+    console.log("  cells sleep <name>          hibernate a cell — releases VM RAM, wakes on inbound traffic");
+    console.log("  cells stop <name>           cold-stop a cell — explicit reset/recovery (use sleep for normal pause)");
+    console.log("  cells wake <name>           wake a hibernated or stopped cell");
     console.log("  cells checkpoint <name>     snapshot a cell's filesystem");
     console.log("  cells dream <name|mother|--all>  run dream consolidation on a cell, the mother, or all");
     console.log("  cells sync [name]           pull cell markdown into ~/Obsidian/cells/ (default: all + mother)");

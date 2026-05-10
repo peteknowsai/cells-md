@@ -5,7 +5,7 @@
  * content to https://pulse.cells.md/heartbeat-changed. Pulse drains its
  * inbox each tick, re-interprets the prose schedule (LLM call), and updates
  * its cached cron table. Without this, pulse would have to poll every cell
- * over sprite_exec — wasteful and warms otherwise-hibernating sprites.
+ * over well_exec — wasteful and warms otherwise-hibernating wells.
  *
  * Best-effort. On HTTP failure (subscriptions proxy down, transient network), log
  * and move on — pulse's bootstrap walk catches stragglers next time it
@@ -15,7 +15,7 @@
  * ~/.bashrc.d/site_proxy.
  *
  * Cell name: this cell's hostname, which by convention matches the cell
- * name in the registry (sprites.dev sprite name == cell name == agent name).
+ * name in the registry (sprites.dev well name == cell name == agent name).
  */
 
 import * as fs from "node:fs";
@@ -27,7 +27,7 @@ const DEBOUNCE_MS = 2000;
 const HEARTBEAT_FILENAME = "HEARTBEAT.md";
 
 function readSelfName(): string {
-  // hostname matches the cell name by convention (set at sprite-create).
+  // hostname matches the cell name by convention (set at well-create).
   // os.hostname() works under Node and Bun. Fall back to env, then "unknown".
   return os.hostname() || process.env.CELL_NAME || "unknown";
 }

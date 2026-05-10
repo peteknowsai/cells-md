@@ -17,7 +17,7 @@ import { Type } from "@sinclair/typebox";
 import * as fs from "node:fs";
 
 const API = "https://api.sprites.dev";
-const TOKEN = process.env.SPRITES_TOKEN;
+const TOKEN = process.env.WELL_TOKEN;
 const MAX_CONCURRENCY = 4;
 
 const JURY_FILE = "/home/sprite/agent/.pi/extensions/deliberate/jury.json";
@@ -32,7 +32,7 @@ function loadJury(): Juror[] {
 }
 
 async function execOnSprite(name: string, command: string): Promise<{ ok: boolean; stdout: string; stderr: string }> {
-  if (!TOKEN) return { ok: false, stdout: "", stderr: "SPRITES_TOKEN not set" };
+  if (!TOKEN) return { ok: false, stdout: "", stderr: "WELL_TOKEN not set" };
   try {
     const r = await fetch(`${API}/v1/sprites/${encodeURIComponent(name)}/exec`, {
       method: "POST",

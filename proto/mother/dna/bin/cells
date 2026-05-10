@@ -25,7 +25,7 @@ function selfName(): string {
 }
 
 async function api(path: string, init?: RequestInit): Promise<any> {
-  if (!TOKEN) die("SPRITES_TOKEN not set in env (check /home/sprite/.bashrc.d/sprites)");
+  if (!TOKEN) die("SPRITES_TOKEN not set in env (check ~/.bashrc.d/sprites)");
   const r = await fetch(`${API}${path}`, {
     ...init,
     headers: {
@@ -146,7 +146,7 @@ async function cmdTalk(name: string, message: string) {
   const script = [
     // Env (PATH, secrets) comes from ~/.profile sourcing .bashrc.d/*
     // for any login shell, including non-interactive `bash -lc`.
-    `tmux has-session -t agent 2>/dev/null || tmux new-session -d -s agent -c /home/sprite/agent pi`,
+    `tmux has-session -t agent 2>/dev/null || tmux new-session -d -s agent -c ~/agent pi`,
     `sleep 1`,
     `tmux send-keys -t agent '${escaped}' Enter`,
     `sleep 8`,

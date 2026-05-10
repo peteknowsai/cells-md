@@ -42,7 +42,7 @@ upstream API calls.
 We also separated three roles that v1 had collapsed into "mother":
 
 1. **Mother's identity.** Mother is a cell. Same shape as `pete`, `kev`
-   et al — a sprite VM with its own `~/agent`, sessions, memory, identity.
+   et al — a well VM with its own `~/agent`, sessions, memory, identity.
 2. **Mother's website.** Like every cell, mother gets a per-cell CF
    Worker + DO at `mother.cells.md` whenever we get around to birthing
    her. That gives her a public face that survives the laptop being off.

@@ -13,7 +13,7 @@ Operator-facing: `cells egg [...]` to manage the pool.
 
 ## Architecture in 30 seconds
 
-- An **egg** is a sprite with the toolchain, env, secrets, proxy
+- An **egg** is a well with the toolchain, env, secrets, proxy
   patches, and DNA on disk — but no agent identity. The DNA's
   `__NAME__` and `__THINKING__` placeholders are intact.
 - An egg's **variant signature** is `model + extensions + packages` —
@@ -74,7 +74,7 @@ Eggs have four states:
 
 - **warm** — ready to hatch
 - **claimed** — atomic claim in progress; transient (~10s during a hatch)
-- **live** — was claimed, hatch succeeded, the egg's sprite is now a
+- **live** — was claimed, hatch succeeded, the egg's well is now a
   cell. Stays around as a breadcrumb so we know an egg got used.
 - **culling** — hatch failed partway. `cells egg cull <id>` to clean up.
 
@@ -109,10 +109,10 @@ Library: `cli/lib/variant-signature.ts` (pure, unit-tested).
 - `proto/mother/.pi/skills/birth-egg/SKILL.md` — the egg-birth ritual.
   Forked from `birth/SKILL.md` minus per-cell steps (4b, 4c, 7, 11, 12).
 - `proto/mother/.pi/prompts/egg-birth.md` — prompt mother receives.
-  Takes a sprite name and a JSON config (no name, no thinking, no
+  Takes a well name and a JSON config (no name, no thinking, no
   channels — those are hatch-time).
 - **No `cull-egg` skill.** Eggs have no side effects beyond their
-  sprite, so cull is direct `sprite destroy --force` from the CLI.
+  well, so cull is direct `well destroy --force` from the CLI.
   No mother in the loop.
 
 ## What this doesn't do (Phase 1)

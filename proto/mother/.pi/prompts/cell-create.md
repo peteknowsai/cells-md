@@ -1,6 +1,6 @@
 ---
 name: cell-create
-description: Provision a new Cell on a Sprite (delegates to the birth skill).
+description: Provision a new Cell on a Well (delegates to the birth skill).
 ---
 
 The user wants to create a cell named: $1

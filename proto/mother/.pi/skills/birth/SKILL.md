@@ -1,302 +1,145 @@
 ---
 name: birth
-description: Provision a new agent on a fresh Sprite. Creates the VM, configures egress, installs runtime tools, pushes the recipe-compliant DNA, runs `bun install`, injects the OAuth token, installs the login shim, and takes the first checkpoint.
-allowed-tools: [bash, sprite_create, sprite_destroy, sprite_exec, sprite_push, sprite_egress_allow, sprite_checkpoint, report_outcome, read]
+description: Provision a new agent by forking the `cell-base` image into a fresh well, applying per-cell identity, registering the site service, and reporting outcome. Birth is fast (~15s) — heavy lifting (toolchain, DNA, pi install, proxy wiring) is pre-baked in `cell-base` via `cells bake`.
+allowed-tools: [bash, well_create, well_destroy, well_exec, well_egress_allow, well_checkpoint, report_outcome, read]
 ---
 
-# Birth Ritual — Phase 0
+# Birth Ritual — fork-from-image
 
-Bring a new agent into being on a fresh Sprite. The agent's name is in the
-user's message; substitute it for `<NAME>` in every step below.
+Bring a new agent into being by forking the `cell-base` image (built by `cells bake`) into a fresh well, then applying the per-cell identity bake-in. The agent's name is in the user's message; substitute it for `<NAME>` in every step below.
 
-Every step matters — if you shortcut, the agent silently lands on extra-usage billing.
+`cell-base` already has bun, pi-coding-agent, terminal toolkit, the DNA at `~/agent` (with `__NAME__` / `__MODEL__` / `__PROVIDER__` / `__THINKING__` / `__MODEL_CHAIN__` placeholders intact), `bun install` done, pi-ai patches applied, and `~/.bashrc.d/` env shims in place. Birth's job is the per-cell delta: identity substitution, tmux color, optional extensions, site service.
 
-Prefer the sprite_* tools for every step that has them — they're cleaner than
-shell-out and surface errors as structured tool results. The `bash` tool is
-still available for local-only operations on the Mac (e.g., reading
-`~/.cells/secrets.json`).
+Prefer the `well_*` tools where they exist — they're cleaner than shelling out and surface errors as structured tool results. The `bash` tool is for local-only operations on the Mac (e.g. reading `~/.cells/secrets.json` or invoking helper scripts).
 
 ## Preconditions
 
-- `sprite` CLI authenticated (verify with `sprite org list`)
-- `~/.cells/secrets.json` contains `CELLS_PROXY_SECRET` (the bearer token cells use to reach the subscriptions proxy at `https://proxy.cells.md`)
-- No existing agent with this name (the Bun CLI checks before invoking you)
-- All `bash scripts/...` invocations in this skill are relative to the cells repo root (`~/Projects/cells`). `cd` there before running them, or prefix each call with `cd ~/Projects/cells &&`.
+- `cell-base` image exists in welld (`well image list` should show it). If missing, run `cells bake` on the Mac before any birth.
+- `~/.cells/secrets.json` contains `CELLS_PROXY_SECRET` and other shared secrets.
+- No existing agent with this name (the Bun CLI checks before invoking you).
+- All helper scripts in this skill are invoked by absolute path (`bash ~/Projects/cells/scripts/...`), so cwd doesn't matter. No need to `cd` anywhere first.
 
 ## Timing instrumentation
 
-The very first action of **every** numbered step below is a single local-`bash` call:
+The very first action of **every** numbered step below is one local-`bash` call:
 
 ```bash
-bash scripts/log-birth-step.sh <NAME> <step-number> <short-label>
+bash ~/Projects/cells/scripts/log-birth-step.sh <NAME> <step-number> <short-label>
 ```
 
-This appends a timestamp + step label to `~/.cells/logs/birth-timings/<NAME>.log`. The hardening loop reads it to figure out where birth is spending time — drop a marker even if the step itself fails. Don't skip the timing call; it costs ~1ms and is the only way Pete can see per-step durations.
+This appends a timestamp + label to `~/.cells/logs/birth-timings/<NAME>.log`. Drop the marker even if the step itself fails — the harden loop reads these to figure out where birth is spending time.
 
 ## Handling transient failures
 
-If a step's command exits non-zero AND the error message looks network-class, **retry the same step once after a 5-second wait** before reporting failure. If the retry also fails, then call `report_outcome` with `success: false, message: "step <N>: <first error> · retry: <retry error>"`.
+If a step's command exits non-zero AND the error message looks network-class, retry the same step once after a 5-second wait before reporting failure. If the retry also fails, call `report_outcome` with `success: false, message: "step <N>: <first error> · retry: <retry error>"`.
 
 Network-class errors that warrant a retry:
 - `401 bad bearer` (the subscriptions proxy occasionally returns this on the first call)
 - Any `5xx` from an HTTP call
 - `ECONNRESET`, `ETIMEDOUT`, `dial tcp`, `connection refused`
-- `npm ERR! network`, `fetch failed`, registry timeouts
-- `sprite_exec` returning the timeout-kill tag (`[killed by sprite-tools after Ns]`) — that means the inner command stalled on the network; one retry is worth trying
+- `well_exec` returning the timeout-kill tag (`[killed by well-tools after Ns]`)
 
-Do **NOT** retry on:
-- Logic errors (sprite already exists, malformed input, missing file, jq parse error)
-- Authorization errors that aren't transient (403 forbidden, no token in secrets.json)
-- Step 1 (sprite create) — let the CLI handle retry there if it wants to
+Do NOT retry on:
+- Logic errors (well already exists, malformed input, missing file, jq parse error)
+- Authorization errors that aren't transient (403 forbidden)
+- Step 1 (well_create) — let the CLI handle retry there
 
-Retry budget: at most one retry per step. Don't loop. If the second attempt fails the step, escalate to `report_outcome failure` and stop the ritual.
+Retry budget: at most one retry per step. Don't loop.
 
-## 1. Create the Sprite
+## 1. Fork the cell-base image into a fresh well
 
-> _Timing marker (run first via local `bash`):_ `bash scripts/log-birth-step.sh <NAME> 1 create-sprite`
+> _Timing marker (run first via local `bash`):_ `bash ~/Projects/cells/scripts/log-birth-step.sh <NAME> 1 well-create`
 
-Use `sprite_create` with `name: <NAME>`. Blocks ~15s until ready.
+Read shared secrets from the Mac first (use local `bash`):
+
+```bash
+test -f ~/.cells/secrets.json || { echo "missing ~/.cells/secrets.json"; exit 1; }
+jq -r 'to_entries[] | "\(.key)=\(.value)"' ~/.cells/secrets.json
+```
+
+Take that key-value list and pass it via `well_create`'s `env` parameter — welld lands each pair in `/etc/environment` on the well at first boot, PAM auto-loads it on every shell, and the in-image `~/.bashrc.d/` shims re-export under the names pi-ai expects.
+
+Use `well_create` with:
+- `name: <NAME>`
+- `fromImage: "cell-base"`
+- `env: ["KEY1=val1", "KEY2=val2", ...]` (one entry per line from secrets.json)
+
+🚨 **The `env: [...]` parameter is NOT optional.** If you skip it, `/etc/environment` will be empty of secrets, the in-image `~/.bashrc.d/*` shims will silently no-op (they're conditional on `CELLS_PROXY_SECRET` being set), and the cell will fail step 4b verify. Every birth that has dropped this parameter has failed in exactly the same place. Pass the env every time, even if the secrets list is short.
+
+Forks via APFS clonefile (sub-millisecond) + ~5s boot. The `well` user, SSH key, DNA, toolchain, and proxy patches are all already on disk from the bake — SSH works the moment the VM is up.
+
+**Immediately after `well_create` returns success, sanity-check that env landed.** This is a one-line `well_exec` and takes ~200ms — it catches the `env: [...]` omission at the source instead of letting it cascade to step 4b:
+
+```bash
+grep -q '^CELLS_PROXY_SECRET=' /etc/environment && echo OK || { echo MISSING; exit 1; }
+```
+
+If this prints `MISSING`, you forgot `env: [...]` on `well_create`. Destroy the well via `well_destroy`, re-call `well_create` with the env list, and re-verify. Do not proceed to step 2 until the check prints `OK`.
 
 ## 2. Configure egress (allow all)
 
-> _Timing marker (run first via local `bash`):_ `bash scripts/log-birth-step.sh <NAME> 2 egress-allow`
+> _Timing marker:_ `bash ~/Projects/cells/scripts/log-birth-step.sh <NAME> 2 egress-allow`
 
-Use `sprite_egress_allow` with `name: <NAME>` and `domains: ["*"]`. This opens
-outbound to any host so the agent can research, fetch, and install freely.
+Use `well_egress_allow` with `name: <NAME>` and `domains: ["*"]`. Egress policy is per-well config (not on disk), so it doesn't carry from the source image.
 
-Don't proceed until this succeeds — every later step depends on egress.
+Don't proceed until egress succeeds — every later step depends on outbound HTTP working.
 
-## 3. Install system tools and configure tmux
+## 3. Apply per-cell identity to the baked DNA
 
-> _Timing marker (run first via local `bash`):_ `bash scripts/log-birth-step.sh <NAME> 3 system-tools-tmux`
+> _Timing marker:_ `bash ~/Projects/cells/scripts/log-birth-step.sh <NAME> 3 identity-bake-in`
 
-Bun is not pre-installed on Sprite VMs. tmux often is, but install/upgrade
-it to be safe — useful for interactive shell sessions. (In v2 pi runs
-under the site service, not in a tmux session, but tmux remains handy
-for keeping side shells alive across sprite console reconnects.)
-
-Also install the standard terminal-editing toolkit (`micro`, `fzf`,
-`ripgrep`, `bat`) — see `docs/terminal-setup.md`. These power the `mf` /
-`mft` shell helpers wired up in step 6 and make it easy for a human (or
-the agent) to navigate and edit files on the cell. On Ubuntu `bat` ships
-as `batcat` due to a binary-name conflict, so we symlink it to `bat`.
-
-Also install the `sprite` CLI on the Sprite — the `self` extension
-needs it to let the agent operate on its own sprite (checkpoint, egress,
-inspect). The CLI authenticates from `SPRITES_TOKEN` env var, which gets
-injected from `~/.cells/secrets.json` in step 6b. If that key isn't in the
-secrets file, the API-based self tools simply return a clear error;
-`talk_to_self` works regardless.
-
-Use `sprite_exec` for the curl installs and tmux config (these don't have
-sharp edges — they're idempotent and fast):
-
-```bash
-curl -fsSL https://bun.sh/install | bash
-curl -fsSL https://sprites.dev/install.sh | sh
-# gh CLI — required by pi's /share (it shells out to `gh gist create`).
-# Tarball install avoids the GitHub apt-repo dance and dpkg-lock exposure.
-# Auth happens via GH_TOKEN injected in step 6b — `gh auth status` honors it
-# natively, so no interactive `gh auth login` is needed.
-GH_VERSION=2.62.0
-curl -fsSL "https://github.com/cli/cli/releases/download/v${GH_VERSION}/gh_${GH_VERSION}_linux_amd64.tar.gz" \
-  | sudo tar -xz -C /usr/local --strip-components=1 \
-    "gh_${GH_VERSION}_linux_amd64/bin/gh"
-mkdir -p /home/sprite/.local/bin
-ln -sf /usr/bin/batcat /home/sprite/.local/bin/bat
-cat > /home/sprite/.tmux.conf << 'EOF'
-# Pi compatibility — modified-Enter keys, csi-u format
-set -g extended-keys on
-set -g extended-keys-format csi-u
-set -g default-terminal "tmux-256color"
-set -ag terminal-overrides ",xterm-256color:RGB"
-
-# Prefix: Ctrl+Space (avoids C-b's collision with readline back-char)
-unbind C-b
-set -g prefix C-Space
-bind C-Space send-prefix
-
-# Mouse off — drag-select highlights aren't wanted while talking to pi,
-# and wheel events can land tmux in copy-mode. For scrollback inside the
-# shell use prefix-`[` then arrows / PgUp / PgDn (exit with `q`).
-set -g mouse off
-set -g history-limit 50000
-
-# Lock mode-keys to emacs — tmux otherwise picks vi when $EDITOR=vim,
-# which silently breaks scroll/copy-mode keybinds (e.g. `i` does nothing).
-setw -g mode-keys emacs
-set -g set-clipboard on
-
-# Snappy escape (helps Pi UI responsiveness)
-set -sg escape-time 0
-
-# Status-line input uses emacs keys (sensible default).
-set -g status-keys emacs
-
-# Aggressive resize for grouped sessions / multi-monitor.
-setw -g aggressive-resize on
-
-# Windows count from 1; renumber when one closes
-set -g base-index 1
-setw -g pane-base-index 1
-set -g renumber-windows on
-
-# Focus events forwarded (for editors that care)
-set -g focus-events on
-
-# Auto-rename windows to the basename of the pane's cwd
-set -g automatic-rename on
-set -g automatic-rename-format '#{b:pane_current_path}'
-
-# Splits inherit cwd and run a login zsh (same env as `cells shell`).
-# Directional: `prefix Right` = split right, `prefix Down` = split down.
-# Symbolic: `prefix |` and `prefix -` do the same.
-# `prefix x` (default) closes a pane with confirmation.
-# (Rebinding arrows means losing default prefix-arrow pane navigation;
-# use the mouse, or `prefix o` to cycle panes.)
-bind Right split-window -h -c "#{pane_current_path}" "zsh -l"
-bind Down  split-window -v -c "#{pane_current_path}" "zsh -l"
-bind '|'   split-window -h -c "#{pane_current_path}" "zsh -l"
-bind '-'   split-window -v -c "#{pane_current_path}" "zsh -l"
-
-# Status line — solid color bar in the cell's color across the bottom.
-set -g status-position bottom
-set -g status-justify left
-set -g status-style 'fg=__CELL_FG__,bg=__CELL_BG__,bold'
-set -g status-left ' __NAME__ '
-set -g status-left-length 20
-set -g status-right ' #(/home/sprite/agent/bin/cell-status.sh) '
-set -g status-right-length 60
-set -g status-interval 5
-setw -g window-status-format ''
-setw -g window-status-current-format ''
-setw -g window-status-separator ''
-
-set -g pane-border-lines single
-set -g pane-border-style 'fg=#54546D'
-set -g pane-active-border-style 'fg=#957FB8'
-
-setw -g mode-style 'fg=#1F1F28,bg=#7E9CD8'
-
-# Bell notifications: Pi rings the terminal bell when a response is ready.
-# bell-action other = flash only when the window isn't currently focused.
-setw -g monitor-bell on
-set -g bell-action other
-setw -g window-status-bell-style 'fg=#C8C093,dotted-underscore'
-EOF
-ls -la /home/sprite/.bun/bin/bun
-```
-
-Then install the apt baseline using the helper script (laptop-side, **not**
-`sprite_exec`). It handles dpkg-lock contention deterministically — if the
-lock is held, it waits 30s, then force-unlocks once and retries. Without
-this, a transient network blip mid-`apt-get` can leave the lock pinned for
-~15 minutes.
-
-```bash
-bash scripts/apt-install-on-cell.sh <NAME> tmux micro fzf ripgrep bat
-```
-
-Before moving on, verify every required binary is on PATH on the sprite:
-`sprite_exec`-run `command -v bun tmux micro fzf rg batcat gh` and confirm
-all seven print a path. If any are missing, re-run only the substep that
-provided that binary; do not proceed to step 4.
-
-**Recovery posture for the whole birth:** if any single sub-operation fails
-twice, *stop and surface the error to Pete* with the specific command and
-stderr. Do not enter ad-hoc retry loops. Birth is rare enough that a quick
-hard-fail is always better than a slow silent one.
-
-**Phase checkpoint.** Now that all system tools are installed and verified, take a checkpoint so future birth retries can resume from this known-good phase: `sprite_checkpoint` with `name: <NAME>` and `comment: "phase-tools-v1"`. Cost ~300ms.
-
-## 4. Push the agent DNA
-
-> _Timing marker (run first via local `bash`):_ `bash scripts/log-birth-step.sh <NAME> 4 dna-push`
-
-Mother's `dna/` directory (at `proto/mother/dna/`) contains the canonical
-recipe-compliant layout — the genetic material every cell is born with.
-The agent's "anatomy" is sharded into single-purpose markdown files at the
-agent root, each independently editable:
-
-- `AGENTS.md` — thin entrypoint (cross-harness convention)
-- `SOUL.md` — identity + behavior (the use-max systemPrompt source)
-- `CELLS.md` — what it means to be a cell (substrate awareness)
-- `TOOLS.md` — capability inventory
-- `CONTACTS.md` — who the cell interacts with
-- `MEMORY.md` — pointer to `state/memory/`
-- `HEARTBEAT.md` — declared schedule (future heartbeat agent enforces)
-- `IDENTITY.md` — metadata for tooling
-
-Plus `.pi/extensions/use-max`, `.pi/settings.json`, `package.json`,
-`.gitignore`, `bin/`, `scripts/`, `site/`.
-
-Use `sprite_push` with:
-- `name: <NAME>`
-- `localPath: /Users/pete/Projects/cells/proto/mother/dna`
-- `remotePath: /home/sprite/agent`
-
-Then substitute `__NAME__`, `__MODEL__`, `__PROVIDER__`, and `__THINKING__`
-with their actual values. Use `sprite_exec`:
+The DNA in `~/agent` is intact from the bake but still has placeholders. Use `well_exec` to substitute them:
 
 ```bash
 sed -i 's/__NAME__/<NAME>/g' \
-  /home/sprite/agent/AGENTS.md \
-  /home/sprite/agent/SOUL.md \
-  /home/sprite/agent/IDENTITY.md \
-  /home/sprite/agent/CELLS.md \
-  /home/sprite/agent/CONTACTS.md \
-  /home/sprite/agent/HEARTBEAT.md \
-  /home/sprite/agent/package.json
+  ~/agent/AGENTS.md \
+  ~/agent/SOUL.md \
+  ~/agent/IDENTITY.md \
+  ~/agent/CELLS.md \
+  ~/agent/CONTACTS.md \
+  ~/agent/HEARTBEAT.md \
+  ~/agent/package.json
 
 sed -i 's/__MODEL__/<MODEL>/g' \
-  /home/sprite/agent/SOUL.md \
-  /home/sprite/agent/IDENTITY.md \
-  /home/sprite/agent/.pi/settings.json
+  ~/agent/SOUL.md \
+  ~/agent/IDENTITY.md \
+  ~/agent/.pi/settings.json
 
 sed -i 's/__PROVIDER__/<PROVIDER>/g' \
-  /home/sprite/agent/IDENTITY.md \
-  /home/sprite/agent/.pi/settings.json
+  ~/agent/IDENTITY.md \
+  ~/agent/.pi/settings.json
 
-sed -i 's/__THINKING__/<THINKING>/g' /home/sprite/agent/.pi/settings.json
+sed -i 's/__THINKING__/<THINKING>/g' ~/agent/.pi/settings.json
 
 # Substitute the model fallback chain as a literal JSON array. Use `|` as
 # the sed delimiter so the slashes inside `provider/model:thinking` entries
 # don't collide. <CHAIN_JSON> is already a valid JSON array string.
-sed -i 's|__MODEL_CHAIN__|<CHAIN_JSON>|g' /home/sprite/agent/.pi/settings.json
+sed -i 's|__MODEL_CHAIN__|<CHAIN_JSON>|g' ~/agent/.pi/settings.json
 ```
 
-### 4b. Per-cell tmux color chip
+### 3b. Per-cell tmux color chip
 
-> _Timing marker (run first via local `bash`):_ `bash scripts/log-birth-step.sh <NAME> 4b tmux-color`
+> _Timing marker:_ `bash ~/Projects/cells/scripts/log-birth-step.sh <NAME> 3b tmux-color`
 
-The DNA's `~/.tmux.conf` ships with `__CELL_FG__` / `__CELL_BG__`
-placeholders in the `status-left-style` line. Compute the color
-locally and substitute them on the cell:
+The DNA's `~/.tmux.conf` ships with `__CELL_FG__` / `__CELL_BG__` / `__NAME__` placeholders in the status-left chip. Compute the color locally and substitute on the well:
 
 ```bash
-# Locally on the Mac (use bash, NOT sprite_exec):
-read CBG CFG < <(bash scripts/cell-color.sh <NAME>)
+# Locally on the Mac (use bash, NOT well_exec):
+read CBG CFG < <(bash ~/Projects/cells/scripts/cell-color.sh <NAME>)
 
-# Then sprite_exec to substitute on the cell. Also bake the cell name
-# into the status-left chip so the bar reads the cell name regardless of
-# which tmux session you're attached to (tui, shell, etc.).
-sed -i "s|__CELL_BG__|$CBG|g; s|__CELL_FG__|$CFG|g; s|__NAME__|<NAME>|g" /home/sprite/.tmux.conf
+# Then well_exec to substitute:
+sed -i "s|__CELL_BG__|$CBG|g; s|__CELL_FG__|$CFG|g; s|__NAME__|<NAME>|g" ~/.tmux.conf
 ```
 
-`scripts/cell-color.sh` is deterministic — same name always maps to the
-same palette entry — so retrofits and re-births stay stable.
+### 3c. Per-cell status file
 
-### 4c. Write the cell's status file
+> _Timing marker:_ `bash ~/Projects/cells/scripts/log-birth-step.sh <NAME> 3c status-file`
 
-> _Timing marker (run first via local `bash`):_ `bash scripts/log-birth-step.sh <NAME> 4c status-file`
-
-The right side of the tmux bar reads `~/agent/.pi/status.json`. Write
-it now with the harness baked in and channels empty (the laptop's slack
-binding code populates `channels` later if a slack channel is bound):
+The right side of the tmux bar reads `~/agent/.pi/status.json`. Write it now via `well_exec`:
 
 ```bash
-mkdir -p /home/sprite/agent/.pi
-cat > /home/sprite/agent/.pi/status.json <<'EOF'
+mkdir -p ~/agent/.pi
+cat > ~/agent/.pi/status.json <<'EOF'
 {
   "harness": "<HARNESS>",
   "channels": []
@@ -304,333 +147,107 @@ cat > /home/sprite/agent/.pi/status.json <<'EOF'
 EOF
 ```
 
-## 5. Run `bun install`, install Pi globally, install web-access, install `cells` CLI
+The laptop's slack-binding code populates `channels` later if a slack channel is bound.
 
-> _Timing marker (run first via local `bash`):_ `bash scripts/log-birth-step.sh <NAME> 5 bun-install-pi-extensions`
+### 3d. Prune + register optional extensions
 
-`bun install` is mandatory — without `node_modules/`, the use-max extension
-fails to load and the agent silently lands on extra-usage billing.
+> _Timing marker:_ `bash ~/Projects/cells/scripts/log-birth-step.sh <NAME> 3d extensions`
 
-Pi itself is **not** pre-installed on Sprite VMs. Install it globally via Bun
-so the `pi` command is on PATH for the interactive shell.
+The cell-base image ships with all four optional in-tree extensions (`memory`, `mentality`, `wiki`, `dream`) under `~/agent/.pi/extensions/`. Pi only loads what's listed in `.pi/settings.json` `extensions` — leaving an extension on disk without registering it does nothing.
 
-Then install `pi-web-access` (project-local) via Pi's own package manager —
-this registers the `web_search`, `fetch_content`, `code_search`, and
-`get_search_content` tools the agent uses to browse the web. Works without
-API keys (uses Exa MCP free tier); for higher rate limits inject an Exa key
-later.
-
-Use `sprite_exec`:
-
-The DNA ships with `bin/cells` — a slim on-sprite CLI (read+talk only,
-backed by the Sprites HTTP API). Make it executable and symlink onto PATH
-so both the agent's bash and the `self` extension can call it.
-
-First, prune the in-tree optional extensions the user did NOT pick. The
-DNA ships with all four (`memory`, `mentality`, `wiki`, `dream`) under
-`/home/sprite/agent/.pi/extensions/`; we keep only those listed in
-`<EXTENSIONS>` and delete the rest.
-
-The always-installed extensions (`use-max`, `self`, `heartbeat-watch`)
-stay regardless. Slack delivery is handled by the v2 bridge (the
-per-cell Cloudflare Worker + the cell's site server's WebSocket
-endpoint), not by any in-pi extension.
-
-For each name in `["memory", "mentality", "wiki", "dream"]` that is NOT
-in `<EXTENSIONS>`, delete the directory via `sprite_exec`:
+For each name in `["memory", "mentality", "wiki", "dream"]` that is NOT in `<EXTENSIONS>`, delete the directory via `well_exec`:
 
 ```bash
-rm -rf /home/sprite/agent/.pi/extensions/<name>
+rm -rf ~/agent/.pi/extensions/<name>
 ```
 
-If `<EXTENSIONS>` is `["memory", "wiki"]`, delete the other two.
-If `<EXTENSIONS>` is empty, delete all four.
-
-Then **register the chosen optional extensions in `.pi/settings.json`**.
-The DNA template's `extensions` array only lists the always-installed
-ones (`use-max`, `codex-proxy`, `self`, `thinking`, `heartbeat-watch`).
-Pi loads only what's in this array — leaving an extension on disk
-without registering it does nothing. For each name in `<EXTENSIONS>`,
-append `.pi/extensions/<name>/index.ts` via `sprite_exec`:
+Then register the chosen ones in `.pi/settings.json`. The DNA template's `extensions` array only lists the always-installed ones (`use-max`, `codex-proxy`, `self`, `thinking`, `heartbeat-watch`). For each name in `<EXTENSIONS>`, append `.pi/extensions/<name>/index.ts` via `well_exec`:
 
 ```bash
 jq --arg p ".pi/extensions/<name>/index.ts" \
-  '.extensions += [$p]' /home/sprite/agent/.pi/settings.json \
-  > /tmp/s.json && mv /tmp/s.json /home/sprite/agent/.pi/settings.json
+  '.extensions += [$p]' ~/agent/.pi/settings.json \
+  > /tmp/s.json && mv /tmp/s.json ~/agent/.pi/settings.json
 ```
 
-If `<EXTENSIONS>` is empty, skip this step.
+If `<EXTENSIONS>` is empty, skip the registration but still prune all four directories.
 
-Then run the baseline install in **two separate `sprite_exec` calls** so a hang in `bun install` is reportable on its own. Don't chain these together — when the npm registry stalls (it does, observed in the wild), we want the failure attributed to the install step, not buried in a 6-line blob.
+### 3e. Install optional packages
 
-**5a. Bun + Pi global install** — `sprite_exec` with `timeoutSeconds: 240`:
+> _Timing marker:_ `bash ~/Projects/cells/scripts/log-birth-step.sh <NAME> 3e packages`
 
-```bash
-export PATH=$HOME/.bun/bin:$PATH
-cd /home/sprite/agent && bun install --frozen-lockfile
-bun install -g @mariozechner/pi-coding-agent@latest
-```
+If `<PACKAGES>` is empty, skip this sub-step entirely.
 
-Why 240s: legitimate run is ~60–90s. Doubling the budget catches npm-stall hangs without false-positiving on slow networks.
-
-**5b. Cells CLI shim** — `sprite_exec` with `timeoutSeconds: 30`:
-
-```bash
-chmod +x /home/sprite/agent/bin/cells
-mkdir -p /home/sprite/.local/bin
-ln -sf /home/sprite/agent/bin/cells /home/sprite/.local/bin/cells
-```
-
-Why 30s: file ops only. Anything past 30s here means the VM is stuck.
-
-Then install the optional packages — only those listed in `<PACKAGES>`. If
-`<PACKAGES>` is empty, skip this block entirely.
-
-For each entry in `<PACKAGES>`, run the matching `pi install`:
+For each entry in `<PACKAGES>`, run the matching `pi install` via `well_exec` with `timeoutSeconds: 120`:
 
 | package        | install spec        |
 |----------------|---------------------|
 | pi-web-access  | `npm:pi-web-access` |
 
-Example: if `<PACKAGES>` is `["pi-web-access"]`, run via `sprite_exec` **with `timeoutSeconds: 120`** — npm registry stalls have hung births for 50+ minutes. Fail fast and report the install step as the failure:
+Example for `<PACKAGES>` = `["pi-web-access"]`:
 
 ```bash
 pi install -l npm:pi-web-access
 ```
 
-The optional in-tree extensions:
+Why 120s: npm registry stalls have hung births for 50+ minutes in the wild. Fail fast and surface the install step as the failure.
 
-- `memory` — atoms + yearnings, `write_memory` / `write_yearning` tools, MEMORY.md always-loaded
-- `mentality` — single `mentality.md` synthesis, always-loaded
-- `wiki` — deep narrative knowledge, lazy-queried
-- `dream` — async learner, four-phase consolidation from past sessions
+## 4. Register the `site` service + flip URL to public
 
-Storage extensions (memory / mentality / wiki) function standalone. Dream is
-the optional accelerant. Pi auto-discovers extensions in `.pi/extensions/`
-on session start.
+> _Timing marker:_ `bash ~/Projects/cells/scripts/log-birth-step.sh <NAME> 4 site-service`
 
-**Phase checkpoint.** All packages and extensions are now installed. Take a checkpoint: `sprite_checkpoint` with `name: <NAME>` and `comment: "phase-installed-v1"`.
-
-## 6. Set up the env shim and PATH
-
-> _Timing marker (run first via local `bash`):_ `bash scripts/log-birth-step.sh <NAME> 6 env-shim`
-
-Sprites' Ubuntu non-interactive login shells (`bash -lc 'cmd'`, used by
-`sprite exec`) bail out of `.bashrc` before reaching the end. So we source
-`~/.bashrc.d/*` from `~/.profile` instead — that runs for *every* login
-shell, interactive or not. Also drop a `bashrc.d/bun` file so Bun is on
-PATH everywhere.
-
-Use `sprite_exec`:
-
-```bash
-mkdir -p /home/sprite/.bashrc.d
-
-grep -q bashrc.d /home/sprite/.profile || cat >> /home/sprite/.profile << 'EOF'
-
-# agent: load env from ~/.bashrc.d/ for all login shells (interactive and non-interactive)
-for f in /home/sprite/.bashrc.d/*; do [ -r "$f" ] && . "$f"; done
-EOF
-
-cat > /home/sprite/.bashrc.d/bun << 'EOF'
-export PATH=$HOME/.local/bin:$HOME/.bun/bin:$PATH
-EOF
-
-cat > /home/sprite/.bashrc.d/terminal << 'EOF'
-# Standard terminal-editing setup (see docs/terminal-setup.md):
-# fzf is gitignore-aware via ripgrep; preview pane uses bat.
-export FZF_DEFAULT_COMMAND='rg --files --hidden --glob "!.git"'
-export FZF_DEFAULT_OPTS='--height 80% --reverse --border --preview "bat --style=numbers --color=always --line-range=:300 {} 2>/dev/null || ls -la {}" --preview-window=right:60%'
-
-# mf: fuzzy-pick a file anywhere in the tree, open in micro.
-alias mf='f=$(fzf) && [ -n "$f" ] && micro "$f"'
-
-# mft: browse mode — descend folders, open files, .. to go up.
-mft() {
-  local cur="$PWD"
-  while true; do
-    local pick
-    pick=$( { echo ".."; ls -A1 "$cur"; } | fzf --prompt="$cur > " ) || return
-    if [ "$pick" = ".." ]; then
-      cur=$(dirname "$cur")
-    elif [ -d "$cur/$pick" ]; then
-      cur="$cur/$pick"
-    else
-      micro "$cur/$pick"
-      return
-    fi
-  done
-}
-EOF
-```
-
-## 6b. Inject shared secrets from `~/.cells/secrets.json`
-
-> _Timing marker (run first via local `bash`):_ `bash scripts/log-birth-step.sh <NAME> 6b secrets-inject`
-
-Every cell gets the same shared secrets, read from `~/.cells/secrets.json`
-on the Mac and written one-file-per-key into `/home/sprite/.bashrc.d/` on
-the Sprite. Don't echo any values in your reply.
-
-Local bash to read the file (use `bash`, not `sprite_exec`):
-
-```bash
-test -f ~/.cells/secrets.json && jq -r 'keys[]' ~/.cells/secrets.json
-```
-
-Then for each `KEY: value` pair (other than `CELLS_PROXY_SECRET` — handled
-in step 6c), write to the Sprite. Per-key files keep rotation granular.
-Example for `EXA_API_KEY`:
-
-```bash
-sprite exec -s <NAME> -- bash -c "
-cat > /home/sprite/.bashrc.d/exa << 'EOF'
-export EXA_API_KEY='<value>'
-EOF
-chmod 600 /home/sprite/.bashrc.d/exa
-"
-```
-
-`ANTHROPIC_API_KEY` is intentionally absent from `secrets.json` — cells
-route through the subscriptions proxy and don't hold real Anthropic credentials.
-The legacy approach was to push a frozen OAuth access token; it expired
-hours after birth.
-
-## 6c. Wire the cell to the subscriptions proxy
-
-> _Timing marker (run first via local `bash`):_ `bash scripts/log-birth-step.sh <NAME> 6c proxy-wire`
-
-Cells reach both Anthropic (Claude Max) and OpenAI Codex (ChatGPT Plus)
-via `https://proxy.cells.md`, which the mother laptop runs as the single
-OAuth principal for both subscriptions across the whole fleet.
-
-This step runs unconditionally — including for direct-API cells (e.g.
-`deepseek`, `openai` non-codex). The proxy env files (`anthropic_proxy`,
-`codex_proxy`) and pi patches (Anthropic URL rewrite, codex
-extractAccountId stub) are harmless on those cells: pi-ai only consults
-the env var for its active provider, and the patched code paths are
-never executed when `defaultProvider` is something else.
-
-This step does five things:
-
-1. Drops `~/.bashrc.d/anthropic_proxy` with the shared bearer secret
-   (`CELLS_PROXY_SECRET` from `~/.cells/secrets.json`) as `ANTHROPIC_AUTH_TOKEN`.
-2. Drops `~/.bashrc.d/codex_proxy` with the same secret as `OPENAI_CODEX_API_KEY`,
-   read by the `codex-proxy` extension at pi startup.
-3. Drops `~/.bashrc.d/site_proxy` with the same secret as `CELLS_PROXY_SECRET`,
-   read by the cell's site server (`~/agent/site/server.ts`) and by the
-   `heartbeat-watch` extension. The site server gates the `/agent`
-   WebSocket upgrade on `Authorization: Bearer <CELLS_PROXY_SECRET>`;
-   only the per-cell Cloudflare Worker (which knows the secret) can
-   establish the bridge.
-4. Patches the hardcoded `api.anthropic.com` URL in `pi-ai`'s model registry
-   to `proxy.cells.md`. Pi does NOT respect `ANTHROPIC_BASE_URL` — the URL
-   is baked per-model in `models.generated.js`. The patch is idempotent.
-5. Neutralizes JWT-based `extractAccountId` in `pi-ai`'s codex provider —
-   cells ship the proxy secret as bearer (not a JWT), so the original
-   function would throw. Mother adds the real `chatgpt-account-id` header
-   server-side. Idempotent.
-
-Use local `bash`:
-
-```bash
-scripts/configure-cell-proxy.sh <NAME>
-```
-
-This runs after `bun install` (step 5) so the model files exist. If the
-cell ever runs `bun install` again, this script must be re-run — both
-patches will be clobbered and the cell will start hitting upstream APIs
-directly with the proxy secret (which both providers reject). Also re-run
-if you rotate `CELLS_PROXY_SECRET`.
-
-Background: see `state/memory/project_mother_proxy.md` and
-`state/memory/reference_pi_internals.md` for why this is necessary.
-
-**Phase checkpoint.** Proxy is wired; the cell can now reach the LLM provider through the subscriptions proxy. Take a checkpoint: `sprite_checkpoint` with `name: <NAME>` and `comment: "phase-proxy-v1"`.
-
-## 7. Register the `site` service + open the cell URL to mother
-
-> _Timing marker (run first via local `bash`):_ `bash scripts/log-birth-step.sh <NAME> 7 site-service`
-
-The cell's public face at `<NAME>.cells.md` is served by the cell itself,
-not mother — `~/agent/site/server.ts` is a tiny Bun web server that the
-cell owns and can morph (drop `public/index.html`, add routes, swap the
-whole thing for a different framework). Mother just reverse-proxies.
-
-In v2, the site server is also the **pi host**: it spawns `pi --mode rpc`
-as a child process and exposes a `/agent` WebSocket endpoint. The
-per-cell Cloudflare Worker (deployed below if a Slack channel is bound)
-holds a persistent outbound WebSocket to that endpoint and is the only
-delivery path for inbound prompts and outbound replies. There is no
-separate `agent` service and no tmux pi.
+The cell's public face at `<NAME>.cells.md` is served by the cell itself — `~/agent/site/server.ts` is a Bun web server that the cell owns. The site server also spawns `pi --mode rpc` as a child and exposes `/agent` over WebSocket. The per-cell Cloudflare Worker (deployed by the `cells` CLI post-birth, not from inside this skill) holds a persistent outbound WebSocket to that endpoint.
 
 Two pieces:
 
-1. **Flip the sprite URL to `--auth=public`.** By default the sprite URL
-   `<name>-XXX.sprites.app` redirects unauthenticated traffic to a
-   sprites.dev login. The per-cell Cloudflare Worker can't carry the
-   org-token cookie, so we open the URL. Security still holds because the
-   site server requires `Authorization: Bearer <CELLS_PROXY_SECRET>` on the
-   `/agent` WS upgrade — the per-cell Worker is the only thing that knows
-   the secret. Static HTTP routes (homepage, public/) are public.
+1. **Flip the well URL to `--auth=public`** so external WS upgrade requests can reach the site server. Security still holds because the site server requires `Authorization: Bearer <CELLS_PROXY_SECRET>` on the `/agent` upgrade — only the per-cell Worker knows the secret.
+
+   ⚠️ Run this from your local `bash` tool ON THE MAC. The `well` CLI is a host binary — it does NOT exist inside the VM. Do NOT pass it through `well_exec`.
 
    ```bash
-   sprite url update --auth public -s <NAME>
+   well url update --auth public -s <NAME>
    ```
 
-2. **Register the `site` service.** Supervises `bun run server.ts`
-   with `CELL_NAME` and `PORT=8080` set; the server itself spawns pi:
+2. **Register the `site` service** — supervises `bun run server.ts` with `CELL_NAME` and `PORT=8080` set. Run from the Mac:
 
    ```bash
-   scripts/register-site-service.sh <NAME>
+   bash ~/Projects/cells/scripts/register-site-service.sh <NAME>
    ```
 
-The per-cell Cloudflare Worker (the `CellAgent` DO that holds the
-persistent WS to the sprite) is deployed by the `cells` CLI itself
-post-birth — not from inside the birth ritual — because it runs on
-the Mac and depends on the sprite already existing. You don't need
-to touch `deploy-cell-worker.sh` here.
+After both pieces, `cells see <NAME>` should open `<NAME>.cells.md` in the browser.
 
-After both pieces register, `cells see <NAME>` should open
-`<NAME>.cells.md` in the browser and render the cell's homepage.
+### 4b. Verify the agent can talk
 
-## 8. Login shim — env on interactive login
+> _Timing marker:_ `bash ~/Projects/cells/scripts/log-birth-step.sh <NAME> 4b verify`
 
-> _Timing marker (run first via local `bash`):_ `bash scripts/log-birth-step.sh <NAME> 8 login-shim`
+Before checkpointing, prove the agent is actually wired up. The most common silent failure is `/etc/environment` missing the auth secret because step 1's `well_create` was called without `env: [...]` — pi installs cleanly, the site server starts cleanly, but every prompt hangs on auth. A 30s smoke test catches this before we lock the broken state into a checkpoint.
 
-Sprite's interactive shell is **zsh** (despite `/etc/passwd` listing /bin/bash
-as the login shell). zsh doesn't auto-source `.bashrc.d`, so we explicitly
-source it from `.zshrc` so an interactive login has the same env (PATH,
-ANTHROPIC_AUTH_TOKEN, CELLS_PROXY_SECRET, etc.) as the site service.
-
-In v2 we **don't** auto-attach to a pi TUI on login. Pi runs as a child
-of the site service (step 7); the cell speaks via the WebSocket bridge.
-Logging in lands you in a normal zsh in `/home/sprite/agent` so you can
-inspect logs, edit files, or run `pi --mode tui` manually against a
-separate session if you want to drive pi interactively.
-
-Use `sprite_exec`:
+Use `well_exec` with `timeoutSeconds: 60`:
 
 ```bash
-cat >> /home/sprite/.zshrc << 'EOF'
-
-# agent: source bashrc.d for env (PATH, ANTHROPIC_AUTH_TOKEN, etc)
-for f in /home/sprite/.bashrc.d/*; do source $f; done
-
-# agent: drop into the agent dir on login
-cd /home/sprite/agent
-EOF
+cd ~/agent && for f in ~/.bashrc.d/*; do . "$f"; done && timeout 30 pi --print "say ok"
 ```
 
-## 9. First checkpoint
+The bashrc.d sourcing matters: `well_exec` shells out via `bash -c` (not `-lc`), which skips `~/.bashrc` and therefore skips the proxy env files (`anthropic_proxy`, `codex_proxy`, `site_proxy`) that hold `ANTHROPIC_AUTH_TOKEN`, `OPENAI_CODEX_API_KEY`, and `CELLS_PROXY_SECRET`. Sourcing them explicitly mirrors what the site service does in `register-site-service.sh` — so a passing verify here proves the same env that production pi will have.
 
-> _Timing marker (run first via local `bash`):_ `bash scripts/log-birth-step.sh <NAME> 9 checkpoint`
+What success looks like: pi exits 0 within 30s with some short response. The content doesn't matter — exit-0-within-deadline proves env files exist with values, pi runs, model is reachable, proxy auth works.
 
-Use `sprite_checkpoint` with `name: <NAME>`.
+What failure looks like:
+- `timeout: sending signal` / exit 124 → pi hung, almost certainly missing auth env
+- `command not found: pi` → cell-base install regressed (rare, file a bug)
+- `cd: no such file or directory` → DNA push didn't land in step 3 (rare, file a bug)
+- pi exits non-zero with an error message → read it; if it says anything about credentials, env, or 401, that's the missing-env case
 
-## 10. Report outcome (mandatory)
+If verify fails, skip ahead to step 6 with `success: false, message: "step 4b: verify failed — <pi error>. Likely cause: step 1's well_create was called without env from secrets.json; rebirth and confirm env: [...] was passed."`. Don't try to patch the cell in place — the orphan sweep is faster than diagnosing a half-born cell.
 
-> _Timing marker (run first via local `bash`):_ `bash scripts/log-birth-step.sh <NAME> 10 report-outcome`
+## 5. First checkpoint
+
+> _Timing marker:_ `bash ~/Projects/cells/scripts/log-birth-step.sh <NAME> 5 checkpoint`
+
+Use `well_checkpoint` with `name: <NAME>`. Cheap (~300ms) and gives a clean restore point if the cell wedges later.
+
+## 6. Report outcome (mandatory)
+
+> _Timing marker:_ `bash ~/Projects/cells/scripts/log-birth-step.sh <NAME> 6 report-outcome`
 
 Call `report_outcome` to tell the Bun CLI whether the birth succeeded.
 
@@ -639,19 +256,19 @@ Call `report_outcome` to tell the Bun CLI whether the birth succeeded.
 
 Without this call the CLI assumes failure and won't register the agent.
 
-## 11. Record in memory (success only)
+## 7. Record in memory (success only)
 
-> _Timing marker (run first via local `bash`):_ `bash scripts/log-birth-step.sh <NAME> 11 record-memory`
+> _Timing marker:_ `bash ~/Projects/cells/scripts/log-birth-step.sh <NAME> 7 record-memory`
 
-Log the birth event by appending one line to `state/memory/project_cells_activity.md`:
+Append one line to `state/memory/project_cells_activity.md`:
 
 `<UTC date HH:MM>  born        <NAME>      <terse notes>`
 
 Use `date -u +"%Y-%m-%d %H:%M"` for the timestamp.
 
-## 12. Tell the user
+## 8. Tell the user
 
-> _Timing marker (run first via local `bash`):_ `bash scripts/log-birth-step.sh <NAME> 12 tell-user`
+> _Timing marker:_ `bash ~/Projects/cells/scripts/log-birth-step.sh <NAME> 8 tell-user`
 
 After reporting outcome, tell the user one line:
 
@@ -661,6 +278,4 @@ No caveats, no warnings, no future-state notes. Just the success line.
 
 ## On failure
 
-Stop at the first failed step. Skip ahead to step 10 with `success: false`
-and a message describing what broke. Don't record in memory (step 11) on
-failure. Don't try to recover automatically.
+Stop at the first failed step. Skip ahead to step 6 with `success: false` and a message describing what broke. Don't record in memory (step 7) on failure. Don't try to recover automatically — the CLI sweeps the orphan well on outcome failure.

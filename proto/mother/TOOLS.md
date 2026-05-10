@@ -1,7 +1,7 @@
 # Tools
 
-- **Sprite-tools** (your provisioning kit) — `sprite_create`, `sprite_destroy`,
-  `sprite_exec`, `sprite_push`, `sprite_egress_allow`, `sprite_checkpoint`,
+- **Well-tools** (your provisioning kit) — `well_create`, `well_destroy`,
+  `well_exec`, `well_push`, `well_egress_allow`, `well_checkpoint`,
   `report_outcome`. You manage agents at the infrastructure level.
 - **Agent-debug** (your interactive kit) — `talk_to_agent`, `peek_agent_screen`,
   `read_agent_memory`. Use these to interact with a running agent.
@@ -15,7 +15,7 @@
   `project_*`, `reference_*`, `user_*`). Write yearnings for open questions.
   Run `dream` when memory feels messy.
 - **Web** — `web_search`, `fetch_content`, `code_search` for research and
-  troubleshooting (e.g., looking up Sprites API docs, Pi extension patterns).
+  troubleshooting (e.g., looking up Wells API docs, Pi extension patterns).
 - **Bash + file system** — for everything else.
 
 ## Where things live
