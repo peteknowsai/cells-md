@@ -787,3 +787,39 @@ Bug rollup from the session (all closed):
 Direct cells↔wells Claude-Code chat at /tmp/cells-wells-chat/ was the diagnostic accelerant — turned ~3 hrs of would-be-relay-through-Pete into ~45 min of direct exchange.
 
 Moving to P1.4 next fire.
+
+## 2026-05-10 15:34 MT — worker(P1.4) fire 25 — birth in progress, mother first LLM turn
+
+P1.4 birth ck-pi-gpt55-pro firing (pids 61402/61404, 33s in). No timing-log entries yet — mother in first LLM turn.
+
+Side note: ck-pi-gpt55 (P1.3 cell, kept for P1.14) was hibernated by watchdog at 21:33:43. Normal idle behavior.
+
+## 2026-05-10 15:34 MT — worker(P1.4) fire 26 — mother pi alive, no progress yet (pid 61407, 48s)
+
+Pi mother is running (pid 61407, 48s elapsed). Cold start on gpt-5.5-pro is slower than 5.5; waiting on its first tool call.
+
+## 2026-05-10 15:36 MT — worker(P1.4) fire 27 — mother active, just slow
+
+Proxy log shows mother actively serving requests (codex POSTs, ~500ms each, dozens of them). Pi mother (61407, 2m elapsed, 0% CPU spike-y) is in the cell-create skill's setup phase before step 1 stamps. gpt-5.5-pro is heavier so first turn takes longer than P1.3's gpt-5.5 default. Just slow, not stuck. Continuing to wait.
+
+## 2026-05-10 15:36 MT — worker(P1.4) fire 28 — mother quiet but alive (2m38s)
+
+Proxy log: last codex request at 21:35:51 (~35s ago). Pi mother (61407) at 0% CPU. welld no new activity. Maybe mother is between LLM turns; gpt-5.5-pro reasoning is heavier so individual responses + tool-call gaps are longer. Will give it 2 more fires before declaring stuck.
+
+## 2026-05-10 15:37 MT — worker(P1.4) fire 29 — pi mother actively serving (proxy stream of small POSTs)
+
+Pi mother at 3m20s, proxy log shows continuous activity. Just slow on the pro model. No step entries yet.
+
+## 2026-05-10 15:37 MT — worker(P1.4) fire 30 — still pre-step-1 (4m elapsed)
+
+Pi mother still pre-step-1 after 4m. Proxy log shows continuous activity. gpt-5.5-pro has MIN_MEDIUM_THINKING_MODELS auto-bump → default thinking on pro is medium, which slows tool-call cadence vs gpt-5.5 default. Patient wait.
+
+## 2026-05-10 15:38 MT — worker(P1.4) fire 31 — new stream at 21:38:21, mother still cooking
+
+## 2026-05-10 15:38 MT — worker(P1.4) fire 32 — 5m elapsed, mother still cooking proxy actively
+
+## 2026-05-10 20:11 MT — worker(P1.4) fire 35 — Pete back, P1.4 still stuck after ~4h45m
+
+Pi mother (PID 61407) has been running ~4h45m. Still 0% CPU. No step stamps. New pi 42752 just spawned (87% CPU, 0s old) — probably new session activity from Pete returning. Awaiting Pete's call.
+
+## 2026-05-10 20:12 MT — worker(P1.4) fire 36 — no-op, idle on Pete

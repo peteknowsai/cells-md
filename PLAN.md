@@ -2,84 +2,89 @@
 
 ## Thesis
 
-A fleet of always-on AI agents, each in its own well (a hardware-isolated Linux VM on Pete's Mac), addressable by name. The product wedge is **the magical first-talk experience**: `cells birth bob --model=gpt-5.5 --extensions=memory` returns to a prompt where Bob is *already greeting Pete back*, within seconds, without Pete having to type the first message. Everything that doesn't shorten birth-to-greeting time or polish the greeting itself is secondary.
+A fleet of always-on AI agents, each in its own well (a hardware-isolated Linux VM on Pete's Mac), addressable by name. The product wedge is **the magical first-talk experience**: `cells birth` shows a ~3-second progress animation, drops the user into a talk prompt, and the cell genuinely responds via LLM. Every word from the cell comes from an LLM — no canned text. The system "cheats" only at the orchestration layer (cells CLI animation), never at the cell layer (LLM is the only voice).
 
 The substrate (welld, lume, Cloudflare Workers, cloudflared) is somebody else's problem most of the time. Cells's job is the harness, the DNA, the birth ritual, the talk loop, and the agent ergonomics that make a cell feel alive.
 
 ## Phases
 
-### Phase 0 — Infrastructure (this session)
+### Phase v1 — Magical generic cell (current work)
 
-Pete Loop set up. PLAN/BOARD/JOURNAL/STATUS in place. Worker can fire on real tasks. Done when `/start-pete-loop` returns the first `worker(P0.x): …` line and a follow-up turn picks up a P1 task cleanly.
+Type `cells birth`, see a fixed-tempo ~3s animation (waking → warming → ready → alive), get dropped into a talk prompt, type a message, watch the cell respond via LLM. Every cell is the same generic cell — same canned identity, same model chain, same extension set. No personality, no per-cell binding, no mother in the critical path.
 
-### Phase 1 — Birth checklist passes (acceptance gate)
+**Acceptance:**
 
-Run the `docs/birth-checklist.md` matrix end-to-end with no failures. 11 rows × per-birth verification × lifecycle exercises × clean cleanup. This is the "birth as it stands today actually works for every flag we expose" gate. Done when the checklist passes in a single run and `state/memory/project_cells_activity.md` carries the sign-off line.
+| ID | Test |
+|---|---|
+| V1.1 | `cells birth` shows the 3-stage animation, drops into talk prompt |
+| V1.2 | First user message hits the cell, LLM streams a real response |
+| V1.3 | Birth-to-first-LLM-token ≤ 5s p50 |
+| V1.4 | Pool refill: second `cells birth` immediately after first hits warm path |
+| V1.5 | `cells sleep` + talk-wakes round-trips |
+| V1.6 | `cells stop` + `cells wake` round-trips |
+| V1.7 | `cells kill` cleans up wells + registry |
+| V1.8 | Two cells coexist; talking to one doesn't affect the other |
 
-This phase must come first — there's no point optimizing first-talk latency on a flow that doesn't reliably finish.
+### Phase v2 — Personality + identity layers (next)
 
-### Phase 1b — Full CLI smoke
+When the user wants this cell to *be something* — a Chief of Staff for their workflow, a Researcher, a personal coding pair — we layer that on top of the generic cell. Cell still wakes generic, says "hi" generic, but as the user is typing their first real message, the personality MD streams in. By turn 2, the cell is itself.
 
-Walk every `cells` subcommand against a real alive cell. Phase 1 confirms birth across the flag matrix; Phase 1b confirms `talk`, `sleep`, `wake`, `stop`, `checkpoint`, `tui`, `shell`, `sync`, `dream`, `refresh-extensions`, `heartbeat`, `channel`, `see`, `doctor`, `schedule-pulse`, `schedule-pi-patches`, `kill --all-but`, `pi` (mother TUI). Includes visual checks inside `cells tui`: status bar color chip, harness rendering, `mft` launching cleanly, key bindings, persistent session on detach. Done when every CLI verb has been exercised against a live cell and the assertions pass.
+- Per-instance bind: name, color, owner identity, channel binding
+- Personality templates: CoS first; others as needed
+- Hot-reload of personality MD without pi restart (or restart hidden behind first "hi")
+- "Become" extension in DNA handles the runtime identity injection
 
-### Phase 2 — Auto-seed first message
+### Phase v3 — Cloud lifecycle polish
 
-`cells birth bob` no longer drops Pete into an empty prompt. The moment the cell can answer (post-step-4b verify), the CLI auto-sends `"introduce yourself"` (or a configurable seed) so Pete sees Bob greeting him as soon as the talk session opens. Streaming works the same as a manual prompt.
+- CF Worker reliable WS upgrade (the Phase 5 in old plan)
+- Slack channel binding
+- Vault markdown sync
+- Multi-device access via `wss://<name>.cells.md`
 
-Done when:
-
-- `cells birth <name>` flag `--seed=<text>` works (default: `"introduce yourself in one sentence and tell me what you can help with"`)
-- `--seed=off` opt-out preserved
-- The greeting lands in the same talk session the user dropped into, not a separate one
-- Slack-bound cells: greeting also mirrors to Slack as expected
-- p50 birth-to-greeting under the current substrate (no eggs yet) is recorded in `docs/perf/birth-to-greeting.md`
-
-### Phase 3 — Eggs (pre-warmed wells, agent-managed pool)
-
-Wells team's `pool_size` config makes well-create sub-3s. Cells layers an agent-management pool on top:
-
-- A pool of pre-warmed wells with the cell-base image already booted
-- Common configurations pre-applied (the most-frequent harness × model × extensions combos baked in)
-- "Hatching" = bind a name to a pre-warmed well, substitute identity, attach to the talk session
-
-See `docs/eggs-spec.md` for the consolidated v2 architecture (with `docs/eggs.md` + `docs/eggs-phase-1.md` retained as prior context). Initial pool sizing in `docs/eggs-variants.md`.
-
-Done when:
-
-- Hatching from a pool is the default path for `cells birth` when a compatible egg exists
-- `cells birth <name> --no-pool` opt-out for testing
-- `cells egg list/refill/drain` CLI surfaces depth + types
-- p50 birth-to-greeting drops by at least 4× vs Phase 2 baseline
-
-### Phase 4 — Capability-deferred install
-
-When user picks a config that isn't pre-baked into any pool, birth still hands them a talkable cell fast: the missing extensions / packages install **after** the seed-greeting has already begun, in the background, on the cell. The talk session is live during the install; the cell itself can comment on what's loading.
-
-Done when:
-
-- A birth that would otherwise need package installs (e.g. `--packages=pi-web-access`) returns to a talk-ready state in pool-time, not install-time
-- The cell becomes self-aware of in-flight installs (via a status file the agent reads in its system prompt)
-- Failed background installs surface to the user as a graceful "I couldn't load X yet — try again in a minute" reply rather than a silent broken cell
-
-### Phase 5 — Cloud talk path
-
-Off-Mac access to cells via `wss://<name>.cells.md`. Currently broken with 1002 protocol error — wells team's diagnostic points at the per-cell CF Worker stripping `Upgrade` headers when forwarding via `fetch()`. Either fix the Worker to preserve upgrade, switch to `WebSocketPair()` for in-Worker WS proxying, or have cloudflared expose `/agent` directly and skip the Worker for WS.
-
-Lower priority than 1-4 because Pete is on the Mac. Don't let it sneak ahead unless 1-4 are clean.
-
-## Architectural principles
+## Architectural principles (locked)
 
 1. **First-talk latency is the metric that matters.** Every shipped feature reports a delta on `docs/perf/birth-to-greeting.md`.
-2. **Loop-friendly first.** Prefer file-based state, headless tooling, bounded work cycles. The worker turns every Claude Code turn — design tasks for that cadence.
-3. **Cheap experiments before expensive infra.** Validate before scaling. A throwaway smoke cell beats a doc.
-4. **Don't fight the substrate.** Welld/lume issues go to wells team via the steward's `needs-wells:` bundling. We don't reimplement their fixes.
-5. **Anthropic on cell IPs is poison for the OAuth subscription.** Pete has memory-tagged this multiple times. Default model for cells is gpt-5.5 via openai-codex. Anthropic via API key (paid) is fine; via Pete's Claude Max sub from inside a cell is a ban risk and gets blocked at the worker.
-6. **Birth/death stay LLM-routed.** The skill prose at `proto/mother/.pi/skills/birth/SKILL.md` IS the program. Iterate on prose, don't migrate to TS.
-7. **Solo-dev git flow.** Branch off main → commit → squash merge to main → push. No PRs unless asked.
-8. **Night work goes to a `night/<date>` branch, never to main.** The morning steward fire bundles it into one approve-or-discard touch.
+2. **LLM-genuine at the cell layer.** Cells (the orchestrator CLI) can have progress UI, terminal flair, animation. The cell itself only speaks via LLM, never via pre-staged text.
+3. **Identity is internal, not user-facing.** "Cell" is what the user interacts with; pi/claude-code/codex/model-name are implementation details. The cell's voice never advertises its harness or model.
+4. **Critical path is deterministic; mother is async cleanup.** The birth flow (thaw → mark alive → drop into talk) is straight TS code, no LLM in the loop. Mother runs after the magical moment to ratify and tidy.
+5. **Bake everything common, flip switches at birth.** Cell-base ships with all standard extensions, packages, harnesses pre-installed. Birth = use the canned defaults. Customization (personality, bindings) comes from hot-reloads after the user is already talking.
+6. **Don't fight the substrate.** Welld/lume issues go to wells team via the direct chat channel at `/tmp/cells-wells-chat/`. We don't reimplement their fixes.
+7. **Anthropic on cell IPs is poison for the OAuth subscription.** Default cell model chain is `openai-codex/gpt-5.5:high → deepseek-v4-pro:high`. Anthropic via API key (paid) is fine; via Pete's Claude Max sub from inside a cell is a ban risk and gets blocked at the worker.
+8. **Solo-dev git flow.** Branch off main → commit → squash merge to main. No PRs unless asked.
+9. **Night work goes to a `night/<date>` branch, never to main.** The morning steward fire bundles it into one approve-or-discard touch.
+
+## Phase v1 implementation steps
+
+Sequenced. Each step is a worker branch + squash to main on completion.
+
+| Step | Slice | Effort | Outcome |
+|---|---|---|---|
+| 1 | Bake canned generic cell identity into cell-base. New `IDENTITY.md` (cell voice, no harness reference), default `status.json`, default `settings.json` with model chain set and standard extensions enabled. Update bake recipe. | ~1hr | Cell-base has a working canned cell |
+| 2 | Refactor `cmdCreate` fast-path: deterministic TS function, no mother in critical path. Background birth promise + foreground animation + await on first-user-send. Auto-name (`cell-<short-id>` or similar). | ~3hrs | Birth flow uses the canned cell, no LLM-routed orchestration |
+| 3 | React Ink birth-animation component. `cli/birth-ui.tsx`. 4 stages, ~750ms each, filling dots + label line beneath. Mounts on `cells birth`, unmounts at animation end. | ~2hrs | Visual flair, ~3s of intentional UX |
+| 4 | Hibernated cell-base pool. `cells egg refill` keeps 1 hot egg warm. Refill triggered after consumption. | ~3hrs | Birth grabs warm egg from pool, falls back to cold-fork if pool empty |
+| 5 | (Optional) Well-rename support via welld API. Egg from pool is renamed to user-facing cell name at birth. If welld doesn't support this cheaply, skip and use egg's pool-name as cell-name for v1. | ~1hr | Friendlier cell names |
+| 6 | Live test: `cells birth` from cold start, measure animation timing + first-LLM-token latency. Tune as needed. Capture numbers in `docs/perf/birth-to-greeting.md`. | ~1hr | V1.3 acceptance landed |
+| 7 | Run V1.1-V1.8 acceptance items. Bundle any fixes. | ~1-2hrs | v1 acceptance complete |
+
+Total ~11-13 hrs of focused work to ship Phase v1.
+
+## What's deferred (post-v1)
+
+These were in the old plan; v1 doesn't need them:
+
+- Per-variant matrix (old P1.3-P1.13) — variants come back as personality+binding swaps, not as separate eggs
+- Phase 1b CLI surface walk on multiple variants — replaced by V1.x acceptance on the canned cell; CLI smoke happens implicitly during V1.5-V1.7
+- CF Worker remote WS — Phase v3
+- Slack/vault — Phase v3
+- Per-cell color theming, in-flight package install, capability-deferred load — Phase v2
 
 ## Loop architecture
 
 The worker is driven by the Pete Loop — a Stop hook in `.claude/hooks/pete-loop-stop.sh` that re-injects the worker prompt after every Claude Code turn until the flag file is removed or 200 turns elapse. The steward fires manually via `/steward`. State lives on disk in this repo (PLAN/BOARD/JOURNAL/STATUS).
 
-`/start-pete-loop` to begin a grinding session. `/stop-pete-loop` to halt. `/steward` for triage. `/worker` for one manual single-fire turn.
+`/start-pete-loop` to begin a grinding session. `/stop-pete-loop` to halt. `/steward` for triage.
+
+## Direct cells↔wells chat
+
+Active during day sessions when both teams are working: `/tmp/cells-wells-chat/cells-out.log` (cells appends) and `wells-out.log` (wells appends). Each side runs a persistent `Monitor tail -f` on the other's outbox. Used to root-cause cross-team bugs in real-time without copy-paste relay. See `/tmp/cells-wells-chat/PROTOCOL.md`.
