@@ -873,3 +873,30 @@ Talk smoke verified last fire: pool-born cell replies "ok" via local welld. Both
 **Tier choice:** stayed Tier 2 (VM hibernated pre-pi-start; pi cold-starts via site service after wake). Tier 3 (pi running in hibernated state) is a future optimization if perf needs <2s. Tier 2 already meets the magical-moment target.
 
 **V1.STEP3 done.** Ready for V1.STEP4 (React Ink birth animation).
+
+## 2026-05-10 22:10 MT — worker(V1.STEP4) fires 6-7 — Ink animation live-verified, DONE
+
+Built and live-verified the React Ink birth animation:
+
+**Component (`cli/birth-ui.tsx`):**
+- 4 stages × 750ms = 3s total
+- Filling dots: ◉ ◯ ◯ ◯ → ◉ ◉ ◯ ◯ → ◉ ◉ ◉ ◯ → ◉ ◉ ◉ ◉
+- Labels: waking → warming → ready → alive
+- Fleet color `#9D7CD8` (muted violet) on dots, dim text on label
+- Fixed tempo on timers, no progress signaling from welld
+
+**Wiring (cmdCreateV1Fast):**
+- TTY mode: animation kicks off in parallel with birth promise; `await Promise.all` shape via `await animPromise` after birth phase A completes.
+- Non-TTY mode: plain text `birthing X… ✓ alive`. Falls through to script-style output.
+- Birth-from-pool ~2s, animation 3s → total perceived 3s with smooth animation cover.
+- Birth-from-cold ~10s, animation 3s → total perceived 10s; animation finishes early but the user is "still waiting" pattern matches expectations of a cold birth.
+
+**Live verification (pty wrapper):**
+```
+$ script -q /tmp/cells-anim.log bun run cells birth --seed=off
+```
+Captured all four stage frames with proper ANSI color codes (`[38;2;157;124;216m`), clean unmount, transition into "── connecting to cell-X… ── connected via local welld ── talking to cell-X" pattern.
+
+**Deps added:** ink@7.0.2, react@19.2.6, @types/react@19.2.14. `react-devtools-core` is ink's optional peer dep — bun runtime tolerates absence; `--external react-devtools-core` needed for `bun build` verification (not for actual runtime via the `bun cells.ts` symlink at `~/.local/bin/cells`).
+
+**V1.STEP4 done.** Next: V1.STEP5 (well-rename) or V1.STEP6 (perf measurement). V1.STEP5 is optional — skip if welld doesn't support cheap rename. V1.STEP6 is the acceptance measurement.

@@ -8,9 +8,12 @@
     "@mariozechner/pi-coding-agent": "^0.70.5",
     "@mariozechner/pi-tui": "^0.70.5",
     "@sinclair/typebox": "^0.34.49",
-    "@types/bun": "latest"
+    "@types/bun": "latest",
+    "@types/react": "^19.2.14"
   },
   "dependencies": {
-    "cron-parser": "^5.5.0"
+    "cron-parser": "^5.5.0",
+    "ink": "^7.0.2",
+    "react": "^19.2.6"
   }
 }

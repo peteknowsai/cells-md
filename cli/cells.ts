@@ -1368,7 +1368,14 @@ async function cmdCreateV1Fast(name: string | undefined, opts: CreateOpts): Prom
     process.exit(1);
   }
 
-  console.log(`birthing ${cellName}…`);
+  // Start the animation theater + the real birth pipeline in parallel.
+  // Animation is fixed 3s. Birth pipeline takes 2s (pool) or 10s (cold).
+  // We wait for both before dropping into talk.
+  const useAnim = process.stdout.isTTY;
+  const animPromise: Promise<void> = useAnim
+    ? (await import("./birth-ui.tsx")).runBirthAnimation()
+    : Promise.resolve();
+  if (!useAnim) console.log(`birthing ${cellName}…`);
 
   // Phase A — deterministic, no LLM.
   // Try the pool first: a hibernated egg wakes in ~3s vs ~9s cold fork.
@@ -1437,7 +1444,11 @@ async function cmdCreateV1Fast(name: string | undefined, opts: CreateOpts): Prom
     process.exit(1);
   }
 
-  console.log(`✓ ${cellName} alive${hatchedFrom ? " (from pool)" : ""}`);
+  // Wait for the animation to finish if it's still playing (cold fork
+  // typically outlasts the 3s animation; warm-pool birth lands before).
+  await animPromise;
+
+  if (!useAnim) console.log(`✓ ${cellName} alive${hatchedFrom ? " (from pool)" : ""}`);
 
   // Fire-and-forget pool refill. Runs while the user talks; the talk
   // session keeps this process alive long enough for the refill to land.
