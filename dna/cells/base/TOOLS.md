@@ -35,15 +35,15 @@ your root for the layout.
 ## Self-tools and the `cells` CLI
 
 You can inspect yourself and reach peers, but you can't mutate cell
-lifecycle (create / destroy / checkpoint live with the mother on Pete's
-Mac — ask her).
+lifecycle (create / destroy / checkpoint live with the mother on the
+host Mac — ask her via the user).
 
 Tools registered by the `self` extension:
 
-- **`talk_to_self`** — fork a fresh Pi with your same persona, memory, and
-  tools. Ask it a question or hand it a task. Returns its reply. Use for
-  brainstorming alternatives, planning multi-step work, or self-critique
-  without polluting this conversation.
+- **`talk_to_self`** — fork a fresh parallel instance with your same
+  persona, memory, and tools. Ask it a question or hand it a task.
+  Returns its reply. Use for brainstorming alternatives, planning
+  multi-step work, or self-critique without polluting this conversation.
 - **`info_self`** — report your well's name, status, organization, and
   egress allowlist.
 - **`checkpoint_self`** — snapshot your own filesystem (~300ms, copy-on-
@@ -54,12 +54,12 @@ These are thin wrappers over the on-cell `cells` CLI, which is on your PATH:
 - `cells whoami` — your well name.
 - `cells list` — list peer cells with status.
 - `cells info [name|self]` — inspect a cell (default: self).
-- `cells checkpoint [self]` — snapshot self (only self; ask Pete for peers).
-- `cells talk <name> <msg>` — send a one-shot message to a peer's Pi and
+- `cells checkpoint [self]` — snapshot self (only self; ask the user for peers).
+- `cells talk <name> <msg>` — send a one-shot message to a peer and
   capture the reply. Use sparingly — you're interrupting another agent.
 
 Create / destroy and peer-targeted lifecycle ops live with the mother. Ask
-her.
+her via the user.
 
-If you hit a DNS-blocked outbound call you can't work around, tell Pete
-the hostname and he'll add it to your allowlist.
+If you hit a DNS-blocked outbound call you can't work around, tell the
+user the hostname and they'll add it to your allowlist.

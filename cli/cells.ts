@@ -17,10 +17,11 @@ import {
 
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = dirname(SCRIPT_DIR);
-const PROTO_DIR = join(REPO_ROOT, "proto");
+const DNA_ROOT = join(REPO_ROOT, "dna");
+const PROTO_DIR = join(DNA_ROOT, "proto");
 const MOTHER_ROOT = join(PROTO_DIR, "mother");
 const PULSE_ROOT = join(PROTO_DIR, "pulse");
-const DNA_DIR = join(MOTHER_ROOT, "dna");
+const DNA_DIR = join(DNA_ROOT, "cells/base");
 const REGISTRY_DIR = join(homedir(), ".cells");
 const REGISTRY_PATH = join(REGISTRY_DIR, "cells.json");
 const CHANNELS_PATH = join(REGISTRY_DIR, "channels.json");
@@ -102,7 +103,7 @@ function buildDefaultChain(primary: { provider: string; modelId: string; thinkin
 }
 
 // In-tree extensions a user can opt into at create time. Each lives at
-// proto/mother/dna/.pi/extensions/<name>/ — birth pushes the whole dna, then
+// dna/cells/base/.pi/extensions/<name>/ — birth pushes the whole dna, then
 // deletes the unselected ones from the cell.
 const OPTIONAL_EXTENSIONS = ["memory", "mentality", "wiki", "dream"] as const;
 type OptionalExtension = (typeof OPTIONAL_EXTENSIONS)[number];
@@ -3237,7 +3238,7 @@ echo removed
 /**
  * Restart pi on a cell so newly-pushed extensions actually load.
  *
- * v2: pi runs as a child of the site server (proto/mother/dna/site/server.ts).
+ * v2: pi runs as a child of the site server (dna/cells/base/site/server.ts).
  * Killing pi is enough — the site server's `pi.exited` handler respawns
  * it after PI_RESPAWN_DELAY_MS (1s) and pi re-reads extensions on boot.
  * No need to restart the well service itself.
@@ -4043,7 +4044,7 @@ async function setupPulseVault(): Promise<void> {
   await mkdir(vault, { recursive: true });
 
   // Wipe regenerated surfaces; preserve nothing — pulse is fully reproducible
-  // from proto/pulse/ + ~/.cells/pulse.json.
+  // from dna/proto/pulse/ + ~/.cells/pulse.json.
   for (const f of ["README.md", "AGENTS.md", "persona.md", ...ANATOMY_FILES]) {
     if (existsSync(join(vault, f))) await rm(join(vault, f));
   }
@@ -4993,7 +4994,7 @@ async function cmdBake(opts: BakeOpts) {
 
     // 3. Push DNA — cells-specific package.json, .pi/, scripts/, site/, etc.
     console.log(`→ push DNA → /cell`);
-    await pushLocalDirToWellAsCell(sourceName, join(REPO_ROOT, "proto/mother/dna"), "/cell");
+    await pushLocalDirToWellAsCell(sourceName, DNA_DIR, "/cell");
 
     // 3b. Write the per-cell tmux config template (placeholders for cell
     //     name + bg/fg color get filled in at birth time, step 3b of the

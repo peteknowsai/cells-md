@@ -55,7 +55,7 @@ These are the calls made up front to avoid mid-build re-architecture:
   export function eggSpritePool(v: Variant): string // 'egg-<short-token>' for well naming
   ```
   Pure function — no IO. Unit-testable.
-- **`proto/mother/.pi/skills/birth-egg/SKILL.md`** — fork of `birth/SKILL.md` minus identity steps:
+- **`dna/proto/mother/.pi/skills/birth-egg/SKILL.md`** — fork of `birth/SKILL.md` minus identity steps:
   - Steps 1, 2, 3, 6, 6b, 6c, 8 — copied verbatim (universal work)
   - Step 4 — push DNA but **don't sed** the placeholders. Substitute `<MODEL>`, `<PROVIDER>`, `<THINKING>` per egg variant; leave `<NAME>` untouched.
   - Step 4b, 4c, 7 — **skipped**. Per-cell color, status file, site-service all run at hatch.
@@ -63,9 +63,9 @@ These are the calls made up front to avoid mid-build re-architecture:
   - Step 9 — checkpoint named `pristine-v1`.
   - Step 10 — `report_outcome(success, "egg <SPRITE> ready · variant=<SIG>")`.
   - Skip step 11 (no cells_activity log for eggs).
-- **`proto/mother/.pi/skills/cull-egg/SKILL.md`** — `well_destroy` + `report_outcome`. ~10 lines.
-- **`proto/mother/.pi/prompts/egg-birth.md`** — entry prompt for `birth-egg`. Receives variant signature, parses, calls birth-egg skill with substitutions. Mirrors `cell-create.md`.
-- **`proto/mother/.pi/prompts/egg-cull.md`** — mirrors `cell-destroy.md`.
+- **`dna/proto/mother/.pi/skills/cull-egg/SKILL.md`** — `well_destroy` + `report_outcome`. ~10 lines.
+- **`dna/proto/mother/.pi/prompts/egg-birth.md`** — entry prompt for `birth-egg`. Receives variant signature, parses, calls birth-egg skill with substitutions. Mirrors `cell-create.md`.
+- **`dna/proto/mother/.pi/prompts/egg-cull.md`** — mirrors `cell-destroy.md`.
 - **`scripts/hatch.ts`** — Bun TS, ~150 lines:
   ```ts
   // CLI: hatch <egg-id> --as <name> --variant <sig>

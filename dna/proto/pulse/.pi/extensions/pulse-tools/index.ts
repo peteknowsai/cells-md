@@ -10,7 +10,7 @@
  *   pulse-inbox/processed/  archive of drained inbox files
  *   pulse-cache/<cell>.json parsed schedule per cell ({items: [{id, cron, message}]})
  *
- * Vault-readable surfaces (under proto/pulse/state/, mirrored by `cells sync pulse`):
+ * Vault-readable surfaces (under dna/proto/pulse/state/, mirrored by `cells sync pulse`):
  *
  *   heartbeats.md    table of every cell's schedule + last/next fire (rendered each pulse)
  *   log.md           LLM-written daily narrative (one entry per 24h, prepended)
@@ -45,7 +45,7 @@ const LOGS_DIR = path.join(CELLS_DIR, "logs");
 const PULSE_TRACE_LOG = path.join(LOGS_DIR, "pulse-trace.log");
 const FIRES_LOG = path.join(LOGS_DIR, "fires.log");
 
-// pulse-tools lives at proto/pulse/.pi/extensions/pulse-tools/index.ts;
+// pulse-tools lives at dna/proto/pulse/.pi/extensions/pulse-tools/index.ts;
 // state/ is two dirs up.
 const PULSE_ROOT = path.resolve(__dirname, "..", "..", "..");
 const STATE_DIR = path.join(PULSE_ROOT, "state");
@@ -501,7 +501,7 @@ export default function (pi: any) {
     name: "write_log_entry",
     label: "Write daily log entry",
     description:
-      "Prepend a daily narrative entry to proto/pulse/state/log.md. body should be a short paragraph (~3-5 sentences) describing what happened in the prior 24h. Markdown, no leading H2 (the tool adds `## <date>`). The date is LOCAL — pass the value daily_log_due returned.",
+      "Prepend a daily narrative entry to dna/proto/pulse/state/log.md. body should be a short paragraph (~3-5 sentences) describing what happened in the prior 24h. Markdown, no leading H2 (the tool adds `## <date>`). The date is LOCAL — pass the value daily_log_due returned.",
     parameters: Type.Object({
       date: Type.String({ description: "YYYY-MM-DD (local TZ — value from daily_log_due.today)." }),
       body: Type.String({ description: "Markdown paragraph; no headers." }),
@@ -525,7 +525,7 @@ export default function (pi: any) {
     name: "render_digest",
     label: "Render heartbeats digest",
     description:
-      "Write proto/pulse/state/heartbeats.md — a markdown table of every cell's schedule, last-fire, next-fire. Pure compute over pulse-cache/ + state. Call at the end of each pulse.",
+      "Write dna/proto/pulse/state/heartbeats.md — a markdown table of every cell's schedule, last-fire, next-fire. Pure compute over pulse-cache/ + state. Call at the end of each pulse.",
     parameters: Type.Object({}),
     async execute() {
       ensureDirs();

@@ -8,18 +8,17 @@
   ],
   "packages": [],
   "enabledModels": [
-    "claude-opus-4-7",
-    "claude-sonnet-4-6",
-    "claude-haiku-4-5",
     "openai-codex/gpt-5.5",
-    "openai/gpt-5.5-pro",
-    "deepseek-v4-flash",
-    "deepseek-v4-pro"
+    "deepseek-v4-pro",
+    "deepseek-v4-flash"
   ],
-  "defaultProvider": "__PROVIDER__",
-  "defaultModel": "__MODEL__",
-  "defaultThinkingLevel": "__THINKING__",
-  "modelChain": __MODEL_CHAIN__,
+  "defaultProvider": "openai-codex",
+  "defaultModel": "gpt-5.5",
+  "defaultThinkingLevel": "medium",
+  "modelChain": [
+    "openai-codex/gpt-5.5:medium",
+    "deepseek/deepseek-v4-pro:high"
+  ],
   "warnings": {
     "anthropicExtraUsage": false
   },

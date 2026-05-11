@@ -10,7 +10,7 @@ The cells project: a fleet of always-on AI agents, each in its own well (a local
 - **Don't print verbose status to chat.** One sentence per turn saying what you did. Detailed work goes in JOURNAL.md.
 - **Don't make architectural decisions.** Implementation calls (which library, which pattern, which sed expression) are yours; framework choices, schema designs, naming conventions, and phase changes get marked `decision-needed:`.
 - **Substrate is wells team's territory.** If something looks like a welld/lume bug (lume crash, vhost dispatch returning 1011, hibernate misbehaviour), don't try to fix it. Mark it Blocked with `needs-wells: <symptom>` and move on. Pete pings them out-of-band.
-- **Birth/death are LLM-routed.** Skill prose at `proto/mother/.pi/skills/birth/SKILL.md` and `proto/mother/.pi/prompts/cell-destroy.md` is the source of truth. Don't migrate steps into deterministic TS to "speed things up" — iterate on the skill.
+- **Birth/death are LLM-routed.** Skill prose at `dna/proto/mother/.pi/skills/birth/SKILL.md` and `dna/proto/mother/.pi/prompts/cell-destroy.md` is the source of truth. Don't migrate steps into deterministic TS to "speed things up" — iterate on the skill.
 - **Solo-dev git flow.** Per Pete's CLAUDE.md: branch off `main` for features (`worker/...` for worker tasks), commit liberally, squash-merge to `main` on completion. No PRs unless explicitly asked.
 
 ## Step 0 — Time check (do this first, every turn)

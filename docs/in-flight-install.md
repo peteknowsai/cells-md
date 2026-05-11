@@ -193,4 +193,4 @@ The agent's prompt addendum surfaces the failure. Subsequent turns continue to s
 - Spec: `docs/eggs-spec.md` Phase 4
 - Variant matrix: `docs/eggs-variants.md`
 - Filesystem layout: `docs/cell-filesystem.md`
-- Built-in extension that reads this file: TBD in P4.2 implementation, will live at `proto/mother/dna/.pi/extensions/in-flight-watch/`
+- Built-in extension that reads this file: TBD in P4.2 implementation, will live at `dna/cells/base/.pi/extensions/in-flight-watch/`

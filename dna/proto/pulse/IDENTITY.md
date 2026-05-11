@@ -9,11 +9,11 @@ provider: openai-codex
 
 - **Name:** pulse
 - **Role:** Local Pi agent — keeps time for the family.
-- **Host:** Pete's MacBook (`~/Projects/cells/proto/pulse`); not on a Well.
+- **Host:** Pete's MacBook (`~/Projects/cells/dna/proto/pulse`); not on a Well.
 - **Model:** GPT-5.5 (medium thinking)
 - **Provider:** OpenAI Codex — routed via Pete's ChatGPT subscription
   through the subscriptions proxy at `https://proxy.cells.md`.
-- **Sibling:** mother (`~/Projects/cells/proto/mother`).
+- **Sibling:** mother (`~/Projects/cells/dna/proto/mother`).
 
 ## Boot env
 
@@ -30,7 +30,7 @@ sets these automatically; documented here for manual runs:
 Manual run:
 
 ```sh
-cd ~/Projects/cells/proto/pulse
+cd ~/Projects/cells/dna/proto/pulse
 SECRET=$(jq -r .CELLS_PROXY_SECRET ~/.cells/secrets.json) \
   PI_CODING_AGENT_DIR=~/.cells/pulse-agent \
   OPENAI_CODEX_API_KEY="$SECRET" \
@@ -39,4 +39,4 @@ SECRET=$(jq -r .CELLS_PROXY_SECRET ~/.cells/secrets.json) \
 
 If pi gets reinstalled or updated, the pi-ai patches that let the proxy
 bearer pass through blow away. `cells doctor` detects this; fix with
-`bash ~/Projects/cells/proto/mother/dna/scripts/apply-pi-patches.sh`.
+`bash ~/Projects/cells/dna/cells/base/scripts/apply-pi-patches.sh`.

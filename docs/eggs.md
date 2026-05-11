@@ -106,9 +106,9 @@ Library: `cli/lib/variant-signature.ts` (pure, unit-tested).
 
 ## Skills + prompts
 
-- `proto/mother/.pi/skills/birth-egg/SKILL.md` — the egg-birth ritual.
+- `dna/proto/mother/.pi/skills/birth-egg/SKILL.md` — the egg-birth ritual.
   Forked from `birth/SKILL.md` minus per-cell steps (4b, 4c, 7, 11, 12).
-- `proto/mother/.pi/prompts/egg-birth.md` — prompt mother receives.
+- `dna/proto/mother/.pi/prompts/egg-birth.md` — prompt mother receives.
   Takes a well name and a JSON config (no name, no thinking, no
   channels — those are hatch-time).
 - **No `cull-egg` skill.** Eggs have no side effects beyond their

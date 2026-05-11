@@ -36,8 +36,8 @@ import { tmpdir } from "node:os";
  *   - Inside a cell (the agent runs in $HOME/agent — that's /home/well/agent
  *     on local wells, historically /home/well/agent on retired wells):
  *     use the in-VM state dir.
- *   - On Pete's Mac (mother running in ~/Projects/cells/proto/mother, pulse
- *     in ~/Projects/cells/proto/pulse): cwd/state/memory.
+ *   - On Pete's Mac (mother running in ~/Projects/cells/dna/proto/mother, pulse
+ *     in ~/Projects/cells/dna/proto/pulse): cwd/state/memory.
  *   - Override via env var CELL_MEMORY_DIR.
  *
  * Both contexts get identical structure: MEMORY.md + topical files +

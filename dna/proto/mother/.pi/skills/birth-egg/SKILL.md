@@ -116,7 +116,7 @@ Verify every required binary is on PATH on the well:
 
 Use `well_push` with:
 - `name: <NAME>`
-- `localPath: /Users/pete/Projects/cells/proto/mother/dna`
+- `localPath: /Users/pete/Projects/cells/dna/cells/base`
 - `remotePath: /cell`
 
 Then substitute **only `__MODEL__` and `__PROVIDER__`** — these are

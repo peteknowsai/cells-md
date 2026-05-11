@@ -8,12 +8,12 @@
 
 | What | Where |
 |---|---|
-| Pulse agent root | `proto/pulse/` |
-| Slash command (the pulse body) | `proto/pulse/.pi/prompts/pulse.md` |
-| Tools (state, inbox, cron, fire, digest, daily-log) | `proto/pulse/.pi/extensions/pulse-tools/index.ts` |
-| Codex routing + anatomy composer | `proto/pulse/.pi/extensions/use-codex/index.ts` |
-| Launcher (loads secrets, isolates pi auth) | `proto/pulse/bin/pulse-run` |
-| Inbox push extension (ships in cell DNA) | `proto/mother/dna/.pi/extensions/heartbeat-watch/index.ts` |
+| Pulse agent root | `dna/proto/pulse/` |
+| Slash command (the pulse body) | `dna/proto/pulse/.pi/prompts/pulse.md` |
+| Tools (state, inbox, cron, fire, digest, daily-log) | `dna/proto/pulse/.pi/extensions/pulse-tools/index.ts` |
+| Codex routing + anatomy composer | `dna/proto/pulse/.pi/extensions/use-codex/index.ts` |
+| Launcher (loads secrets, isolates pi auth) | `dna/proto/pulse/bin/pulse-run` |
+| Inbox push extension (ships in cell DNA) | `dna/cells/base/.pi/extensions/heartbeat-watch/index.ts` |
 | Inbox endpoint (subscriptions proxy host route) | `cli/proxy.ts` (`pulse.cells.md/heartbeat-changed`) |
 
 ## Runtime state (on Pete's Mac)
@@ -29,7 +29,7 @@
 
 ## Vault-readable surfaces
 
-`cells sync pulse` mirrors `proto/pulse/state/` to `~/Obsidian/cells/pulse/state/`:
+`cells sync pulse` mirrors `dna/proto/pulse/state/` to `~/Obsidian/cells/pulse/state/`:
 
 | File | Updated by | Contents |
 |---|---|---|

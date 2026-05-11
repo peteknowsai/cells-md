@@ -18,12 +18,12 @@ anything inside it.
 **Includes:**
 
 - `cell` CLI: `pi`, `create`, `talk`, `list`, `sleep`, `wake`, `checkpoint`, `destroy`
-- Local mother Pi project at `proto/mother/` (`SOUL.md` + sharded anatomy files + use-max extension + `package.json`) so it bills against Pro/Max via the first-party billing recipe
-- `proto/mother/dna/` — recipe-compliant cell-on-Well layout that birth pushes onto each Well
-- `proto/mother/.pi/skills/birth/SKILL.md` — birth ritual the mother follows:
+- Local mother Pi project at `dna/proto/mother/` (`SOUL.md` + sharded anatomy files + use-max extension + `package.json`) so it bills against Pro/Max via the first-party billing recipe
+- `dna/cells/base/` — recipe-compliant cell-on-Well layout that birth pushes onto each Well
+- `dna/proto/mother/.pi/skills/birth/SKILL.md` — birth ritual the mother follows:
   - create the Well + configure egress (anthropic, bun.sh, npm, github)
   - install Bun on the Well
-  - tar+push `proto/mother/dna/` to `/root/cell`, `sed` substitute `__NAME__`
+  - tar+push `dna/cells/base/` to `/root/cell`, `sed` substitute `__NAME__`
   - run `bun install` on the Well
   - inject shared keys (`CELLS_PROXY_SECRET`, `EXA_API_KEY`, `WELL_TOKEN`) from `~/.cells/secrets.json` and patch pi-ai's model registry to route through `proxy.cells.md`
   - register the `site` well service (it serves `<cell>.cells.md` and

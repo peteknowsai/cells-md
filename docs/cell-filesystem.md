@@ -21,7 +21,7 @@ The well is the box. The cell is the inhabitant. SSH'ing in lands you directly i
 └── site/                    ← Bun web server for <name>.cells.md
 ```
 
-**Flat-at-root**, not subdirected into `identity/code/memory/` — the original plan called for that grouping; ship reality is flat so pi's working dir of `/cell` finds `.pi/`, `package.json`, `node_modules/` directly without nesting. The DNA template at `proto/mother/dna/` mirrors this.
+**Flat-at-root**, not subdirected into `identity/code/memory/` — the original plan called for that grouping; ship reality is flat so pi's working dir of `/cell` finds `.pi/`, `package.json`, `node_modules/` directly without nesting. The DNA template at `dna/cells/base/` mirrors this.
 
 The system-wide env shim lives at `/etc/profile.d/cells-env.sh` (root-owned 0644, written by `cells bake`'s `bakeWriteProfileD`). It re-exports `CELLS_PROXY_SECRET` from `/etc/environment` as `ANTHROPIC_OAUTH_TOKEN` / `ANTHROPIC_AUTH_TOKEN` / `OPENAI_CODEX_API_KEY` and prepends `/cell/bin` to `PATH`.
 
@@ -47,8 +47,8 @@ The login user is **`cell`**, not `well`. Wells's substrate keeps `well` for its
 
 - Bake script (`cli/cells.ts cmdBake`): pushes DNA to `/cell/` directly via `pushLocalDirToWellAsCell`, creates user `cell` with `bakeCreateCellUser` (`useradd -d /cell -m -s /bin/bash cell` + sudo group), chowns `/cell` to `cell:cell`. Force-fsyncs (`sync && sync`) before save (W.20 finding) so wells's stop+save preserves writes.
 - `/etc/profile.d/cells-env.sh` (`bakeWriteProfileD`) replaces the old `~/.bashrc.d/` shims. System-wide, sourced by every login shell.
-- DNA template at `proto/mother/dna/` is **flat** (not `identity/code/memory/` subdirs) — the on-disk `/cell` layout matches.
-- Birth skills (`proto/mother/.pi/skills/birth/SKILL.md`, `birth-egg/SKILL.md`) swept `~/agent` → `/cell` and `~/.bashrc.d/*` → `source /etc/profile.d/cells-env.sh` in step 4b verify.
+- DNA template at `dna/cells/base/` is **flat** (not `identity/code/memory/` subdirs) — the on-disk `/cell` layout matches.
+- Birth skills (`dna/proto/mother/.pi/skills/birth/SKILL.md`, `birth-egg/SKILL.md`) swept `~/agent` → `/cell` and `~/.bashrc.d/*` → `source /etc/profile.d/cells-env.sh` in step 4b verify.
 - CLI heredocs in `cli/cells.ts` swept (17 refs across tmux launch, dream tool, extension push/remove, pullMarkdown, post-install).
 
 **Still open from cells's side:**
