@@ -1351,6 +1351,7 @@ function generateCellName(): string {
 // fall through to the legacy slow-birth path (mother LLM-routed) — to be
 // re-shaped in v2 as personality/binding swaps on the canned cell.
 async function cmdCreateV1Fast(name: string | undefined, opts: CreateOpts): Promise<void> {
+  const t0 = Date.now();
   const cellName = name ?? generateCellName();
 
   if (RESERVED_NAMES.has(cellName)) {
@@ -1444,9 +1445,34 @@ async function cmdCreateV1Fast(name: string | undefined, opts: CreateOpts): Prom
     process.exit(1);
   }
 
+  const tPhaseA = Date.now();
+
   // Wait for the animation to finish if it's still playing (cold fork
   // typically outlasts the 3s animation; warm-pool birth lands before).
   await animPromise;
+
+  const tAlive = Date.now();
+
+  // Perf telemetry — append one JSONL row per birth. Used by V1.STEP6
+  // measurement. Best-effort, never throws.
+  try {
+    const perfDir = join(homedir(), ".cells", "logs", "perf");
+    await mkdir(perfDir, { recursive: true });
+    const row = {
+      ts: new Date().toISOString(),
+      cell: cellName,
+      path: hatchedFrom ? "pool" : "cold",
+      phase_a_ms: tPhaseA - t0,
+      alive_ms: tAlive - t0,
+    };
+    await writeFile(
+      join(perfDir, "birth.jsonl"),
+      JSON.stringify(row) + "\n",
+      { flag: "a" },
+    );
+  } catch {
+    // Telemetry is non-critical; ignore failures.
+  }
 
   if (!useAnim) console.log(`✓ ${cellName} alive${hatchedFrom ? " (from pool)" : ""}`);
 

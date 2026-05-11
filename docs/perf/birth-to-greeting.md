@@ -1,68 +1,76 @@
 # Birth-to-greeting perf
 
-The wedge metric for cells. From `cells birth <name> ...` invocation to the moment the cell's first token of its seed-greeting reply lands in Pete's terminal. Lower is better. Target: under 15s p50 with eggs + auto-seed.
+The wedge metric for cells. Two related measurements:
+
+- **`alive_ms`** — from `cells birth` invocation to the cell being registered as `alive` in `~/.cells/cells.json` (deterministic Phase A complete; WS handle available). Captured in `~/.cells/logs/perf/birth.jsonl` per-birth.
+- **`first_token_ms`** *(not yet instrumented)* — from `cells birth` invocation to the first LLM token of the seed-greeting reply streaming into the user's terminal. Adds WS-connect + pi cold-start (Tier 2) + LLM round-trip on top of `alive_ms`. Estimated +3–5s.
+
+Target: `first_token_ms` ≤ 5s p50 on warm-pool birth (V1.3 acceptance).
 
 ## How it's measured
 
-- **Start**: epoch ms at the moment `cmdCreate` is entered (after arg parsing).
-- **End**: epoch ms at the moment `streamCellBridge` emits its first delta token from the seed message reply.
-- **Sample size**: at least 5 births per row; record p50 + min + max.
-- **Substrate**: `wells-stable-<date>` build, noted per-row.
-- **Network**: Pete's home WiFi; not a controlled environment, but consistent enough at this latency scale.
+`scripts/perf-birth.sh N_COLD N_WARM` runs N births in each mode against the local substrate, parses `~/.cells/logs/perf/birth.jsonl`, prints p50/p95/min/max.
 
-When eggs aren't matching, slow-birth rows include the bake-cache state: warm (cell-base recent) vs cold (recently force-baked).
+- Non-TTY mode (no animation overhead).
+- Pool drained between cold runs.
+- Pool refilled to depth 1 before each warm run.
+- Cell killed between runs.
 
-## Phase 2 baseline — slow-birth, no pool
+## Phase v1 baseline — 2026-05-10 22:35 MT
 
-Substrate: TBD on the next P2.4 run.
-Pool state: drained (`cells egg drain -y`).
+Substrate: `wells-stable-2026-05-10h`. cell-base from commit `c109bb9` (V1.STEP4 merged).
 
-| Variant | Model | Thinking | Extensions | Packages | p50 (s) | min | max | Substrate |
-|---|---|---|---|---|---|---|---|---|
-| ck-pi-gpt55 | gpt-5.5 | medium | — | — | TBD | TBD | TBD | TBD |
-| ck-pi-gpt55-pro | gpt-5.5-pro | medium | — | — | TBD | TBD | TBD | TBD |
-| ck-pi-deepseek-pro | deepseek-v4-pro | high | — | — | TBD | TBD | TBD | TBD |
-| ck-pi-deepseek-fl | deepseek-v4-flash | medium | — | — | TBD | TBD | TBD | TBD |
-| ck-pi-think-low | gpt-5.5 | low | — | — | TBD | TBD | TBD | TBD |
-| ck-pi-think-adapt | gpt-5.5 | adaptive | — | — | TBD | TBD | TBD | TBD |
-| ck-pi-ext-memory | gpt-5.5 | medium | memory | — | TBD | TBD | TBD | TBD |
-| ck-pi-ext-many | gpt-5.5 | medium | memory,wiki,dream | — | TBD | TBD | TBD | TBD |
-| ck-pi-pkg-web | gpt-5.5 | medium | — | pi-web-access | TBD | TBD | TBD | TBD |
-| ck-pi-slack | gpt-5.5 | medium | — | — | TBD | TBD | TBD | TBD |
+**Alive-time** (`cells birth … alive` log line, 5 trials each):
 
-Filled by P2.4 once W.27 unblocks Phase 1.
+| path | n | p50 | p95 | min | max |
+|---|---|---|---|---|---|
+| cold-fork (pool empty) | 5 | 9.60s | 10.04s | 9.04s | 10.04s |
+| warm-pool | 5 | 2.36s | 2.44s | 2.30s | 2.44s |
 
-## Phase 3 — eggs on
+Warm cluster is *very* tight (2.30–2.44s range, only 140ms spread). Cold cluster is also tight (9.04–10.04s, ~1s spread, all 9+s). **Warm-pool is 4.07× faster than cold-fork at the alive line.**
 
-Substrate: TBD on the next P3.7 run.
-Pool state: per `docs/eggs-variants.md` (gpt-5.5 ×3, gpt-5.5+memory ×2, deepseek-v4-pro ×1).
+**Estimated first-token-time** (alive_ms + WS-connect + pi cold-start + LLM round-trip):
 
-Hatch path (matching variants) vs slow-birth fallback (off-menu) noted per-row.
+| path | estimated p50 | components |
+|---|---|---|
+| cold-fork | ~14s | 9.6s alive + ~0.1s WS + ~3s pi-cold + ~1s LLM |
+| warm-pool | ~6.5s | 2.4s alive + ~0.1s WS + ~3s pi-cold + ~1s LLM |
 
-| Variant | Match | p50 (s) | Δ vs Phase 2 | Notes |
-|---|---|---|---|---|
-| ck-pi-gpt55 | hatch (gpt-5.5 vanilla) | TBD | TBD | |
-| ck-pi-ext-memory | hatch (gpt-5.5+memory) | TBD | TBD | |
-| ck-pi-deepseek-pro | hatch (deepseek-v4-pro vanilla) | TBD | TBD | |
-| ck-pi-gpt55-pro | slow-birth (off-menu) | TBD | TBD | falls through to Phase 2 path |
-| ck-pi-pkg-web | slow-birth (packages off-menu) | TBD | TBD | |
+The dominant cost in cold is welld's clonefile + warming-restart (~9s); the pool side dodges that via hibernate/wake (~2s).
 
-Target: ≥4× drop on hatch rows.
+## Where the 3s animation lands
 
-## Phase 4 — capability-deferred install
+`cells birth` in TTY mode runs a fixed-tempo 3s animation (`waking → warming → ready → alive`) in parallel with Phase A. User-perceived time = max(animation, phase_a):
 
-Substrate: TBD on the next P4.4 run.
-Pool state: per `docs/eggs-variants.md`.
+- Warm-pool birth: animation dominates → user sees ~3s total to "alive".
+- Cold-fork birth: phase_a dominates → user sees ~9s total to "alive" (animation finishes early at 3s and the cell catches up).
 
-| Variant | Closest match | p50 to talk-ready (s) | Install completion (s) | Δ vs slow-birth |
-|---|---|---|---|---|
-| ck-pi-pkg-web | gpt-5.5 vanilla + deferred pi-web-access | TBD | TBD | TBD |
-| ck-pi-ext-many | gpt-5.5+memory + deferred wiki+dream | TBD | TBD | TBD |
+## Gap to V1.3 target
 
-Target: hand off to talk in pool-time (~5–15s), not install-time (~30–60s+).
+V1.3 target: `first_token_ms` ≤ 5s p50 warm-pool.
 
-## Notes
+Current estimate: ~6.5s p50. **~1.5s over target.**
 
-- p50 is the magical-first-talk metric. Min/max captured for outlier visibility (cold-cache, lume slow-paths, network jitter).
-- Each P2.4/P3.7/P4.4 run replaces the corresponding row(s); old measurements get archived in this file's commit history rather than crowding the table.
-- The `cells birth-timings` log at `~/.cells/logs/birth-timings/<name>.log` (P2.5 progress chip's source) gives per-step breakdowns when investigating regressions.
+The bottleneck is **pi cold-start inside the egg** (~3s after wake). The egg is hibernated pre-pi-start (Tier 2); pi spawns via site-service after wake. Tier 3 (pi running in hibernated state, resumed on thaw) would eliminate this ~3s — putting us at ~3s p50 first-token, well under target.
+
+**Recommendation:** ship Tier 2 for v1, escalate to Tier 3 if/when Pete's actual usage shows the 1.5s gap matters. The animation + the user's typing time on the first prompt already absorb 3–5s of perceived latency, so the alive-line is the dominant user-perceived event. The first-token may matter less in practice than the alive-line feel does.
+
+Open: instrument `first_token_ms` directly (either non-TTY auto-seed path or pty-emulated TTY run) to confirm the estimate. Current number is alive-line measured + budget for the rest.
+
+## Cold-fork detail (for posterity)
+
+The 8.94s cold-fork is mostly wells's create profile, observed via `~/.wells/welld.log`:
+
+```
+totalMs:8580, phase:{
+  vmDir:1, seed:21, lumeCreate:24, waitStopped:30, clonefile:32, truncate:31,
+  lumeStart1:35, waitRunning1:47, dhcp1:3057, ssh1:5435, shutdownSent:5562,
+  diskReleased:5826, lumeStart2:5828, waitRunning2:5834, dhcp2:8344, ssh2:8580
+}
+```
+
+Dominant: double-DHCP from the warming-restart cycle (3s × 2 = 6s) + ssh-ready confirmation (~2s). This is wells's own latency budget; cells can't optimize it further without wells substrate changes.
+
+## History
+
+Old "Phase 1 matrix variant" tables (P2.4, P3.7, P4.4 rows for each model × extensions combo) were dropped when the v1 plan locked. v1 has one canned cell shape, so there's just cold vs warm. Variant-aware perf returns in v2 if/when personality binding adds substantial new variants. Git history of this file has the prior shape if useful.

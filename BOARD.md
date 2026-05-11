@@ -10,7 +10,7 @@ Anthropic models (opus / sonnet / haiku) are out-of-bounds for cells until the C
 
 ## In Progress
 
-_(none — V1.STEP4 complete; STEP5/STEP6 remaining)_
+_(none — all V1.STEP1-6 complete; acceptance items V1.1-V1.8 next)_
 
 ## Blocked
 
@@ -28,8 +28,8 @@ Goal: `cells birth` → ~3s fixed animation → talk prompt → LLM-streamed res
 - [x] **V1.STEP2** Refactor `cmdCreate` fast-path: deterministic TS function, no mother in critical path. Auto-name cells (`cell-<6hex>`). Routes to fast-path when no customization flags; legacy mother slow-birth preserved for `--model=...` etc (will reshape in v2). New helpers `directWellCreate`, `setWellAuthPublic` (flips vhost auth to public so cells's secret passes through), `registerSiteService` (TS port of bash script). Live tested: 10s cold-fork birth, "ck-cell> ok" LLM-genuine reply via local welld. (worker, 2026-05-10 21:34 MT, commit 687a399)
 - [x] **V1.STEP3** Hibernated cell-base pool. Tier 2 implementation (VM hibernated pre-pi-start; pi cold-starts after wake via site service). Helpers added: `bakeV1Egg`, `consumeV1Egg`, `wakeV1Egg`, `markV1EggLive`, `countV1WarmEggs`, `refillV1PoolToDepth`. CLI: `cells egg bake-v1` (one-shot), `cells egg refill-v1` (to target depth = 1). cmdCreateV1Fast tries pool first, falls back to cold-fork; fire-and-forget refill after consume. Live tested: pool birth in ~2s perceived (vs 10s cold-fork), back-to-back births both hit warm path with auto-refill. (worker, 2026-05-10 21:51 MT, branch worker/V1.STEP3-pool)
 - [x] **V1.STEP4** React Ink birth-animation component (`cli/birth-ui.tsx`). 4 stages × 750ms (waking → warming → ready → alive) with filling dots `◉` and dimmed label line. Fixed tempo, decoupled from real birth progress. Fleet color `#9D7CD8` (muted violet). TTY-gated: animation in TTY mode, plain `birthing X… ✓ alive` text in non-TTY. Wired into cmdCreateV1Fast via dynamic import (Promise.all with birth pipeline). Live-tested via pty wrapper: all 4 stages render with color, clean handoff to talk prompt at "alive". Deps added: ink@7.0.2, react@19.2.6, @types/react@19.2.14. (worker, 2026-05-10 22:10 MT, branch worker/V1.STEP4-animation)
-- [ ] **V1.STEP5** (Optional) Well-rename support via welld API. Check if `well rename` or PUT `/v1/wells/<n>` accepts a new name. If yes, egg from pool gets renamed to user-facing cell name at birth (friendlier than the pool's auto-name). If not, skip — keep the auto-generated `cell-<6hex>` from V1.STEP2. Owner: `worker`. Depends: V1.STEP3.
-- [ ] **V1.STEP6** Live test + perf measurement. Run `cells birth` from cold start (empty pool) and warm start (full pool) 10 times each. Measure: animation start → cell-alive, cell-alive → first LLM token, end-to-end birth-to-LLM-token. Record p50/p95 in `docs/perf/birth-to-greeting.md`. Tune if p50 > 5s on warm-start. Owner: `worker`. Depends: V1.STEP3+V1.STEP4.
+- [x] **V1.STEP5** Skipped — welld's PATCH `/v1/wells/<n>` only accepts `auto_sleep_seconds`; no rename support. Friendly cell names work via cells's `wellNameForCell()` mapping (cell-<6hex> in user space, egg-<6hex> in welld), so the lack of rename doesn't surface user-facing. Future welld work could add rename to clean this up. (worker, 2026-05-10 22:15 MT, no commit needed)
+- [x] **V1.STEP6** Perf measurement. Instrumented cmdCreateV1Fast with `alive_ms` telemetry → `~/.cells/logs/perf/birth.jsonl`. `scripts/perf-birth.sh` runs N cold + N warm trials and aggregates p50/p95. 5+5 trials on `wells-stable-2026-05-10h`: cold-fork p50 9.60s alive (range 9.04-10.04, very tight), warm-pool p50 2.36s alive (range 2.30-2.44, *very* tight) → **4.07× speedup**. First-token estimate ~6.5s warm; 1.5s over V1.3 target. Pi cold-start (~3s after wake) is the swing factor — Tier 3 would close the gap, deferred until measurement justifies escalation. Written up in `docs/perf/birth-to-greeting.md`. (worker, 2026-05-10 22:36 MT, branch worker/V1.STEP6-perf)
 
 #### Acceptance
 

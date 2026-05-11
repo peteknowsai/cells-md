@@ -900,3 +900,12 @@ Captured all four stage frames with proper ANSI color codes (`[38;2;157;124;216m
 **Deps added:** ink@7.0.2, react@19.2.6, @types/react@19.2.14. `react-devtools-core` is ink's optional peer dep — bun runtime tolerates absence; `--external react-devtools-core` needed for `bun build` verification (not for actual runtime via the `bun cells.ts` symlink at `~/.local/bin/cells`).
 
 **V1.STEP4 done.** Next: V1.STEP5 (well-rename) or V1.STEP6 (perf measurement). V1.STEP5 is optional — skip if welld doesn't support cheap rename. V1.STEP6 is the acceptance measurement.
+
+## 2026-05-10 22:30 MT — worker(V1.STEP6) fire 10 — bigger perf run (5+5) firing
+
+First pass 3+3 was: cold p50 8.94s, warm p50 2.34s alive. Running 5+5 now for tighter p50/p95.
+
+First-token measurement deferred — would need either TTY-emulated runs or
+non-TTY auto-seed path in cmdCreateV1Fast. Estimating ~6s warm based on
+alive (2.3s) + pi cold-start (3s) + LLM round-trip (1s). Gap to V1.3 5s
+target is the pi cold-start (Tier 2). Tier 3 escalation would close it.
