@@ -1371,27 +1371,54 @@ async function cmdCreateV1Fast(name: string | undefined, opts: CreateOpts): Prom
   console.log(`birthing ${cellName}…`);
 
   // Phase A — deterministic, no LLM.
+  // Try the pool first: a hibernated egg wakes in ~3s vs ~9s cold fork.
+  // Falls back to cold-fork transparently if pool is empty or wake fails.
+  const pooledWell = await consumeV1Egg(cellName);
+  let wellName = cellName;
+  let hatchedFrom: string | undefined;
+
   try {
-    // 1. Fork well from cell-base, with secret in env. welld's create
-    //    returns once DHCP + SSH are confirmed (~5-9s on a cold path,
-    //    sub-3s on hot eggs — V1.STEP4 wires the pool).
-    await directWellCreate(cellName, {
-      fromImage: "cell-base",
-      env: { CELLS_PROXY_SECRET: secret },
-    });
+    if (pooledWell) {
+      // Warm-egg path: wake the hibernated VM. The well is already
+      // forked from cell-base with auth=public and secret in env (set
+      // at bake time by bakeV1Egg). Just wake + register site service.
+      try {
+        await wakeV1Egg(pooledWell);
+        wellName = pooledWell;
+        hatchedFrom = pooledWell.slice("egg-".length);
+        await markV1EggLive(pooledWell);
+      } catch (e) {
+        // Wake failed — pool egg is broken. Cull it and fall through
+        // to cold-fork so the user still gets a working birth.
+        console.warn(`! pool wake failed (${e instanceof Error ? e.message : String(e)}), falling back to cold-fork`);
+        await directWellDestroy(pooledWell).catch(() => {});
+        await withEggLock(async () => {
+          const file = await loadEggs();
+          file.eggs = file.eggs.filter((e) => e.well_name !== pooledWell);
+          await saveEggs(file);
+        });
+        // Fall through to cold-fork below.
+      }
+    }
 
-    // 2. Flip auth to "public" — welld defaults new wells to "well"
-    //    (requires WELL_TOKEN bearer at the vhost proxy). Cells uses
-    //    "public" so the cell-side bun server validates the proxy secret
-    //    itself, and welld's proxy is a pass-through.
-    await setWellAuthPublic(cellName);
+    if (!hatchedFrom) {
+      // Cold-fork path: no warm egg available (pool empty or wake failed).
+      await directWellCreate(cellName, {
+        fromImage: "cell-base",
+        env: { CELLS_PROXY_SECRET: secret },
+      });
+      await setWellAuthPublic(cellName);
+      wellName = cellName;
+    }
 
-    // 3. Register site service via welld API. systemd starts well-site
-    //    inside the cell → bun spawns server.ts → pi spawns inside that.
-    await registerSiteService(cellName, cellName);
+    // Register site service via welld API. systemd starts well-site
+    // inside the cell → bun spawns server.ts → pi spawns inside that.
+    // wellName != cellName on the pool path — the bun server reads
+    // CELL_NAME from its env so it knows what to call itself.
+    await registerSiteService(wellName, cellName);
 
-    // 3. Mark alive in cells.json. Generic cell uses the canned default
-    //    chain baked into /cell/.pi/settings.json.
+    // Mark alive in cells.json. Generic cell uses the canned default
+    // chain baked into /cell/.pi/settings.json.
     const reg = await loadRegistry();
     reg.cells.push({
       name: cellName,
@@ -1401,15 +1428,26 @@ async function cmdCreateV1Fast(name: string | undefined, opts: CreateOpts): Prom
         "openai-codex/gpt-5.5:medium",
         "deepseek/deepseek-v4-pro:high",
       ],
+      ...(hatchedFrom ? { hatched_from: hatchedFrom } : {}),
     });
     await saveRegistry(reg);
   } catch (e) {
     console.error(`birth failed: ${e instanceof Error ? e.message : String(e)} — sweeping well`);
-    await directWellDestroy(cellName);
+    await directWellDestroy(wellName);
     process.exit(1);
   }
 
-  console.log(`✓ ${cellName} alive`);
+  console.log(`✓ ${cellName} alive${hatchedFrom ? " (from pool)" : ""}`);
+
+  // Fire-and-forget pool refill. Runs while the user talks; the talk
+  // session keeps this process alive long enough for the refill to land.
+  // For non-TTY `cells birth --seed=off` the process exits before refill
+  // finishes — script users should invoke `cells egg refill-v1` separately
+  // or schedule it via launchd. Caught silently — refill failure here
+  // shouldn't poison the user's birth experience.
+  refillV1PoolToDepth().catch((e) => {
+    console.warn(`! background pool refill failed: ${e instanceof Error ? e.message : String(e)}`);
+  });
 
   // 4. Drop into talk. Pi inside the cell handles the seed via streaming
   //    WS — every word the user sees from the cell is LLM-generated.
@@ -1912,6 +1950,150 @@ async function registerSiteService(wellName: string, cellName: string): Promise<
       `register site service for '${wellName}' failed: ${r.status} ${(await r.text()).slice(0, 300)}`,
     );
   }
+}
+
+// v1 egg pool helpers. The v1 pool is uniform — every egg is the same
+// canned generic cell, baked from cell-base. variant_signature is the
+// constant "v1-generic" so consumers can filter the pool without the
+// variant-aware machinery of the legacy multi-variant pool.
+const V1_EGG_VARIANT_SIGNATURE = "v1-generic";
+
+// Generate a fresh egg well-name. Distinct from cell-names (cell-<hex>) so
+// `cells list` doesn't pretend pool wells are user-facing cells.
+function generateEggWellName(): string {
+  return `egg-${randomBytes(4).toString("hex").slice(0, 6)}`;
+}
+
+// Bake one v1 egg: fork cell-base, set auth=public, hibernate. Inserts an
+// entry into eggs.json with state=warm on success. Returns the well-name
+// or throws. Caller is responsible for the egg-lock dance (use
+// withEggLock around the bake invocation when refilling).
+async function bakeV1Egg(): Promise<string> {
+  const secret = await readSecret("CELLS_PROXY_SECRET");
+  if (!secret) throw new Error("CELLS_PROXY_SECRET missing from ~/.cells/secrets.json");
+
+  const wellName = generateEggWellName();
+  await directWellCreate(wellName, {
+    fromImage: "cell-base",
+    env: { CELLS_PROXY_SECRET: secret },
+  });
+  await setWellAuthPublic(wellName);
+
+  // Hibernate the freshly-forked VM. welld dumps RAM+device state to
+  // ~/.wells/vms/<n>/hibernate.bin and stops the VM. Wake later restores
+  // from that file in ~3s. We're hibernating PRE-pi-start (Tier 2) — site
+  // service is registered at birth time, pi cold-starts after wake.
+  const base = process.env.WELL_API_URL ?? "http://127.0.0.1:7878";
+  const hibRes = await fetch(
+    `${base}/v1/wells/${encodeURIComponent(wellName)}/hibernate`,
+    {
+      method: "POST",
+      headers: { Authorization: `Bearer ${await wellsToken()}` },
+    },
+  );
+  if (!hibRes.ok) {
+    // Best-effort cleanup of the well so we don't leak.
+    await directWellDestroy(wellName);
+    throw new Error(
+      `hibernate '${wellName}' failed: ${hibRes.status} ${(await hibRes.text()).slice(0, 300)}`,
+    );
+  }
+
+  // Record in eggs.json.
+  await withEggLock(async () => {
+    const file = await loadEggs();
+    file.eggs.push({
+      id: wellName.slice("egg-".length),
+      well_name: wellName,
+      variant_signature: V1_EGG_VARIANT_SIGNATURE,
+      state: "warm",
+      born_at: new Date().toISOString(),
+      claimed_at: null,
+      claimed_by: null,
+      max_age_at: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString(),
+    });
+    await saveEggs(file);
+  });
+
+  return wellName;
+}
+
+// Consume one warm v1 egg from the pool. Atomically marks it as claimed in
+// eggs.json and returns the well-name to use as the cell's backing well.
+// Returns null if pool is empty (caller falls back to cold-fork).
+async function consumeV1Egg(cellName: string): Promise<string | null> {
+  let chosen: string | null = null;
+  await withEggLock(async () => {
+    const file = await loadEggs();
+    const warm = file.eggs.find(
+      (e) => e.state === "warm" && e.variant_signature === V1_EGG_VARIANT_SIGNATURE,
+    );
+    if (!warm) return;
+    warm.state = "claimed";
+    warm.claimed_at = new Date().toISOString();
+    warm.claimed_by = cellName;
+    chosen = warm.well_name;
+    await saveEggs(file);
+  });
+  return chosen;
+}
+
+// Wake a hibernated egg. Returns when welld confirms the VM is running again.
+async function wakeV1Egg(wellName: string): Promise<void> {
+  const base = process.env.WELL_API_URL ?? "http://127.0.0.1:7878";
+  const r = await fetch(
+    `${base}/v1/wells/${encodeURIComponent(wellName)}/wake`,
+    {
+      method: "POST",
+      headers: { Authorization: `Bearer ${await wellsToken()}` },
+    },
+  );
+  if (!r.ok) {
+    throw new Error(
+      `wake '${wellName}' failed: ${r.status} ${(await r.text()).slice(0, 300)}`,
+    );
+  }
+}
+
+// Mark a consumed egg as "live" (now a cell). Bookkeeping for the eggs
+// file — the egg's well is now serving as a cell's backing well.
+async function markV1EggLive(wellName: string): Promise<void> {
+  await withEggLock(async () => {
+    const file = await loadEggs();
+    const egg = file.eggs.find((e) => e.well_name === wellName);
+    if (!egg) return;
+    egg.state = "live";
+    await saveEggs(file);
+  });
+}
+
+// v1 pool target depth. Always-on, single warm egg ready to go.
+// Future: configurable in eggs-config or launchd refill plist.
+const V1_POOL_TARGET_DEPTH = 1;
+
+// Count warm v1 eggs currently in the pool.
+async function countV1WarmEggs(): Promise<number> {
+  const file = await loadEggs();
+  return file.eggs.filter(
+    (e) => e.state === "warm" && e.variant_signature === V1_EGG_VARIANT_SIGNATURE,
+  ).length;
+}
+
+// Refill the v1 pool to the target depth. Bakes new eggs serially (one at
+// a time) — wells's mother concurrency limit serializes anyway, and serial
+// keeps welld traffic predictable. Returns the number of eggs baked.
+async function refillV1PoolToDepth(target: number = V1_POOL_TARGET_DEPTH): Promise<number> {
+  let baked = 0;
+  while ((await countV1WarmEggs()) < target) {
+    try {
+      await bakeV1Egg();
+      baked++;
+    } catch (e) {
+      console.warn(`! v1 egg bake failed: ${e instanceof Error ? e.message : String(e)}`);
+      break; // don't loop forever if welld is sick
+    }
+  }
+  return baked;
 }
 
 // Destroy a well directly via the well CLI, bypassing the mother
@@ -4776,6 +4958,30 @@ async function cmdEgg(args: string[]) {
   }
   if (sub === "drain") {
     await cmdEggDrain(args.slice(1));
+    return;
+  }
+  if (sub === "bake-v1") {
+    // V1.STEP3 manual control: bake one v1 generic egg, hibernated, ready
+    // for the next cmdCreateV1Fast to consume. Refill normally happens
+    // async after consumption; this command is a one-shot for testing
+    // and pool seeding.
+    console.log("baking one v1 egg…");
+    const t0 = Date.now();
+    const wellName = await bakeV1Egg();
+    console.log(`✓ egg '${wellName}' warm + hibernated (${((Date.now() - t0) / 1000).toFixed(1)}s)`);
+    return;
+  }
+  if (sub === "refill-v1") {
+    // Bring the v1 pool up to the target depth. Idempotent: returns
+    // immediately if pool is already full. Logs each bake.
+    const current = await countV1WarmEggs();
+    if (current >= V1_POOL_TARGET_DEPTH) {
+      console.log(`v1 pool at target depth (${current}/${V1_POOL_TARGET_DEPTH})`);
+      return;
+    }
+    console.log(`refilling v1 pool: ${current} → ${V1_POOL_TARGET_DEPTH}…`);
+    const baked = await refillV1PoolToDepth();
+    console.log(`✓ baked ${baked} egg(s); pool now at ${await countV1WarmEggs()}/${V1_POOL_TARGET_DEPTH}`);
     return;
   }
   await cmdEggCreate(args);

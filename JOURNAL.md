@@ -823,3 +823,53 @@ Pi mother still pre-step-1 after 4m. Proxy log shows continuous activity. gpt-5.
 Pi mother (PID 61407) has been running ~4h45m. Still 0% CPU. No step stamps. New pi 42752 just spawned (87% CPU, 0s old) — probably new session activity from Pete returning. Awaiting Pete's call.
 
 ## 2026-05-10 20:12 MT — worker(P1.4) fire 36 — no-op, idle on Pete
+
+---
+
+## 2026-05-10 21:36 MT — worker(V1.STEP3) fire 0 — scouted welld APIs + designed pool shape
+
+**Welld surface available:**
+- `POST /v1/wells/{n}/hibernate` — dumps VM RAM+CPU+device state to ~/.wells/vms/{n}/hibernate.bin, stops VM.
+- `POST /v1/wells/{n}/wake` — restores from hibernate.bin.
+- `PATCH /v1/wells/{n}` — only accepts auto_sleep_seconds. **No well rename.**
+- Wake reliability fixed in -10g/-10h (was broken in -10c/d).
+
+**Design for V1.STEP3 (Tier 2 first, can escalate to Tier 3 later):**
+
+Tier 2 — VM hibernated, pi NOT running:
+1. Bake egg: fork from cell-base with secret in env, wait for ssh-ready, immediately POST /hibernate.
+2. Pool tracks warm eggs in ~/.cells/eggs.json. Simpler than existing variant-keyed pool — v1 has one canned variant, so eggs are interchangeable.
+3. Birth: pop a warm egg, POST /wake (~3s), register site service (triggers bun→pi spawn), insert in cells.json with cell_name→well_name mapping, drop into talk.
+4. Refill: async after consumption.
+
+Net target: thaw (3s) + pi cold-start via site-service (2-3s) = ~5s.
+
+**Why Tier 2 not Tier 3:**
+- Simpler: no waiting for pi to fully start before hibernating during bake.
+- Avoids hibernate-mid-execution flakiness with pi's runtime state.
+- Still meets the magical 5s target.
+- Tier 3 (pi pre-running in egg) escalation is a future optimization if p50 needs to drop further.
+
+**Name mapping:**
+- Welld doesn't support rename. cell-name ≠ well-name supported by cells via `wellNameForCell()`.
+- Pool wells: `egg-<6hex>`. User-facing cell-name: `cell-<6hex>` (auto-generated at birth).
+- WS vhost dispatch uses well-name (per proxy.ts extractWellFromHost).
+
+**Next fire**: write `bakeV1Egg(name)` helper — fork + hibernate. Then `consumeV1Egg()` for the birth path. Then wire into cmdCreateV1Fast.
+
+## 2026-05-10 21:51 MT — worker(V1.STEP3) fire 5 — pool cycle live-tested + DONE
+
+End-to-end test of the v1 pool:
+1. Started from empty pool. `cells egg refill-v1` baked 1 egg in 9.4s.
+2. `cells birth --seed=off` hit warm path, "alive" line at ~2s perceived (vs ~10s cold-fork).
+3. Background refill kicked off, completed silently in ~9s after the alive line.
+4. Second back-to-back birth also hit warm path (new egg was ready by then), ~2s perceived.
+5. Pool state correctly tracked: consumed eggs → `live`, fresh bakes → `warm`.
+
+Non-TTY mode (`--seed=off`) waits for the fire-and-forget refill before process exits, so `time` shows ~11s total. Interactive mode (with talk session) the refill happens silently during conversation — user perceives just the ~2s alive-line latency. Documented as expected behavior.
+
+Talk smoke verified last fire: pool-born cell replies "ok" via local welld. Both LLM-genuine and end-to-end-functional.
+
+**Tier choice:** stayed Tier 2 (VM hibernated pre-pi-start; pi cold-starts via site service after wake). Tier 3 (pi running in hibernated state) is a future optimization if perf needs <2s. Tier 2 already meets the magical-moment target.
+
+**V1.STEP3 done.** Ready for V1.STEP4 (React Ink birth animation).
