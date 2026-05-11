@@ -6,7 +6,7 @@ import { dirname, join, basename } from "node:path";
 import { existsSync, statSync, readFileSync, unlinkSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import * as readline from "node:readline/promises";
-import { createHash } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import {
   formatVariant,
   variantHash,
@@ -1257,7 +1257,7 @@ function wellsEnv(): Record<string, string> {
 
 const PACKAGE_VALUES = OPTIONAL_PACKAGES.map((p) => p.value);
 
-function parseCreateArgs(args: string[]): { name: string; opts: CreateOpts } {
+function parseCreateArgs(args: string[]): { name: string | undefined; opts: CreateOpts } {
   let name: string | undefined;
   const opts: CreateOpts = {};
   for (const a of args) {
@@ -1333,16 +1333,122 @@ function parseCreateArgs(args: string[]): { name: string; opts: CreateOpts } {
       process.exit(1);
     }
   }
-  if (!name) {
-    console.error(
-      "usage: cells birth <name> [--harness=pi] [--model=opus|sonnet|haiku|gpt-5.5|gpt-5.5-pro|deepseek-v4-flash|deepseek-v4-pro] [--thinking=off|minimal|low|medium|high|xhigh|adaptive] [--extensions=memory,...] [--packages=pi-web-access,...]",
-    );
-    process.exit(1);
-  }
+  // Name is optional. If omitted, cmdCreate auto-generates one (v1 fast-path).
   return { name, opts };
 }
 
-async function cmdCreate(name: string, opts: CreateOpts) {
+// Auto-name shape: `cell-` + 6 hex chars from 4 random bytes (~16M unique).
+function generateCellName(): string {
+  return `cell-${randomBytes(4).toString("hex").slice(0, 6)}`;
+}
+
+// v1 fast-path: deterministic birth, no mother in critical path.
+// Cell-base ships with a canned generic identity — no per-cell substitution.
+// Birth = fork well from cell-base + register site service + mark alive +
+// drop into talk. Targets ~5s birth-to-first-LLM-token.
+//
+// Used when the user passes no customization flags. Customization flags
+// fall through to the legacy slow-birth path (mother LLM-routed) — to be
+// re-shaped in v2 as personality/binding swaps on the canned cell.
+async function cmdCreateV1Fast(name: string | undefined, opts: CreateOpts): Promise<void> {
+  const cellName = name ?? generateCellName();
+
+  if (RESERVED_NAMES.has(cellName)) {
+    console.error(`'${cellName}' is reserved. Pick another name.`);
+    process.exit(1);
+  }
+  if (await findCell(cellName)) {
+    console.error(`cell '${cellName}' already exists in registry`);
+    process.exit(1);
+  }
+
+  const secret = await readSecret("CELLS_PROXY_SECRET");
+  if (!secret) {
+    console.error("CELLS_PROXY_SECRET missing from ~/.cells/secrets.json");
+    process.exit(1);
+  }
+
+  console.log(`birthing ${cellName}…`);
+
+  // Phase A — deterministic, no LLM.
+  try {
+    // 1. Fork well from cell-base, with secret in env. welld's create
+    //    returns once DHCP + SSH are confirmed (~5-9s on a cold path,
+    //    sub-3s on hot eggs — V1.STEP4 wires the pool).
+    await directWellCreate(cellName, {
+      fromImage: "cell-base",
+      env: { CELLS_PROXY_SECRET: secret },
+    });
+
+    // 2. Flip auth to "public" — welld defaults new wells to "well"
+    //    (requires WELL_TOKEN bearer at the vhost proxy). Cells uses
+    //    "public" so the cell-side bun server validates the proxy secret
+    //    itself, and welld's proxy is a pass-through.
+    await setWellAuthPublic(cellName);
+
+    // 3. Register site service via welld API. systemd starts well-site
+    //    inside the cell → bun spawns server.ts → pi spawns inside that.
+    await registerSiteService(cellName, cellName);
+
+    // 3. Mark alive in cells.json. Generic cell uses the canned default
+    //    chain baked into /cell/.pi/settings.json.
+    const reg = await loadRegistry();
+    reg.cells.push({
+      name: cellName,
+      created_at: new Date().toISOString(),
+      status: "alive",
+      modelChain: [
+        "openai-codex/gpt-5.5:medium",
+        "deepseek/deepseek-v4-pro:high",
+      ],
+    });
+    await saveRegistry(reg);
+  } catch (e) {
+    console.error(`birth failed: ${e instanceof Error ? e.message : String(e)} — sweeping well`);
+    await directWellDestroy(cellName);
+    process.exit(1);
+  }
+
+  console.log(`✓ ${cellName} alive`);
+
+  // 4. Drop into talk. Pi inside the cell handles the seed via streaming
+  //    WS — every word the user sees from the cell is LLM-generated.
+  if (process.stdout.isTTY) {
+    const seedText = opts.seedOff ? undefined : (opts.seed ?? DEFAULT_SEED);
+    if (seedText) {
+      await streamCellBridge(cellName, { interactive: true, initialMessage: seedText });
+    } else {
+      await cmdTalk(cellName, []);
+    }
+  }
+}
+
+async function cmdCreate(name: string | undefined, opts: CreateOpts) {
+  // v1 fast-path: no customization flags → canned generic cell, deterministic.
+  // Custom flags → legacy slow-birth (mother) for now; v2 reshapes this
+  // into personality/binding swaps that don't need full mother orchestration.
+  const isV1Default =
+    opts.harness === undefined &&
+    opts.model === undefined &&
+    opts.thinking === undefined &&
+    opts.extensions === undefined &&
+    opts.packages === undefined &&
+    opts.channels === undefined &&
+    opts.slackChannel === undefined;
+
+  if (isV1Default) {
+    return cmdCreateV1Fast(name, opts);
+  }
+
+  // Legacy slow-birth (mother) path requires an explicit name.
+  if (!name) {
+    console.error(
+      "usage: cells birth <name> [--harness=pi] [--model=...] [--thinking=...] [--extensions=...] [--packages=...] [--channels=...] [--slack-channel=...]\n" +
+      "       cells birth                    (v1 fast-path: auto-named generic cell)",
+    );
+    process.exit(1);
+  }
+
   if (RESERVED_NAMES.has(name)) {
     console.error(`'${name}' is reserved. Pick another name.`);
     process.exit(1);
@@ -1706,6 +1812,105 @@ async function readSecret(key: string): Promise<string | null> {
     return typeof v === "string" && v ? v : null;
   } catch {
     return null;
+  }
+}
+
+// Fork a well directly via welld API, bypassing the mother agent. Used
+// by the v1 fast-path (cmdCreateV1Fast) to skip the LLM-routed birth
+// skill. Throws on failure — caller is responsible for cleanup via
+// directWellDestroy.
+async function directWellCreate(
+  name: string,
+  opts: { fromImage: string; env?: Record<string, string> },
+): Promise<void> {
+  const body: Record<string, unknown> = {
+    name,
+    from_image: opts.fromImage,
+  };
+  if (opts.env && Object.keys(opts.env).length > 0) {
+    body.env = opts.env;
+  }
+  const base = process.env.WELL_API_URL ?? "http://127.0.0.1:7878";
+  const r = await fetch(`${base}/v1/wells`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${await wellsToken()}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(body),
+  });
+  if (!r.ok) {
+    throw new Error(
+      `direct well create '${name}' failed: ${r.status} ${(await r.text()).slice(0, 300)}`,
+    );
+  }
+}
+
+// Flip the well's vhost auth mode to "public" — required so the local
+// welld proxy passes WS traffic through to the cell's own /agent server,
+// which validates CELLS_PROXY_SECRET itself. Wells defaults new wells to
+// "well" auth (requires WELL_TOKEN at the proxy).
+async function setWellAuthPublic(wellName: string): Promise<void> {
+  const base = process.env.WELL_API_URL ?? "http://127.0.0.1:7878";
+  const r = await fetch(
+    `${base}/v1/wells/${encodeURIComponent(wellName)}/url`,
+    {
+      method: "PUT",
+      headers: {
+        Authorization: `Bearer ${await wellsToken()}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ auth: "public" }),
+    },
+  );
+  if (!r.ok) {
+    throw new Error(
+      `set auth=public for '${wellName}' failed: ${r.status} ${(await r.text()).slice(0, 300)}`,
+    );
+  }
+}
+
+// Register the `site` systemd service on a cell via welld's services API.
+// Triggers /cell/site/server.ts (bun web server) to start at boot. Mirrors
+// scripts/register-site-service.sh in TS so the v1 fast-path doesn't shell
+// out. Wraps the bun launch in `sudo -u cell bash -c '...'` because wells's
+// services API hardcodes User=ubuntu (W.28) and /cell is cell-owned.
+async function registerSiteService(wellName: string, cellName: string): Promise<void> {
+  const inner =
+    `cd /cell/site && . /etc/profile.d/cells-env.sh; ` +
+    `export PATH="/home/well/.bun/bin:$PATH"; ` +
+    `export CELL_NAME='${cellName}'; export PORT=8080; ` +
+    `exec bun run server.ts`;
+  // Escape single quotes for the outer `sudo -u cell bash -c '...'` wrap.
+  const quotedInner = `'${inner.replace(/'/g, `'\\''`)}'`;
+  const script = `sudo -u cell bash -c ${quotedInner}`;
+  const payload = { cmd: "bash", args: ["-lc", script], workdir: "/cell" };
+
+  const token = await wellsToken();
+  const base = process.env.WELL_API_URL ?? "http://127.0.0.1:7878";
+
+  // DELETE first — wells's PUT no-ops on an existing service, leaving stale
+  // config in place. DELETE is idempotent (404 → fine).
+  await fetch(`${base}/v1/wells/${encodeURIComponent(wellName)}/services/site`, {
+    method: "DELETE",
+    headers: { Authorization: `Bearer ${token}` },
+  }).catch(() => {});
+
+  const r = await fetch(
+    `${base}/v1/wells/${encodeURIComponent(wellName)}/services/site`,
+    {
+      method: "PUT",
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(payload),
+    },
+  );
+  if (!r.ok) {
+    throw new Error(
+      `register site service for '${wellName}' failed: ${r.status} ${(await r.text()).slice(0, 300)}`,
+    );
   }
 }
 
