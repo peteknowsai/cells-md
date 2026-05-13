@@ -8,16 +8,16 @@
   ],
   "packages": [],
   "enabledModels": [
-    "openai-codex/gpt-5.5",
-    "deepseek-v4-pro",
-    "deepseek-v4-flash"
+    "deepseek/deepseek-v4-flash",
+    "deepseek/deepseek-v4-pro",
+    "openai-codex/gpt-5.5"
   ],
-  "defaultProvider": "openai-codex",
-  "defaultModel": "gpt-5.5",
-  "defaultThinkingLevel": "medium",
+  "defaultProvider": "deepseek",
+  "defaultModel": "deepseek-v4-flash",
+  "defaultThinkingLevel": "off",
   "modelChain": [
-    "openai-codex/gpt-5.5:medium",
-    "deepseek/deepseek-v4-pro:high"
+    "deepseek/deepseek-v4-flash:off",
+    "openai-codex/gpt-5.5:off"
   ],
   "warnings": {
     "anthropicExtraUsage": false

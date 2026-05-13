@@ -1,0 +1,494 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Cell lifecycle latency</title>
+<style>
+  :root {
+    --cells: #4ca87a;
+    --cells-light: #e8f5ee;
+    --cells-dark: #2d7050;
+    --wells: #3b82c4;
+    --wells-light: #e6f0fb;
+    --wells-dark: #1e5a8e;
+    --warn: #d99834;
+    --warn-light: #fff5e0;
+    --neutral: #6b7280;
+    --neutral-light: #f3f4f6;
+    --ink: #1a1a1a;
+    --ink-muted: #5a5a5a;
+    --bg: #fafaf8;
+    --paper: #ffffff;
+    --code-bg: #f0efec;
+  }
+  * { box-sizing: border-box; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, sans-serif;
+    background: var(--bg);
+    color: var(--ink);
+    line-height: 1.6;
+    max-width: 940px;
+    margin: 0 auto;
+    padding: 56px 28px 96px;
+  }
+
+  .cover {
+    text-align: center;
+    padding: 24px 0 56px;
+    border-bottom: 1px solid #e0e0dc;
+    margin-bottom: 48px;
+  }
+  .cover .eyebrow {
+    color: var(--ink-muted);
+    font-size: 12px;
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+    margin-bottom: 12px;
+  }
+  .cover h1 {
+    font-size: 38px;
+    line-height: 1.15;
+    margin: 0 0 12px;
+    font-weight: 700;
+    letter-spacing: -0.01em;
+  }
+  .cover .sub {
+    font-size: 17px;
+    color: var(--ink-muted);
+    max-width: 620px;
+    margin: 0 auto;
+  }
+
+  h2 {
+    font-size: 22px;
+    margin: 56px 0 16px;
+    padding-bottom: 8px;
+    border-bottom: 2px solid #e0e0dc;
+    letter-spacing: -0.01em;
+  }
+  h3 {
+    font-size: 16px;
+    margin: 28px 0 12px;
+    color: var(--ink);
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--ink-muted);
+  }
+
+  p { margin: 0 0 14px; }
+  ul, ol { margin: 0 0 14px; padding-left: 24px; }
+  li { margin-bottom: 6px; }
+
+  /* Journey timeline */
+  .journey {
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+    margin: 28px 0;
+  }
+  .step {
+    background: var(--paper);
+    border: 1px solid #e0e0dc;
+    border-radius: 10px;
+    padding: 18px 22px;
+    display: grid;
+    grid-template-columns: 90px 1fr 130px;
+    align-items: center;
+    gap: 18px;
+  }
+  .step .num {
+    font-size: 32px;
+    font-weight: 700;
+    color: var(--cells);
+    font-variant-numeric: tabular-nums;
+    text-align: center;
+  }
+  .step .body .title {
+    font-weight: 600;
+    margin-bottom: 4px;
+    font-size: 16px;
+  }
+  .step .body .sub {
+    color: var(--ink-muted);
+    font-size: 14px;
+  }
+  .step .latency {
+    font-variant-numeric: tabular-nums;
+    text-align: right;
+  }
+  .step .latency .big {
+    font-size: 26px;
+    font-weight: 600;
+    color: var(--cells-dark);
+    line-height: 1;
+  }
+  .step .latency .small {
+    font-size: 11px;
+    color: var(--ink-muted);
+    margin-top: 4px;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+  }
+
+  /* Side-by-side comparison cards */
+  .compare {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 18px;
+    margin: 22px 0;
+  }
+  .compare > div {
+    background: var(--paper);
+    border: 1px solid #e0e0dc;
+    border-radius: 8px;
+    padding: 18px 20px;
+  }
+  .compare h4 {
+    margin: 0 0 10px;
+    font-size: 14px;
+    font-weight: 600;
+  }
+  .compare .winner {
+    color: var(--cells-dark);
+  }
+  .compare .winner h4 {
+    color: var(--cells-dark);
+  }
+
+  /* Technical table */
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    background: var(--paper);
+    border: 1px solid #e0e0dc;
+    border-radius: 8px;
+    overflow: hidden;
+    font-size: 14px;
+    margin: 16px 0;
+  }
+  table th {
+    background: #f3f3f0;
+    padding: 12px 14px;
+    text-align: left;
+    font-weight: 600;
+    font-size: 12px;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    color: var(--ink-muted);
+    border-bottom: 1px solid #e0e0dc;
+  }
+  table td {
+    padding: 11px 14px;
+    border-bottom: 1px solid #ecebe6;
+    vertical-align: top;
+    font-variant-numeric: tabular-nums;
+  }
+  table tr:last-child td { border-bottom: none; }
+  table td:first-child {
+    font-weight: 600;
+  }
+
+  .callout {
+    padding: 18px 22px;
+    border-radius: 8px;
+    margin: 22px 0;
+    background: var(--cells-light);
+    border-left: 4px solid var(--cells);
+  }
+  .callout.neutral {
+    background: var(--neutral-light);
+    border-left-color: var(--neutral);
+  }
+  .callout.warn {
+    background: var(--warn-light);
+    border-left-color: var(--warn);
+  }
+  .callout strong { font-weight: 600; }
+
+  code {
+    background: var(--code-bg);
+    padding: 1px 6px;
+    border-radius: 4px;
+    font-family: "SF Mono", Menlo, monospace;
+    font-size: 0.92em;
+  }
+  pre {
+    background: var(--code-bg);
+    padding: 14px 16px;
+    border-radius: 6px;
+    overflow-x: auto;
+    font-family: "SF Mono", Menlo, monospace;
+    font-size: 13px;
+    line-height: 1.55;
+  }
+
+  /* Tabs / sections */
+  .section-tab {
+    display: inline-block;
+    padding: 4px 12px;
+    border-radius: 11px;
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    margin-right: 6px;
+  }
+  .section-tab.eli5 { background: var(--cells-light); color: var(--cells-dark); }
+  .section-tab.tech { background: var(--wells-light); color: var(--wells-dark); }
+</style>
+</head>
+<body>
+
+<div class="cover">
+  <div class="eyebrow">Cells perf · 2026-05-12</div>
+  <h1>Cell lifecycle latency</h1>
+  <p class="sub">Birth, sleep, wake, talk — how long each step takes, in plain English and in numbers.</p>
+</div>
+
+<h2>The short version</h2>
+
+<div class="callout">
+  <p style="margin-bottom: 0;">
+    <strong>Bringing a cell to life from nothing takes about 6 seconds.</strong>
+    <strong>Putting it to sleep is instant.</strong>
+    <strong>Waking it up again takes about a second.</strong>
+    <strong>Then chatting with it again is another second or so.</strong>
+    The expensive part is the very first time you breathe life into a cell. Everything after that is fast.
+  </p>
+</div>
+
+<h2>The journey, end to end</h2>
+
+<p>
+  <span class="section-tab eli5">Easy version</span>
+</p>
+
+<p>Imagine the lifetime of a cell as a sequence of moments. Each card below is one moment. The number on the right is how long you'd be waiting after pressing enter.</p>
+
+<div class="journey">
+
+  <div class="step">
+    <div class="num">1</div>
+    <div class="body">
+      <div class="title">Birth</div>
+      <div class="sub">You type <code>cells birth</code>. A pre-warmed VM gets claimed, a personality gets pushed onto it, and the cell says hello back.</div>
+    </div>
+    <div class="latency">
+      <div class="big">6.2s</div>
+      <div class="small">to first word</div>
+    </div>
+  </div>
+
+  <div class="step">
+    <div class="num">2</div>
+    <div class="body">
+      <div class="title">Talk (while cell is awake)</div>
+      <div class="sub">You type <code>cells talk &lt;name&gt; "hi"</code>. The cell is already running, just answers you.</div>
+    </div>
+    <div class="latency">
+      <div class="big">~1s</div>
+      <div class="small">to first word</div>
+    </div>
+  </div>
+
+  <div class="step">
+    <div class="num">3</div>
+    <div class="body">
+      <div class="title">Sleep</div>
+      <div class="sub">You type <code>cells sleep &lt;name&gt;</code>. The cell freezes its state to disk and the VM frees up RAM. Almost instant.</div>
+    </div>
+    <div class="latency">
+      <div class="big">~300ms</div>
+      <div class="small">to confirmation</div>
+    </div>
+  </div>
+
+  <div class="step">
+    <div class="num">4</div>
+    <div class="body">
+      <div class="title">Wake</div>
+      <div class="sub">You type <code>cells wake &lt;name&gt;</code>. The frozen VM resumes from disk, networking comes back.</div>
+    </div>
+    <div class="latency">
+      <div class="big">~1s</div>
+      <div class="small">to running again</div>
+    </div>
+  </div>
+
+  <div class="step">
+    <div class="num">5</div>
+    <div class="body">
+      <div class="title">Talk (right after waking)</div>
+      <div class="sub">You type <code>cells talk &lt;name&gt; "hi"</code>. The cell is back, just had to spin up the agent process for the new conversation.</div>
+    </div>
+    <div class="latency">
+      <div class="big">~1.2s</div>
+      <div class="small">to first word</div>
+    </div>
+  </div>
+
+  <div class="step">
+    <div class="num">6</div>
+    <div class="body">
+      <div class="title">Kill</div>
+      <div class="sub">You type <code>cells kill &lt;name&gt;</code>. Tear-down. Sub-second; latency here doesn't really matter.</div>
+    </div>
+    <div class="latency">
+      <div class="big">—</div>
+      <div class="small">not measured</div>
+    </div>
+  </div>
+
+</div>
+
+<h2>Shortcut: skip the explicit wake</h2>
+
+<p><span class="section-tab eli5">Easy version</span></p>
+
+<p>You don't have to wake a cell before talking to it. If you just type <code>cells talk &lt;name&gt; "hi"</code> on a sleeping cell, it'll wake itself up automatically and respond. But that combined operation takes <strong>about 8 seconds</strong> instead of the ~2 seconds you'd get by waking first and then talking.</p>
+
+<div class="compare">
+  <div>
+    <h4>Two-step (explicit wake, then talk)</h4>
+    <p style="margin-bottom: 8px;"><code>cells wake mycell</code> &nbsp;~1s</p>
+    <p style="margin-bottom: 8px;"><code>cells talk mycell "hi"</code> &nbsp;~1.2s</p>
+    <p style="margin-bottom: 0;"><strong>Total: ~2.2s</strong></p>
+  </div>
+  <div class="winner">
+    <h4>One-step (talk auto-wakes)</h4>
+    <p style="margin-bottom: 8px;"><code>cells talk mycell "hi"</code> &nbsp;~8.2s</p>
+    <p style="margin-bottom: 0;"><strong>Total: ~8.2s</strong></p>
+    <p style="margin-bottom: 0; color: var(--ink-muted); font-size: 13px; margin-top: 8px;">The auto-wake path bundles a longer ssh-accept poll loop plus a cold agent spawn, which adds up.</p>
+  </div>
+</div>
+
+<p>When does each shape matter?</p>
+<ul>
+  <li><strong>Auto-wake</strong> is best when you don't care about waiting — script a quick check, fire and forget.</li>
+  <li><strong>Wake then talk</strong> is best when you want it to <em>feel</em> snappy — wake while you're typing your prompt, then talk is instant.</li>
+</ul>
+
+<h2>Technical details</h2>
+
+<p><span class="section-tab tech">Technical</span></p>
+
+<h3>Measurement methodology</h3>
+
+<p>Two pty-wrapper scripts run end-to-end timing:</p>
+
+<ul>
+  <li><code>/tmp/v13-first-token.py</code> — 10 trials of <code>bun run cells birth</code> against a fresh 10/10 warm pool. Measures from <code>execvp</code> to the first byte after the <code>cell-XXXXXX&gt;</code> prompt label.</li>
+  <li><code>/tmp/v15-cycle-latency.py</code> — for each cell, runs <code>cells talk</code> → <code>cells sleep</code> → poll wells until status flips → <code>cells wake</code> → poll wells until status flips → <code>cells talk</code> again. Captures CLI wall-clock + wells-side status-flip times separately.</li>
+</ul>
+
+<h3>Raw numbers — birth (V1.3)</h3>
+
+<table>
+  <thead><tr><th>Metric</th><th>p50</th><th>p95</th><th>min</th><th>max</th><th>spread</th></tr></thead>
+  <tbody>
+    <tr>
+      <td>Birth → first token (10 trials)</td>
+      <td>6243 ms</td>
+      <td>6346 ms</td>
+      <td>6014 ms</td>
+      <td>6346 ms</td>
+      <td>332 ms</td>
+    </tr>
+  </tbody>
+</table>
+
+<p style="font-size: 13px; color: var(--ink-muted);">Substrate: <code>wells-stable-2026-05-12h</code>. Cells commit <code>3bc65a7</code>. Pool refilled to 10/10 warm before run. Each trial consumed one egg. Re-run cost: ~50s burn + ~10min pool refill.</p>
+
+<h3>Raw numbers — sleep / wake cycle (V1.5/V1.6)</h3>
+
+<p>Representative clean cycle (cell-a1ba58):</p>
+
+<table>
+  <thead><tr><th>Step</th><th>CLI wall-clock</th><th>Wells settled</th><th>Notes</th></tr></thead>
+  <tbody>
+    <tr>
+      <td>talk (cell running)</td>
+      <td>937 ms</td>
+      <td>—</td>
+      <td>Cell already alive_running, ssh+pi session warm.</td>
+    </tr>
+    <tr>
+      <td>sleep</td>
+      <td>296 ms</td>
+      <td>20 ms</td>
+      <td><code>POST /v1/wells/&lt;n&gt;/hibernate</code>. Wells returns quickly; saves RAM to disk image.</td>
+    </tr>
+    <tr>
+      <td>wake</td>
+      <td>976 ms</td>
+      <td>4 ms</td>
+      <td><code>well start -s &lt;n&gt;</code>. CLI waits for VM resume + network up before returning.</td>
+    </tr>
+    <tr>
+      <td>talk (after wake)</td>
+      <td>1244 ms</td>
+      <td>—</td>
+      <td>Cell back up, host-bridge spawns fresh ssh+pi (~545ms) + LLM round-trip (~700ms).</td>
+    </tr>
+    <tr>
+      <td><strong>full round-trip</strong></td>
+      <td><strong>~2.5s</strong></td>
+      <td>—</td>
+      <td>sleep (300ms) + wake (1s) + talk (1.2s)</td>
+    </tr>
+  </tbody>
+</table>
+
+<h3>Where the time goes — birth (6.2s)</h3>
+
+<table>
+  <thead><tr><th>Sub-step</th><th>Cost</th></tr></thead>
+  <tbody>
+    <tr><td>Animation (fixed-tempo, by design)</td><td>~5s</td></tr>
+    <tr><td>Pool claim + ssh-accept verify + prewarm</td><td>fits in the animation</td></tr>
+    <tr><td>LLM first-byte round-trip (deepseek-v4-flash)</td><td>~1.2s</td></tr>
+  </tbody>
+</table>
+
+<p>The animation is intentional UX padding — it gives the cell time to wake from the pool without the user staring at a blank prompt. The ~1.2s LLM cold-start is the remaining gap to a 5s target. Deferred optimization in <code>docs/perf/future-optimizations.md</code>.</p>
+
+<h3>Where the time goes — auto-wake talk (8.2s)</h3>
+
+<table>
+  <thead><tr><th>Sub-step</th><th>Cost</th></tr></thead>
+  <tbody>
+    <tr><td>Wells's /wake (resume hibernated VM)</td><td>~3-5s</td></tr>
+    <tr><td>ensureWellRunningForTalk ssh-accept TCP probe</td><td>~0.5-1s</td></tr>
+    <tr><td>Host-bridge spawns fresh ssh+pi (no prewarm on talk path)</td><td>~0.5s</td></tr>
+    <tr><td>LLM first-byte round-trip</td><td>~1.5s</td></tr>
+  </tbody>
+</table>
+
+<h3>What can throw the numbers off</h3>
+
+<div class="callout warn">
+  <p>The numbers above are <strong>under steady-state conditions</strong>. Things that can change them:</p>
+  <ul style="margin-bottom: 0;">
+    <li><strong>Cold pool</strong> — if no warm eggs are ready, birth falls back to a fresh well create from <code>ubuntu-base</code>, adds ~60-90s for the per-egg provisioning step.</li>
+    <li><strong>Burned ssh+pi sessions</strong> — if a cell's host-bridge session died but the VM stayed running, the next talk pays a cold ssh+pi spawn (~545ms extra).</li>
+    <li><strong>Wells substrate bounces</strong> — if welld restarts mid-talk, you'll get a transient 5xx and a retry.</li>
+    <li><strong>LLM provider hiccups</strong> — deepseek/anthropic upstreams can drift the first-byte by seconds.</li>
+  </ul>
+</div>
+
+<h2>What "passed acceptance" means here</h2>
+
+<p>For V1, two latency targets were defined:</p>
+
+<table>
+  <thead><tr><th>Item</th><th>Target</th><th>Measured</th><th>Verdict</th></tr></thead>
+  <tbody>
+    <tr><td>V1.3 birth → first token</td><td>≤ 5s p50 → revised to ≤ 8s</td><td>6.24s p50</td><td>Pass</td></tr>
+    <tr><td>V1.5/V1.6 talk auto-wakes hibernated cell</td><td>No user-visible timeout</td><td>~8.2s</td><td>Pass</td></tr>
+  </tbody>
+</table>
+
+<p>The 5s → 8s target revision happened because the original number assumed a layered ssh+pi-warm architecture that we walked back from in V1.0 (talk-hang fix). 8s is the honest cost of the new architecture; pre-send-during-animation could close the gap if v2 needs it.</p>
+
+</body>
+</html>

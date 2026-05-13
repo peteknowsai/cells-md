@@ -1,0 +1,554 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Cells / Wells boundary cleanup — cells team migration plan</title>
+<style>
+  :root {
+    --wells: #3b82c4;
+    --wells-light: #e6f0fb;
+    --wells-dark: #1e5a8e;
+    --cells: #4ca87a;
+    --cells-light: #e8f5ee;
+    --cells-dark: #2d7050;
+    --leak: #d65454;
+    --leak-light: #fce8e8;
+    --warn: #d99834;
+    --warn-light: #fff5e0;
+    --ink: #1a1a1a;
+    --ink-muted: #5a5a5a;
+    --bg: #fafaf8;
+    --boundary: #888;
+    --code-bg: #f0efec;
+  }
+  * { box-sizing: border-box; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, sans-serif;
+    background: var(--bg);
+    color: var(--ink);
+    line-height: 1.55;
+    max-width: 960px;
+    margin: 0 auto;
+    padding: 40px 24px 80px;
+  }
+  h1 { font-size: 28px; line-height: 1.25; margin: 0 0 8px; }
+  h2 { font-size: 22px; line-height: 1.3; margin: 48px 0 12px; border-bottom: 1px solid #ddd; padding-bottom: 6px; }
+  h3 { font-size: 17px; line-height: 1.35; margin: 28px 0 8px; }
+  h4 { font-size: 15px; line-height: 1.35; margin: 16px 0 4px; color: var(--ink-muted); text-transform: uppercase; letter-spacing: 0.04em; }
+  .header-meta { color: var(--ink-muted); font-size: 14px; margin-bottom: 24px; }
+  .header-meta strong { color: var(--ink); }
+  code { background: var(--code-bg); padding: 1px 5px; border-radius: 3px; font-size: 0.92em; font-family: "SF Mono", Monaco, Consolas, monospace; }
+  pre { background: var(--code-bg); padding: 12px 16px; border-radius: 6px; overflow-x: auto; font-size: 13px; line-height: 1.5; }
+  pre code { background: transparent; padding: 0; }
+
+  /* Callout boxes */
+  .tldr {
+    background: linear-gradient(to right, var(--cells-light), var(--wells-light));
+    border-left: 4px solid var(--ink);
+    padding: 16px 20px;
+    border-radius: 4px;
+    margin: 24px 0 32px;
+  }
+  .tldr h3 { margin-top: 0; }
+  .tldr ul { margin: 8px 0 0; padding-left: 22px; }
+  .tldr li { margin-bottom: 6px; }
+
+  .callout {
+    border-left: 4px solid var(--ink-muted);
+    background: #f4f3f0;
+    padding: 12px 18px;
+    border-radius: 4px;
+    margin: 20px 0;
+    font-size: 14px;
+  }
+  .callout.q-answer { border-color: var(--cells); background: var(--cells-light); }
+  .callout.risk { border-color: var(--warn); background: var(--warn-light); }
+  .callout strong { display: block; margin-bottom: 4px; }
+  .callout p { margin: 4px 0; }
+
+  /* Plain-English explainer block */
+  .plain {
+    background: #fff8e6;
+    border: 1px solid #e8d4a0;
+    border-radius: 10px;
+    padding: 22px 26px;
+    margin: 28px 0 36px;
+  }
+  .plain h2 {
+    margin: 0 0 4px;
+    border-bottom: none;
+    padding-bottom: 0;
+    font-size: 20px;
+    color: #7a5a18;
+  }
+  .plain .plain-sub {
+    font-size: 13px;
+    color: #8c7035;
+    margin: 0 0 14px;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+  }
+  .plain p { font-size: 15px; line-height: 1.65; margin: 12px 0; }
+  .plain p:first-of-type { margin-top: 0; }
+  .plain p:last-of-type { margin-bottom: 0; }
+  .plain ul { font-size: 15px; line-height: 1.6; margin: 8px 0; padding-left: 22px; }
+  .plain li { margin-bottom: 4px; }
+
+  /* Tables */
+  table { border-collapse: collapse; width: 100%; font-size: 14px; margin: 16px 0; }
+  th { background: #efeeeb; text-align: left; padding: 8px 12px; border-bottom: 2px solid #ccc; font-weight: 600; }
+  td { padding: 8px 12px; border-bottom: 1px solid #e8e6e2; vertical-align: top; }
+  td.col-cells { color: var(--cells-dark); font-weight: 600; }
+  td.col-wells { color: var(--wells-dark); font-weight: 600; }
+  td.small { font-size: 13px; color: var(--ink-muted); }
+
+  /* Two-column layout */
+  .two-col {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 24px;
+    margin: 24px 0;
+  }
+  .col-card {
+    border-radius: 8px;
+    padding: 18px 20px;
+    border: 1px solid #ddd;
+  }
+  .col-now { background: #f4f3f0; border-color: #ccc; }
+  .col-then { background: var(--cells-light); border-color: #c8e2d2; }
+  .col-card h3 { margin-top: 0; color: var(--ink); }
+  .col-then h3 { color: var(--cells-dark); }
+  .col-card ul { margin: 8px 0 0; padding-left: 22px; }
+  .col-card li { margin-bottom: 5px; font-size: 14px; }
+
+  /* Work-item cards */
+  .workitems {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 14px;
+    margin: 18px 0;
+  }
+  .wi {
+    border: 1px solid #ddd;
+    border-radius: 8px;
+    padding: 14px 16px;
+    background: white;
+  }
+  .wi .id {
+    display: inline-block;
+    background: var(--cells-dark);
+    color: white;
+    font-size: 11px;
+    font-weight: 600;
+    padding: 2px 8px;
+    border-radius: 10px;
+    letter-spacing: 0.04em;
+  }
+  .wi h4 {
+    margin: 6px 0 4px;
+    color: var(--ink);
+    font-size: 15px;
+    text-transform: none;
+    letter-spacing: 0;
+  }
+  .wi .meta { font-size: 12px; color: var(--ink-muted); margin-bottom: 6px; }
+  .wi p { font-size: 13px; margin: 4px 0; }
+
+  /* Slice headers */
+  .slices { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 16px; margin: 20px 0; }
+  .slice {
+    border: 1px solid #ddd;
+    border-radius: 8px;
+    padding: 14px 16px;
+    background: white;
+    position: relative;
+  }
+  .slice.s1 { border-top: 4px solid var(--warn); }
+  .slice.s2 { border-top: 4px solid var(--cells); }
+  .slice.s3 { border-top: 4px solid #888; }
+  .slice .num { display: block; font-size: 11px; color: var(--ink-muted); letter-spacing: 0.08em; text-transform: uppercase; margin-bottom: 2px; }
+  .slice .title { font-size: 16px; font-weight: 600; margin-bottom: 8px; }
+  .slice .meta { font-size: 12px; color: var(--ink-muted); margin-bottom: 8px; }
+  .slice p { font-size: 13px; margin: 6px 0; }
+
+  /* SVG diagrams */
+  .diagram-frame {
+    background: white;
+    border: 1px solid #ddd;
+    border-radius: 8px;
+    padding: 20px;
+    margin: 20px 0;
+    overflow-x: auto;
+  }
+  .diagram-frame svg { display: block; margin: 0 auto; }
+  .diagram-caption {
+    font-size: 13px;
+    color: var(--ink-muted);
+    text-align: center;
+    margin-top: 6px;
+    font-style: italic;
+  }
+
+  /* Timeline */
+  .timeline {
+    border-left: 3px solid var(--cells);
+    margin: 20px 0 20px 12px;
+    padding: 4px 0 4px 20px;
+  }
+  .timeline-row {
+    position: relative;
+    padding: 8px 0;
+    font-size: 14px;
+  }
+  .timeline-row::before {
+    content: "";
+    position: absolute;
+    left: -28px;
+    top: 14px;
+    width: 12px; height: 12px;
+    border-radius: 50%;
+    background: var(--cells);
+    border: 2px solid white;
+    box-shadow: 0 0 0 2px var(--cells);
+  }
+  .timeline-row .date { display: inline-block; min-width: 110px; font-weight: 600; color: var(--cells-dark); }
+
+  /* Inline tags */
+  .tag {
+    display: inline-block;
+    padding: 1px 8px;
+    border-radius: 12px;
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+    vertical-align: middle;
+    margin: 0 4px;
+  }
+  .tag-cells { background: var(--cells-light); color: var(--cells-dark); }
+  .tag-wells { background: var(--wells-light); color: var(--wells-dark); }
+  .tag-leak { background: var(--leak-light); color: var(--leak); }
+
+  hr.footer { border: none; border-top: 1px solid #ddd; margin: 60px 0 24px; }
+  .signoff { font-size: 13px; color: var(--ink-muted); }
+</style>
+</head>
+<body>
+
+<h1>Cells / Wells boundary cleanup — migration plan</h1>
+<p class="header-meta">
+  <strong>Status:</strong> Plan · <strong>Date:</strong> 2026-05-12 ·
+  <strong>From:</strong> cells team · <strong>To:</strong> cells team
+  <span style="color:#aaa;"> · (visibility copy for wells)</span>
+</p>
+<p>Response to the wells team's 2026-05-12 boundary cleanup proposal
+(<code>wells-cells-boundary-cleanup.html</code>). We agree with the boundary. This is the cells-side implementation plan — the doc we'll build slice 2 against, shared with wells so the two sides line up.</p>
+
+<div class="tldr">
+  <h3>TL;DR</h3>
+  <ul>
+    <li>We agree with all three slices and with the answers to Q1–Q5 below.</li>
+    <li><strong>Image-layer boundary:</strong> wells owns the Ubuntu base image. Cells owns every layer baked on top (DNA, <code>/cell</code> user, pi, claude-code/codex, host-bridge agent, variant-specific packages).</li>
+    <li>Slice 1 (wells drops the lease publisher) — no cells work; ship whenever.</li>
+    <li>Slice 2 (pool moves to cells) is <strong>consolidation, not creation</strong>. We already have <code>~/.cells/eggs.json</code> + <code>cells egg refill</code> + launchd cron. The work is merging wells's <code>~/.wells/pool/</code> concept into our existing egg pool, absorbing <code>identityReset.ts</code>, and formalising reachability recovery.</li>
+    <li>Slice 3 (wells simplifies <code>createWell</code>) — small cells-side regression pass, no code change.</li>
+    <li><strong>W.72 (static-IP allocation)</strong> lands first — obsoletes the W.13 vmnet ceiling that's been our biggest substrate risk. Resequence: W.72 → boundary slice 1 → cells slice 2 → boundary slice 3.</li>
+    <li>Timing: post-v1-acceptance, <strong>2026-05-19 → 2026-05-23</strong>. Two-day implementation, half-day test pass.</li>
+  </ul>
+</div>
+
+<div class="plain">
+  <h2>In plain English</h2>
+  <p class="plain-sub">Borrowing wells's property-manager frame</p>
+
+  <p>We agreed with our property manager (wells) that they should stop running the move-in process for our tenants (the AI agents). They keep the building, the apartment keys, the elevators, the basic utilities — <strong>and the bare apartment itself</strong> (the Ubuntu base install). We take over everything that turns a bare apartment into a place an AI agent can live in: installing the kitchen, hanging the pictures, setting up the wifi, picking which apartments to pre-furnish, and the move-in process itself.</p>
+
+  <p>The split is clean: <strong>the empty apartment is theirs; everything in it is ours.</strong> If a tenant complains the dishwasher is broken, that's us. If the elevator's stuck, that's them. Before, the line was fuzzy — they were stocking the fridge for us, and we ended up arguing about whose milk it was.</p>
+
+  <p>We already have most of the moving-company operation built — the pre-furnishing checklist, the move-in coordinator, the schedule of upcoming move-ins. It's lived alongside the property manager's version of the same thing for a while. Now we're going to be the only ones doing it, which means we delete the duplicate code on their side and make sure our version handles everything that theirs used to.</p>
+
+  <p><strong>This is a 2–3 day project.</strong> We're going to wait until our current product milestone (v1 acceptance) is done before starting, because we want our existing tenants stable while we're moving the plumbing. Then we'll do it in a focused window the back half of next week.</p>
+
+  <p><strong>What's not changing:</strong></p>
+  <ul>
+    <li>Tenants still come from the same apartments.</li>
+    <li>The product still works the same from a user's perspective — birth, talk, kill all behave identically.</li>
+    <li>Tenants who are mid-conversation when we start the work won't see anything.</li>
+  </ul>
+
+  <p><strong>What is changing internally:</strong> one pool of pre-furnished apartments instead of two overlapping ones, one move-in checklist instead of two that have been drifting apart, and clearer accountability when something goes wrong — if a tenant is unreachable, we know who's investigating without a cross-team conversation.</p>
+</div>
+
+<h2>Why we're writing this</h2>
+
+<p>The wells team's proposal is the "what" — they want to delete ~1100 LoC of cells-shaped orchestration from welld and move ownership to us. This doc is the cells-side "how": which files we touch, what we have to build vs. what we already have, what order we do it in, and how we verify it before wells deletes their copy.</p>
+
+<p>We're sharing it back with wells because the two sides need to land within the same window — wells can't delete <code>poolFill.ts</code> until we've ported pool refill, and we can't switch over until wells exposes hibernate/wake cleanly. A shared timeline keeps that from getting tangled.</p>
+
+<h2>Where we are today</h2>
+
+<div class="diagram-frame">
+<svg viewBox="0 0 760 380" width="100%" style="max-width:760px;" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system, sans-serif">
+  <defs>
+    <marker id="a1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M0,0 L10,5 L0,10 Z" fill="#666"/>
+    </marker>
+  </defs>
+
+  <!-- Cells layer with internal pool box -->
+  <rect x="30" y="20" width="700" height="135" rx="8" fill="#e8f5ee" stroke="#4ca87a" stroke-width="1.5"/>
+  <text x="50" y="48" font-size="16" font-weight="700" fill="#2d7050">cells</text>
+  <text x="50" y="68" font-size="13" fill="#2d7050">birth · bake · talk · host-bridge · mother</text>
+
+  <rect x="50" y="80" width="320" height="65" rx="6" fill="white" stroke="#4ca87a" stroke-width="1"/>
+  <text x="65" y="102" font-size="13" font-weight="600" fill="#2d7050">cells egg pool ✓</text>
+  <text x="65" y="120" font-size="12" fill="#333">• <tspan font-family="monospace">~/.cells/eggs.json</tspan> · Tier 4 running eggs</text>
+  <text x="65" y="138" font-size="12" fill="#333">• <tspan font-family="monospace">cells egg refill</tspan> · launchd cron</text>
+
+  <rect x="390" y="80" width="320" height="65" rx="6" fill="#fce8e8" stroke="#d65454" stroke-width="1.5" stroke-dasharray="4,3"/>
+  <text x="405" y="102" font-size="13" font-weight="600" fill="#d65454">overlap risk</text>
+  <text x="405" y="120" font-size="12" fill="#333">cells's birth flow falls through to wells's</text>
+  <text x="405" y="138" font-size="12" fill="#333">pool when our eggs.json is empty — two pools</text>
+
+  <!-- Arrow -->
+  <line x1="380" y1="165" x2="380" y2="185" stroke="#666" stroke-width="2" marker-end="url(#a1)"/>
+  <text x="395" y="180" font-size="11" fill="#666">REST</text>
+
+  <!-- Wells layer -->
+  <rect x="30" y="195" width="700" height="160" rx="8" fill="#e6f0fb" stroke="#3b82c4" stroke-width="1.5"/>
+  <text x="50" y="222" font-size="16" font-weight="700" fill="#1e5a8e">welld</text>
+
+  <rect x="50" y="240" width="320" height="100" rx="6" fill="white" stroke="#3b82c4" stroke-width="1"/>
+  <text x="65" y="262" font-size="13" font-weight="600" fill="#1e5a8e">Substrate primitives ✓</text>
+  <text x="65" y="280" font-size="12" fill="#333">• VM lifecycle, image store, /healthz</text>
+  <text x="65" y="298" font-size="12" fill="#333">• REST surface (create/start/stop/wake/exec)</text>
+  <text x="65" y="316" font-size="12" fill="#333">• DHCP observation (read-only post-W.70)</text>
+
+  <rect x="390" y="240" width="320" height="100" rx="6" fill="#fce8e8" stroke="#d65454" stroke-width="1.5" stroke-dasharray="4,3"/>
+  <text x="405" y="262" font-size="13" font-weight="600" fill="#d65454">Cells-shaped (going away)</text>
+  <text x="405" y="280" font-size="12" fill="#333">• <tspan font-family="monospace">~/.wells/pool/</tspan> · poolFiller · poolRegistry</text>
+  <text x="405" y="298" font-size="12" fill="#333">• adoptFromPool · identityReset.ts (SSH)</text>
+  <text x="405" y="316" font-size="12" fill="#333">• createWell warming sequence</text>
+</svg>
+<div class="diagram-caption">Today: cells has its own egg pool, wells has its own pool, they overlap in the birth-flow fallthrough.</div>
+</div>
+
+<h2>Where we want to be (post-slice-2)</h2>
+
+<div class="diagram-frame">
+<svg viewBox="0 0 760 380" width="100%" style="max-width:760px;" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system, sans-serif">
+  <defs>
+    <marker id="a2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M0,0 L10,5 L0,10 Z" fill="#666"/>
+    </marker>
+  </defs>
+
+  <!-- Cells layer (now full orchestration) -->
+  <rect x="30" y="20" width="700" height="190" rx="8" fill="#e8f5ee" stroke="#4ca87a" stroke-width="1.5"/>
+  <text x="50" y="48" font-size="16" font-weight="700" fill="#2d7050">cells</text>
+  <text x="50" y="68" font-size="13" fill="#2d7050">orchestration + agent stack (full ownership)</text>
+
+  <text x="50" y="96" font-size="12" fill="#2d7050">• <tspan font-family="monospace">~/.cells/pool.json</tspan> — unified pool (Tier 4 running + hibernated eggs)</text>
+  <text x="50" y="114" font-size="12" fill="#2d7050">• Pool refill: <tspan font-family="monospace">cells egg refill</tspan> → wells create → cmdBake → wells hibernate</text>
+  <text x="50" y="132" font-size="12" fill="#2d7050">• Birth: pick egg → wells wake → cells identity-rotate (SSH)</text>
+  <text x="50" y="150" font-size="12" fill="#2d7050">• <tspan font-family="monospace">identityReset</tspan> — hostname/machine-id/DNA refresh (absorbed from wells)</text>
+  <text x="50" y="168" font-size="12" fill="#2d7050">• Reachability recovery — talk/SSH timeout → stop+start or destroy+rebake</text>
+  <text x="50" y="186" font-size="12" fill="#2d7050">• Bake recipe, host-bridge, mother → cell protocol</text>
+
+  <!-- REST contract band -->
+  <rect x="30" y="225" width="700" height="40" rx="6" fill="#fff8e6" stroke="#d99834" stroke-width="1"/>
+  <text x="50" y="249" font-size="13" font-weight="700" fill="#7a5a18">REST contract (the boundary)</text>
+  <text x="295" y="249" font-size="12" fill="#7a5a18">create · start · stop · hibernate · wake · exec · destroy · /healthz</text>
+
+  <!-- Wells layer (slimmer) -->
+  <rect x="30" y="280" width="700" height="80" rx="8" fill="#e6f0fb" stroke="#3b82c4" stroke-width="1.5"/>
+  <text x="50" y="308" font-size="16" font-weight="700" fill="#1e5a8e">welld — substrate primitives only</text>
+  <text x="50" y="328" font-size="12" fill="#333">VM lifecycle · image store + R2 · DHCP observation · /healthz reports honest observed state</text>
+  <text x="50" y="346" font-size="12" fill="#333">Engine boundary (lume / vwell) · ~1100 LoC + ~50–80 tests deleted</text>
+</svg>
+<div class="diagram-caption">Post-slice-2: one pool (cells), one bake recipe (cells), one identity rotation (cells). Wells reports honest state and stays out of cells's invariants.</div>
+</div>
+
+<h2>Image layering — who owns what image</h2>
+
+<p>Pulling the boundary up one level: the same separation should apply to images themselves. Wells builds and maintains the bare apartment (the Ubuntu base); cells furnishes it (every layer above that). Two clean kinds of image, one boundary in between.</p>
+
+<table>
+  <thead><tr><th>Layer</th><th>Owner</th><th>Content</th><th>Produced by</th></tr></thead>
+  <tbody>
+    <tr>
+      <td><code>ubuntu-base</code> (wells's published image)</td>
+      <td class="col-wells">wells <span class="tag tag-wells">substrate</span></td>
+      <td>Pure Ubuntu (noble) + <code>well-firstboot.service</code> + minimal substrate hooks (machine-id reset, netplan from cidata, /etc/.well-ready marker)</td>
+      <td>wells build pipeline · R2-hosted · versioned tag</td>
+    </tr>
+    <tr>
+      <td><code>cell-base</code> (cells's pre-bake)</td>
+      <td class="col-cells">cells <span class="tag tag-cells">agent</span></td>
+      <td><code>ubuntu-base</code> + DNA (<code>/cell</code> filesystem) + <code>cell</code> user + pi + claude-code + codex + bun + host-bridge agent + <code>/etc/profile.d/cells-env.sh</code></td>
+      <td><code>cells bake cell-base</code> · saved via wells's image store · R2-pushed by wells substrate</td>
+    </tr>
+    <tr>
+      <td>variant eggs (e.g. <code>v1-generic</code>, <code>gpt-5.5+memory</code>)</td>
+      <td class="col-cells">cells <span class="tag tag-cells">agent</span></td>
+      <td><code>cell-base</code> + variant-specific (model keys, memory provisioning, extra packages)</td>
+      <td><code>cells bake</code> + <code>cells egg refill</code> · stored in <code>~/.cells/pool.json</code> per S2.1</td>
+    </tr>
+  </tbody>
+</table>
+
+<p>What this means in practice:</p>
+<ul style="font-size:14px; line-height:1.6;">
+  <li>Cells's bake starts <em>from</em> <code>ubuntu-base</code>, not from <code>cell-base</code> when re-baking the agent layer. Right now we sometimes start from <code>cell-base</code> as shorthand; post-cleanup that's a cells-owned image we produce, not a substrate one we consume.</li>
+  <li>Wells doesn't know what's in <code>cell-base</code> or any egg image — they're opaque blobs to the image store.</li>
+  <li>If Ubuntu needs a security patch, that's wells's responsibility. Wells publishes a new <code>ubuntu-base</code> tag; cells re-bakes <code>cell-base</code> on top at our cadence.</li>
+  <li>If the agent stack needs a change (new pi version, DNA tweak), that's pure cells — wells doesn't get involved.</li>
+</ul>
+
+<h2>Our answers to wells's Q1–Q5</h2>
+
+<div class="callout q-answer">
+  <strong>Q1 — Pool state location</strong>
+  <p><code>~/.cells/pool.json</code>. Symmetric with <code>~/.wells/</code>, consolidates with our existing <code>~/.cells/eggs.json</code> rather than splitting state across two files. Schema absorbs the hibernated-well fields from wells's <code>poolRegistry</code> (image, hibernate.bin path, last-warmed-at) onto the existing egg record.</p>
+</div>
+
+<div class="callout q-answer">
+  <strong>Q2 — Identity reset</strong>
+  <p>Moves to cells. The whole flow is cells-shaped — hostname, machine-id, DNA refresh, host-bridge wiring, <code>/cell</code> user re-keying. Keeping <code>identityReset.ts</code> in wells means piping cells-shaped config through wells's REST surface, which re-creates the same kind of leak the proposal is trying to close. Our <code>cmdBake</code> already does identity-style work over SSH (<code>bakeCreateCellUser</code>, <code>bakeWriteProfileD</code>); extending it to cover post-wake rotation is cheaper than the round-trip.</p>
+</div>
+
+<div class="callout q-answer">
+  <strong>Q3 — Timing</strong>
+  <p>Slice 2 lands <strong>2026-05-19 → 2026-05-23</strong>. We're mid-flight on host-bridge + Tier 4 eggs (v1 acceptance) and want that stable before we shake the plumbing. Slice 1 you can ship whenever — no cells dep.</p>
+</div>
+
+<div class="callout q-answer">
+  <strong>Q4 — /healthz honesty</strong>
+  <p>Observed state, no hint. <code>status: "running", ip: null</code> is the right answer. Recovery decisions are ours; baking a hint into wells re-creates a soft version of the W.68 leak (wells reasoning about cells's reachability invariant).</p>
+</div>
+
+<div class="callout q-answer">
+  <strong>Q5 — Intermittent pool refill bug</strong>
+  <p>Yes, comfortable. Bake recipe is ours anyway. Flag back: if the root cause is vmnet's 4-concurrent DHCP ceiling (W.13 finding), we'll work around it on the cells side (serialize refill, extend DHCP wait, back off on timeout) rather than asking for wells code changes. If we hit something that <em>does</em> need substrate help, we'll bring it back to the channel.</p>
+</div>
+
+<h2>Slice 2 — work breakdown</h2>
+
+<p>Eight work items, ~2.5 days, landed as one PR (no incremental shipping — pool semantics in flight should stay atomic).</p>
+
+<div class="workitems">
+  <div class="wi">
+    <span class="id">S2.1</span>
+    <h4>Unified pool schema</h4>
+    <div class="meta">~0.5 day · <code>cli/cells.ts</code>, new <code>cli/lib/pool.ts</code></div>
+    <p>Extend <code>~/.cells/eggs.json</code> → <code>~/.cells/pool.json</code>. Add hibernated-egg fields (<code>hibernate_bin_path</code>, <code>image_digest</code>, <code>last_warmed_at</code>, <code>tier: 2|4</code>). Migration: read old <code>eggs.json</code> on startup, rewrite as <code>pool.json</code>. Keep cooperative file lock.</p>
+  </div>
+  <div class="wi">
+    <span class="id">S2.2</span>
+    <h4>Pool refill in cells</h4>
+    <div class="meta">~0.5 day · <code>cli/cells.ts cmdEggRefill</code></div>
+    <p>Rewrite refill as: <code>POST /v1/wells</code> (fresh, with <code>--no-cidata-mount</code> by tier) → <code>cmdBake</code> → <code>POST /v1/wells/&lt;n&gt;/hibernate</code> for Tier 2; leave running for Tier 4. Drop calls to <code>POST /v1/wells/pool/refill</code>.</p>
+  </div>
+  <div class="wi">
+    <span class="id">S2.3</span>
+    <h4>Birth-from-pool path</h4>
+    <div class="meta">~0.5 day · <code>cli/cells.ts cmdBirth</code></div>
+    <p>Pick a hibernated egg from <code>pool.json</code> → <code>POST /v1/wells/&lt;n&gt;/wake</code> → identity rotation (S2.4) → mark egg <code>claimed</code>. Remove fallthrough to wells's pool. Tier 4 path unchanged (already in-cells).</p>
+  </div>
+  <div class="wi">
+    <span class="id">S2.4</span>
+    <h4>Absorb identityReset</h4>
+    <div class="meta">~0.5 day · port from wells, new <code>cli/lib/identity.ts</code></div>
+    <p>Port <code>identityReset.ts</code> (~200 LoC SSH-side: hostname, machine-id, DNA refresh) into cells. Call from S2.3 post-wake and from <code>cmdBake</code> at end-of-bake. Wells deletes its copy after we confirm.</p>
+  </div>
+  <div class="wi">
+    <span class="id">S2.5</span>
+    <h4>Reachability recovery</h4>
+    <div class="meta">~0.5 day · <code>cli/lib/recover.ts</code></div>
+    <p>Detect: talk-path timeout or <code>well exec</code> SSH timeout. Decide: stop+start (re-DHCP) first attempt, destroy+rebake on second failure. Wire into <code>cells talk</code> and host-bridge error path. This was the original W.68 motivation — formalising it here.</p>
+  </div>
+  <div class="wi">
+    <span class="id">S2.6</span>
+    <h4>Remove wells pool calls</h4>
+    <div class="meta">~0.25 day · grep + delete</div>
+    <p>Strip cells's references to <code>GET /v1/wells/pool</code> and <code>POST /v1/wells/pool/refill</code>. Confirm no cmd path or test reads them. Wells deletes the endpoints after we confirm.</p>
+  </div>
+  <div class="wi">
+    <span class="id">S2.7</span>
+    <h4>Hibernate-legal bake</h4>
+    <div class="meta">~0.25 day · <code>cmdBake</code> tail</div>
+    <p>Confirm bake leaves the image hibernate-legal (no cidata mounted at save time — we already do this via <code>--no-cidata-mount</code> at egg-create). Add an explicit hibernate-test step to bake's post-save validation.</p>
+  </div>
+  <div class="wi">
+    <span class="id">S2.8</span>
+    <h4>Test matrix</h4>
+    <div class="meta">~0.5 day · existing <code>harden-birth</code> + new cases</div>
+    <p>Cover: refill from empty pool, refill under DHCP timeout (W.13 ceiling), birth-from-pool, fresh birth, identity uniqueness across two consecutive births, reachability recovery (stop+start succeeds, destroy+rebake fallback), Tier 4 stays running across refill.</p>
+  </div>
+</div>
+
+<h3>Order within the PR</h3>
+<p>S2.1 → S2.4 → S2.2 → S2.3 → S2.5 → S2.6 → S2.7 → S2.8. Schema first so every other item builds against a stable shape; identity rotation second because S2.3 depends on it; recovery near the end because it touches every other code path; cleanup and test last.</p>
+
+<h2>Slice 1 + slice 3 — cells impact</h2>
+
+<div class="two-col">
+  <div class="col-card col-now">
+    <h3>Slice 1 — wells drops lease publisher</h3>
+    <p style="font-size:14px;">Wells does ~30 min, deletes ~250 LoC.</p>
+    <p style="font-size:14px;"><strong>Cells impact: zero.</strong> The publisher's been disabled since the W.68 mitigation; we never relied on it. Reachability recovery (its original motivation) shows up as S2.5 in our slice 2 work — we were already absorbing it implicitly.</p>
+    <p style="font-size:13px; color:var(--ink-muted); margin-top:6px;">Action on our side: none. Watch for the PR, ack on the channel.</p>
+  </div>
+  <div class="col-card col-then">
+    <h3>Slice 3 — wells simplifies createWell</h3>
+    <p style="font-size:14px;">Wells drops the boot-with-cidata → stop → restart-without-mount warming sequence. ~30 min, ~100 LoC simpler.</p>
+    <p style="font-size:14px;"><strong>Cells impact:</strong> regression-test our fresh-birth path (the non-pool one, <code>cells birth --no-pool</code>). It should get ~6–8s faster. No cells code change.</p>
+    <p style="font-size:13px; color:var(--ink-muted); margin-top:6px;">Action on our side: one row in our test matrix, comparing wall-clock before/after.</p>
+  </div>
+</div>
+
+<h2>Risks &amp; coordination</h2>
+
+<div class="callout risk">
+  <strong>Risk 1 — vmnet 4-concurrent DHCP ceiling (W.13) — obsoleted by W.72</strong>
+  <p>Substrate limit; intermittent refill failures stem from this. <strong>Resolved by wells's W.72 static-IP design (posted 2026-05-12)</strong> — welld picks IPs from a managed pool and writes them via cidata netplan, bypassing bootpd entirely. With W.72 landing before our slice 2, refill serialization in S2.2 becomes a comfort belt rather than a load-bearing mitigation.</p>
+</div>
+
+<div class="callout risk">
+  <strong>Risk 2 — image-level damage from W.68 storm (egg-19a4be)</strong>
+  <p>Already on our list. Destroy + rebake before slice 2 starts so we have a clean baseline.</p>
+</div>
+
+<div class="callout risk">
+  <strong>Risk 3 — migration-window pool gap</strong>
+  <p>While slice 2 is in flight, refill will be paused. Existing eggs in <code>~/.cells/eggs.json</code> + wells's <code>~/.wells/pool/</code> still serve births. <strong>Mitigation:</strong> land slice 2 as one PR — no half-state where one pool refills and the other doesn't. We pre-warm both pools the morning of 5/19 before starting.</p>
+</div>
+
+<div class="callout risk">
+  <strong>Risk 4 — drift between cells&apos;s identityReset port and wells&apos;s original</strong>
+  <p>If we port <code>identityReset.ts</code> incompletely (miss a field, miss an edge case), identity uniqueness could regress. <strong>Mitigation:</strong> port by reading wells's file line-by-line, not paraphrasing. Add S2.8 test for identity uniqueness across two consecutive births. Wells holds the delete on their side until we confirm green.</p>
+</div>
+
+<h2>Timeline</h2>
+
+<div class="timeline">
+  <div class="timeline-row"><span class="date">5/12 (today)</span> Wells slice 1 (drop lease publisher) — ships whenever, no cells dep. Wells W.71 diagnostic dump already deployed (15:50Z).</div>
+  <div class="timeline-row"><span class="date">5/13–5/16</span> Wells implements W.72 (static-IP allocation, ~11h wells-side). Cells continues v1 acceptance in parallel. <em>This sequencing matters: W.72 lands before our slice 2 so we inherit a working pool primitive.</em></div>
+  <div class="timeline-row"><span class="date">5/17 (Fri)</span> Pre-flight: destroy + rebake damaged eggs, pre-warm both pools on the new static-IP substrate, ensure cells side is green.</div>
+  <div class="timeline-row"><span class="date">5/19–5/22</span> Cells slice 2 implementation (S2.1 → S2.7).</div>
+  <div class="timeline-row"><span class="date">5/22 (Fri)</span> S2.8 test pass + harden-birth full matrix.</div>
+  <div class="timeline-row"><span class="date">5/23 (Sat)</span> Cells slice 2 PR merges. Wells flag-flips deletes (~half day) — <code>poolFill</code>, <code>poolFiller</code>, <code>poolRegistry</code>, <code>adoptFromPool</code>, <code>identityReset.ts</code>, pool REST endpoints.</div>
+  <div class="timeline-row"><span class="date">5/26 (Mon)</span> Slice 3 — wells <code>createWell</code> simplification, cells regression pass.</div>
+</div>
+
+<h2>Recommendation</h2>
+
+<p>Wells ship slice 1 immediately — no cells coordination needed. Cells finish v1 acceptance, then run slice 2 in the 5/19–5/23 window. Wells slice 3 follows the Monday after.</p>
+
+<p>This is consolidation, not creation: we already have most of the pool machinery in <code>~/.cells/eggs.json</code> + <code>cmdBake</code> + the egg-refill launchd job. The work is absorbing the remaining cells-shaped bits from welld and standing up reachability recovery as a first-class concern on our side rather than an emergent one.</p>
+
+<hr class="footer">
+<p class="signoff">— cells team · plan 2026-05-12 · response welcome in <code>/tmp/cells-wells-chat/</code> · source: <code>docs/proposals/cells-boundary-cleanup-plan.html</code></p>
+
+</body>
+</html>

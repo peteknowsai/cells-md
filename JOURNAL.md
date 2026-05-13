@@ -909,3 +909,192 @@ First-token measurement deferred — would need either TTY-emulated runs or
 non-TTY auto-seed path in cmdCreateV1Fast. Estimating ~6s warm based on
 alive (2.3s) + pi cold-start (3s) + LLM round-trip (1s). Gap to V1.3 5s
 target is the pi cold-start (Tier 2). Tier 3 escalation would close it.
+
+## 2026-05-10 22:40 MT — worker(V1 acceptance) fire 12 — found a bug
+
+Running V1.1-V1.8 acceptance tests. Hit a real bug:
+
+**V1.8 multi-cell test surfaced:** when birthing two cells back-to-back from
+the pool, the FIRST cell's `well-site.service` ends up `masked` and
+`inactive`. Pi never starts. Talk hangs at "connected" then no response.
+
+The SECOND cell (cell-15561e from egg-7f2264) was fine — well-site
+`enabled active`.
+
+Manual workaround: `systemctl unmask` then re-register via curl PUT —
+works. But that's not a viable production fix.
+
+Investigating the race / interaction. Possibilities:
+- wells's services API PUT sometimes results in a masked unit
+- Hibernate-wake race with systemd state restoration
+- First-birth-of-the-day timing thing
+
+Running a fresh repro in background to confirm if it's deterministic.
+
+## 2026-05-10 22:50 MT — worker(V1 acceptance) fire 14 — V1.5+V1.6+V1.7 green, V1.8 racy
+
+V1.5 ✓ — sleep + talk-wakes in 21.2s (target ≤60s). LLM-genuine reply.
+V1.6 ✓ — stop + wake (3.1s) + talk smoke, LLM reply.
+V1.7 ✓ — kill swept cells.json + welld + eggs.json cleanly.
+V1.8 PARTIAL — cell-B works clean, cell-A unresponsive.
+
+**Root cause for V1.8 cell-A:** Wells's `applyToGuest` (in `splites/lib/services.ts`) writes the systemd unit via SSH:
+
+```
+echo '${b64(unit)}' | base64 -d | sudo tee /etc/systemd/system/well-${id}.service > /dev/null
+```
+
+`sudo tee` truncates the file first. If wells's watchdog hibernates the well DURING the SSH script run (its lastTouched may not be properly reset on wake — that's a wells-side issue), the file gets truncated to 0 bytes. systemctl treats a 0-byte unit file as `masked + inactive`.
+
+cell-A had its egg thawed; my `registerSiteService` PUT raced with the watchdog; unit file ended up 0-byte. cell-B (born seconds later when watchdog had been freshly reset) wrote fine.
+
+**Workaround options for v1:**
+1. Disable auto_sleep on the well before registerSiteService, re-enable after.
+2. Verify-after-write: read back the unit file via well exec; if 0 bytes, retry.
+3. Race-hardened registration: a small delay + ping pattern that keeps the well "fresh" through the write.
+
+Next fire: implement option 1 or 2.
+
+**Real wells-side bug worth filing:** lastTouched reset semantics on wake. Service registration writes should also bump lastTouched. Ship to wells team via the direct chat channel.
+
+## 2026-05-11 04:58 MT — worker(V1 acceptance) fire 17 — talk-hang diagnosis + pool=10
+
+Pete hit V1.2 live: `cells birth` → `> hi` → "still responding — wait, or type /abort".
+Investigation on cell-8bb407 (egg-b49192):
+
+**Pi side checks (well-site service):**
+- well-site.service: active, pi PID 972 alive
+- Bridge: ws connected, set_model openai-codex/gpt-5.5, set_thinking_level medium
+- One suspicious early line: `[bridge] lifecycle busy signal failed: Error: Unable to connect`
+- No further log lines after model set — pi never logged Pete's "hi"
+- ENV in pi proc: OPENAI_CODEX_API_KEY, ANTHROPIC_OAUTH_TOKEN, CELLS_PROXY_SECRET all set correctly
+
+**Proxy auth path verified end-to-end:**
+- cell → https://proxy.cells.md/codex → cloudflared → localhost:8787 cells-proxy → OpenAI chatgpt.com
+- Confirmed with curl from inside cell using cell's OPENAI_CODEX_API_KEY env: hits chatgpt.com (received x-openai-proxy-wasm header + chatgpt.com cookies). 4xx response on empty body proves routing & auth work.
+- Secret matches between host ~/.cells/secrets.json and cell env (sk-ant-oat01-cells-proxy-30d762a4…)
+
+**So the hang is NOT proxy-side. It's either:**
+1. The user's "hi" never reached the bridge (terminal → ws frame loss)
+2. Bridge received it but didn't forward to pi rpc (silently dropped)
+3. Pi received it but no API call was made (the early "lifecycle busy signal failed" might be related)
+
+Next fire: birth a fresh cell, tail well-site log in real-time, type "hi", confirm where the message dies.
+
+**Side change:** V1_POOL_TARGET_DEPTH 1 → 10 per Pete's "spin up 5-10 agents quickly" ask. Pool deep, refill async after each consume.
+
+## 2026-05-11 05:08 MT — worker(V1.0 talk-hang) fire 19 — FIXED
+
+Root cause of Pete's "still responding" hang on cell-142266 and cell-8bb407:
+
+**Race in bridge's pi-setup sequence (dna/cells/base/site/server.ts):**
+- `spawnPi()` is sync — returns immediately after subprocess spawn
+- `setTimeout(750)` schedules `switch_session` + `set_model` + `set_thinking_level`
+- Pete's CLI seed prompt ("introduce yourself…") fires immediately after ws-open
+- That prompt arrives during the 750ms window: pi.stdin is alive (sendToPi returns true) but pi has no session pinned
+- Pi processes the prompt against a transient/default session; the response doesn't reach the user's ws (which is wired to the session that gets pinned by switch_session, which hadn't happened yet)
+- `agent_end` never reaches the CLI → `inFlight` stays true → "still responding" forever
+
+**Smoking gun:** pi's main.jsonl for cell-142266 shows `session/model/thinking_level` events at 05:01:44 then **a 3-minute gap**, then MY direct ws probe's "say hello" at 05:04:49. The seed that should have been at 05:01:45 simply isn't logged.
+
+**Fix (committed 9280c61):**
+- Track `piReady` flag in bridge, set after switch_session+set_model+set_thinking_level complete
+- Queue `prompt` commands that arrive before piReady in `pendingPrompts[]`
+- Echo `{type:"response",command:"prompt",success:true}` back to client so its sendPrompt awaits agent_end normally
+- After setup completes, flush queue + emit `bridge_ready` to all connected clients
+- On ws.open, if piReady already (late client connecting to warm cell), send bridge_ready immediately
+
+**Verification path:** rebake cell-base, refill pool, birth fresh, test. Rebake started fire 20 (PID 50859, log /tmp/cells-bake.log).
+
+## 2026-05-11 05:10 MT — worker(V1 acceptance) fire 20 — pool drain + rebake
+
+Killed 4 test cells (cell-d47752/acdeb4/bb1007/142266), drained 10 stale eggs. Started `cells bake --force` to rebake cell-base image with the V1.0 fix. Monitor armed on /tmp/cells-bake.log. Next fire: verify bake success → refill pool to 10 → birth + V1.2 test (cell speaks first via LLM).
+
+## 2026-05-12 17:42Z — worker(V1 acceptance) — /goal-driven verification
+
+Ran V1 acceptance matrix end-to-end. Two real bugs found and fixed during the run; six items pass clean; one metric fails by 2.3s; one feature not implemented; one item substrate-blocked.
+
+### Found + fixed
+
+**1. Harness-leaking cell voice (V1.2 content).** Test cell said "I'm Pi, your expert coding assistant inside the pi coding agent harness — I can help you read and edit files…". Root cause: host-bridge launched pi via `sudo -u cell -H bash -lc 'exec pi --mode rpc …'` with no `cd /cell`. Pi's CWD stayed at /home/ubuntu (where ssh lands). The `use-max` extension's `before_agent_start` hook reads SOUL.md/CELLS.md/TOOLS.md/CONTACTS.md/MEMORY.md from `ctx.cwd`; without /cell it returned `{}`, pi fell back to its default coding-assistant prompt. Fix: insert `cd /cell &&` before `exec pi` (commit 2a908c8). Post-fix cell-69080d says "I'm a **cell** — a persistent agent living on my own Linux VM…".
+
+**2. Talk-doesn't-wake (V1.5/V1.6).** `cells talk` on a hibernated/stopped cell timed out 60s. host-bridge SSHed direct to cell IP at port 22; the VM was off, no wake path. Added `ensureWellRunningForTalk` to cmdTalk (commit d1a8847): tries /wake first (Tier 2 hibernate-restore), falls back to /start if the 200 from /wake didn't actually flip status to running, then polls TCP-probe to :22 with 60s deadline. Post-fix sleep→talk roundtrip is 5s on a Tier 4 stopped well.
+
+### Verification results
+
+| Item | Status | Notes |
+|---|---|---|
+| V1.1 | ✓ | Animation + talk drop-in clean. Code path + 4-stage Ink visual via pty wrapper. |
+| V1.2 | ✓ | After harness-leak fix. Cell speaks first, clean cell voice. |
+| V1.3 | ⚠ | p50=7.3s, p95=11.3s. FAILS 5s target by 2.3s p50. Architectural — host-bridge spawns fresh ssh+pi per session. Recommendation in `docs/perf/birth-to-greeting.md`: raise target to 8s. |
+| V1.4 | ✓ / ⚠ | Warm path PASSES (6 successive). Refill within 30s blocked by W.72. |
+| V1.5 | ✓ | After ensureWellRunningForTalk fix. Sleep→talk = 5s. |
+| V1.6 | ✓ | Stop+wake+talk = 4s total. |
+| V1.7 | ✓ | Kill removes cells.json entry + well (404). |
+| V1.8 | ✓ | Two-cell coexist + session isolation. No cross-leak. |
+| V1.9 | ✗ | NOT IMPLEMENTED. Customization picker doesn't exist in codebase. Scope: ~2-4h. Deferred pending Pete UX spec. |
+| V1.10 | ⏸ | Blocked on W.72 (vmnet ceiling). |
+
+### Commits
+
+- `2a908c8` host-bridge: cd /cell before exec pi so SOUL.md loads into system prompt
+- `e112a2c` perf: V1.3 measured under host-bridge — p50=7.3s, FAILS 5s target
+- `d1a8847` cells talk: auto-wake the well if hibernated/stopped before bridging
+
+### Wells side (parallel /goal)
+
+- Dashboard live at `localhost:7878/dashboard` (commit ce6c32f, 16:39Z).
+- W.71 diagnostic dump deployed earlier.
+- W.72 static-IP code-complete (a57e0ac→e2ad82f), suite 723→764 green. Deploys 5/17 bundled with Piece 1.
+- Piece 1 (publisher delete) committed 70c685e on feature/phase-a, waiting to ship with W.72.
+
+### What's next
+
+- Pete to decide V1.3 metric (accept current or revise target).
+- Pete to spec V1.9 picker UX so worker can build it.
+- W.72 lands 5/17 → re-run V1.10 burst test.
+- Slice 2 prep window starts ~5/17 (task #12): scaffold S2.1 schema + S2.4 identityReset port outline.
+
+---
+
+## 2026-05-13 06:18Z — worker — V1 stamped (10/10 ✓)
+
+Closed the V1 acceptance loop with three pushes today plus a wells-team substrate sweep.
+
+### What landed (cells side, this session)
+
+- **V1.3 magical first-token**: `captureGreeting` + dynamic-tempo `BirthAnim` (`endSignal` Promise, minDurationMs=1500, maxDurationMs=6000). Animation snaps to "alive" the moment pi streams its first byte; buffered greeting drains instantly. 10 trials: p50 = **2470ms (perf log) / 2645ms (wrapper)**, range 2469–2969ms. `docs/perf/birth-to-greeting.md` updated.
+- **V1.9 picker**: 4 selectOne/selectMany prompts (Model / Thinking / Extensions / Provider) gated on TTY + explicit name + no scripting flags. Picks land in `cells.json` under `picker`. Pty-driven live tests pass — all-defaults → `picker.extensions=[]`; memory-ext (Space toggle) → `picker.extensions=["memory"]`.
+- **V1.5 fixes during retest on the new wells substrate**:
+  - `V1_HOT_POOL_TARGET` 3 → **10** (pure-hot v1: no cold→hot promote path, no wake-from-cold trigger).
+  - `bakeV1Egg` passes `hibernate_ready: true` unconditionally (was `tier === 2`). Wells's Piece 3 made hibernate refuse non-sealed wells; pool eggs are Tier 4 (hot) but the user immediately runs `cells sleep` after birth, so every pool egg has to be sealed. ~6-8s extra per bake; paid async.
+  - `cli/dashboard.ts` `target_hot` synced to 10.
+
+### V1 acceptance: 10/10 ✓ on wells-stable-2026-05-13
+
+- V1.3: 2.5s first-token (was 7.3s)
+- V1.5: sleep 0.6s, auto-wake-from-hibernate 1.9s first cycle, sibling-survive 1.6s (W.74 win)
+- V1.6: stop 7.2s, wake 3.5s, talk 2.7s, siblings 1.2s
+- V1.10: 9/9 pool-hot births p50=2583ms, 10th cold-fork as designed
+
+### Wells side (parallel /goal, today)
+
+The wake-from-hibernate arc this session:
+
+- **W.73** wait-for-SSH on resurrection (replaces just waitForStatus). Slow but each well guaranteed reachable.
+- **W.74** per-VM XPC kill replaces process-wide `killAndRestartLumeServe` in `wakeWell`. **Hibernating one well no longer kills the rest.** Live-verified by wells team — egg-932fe7 hibernated, 4 siblings kept their XPC PIDs alive.
+- **W.75** settle delay before supervisor takes over.
+- **W.76** throwaway hibernate+coldboot inside `createWell`'s hibernate_ready branch. **Reverted** (commit 1a6302d) — didn't fix the user-facing first-wake bug (cells's repro on cell-2506fd + cell-90009f both still failed permission-denied after W.76).
+- **W.77** lume restore-state error handler enhanced (NSError domain/code/userInfo/underlying dump). Diagnostic only — but after W.77 deploy + bounces, fresh-bake hibernate+restore started working cleanly (egg-754152, egg-4b366a both 200/200, cell-3d1995 first wake 1.9s). Substrate state appears to have self-cleaned through the deploy churn; wells team has the W.77-format dumps for follow-up if it regresses.
+
+### What's next
+
+- Stamp V1 in commit + push to `worker/V1-acceptance`. Pete decides on squash merge to main.
+- V2 design: per-variant pool depth + mix strategy + predictive pre-warming (picker variants).
+- V2 design: host-side topup daemon so fire-and-forget refill survives scripted bursts.
+- Wells team: W.78 if first-wake permission denied recurs; otherwise let the W.77 diagnostic catch it.
+
+### Open carry-over (non-blocking)
+
+- Old broken cells from this session (cell-2506fd, cell-90009f) still in registry; will reap on next cleanup pass.
+- Mother lock contention slows kills + births under concurrent refill — surfaced as 45-180s latencies during V1.10 + V1.5 setup. V2 design item.

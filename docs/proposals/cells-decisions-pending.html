@@ -1,0 +1,454 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Two decisions waiting on Pete — V1.3 perf + V1.9 picker UX</title>
+<style>
+  :root {
+    --cells: #4ca87a;
+    --cells-light: #e8f5ee;
+    --cells-dark: #2d7050;
+    --warn: #d99834;
+    --warn-light: #fff5e0;
+    --leak: #d65454;
+    --leak-light: #fce8e8;
+    --pick: #6b73c4;
+    --pick-light: #ecedf7;
+    --pick-dark: #3a4080;
+    --ink: #1a1a1a;
+    --ink-muted: #5a5a5a;
+    --bg: #fafaf8;
+    --paper: #ffffff;
+    --code-bg: #f0efec;
+  }
+  * { box-sizing: border-box; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, sans-serif;
+    background: var(--bg);
+    color: var(--ink);
+    line-height: 1.6;
+    max-width: 940px;
+    margin: 0 auto;
+    padding: 56px 28px 96px;
+  }
+
+  .cover {
+    text-align: center;
+    padding: 24px 0 56px;
+    border-bottom: 1px solid #e0e0dc;
+    margin-bottom: 48px;
+  }
+  .cover .eyebrow {
+    color: var(--ink-muted);
+    font-size: 12px;
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+    margin-bottom: 12px;
+  }
+  .cover h1 {
+    font-size: 36px;
+    line-height: 1.2;
+    margin: 0 0 12px;
+    font-weight: 700;
+    letter-spacing: -0.01em;
+  }
+  .cover .sub {
+    font-size: 17px;
+    color: var(--ink-muted);
+    max-width: 620px;
+    margin: 0 auto;
+  }
+
+  section.decision { margin: 0 0 80px; }
+  section.decision h2 {
+    font-size: 13px;
+    color: var(--ink-muted);
+    letter-spacing: 0.16em;
+    text-transform: uppercase;
+    margin: 0 0 4px;
+    font-weight: 600;
+  }
+  section.decision h2 .num {
+    display: inline-block;
+    width: 28px; height: 28px;
+    border-radius: 50%;
+    background: var(--ink);
+    color: white;
+    text-align: center;
+    line-height: 28px;
+    margin-right: 10px;
+    font-size: 12px;
+  }
+  section.decision h3 {
+    font-size: 28px;
+    line-height: 1.2;
+    margin: 0 0 8px;
+    font-weight: 700;
+    letter-spacing: -0.01em;
+  }
+  section.decision .frame-q {
+    font-size: 18px;
+    color: var(--ink-muted);
+    margin: 0 0 28px;
+    font-style: italic;
+  }
+
+  h4.sub-h {
+    font-size: 14px;
+    color: var(--ink-muted);
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    margin: 32px 0 10px;
+    font-weight: 600;
+  }
+
+  code { background: var(--code-bg); padding: 1px 6px; border-radius: 3px; font-size: 0.9em; font-family: "SF Mono", Monaco, Consolas, monospace; }
+  pre { background: var(--code-bg); padding: 14px 18px; border-radius: 6px; overflow-x: auto; font-size: 13px; line-height: 1.55; }
+
+  /* Plain English block */
+  .plain {
+    background: #fff8e6;
+    border: 1px solid #e8d4a0;
+    border-radius: 10px;
+    padding: 20px 24px;
+    margin: 20px 0 28px;
+  }
+  .plain .label {
+    font-size: 12px;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: #8c7035;
+    margin-bottom: 8px;
+    font-weight: 600;
+  }
+  .plain p { font-size: 16px; line-height: 1.65; margin: 8px 0; }
+  .plain p:first-of-type { margin-top: 0; }
+  .plain p:last-of-type { margin-bottom: 0; }
+
+  /* Technical block */
+  .tech {
+    background: #f4f3f0;
+    border-radius: 10px;
+    padding: 20px 24px;
+    margin: 20px 0 28px;
+    font-size: 14px;
+  }
+  .tech .label {
+    font-size: 12px;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--ink-muted);
+    margin-bottom: 8px;
+    font-weight: 600;
+  }
+  .tech p { font-size: 14px; line-height: 1.6; margin: 8px 0; }
+  .tech ul { font-size: 14px; line-height: 1.6; padding-left: 22px; }
+
+  /* Option cards */
+  .options { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; margin: 24px 0; }
+  .options.three { grid-template-columns: 1fr 1fr 1fr; }
+  .option {
+    background: var(--paper);
+    border-radius: 10px;
+    padding: 18px 20px;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.05);
+    border-top: 4px solid #ccc;
+  }
+  .option.recommended { border-top-color: var(--cells); }
+  .option.middle { border-top-color: var(--warn); }
+  .option.escape { border-top-color: #888; }
+  .option .badge {
+    display: inline-block;
+    font-size: 10px;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    padding: 2px 8px;
+    border-radius: 10px;
+    background: var(--cells);
+    color: white;
+    font-weight: 600;
+    margin-bottom: 8px;
+  }
+  .option .badge.middle { background: var(--warn); }
+  .option .badge.escape { background: #888; }
+  .option h4 { font-size: 17px; margin: 0 0 8px; line-height: 1.25; }
+  .option .meta {
+    display: inline-block;
+    background: #efeeeb;
+    padding: 2px 9px;
+    border-radius: 12px;
+    font-size: 11px;
+    color: var(--ink-muted);
+    margin-bottom: 10px;
+  }
+  .option p { font-size: 13.5px; line-height: 1.55; margin: 5px 0; }
+  .option .verdict {
+    margin-top: 12px;
+    padding-top: 10px;
+    border-top: 1px solid #eee;
+    font-size: 12.5px;
+    color: var(--ink-muted);
+  }
+
+  /* Mockup blocks */
+  .mockup {
+    background: #1a1a1a;
+    color: #e8e8e8;
+    border-radius: 8px;
+    padding: 18px 20px;
+    margin: 16px 0;
+    font-family: "SF Mono", Monaco, Consolas, monospace;
+    font-size: 13px;
+    line-height: 1.5;
+    white-space: pre;
+    overflow-x: auto;
+  }
+  .mockup .dim { color: #888; }
+  .mockup .accent { color: #9D7CD8; }
+  .mockup .cell { color: #4ca87a; font-weight: bold; }
+  .mockup .pick { color: #d99834; }
+  .mockup .highlight { background: #2d4030; color: #b8e8c0; padding: 0 2px; }
+
+  /* My recommendation block */
+  .rec {
+    background: linear-gradient(to right, var(--cells-light), #f8fbf9);
+    border-left: 4px solid var(--cells);
+    border-radius: 6px;
+    padding: 18px 22px;
+    margin: 24px 0;
+  }
+  .rec .label {
+    font-size: 12px;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--cells-dark);
+    margin-bottom: 6px;
+    font-weight: 600;
+  }
+  .rec p { font-size: 15px; line-height: 1.6; margin: 6px 0; }
+  .rec strong { color: var(--cells-dark); }
+
+  /* Test-it-yourself callout */
+  .selftest {
+    background: var(--warn-light);
+    border-left: 4px solid var(--warn);
+    border-radius: 6px;
+    padding: 16px 20px;
+    margin: 20px 0;
+    font-size: 14px;
+  }
+  .selftest strong { display: block; margin-bottom: 4px; }
+
+  /* Sub-question table */
+  .subq-list {
+    background: var(--paper);
+    border-radius: 10px;
+    padding: 22px 28px;
+    margin: 20px 0;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.05);
+  }
+  .subq-list h4 { margin-top: 18px; }
+  .subq-list h4:first-child { margin-top: 0; }
+  .subq-list .sub-q { font-size: 15px; font-weight: 600; margin: 0 0 4px; color: var(--pick-dark); }
+  .subq-list .sub-a { font-size: 14px; margin: 4px 0 0; color: var(--ink-muted); }
+
+  hr.footer { border: none; border-top: 1px solid #ddd; margin: 60px 0 24px; }
+  .signoff { font-size: 13px; color: var(--ink-muted); text-align: center; }
+</style>
+</head>
+<body>
+
+<div class="cover">
+  <div class="eyebrow">Decision request · 2026-05-12</div>
+  <h1>Two open decisions</h1>
+  <p class="sub">Both are gating items in V1 acceptance that I can't move without your call. Each section spells out the question in plain English, the technical detail, the options, and my recommendation.</p>
+</div>
+
+<!-- ===== DECISION 1 ===== -->
+
+<section class="decision">
+  <h2><span class="num">1</span>V1.3 — how fast should the cell speak?</h2>
+  <h3>The cell speaks 2.3 seconds slower than the metric says it should</h3>
+  <p class="frame-q">Question: do we accept that, change the metric, or do a day of engineering to claw the seconds back?</p>
+
+  <div class="plain">
+    <div class="label">In plain English</div>
+    <p>When you type <code>cells birth</code>, here's what you experience:</p>
+    <ol style="font-size:16px; line-height:1.65; padding-left:24px; margin:8px 0 0;">
+      <li>A purple progress animation appears: waking → warming → ready → alive. It takes about 5 seconds, on purpose, to give the cell time to spin up before you see a prompt.</li>
+      <li>The animation finishes and you're at the talk prompt.</li>
+      <li>The cell streams its greeting ("I'm a cell — a persistent agent living on my own Linux VM…").</li>
+    </ol>
+    <p>The original target was that step 3 happens at or before 5 seconds — meaning the greeting starts streaming <em>as</em> the animation finishes. That would feel continuous: the cell appears, says hi, you're talking.</p>
+    <p>The reality I measured: step 3 happens around 7.3 seconds. That means after the animation finishes, there's a roughly <strong>2-second silent pause</strong> where the prompt sits empty before the cell speaks.</p>
+    <p>The question is whether that 2-second pause matters to you. I don't know — you've never seen it on the new architecture. If it feels fine, we set the metric to 8 seconds and move on. If it feels janky, we spend a day eliminating the cause.</p>
+  </div>
+
+  <div class="tech">
+    <div class="label">Technical detail</div>
+    <p>The cause is the host-bridge architecture we adopted to fix V1.0 (the talk-hang bug from 2026-05-11). Previously, pi ran inside the cell as a long-lived process. The bridge raced with pi's startup and dropped messages. The fix moved pi out: now the host-bridge daemon on the Mac spawns a fresh <code>ssh+pi</code> per talk session, into the cell over SSH.</p>
+    <p>That spawn pays a one-time cost <strong>every time</strong> a session starts:</p>
+    <ul>
+      <li>~1s SSH handshake</li>
+      <li>~2s pi process boot + extension load (use-max, codex-proxy, memory, etc.)</li>
+      <li>~1s switch_session + set_model + set_thinking_level handshake</li>
+      <li>~2-3s first LLM round-trip to deepseek-v4-flash</li>
+    </ul>
+    <p>That adds up to ~6-7s, plus the cell's wake/boot time. None of the pi-side work persists between births — each new cell pays the full cost.</p>
+    <p>Full writeup with 10-trial p50/p95 numbers in <code>docs/perf/birth-to-greeting.md</code>.</p>
+  </div>
+
+  <h4 class="sub-h">Three options</h4>
+  <div class="options three">
+    <div class="option recommended">
+      <span class="badge">Recommended</span>
+      <h4>Accept it</h4>
+      <div class="meta">0 days · revise metric to 8s</div>
+      <p>If the 2-second pause feels acceptable when you actually use it, we just change the V1.3 target on the board from 5s to 8s and call V1 shipped.</p>
+      <p>Cost: nothing.</p>
+      <p>Risk: if users (or you) find the pause annoying later, we revisit and do option 2 then.</p>
+      <p class="verdict">The metric is a number on a board. The user experience is what ships. If the experience is fine, the metric is academic.</p>
+    </div>
+    <div class="option middle">
+      <span class="badge middle">If pause feels bad</span>
+      <h4>Keep ssh+pi warm</h4>
+      <div class="meta">~1 day · estimated 3-4s p50 after fix</div>
+      <p>Modify host-bridge so it pre-spawns the <code>ssh+pi</code> process when an egg enters the pool. By the time you birth, the pi is already running and just needs to switch sessions — saves ~3 seconds.</p>
+      <p>Cost: ~1 day of engineering. More RAM (every Tier 4 pool member now holds an extra ~100-200 MB for the ssh+pi process). 5 always-on Tier 4 members × ~150 MB = ~750 MB extra RAM.</p>
+      <p>Risk: more state to manage. If ssh+pi crashes on a pool member, we need recovery logic. Pi may also drift between birth and consume if pool members live longer.</p>
+      <p class="verdict">Lower latency. Real engineering cost. Worth it if the pause is actually noticeable.</p>
+    </div>
+    <div class="option escape">
+      <span class="badge escape">Punt</span>
+      <h4>Defer to post-launch</h4>
+      <div class="meta">0 days · revisit when usage data shows it matters</div>
+      <p>Same as option 1 in the short term, but explicitly track first-token-time in production telemetry and revisit if real users mention it.</p>
+      <p>Cost: nothing now. ~1 day later if you decide to do option 2 anyway.</p>
+      <p>Risk: you live with the 2s pause until then. Could feel sloppy at launch demos.</p>
+      <p class="verdict">Same as option 1 in practice. Different vibe.</p>
+    </div>
+  </div>
+
+  <div class="selftest">
+    <strong>The cheapest way to decide</strong>
+    Run <code>cells birth</code> in your terminal. Watch the animation. Notice whether there's a pause that feels off. If yes → option 2. If no → option 1.
+  </div>
+
+  <div class="rec">
+    <div class="label">My recommendation</div>
+    <p><strong>Option 1 — accept it.</strong> The 5-second animation was explicitly designed to absorb UX latency. From the user's perspective, the animation finishing right as the cell starts speaking is the "magic moment" — but the cell speaking <em>shortly after</em> the animation finishes is also a fine experience. It's not 30 seconds, it's 2.</p>
+    <p>Option 2 is a real day of engineering, plus permanent RAM cost. Worth it only if option 1 fails the eye test. <strong>Run <code>cells birth</code> and decide on feel.</strong> If you say "yeah, the pause is fine", we close V1.3 and move on. If you say "no, that's bad", I build option 2 — it's a clear scope.</p>
+  </div>
+</section>
+
+<!-- ===== DECISION 2 ===== -->
+
+<section class="decision">
+  <h2><span class="num">2</span>V1.9 — what should the customization picker look like?</h2>
+  <h3>Right now, <code>cells birth foo</code> ignores the name "foo"</h3>
+  <p class="frame-q">Question: what should appear on screen when someone types that?</p>
+
+  <div class="plain">
+    <div class="label">In plain English</div>
+    <p>Today, all paths through <code>cells birth</code> end up at the fast pre-baked cell-base path. The cell gets a random name like <code>cell-78e2a6</code>. There's no way for the user to pick a model, a personality, or a specific name — it's the same generic cell every time.</p>
+    <p>You put V1.9 on the board last week with the spec: <em>"<code>cells birth &lt;name&gt;</code> runs the customization picker (harness, model, personality, channel) and goes through mother slow-birth path."</em> So the desired experience is: if the user types <code>cells birth jeeves</code>, they get a picker that lets them choose what kind of cell Jeeves is going to be.</p>
+    <p>I haven't built it yet because the UX is yours to design. Below I lay out three sub-questions that fully specify the picker. Once you answer those, building it is ~2-4 hours.</p>
+  </div>
+
+  <div class="tech">
+    <div class="label">Technical detail</div>
+    <p>The code path in <code>cli/cells.ts:1541</code> (<code>cmdCreate</code>) currently routes any "no flags" invocation to <code>cmdCreateV1Fast</code> — even if a name was passed. The fast path consumes a pool egg whose cell-name was assigned at bake time, ignoring the user's name. To implement the picker, the branch is:</p>
+    <pre><code>if (name && isV1Default) {
+  const config = await runPicker();           // new — Ink modal
+  await cmdCreateLegacy(name, {...config});   // existing slow-birth path
+  return;
+}
+if (isV1Default) {
+  return cmdCreateV1Fast(name, opts);          // unchanged
+}
+// rest unchanged</code></pre>
+    <p>The slow-birth path exists already (it's what <code>cells birth foo --model=opus</code> goes through). The picker is new — needs Ink components or a similar prompt library.</p>
+  </div>
+
+  <h4 class="sub-h">Three sub-questions I need answers to</h4>
+
+  <div class="subq-list">
+    <h4 class="sub-q">Q2a — What triggers the picker?</h4>
+    <p class="sub-a">Option A: <code>cells birth &lt;name&gt;</code> with no flags → picker. <code>cells birth</code> alone → fast generic. <em>My read: this matches what you wrote.</em></p>
+    <p class="sub-a">Option B: any interactive <code>cells birth</code> → picker. Pickaxe always. Need <code>--quick</code> flag to skip.</p>
+    <p class="sub-a">Option C: <code>cells birth</code> → picker, defaults all-around, hit Enter through. <code>cells birth --quick</code> → bypass.</p>
+
+    <h4 class="sub-q">Q2b — What fields does the picker ask about?</h4>
+    <p class="sub-a">The available CLI flags today: <code>--harness</code>, <code>--model</code>, <code>--thinking</code>, <code>--extensions</code>, <code>--packages</code>, <code>--channels</code>, <code>--slack-channel</code>. The board spec mentions: <strong>harness, model, personality, channel</strong>.</p>
+    <p class="sub-a">Open questions:</p>
+    <ul style="font-size:14px; color:var(--ink-muted); margin:6px 0; padding-left:22px;">
+      <li><strong>Harness:</strong> pi is the only one. Drop the field or keep as a placeholder?</li>
+      <li><strong>Model:</strong> what's the list? Today's CLI lists opus/sonnet/haiku/gpt-5.5/gpt-5.5-pro/deepseek-v4-flash/deepseek-v4-pro — but Anthropic models trip your OAuth fingerprint, so they're out for now. Realistic list: gpt-5.5, gpt-5.5-pro, deepseek-v4-flash, deepseek-v4-pro.</li>
+      <li><strong>Thinking:</strong> off / minimal / low / medium / high / xhigh / adaptive. Show or default to a sensible level?</li>
+      <li><strong>Personality:</strong> v2 concept per BOARD ("Chief of Staff personality template"). Not built yet. Drop from v1 picker?</li>
+      <li><strong>Channel:</strong> none / slack (auto-create #cells-jeeves). Slack adds CF Worker deploy time. Default to none?</li>
+    </ul>
+
+    <h4 class="sub-q">Q2c — What does the picker look like on screen?</h4>
+    <p class="sub-a">Two layouts to compare — mockups below.</p>
+  </div>
+
+  <h4 class="sub-h">Layout A — sequential prompts</h4>
+
+  <div class="mockup">$ cells birth <span class="cell">jeeves</span>
+
+<span class="dim">  ◯ Customizing cell <span class="cell">jeeves</span></span>
+
+  Model: <span class="pick">❯ gpt-5.5</span>      gpt-5.5-pro      deepseek-v4-flash      deepseek-v4-pro
+
+  Thinking level: <span class="pick">❯ medium</span>      off  minimal  low  medium  high  xhigh  adaptive
+
+  Extensions: <span class="pick">❯ memory</span>  mentality  wiki  dream  <span class="dim">(space to toggle, enter to continue)</span>
+
+  Channel: <span class="pick">❯ none</span>      slack <span class="dim">(creates #cells-jeeves)</span>
+
+  <span class="accent">Birthing jeeves… ◉ ◉ ◯ ◯</span>
+  <span class="dim">  warming</span></div>
+
+  <p style="font-size:14px; color:var(--ink-muted); margin:6px 0 24px;">One question per screen, arrow keys to pick, enter to confirm and advance. Linear flow. Familiar UX (matches <code>npm init</code>, <code>yarn create</code>, etc.).</p>
+
+  <h4 class="sub-h">Layout B — single-screen form</h4>
+
+  <div class="mockup">$ cells birth <span class="cell">jeeves</span>
+
+<span class="dim">  ──── Customize jeeves ──────────────────────────────────</span>
+
+  Model       <span class="pick">[ gpt-5.5      ▾ ]</span>
+  Thinking    <span class="pick">[ medium       ▾ ]</span>
+  Extensions  <span class="pick">[x] memory    [ ] mentality    [ ] wiki    [ ] dream</span>
+  Channel     <span class="pick">[ none         ▾ ]</span>
+
+<span class="dim">  ─────────────────────────────────────────────────────────</span>
+  <span class="highlight">  [ Birth jeeves ]  </span>     <span class="dim">tab to nav · enter to submit · esc to cancel</span></div>
+
+  <p style="font-size:14px; color:var(--ink-muted); margin:6px 0 24px;">All fields visible at once. Tab between, arrows within, enter to submit. More information-dense; feels more like a form. Slightly more complex to build (Ink doesn't have first-class form components — would need custom).</p>
+
+  <div class="rec">
+    <div class="label">My recommendation</div>
+    <p><strong>Layout A — sequential prompts.</strong> Builds on Ink primitives we already have (<code>SelectInput</code>, <code>MultiSelect</code>). Matches the conventions of <code>npm init</code> and similar tools so users don't need to learn anything new. Fast to build (~2h), low risk of UX edge cases.</p>
+    <p>For fields: drop <strong>harness</strong> (only pi exists), drop <strong>personality</strong> (v2 concept). Keep <strong>model</strong>, <strong>thinking</strong>, <strong>extensions</strong>, <strong>channel</strong>. Anthropic models filtered out of the model list until the Claude Code harness ships (per the OAuth fingerprint constraint in your memory).</p>
+    <p>For trigger: option A — <strong><code>cells birth &lt;name&gt;</code> with no flags fires the picker</strong>. Bare <code>cells birth</code> stays the fast magic-moment path. Matches what you wrote on the board last week.</p>
+    <p>If you sign off on these, I'll build it in the next focused window. ~2-4 hours. We can refine the field list later — the structure is the same either way.</p>
+  </div>
+
+  <div class="selftest">
+    <strong>What I need from you (concretely)</strong>
+    Three short answers:
+    <ol style="margin:8px 0 0; padding-left:22px; font-size:14px;">
+      <li>Q2a trigger: A, B, or C?</li>
+      <li>Q2b fields: which of <em>model, thinking, extensions, channel</em> stay; anything else added?</li>
+      <li>Q2c layout: A or B?</li>
+    </ol>
+  </div>
+</section>
+
+<hr class="footer">
+<p class="signoff">cells team · 2026-05-12 · <code>docs/proposals/cells-decisions-pending.html</code></p>
+
+</body>
+</html>

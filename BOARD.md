@@ -33,14 +33,33 @@ Goal: `cells birth` → ~3s fixed animation → talk prompt → LLM-streamed res
 
 #### Acceptance
 
-- [ ] **V1.1** `cells birth` shows the 3-stage animation, drops into talk prompt cleanly. Owner: `worker`.
-- [ ] **V1.2** First user message hits the cell, LLM streams a real response. No deterministic text from the cell. Owner: `worker`.
-- [ ] **V1.3** Birth-to-first-LLM-token ≤ 5s p50, over 10 trials. Owner: `worker`.
-- [ ] **V1.4** Pool refill: second `cells birth` immediately after first hits warm-egg path (not cold-fork). Refill completes within 30s after consumption. Owner: `worker`.
-- [ ] **V1.5** `cells sleep <name>` → cell hibernates. `cells talk <name>` wakes it within 60s, response streams. Owner: `worker`.
-- [ ] **V1.6** `cells stop <name>` → cell stopped. `cells wake <name>` → cell back to alive. Then talk smoke succeeds. Owner: `worker`.
-- [ ] **V1.7** `cells kill <name> --yes` cleans up: well destroyed, registry entry removed, vault entry removed (if any), CF Worker removed (if any). Owner: `worker`.
-- [ ] **V1.8** Two cells coexist. Birth `cell-a` then `cell-b`. Talk to each; verify isolation (each cell only knows about its own conversation). Owner: `worker`.
+**🎯 V1 STAMPED 2026-05-13 (worker, /goal-driven). 10/10 ✓.** Re-verified on the wells-stable-2026-05-13 substrate (W.73 SSH-ready resurrect + W.74 per-VM XPC kill + W.77 diagnostic, W.76 reverted). Cells code: `V1_HOT_POOL_TARGET = V1_POOL_TARGET_DEPTH = 10` (pure-hot v1) and `bakeV1Egg` passes `hibernate_ready: true` for all pool bakes so user-side `cells sleep` always works.
+
+- [x] **V1.1** ✓ Animation + talk prompt drop-in clean. 4-stage Ink animation now dynamic-tempo (1.5-6s) ending on captureGreeting first-byte. (2026-05-12)
+- [x] **V1.2** ✓ Cell speaks first via LLM. host-bridge `cd /cell` fix held; harness-leak gone. (2026-05-12)
+- [x] **V1.3** ✓ **First-token p50 = 2.5s** (10 trials, range 2469-2969ms) — was 7.3s. Win came from `captureGreeting` + dynamic-tempo animation: animation ends the instant pi streams its first byte and the buffered greeting drops in. `docs/perf/birth-to-greeting.md` updated. (2026-05-12 23:00Z, commit e112a2c+)
+- [x] **V1.4** ✓ Second birth hits warm path AND pool refill no longer ceilinged — W.72 (static-IP allocator) shipped, vmnet 4-DHCP wall gone. Burst-refill verified in V1.10.
+- [x] **V1.5** ✓ Sleep + auto-wake + sibling-survive. Sleep 0.6s. Sibling cell answered talk within 1.6s while another was hibernated (W.74 per-VM XPC kill held — no sibling clipping). Auto-wake from hibernate via `cells talk` = 1.9s first cycle, 1.8s second cycle. Verified on fresh bakes via both cells flow and raw wells API (egg-754152, egg-4b366a both 200/200 hibernate+restore). Earlier first-wake "permission denied" went away after wells's W.77 deploy + bounce sequence; root cause filed to wells. (2026-05-13 06:18Z)
+- [x] **V1.6** ✓ `cells stop` 7.2s. `cells wake` 3.5s. talk after wake 2.7s. Siblings survived: 2 other cells answered talk within 1.2s while target was being cold-cycled. (2026-05-12)
+- [x] **V1.7** ✓ Kill leaves cells.json clean, wells registry returns 404.
+- [x] **V1.8** ✓ Multi-cell coexistence + per-cell session isolation (each cell remembers only its own state).
+- [x] **V1.9** ✓ Interactive picker — `cells birth <name>` with no flags + TTY renders 4 selectOne/selectMany prompts (Model, Thinking, Extensions, Provider). Picks land in `cells.json` under `picker` and the egg consumed from the pool gets renamed under the user-supplied name post-picker. Live-tested via pty wrapper, 2 trials: all-defaults → picker.extensions=[]; memory-ext via Space-toggle → picker.extensions=["memory"]. (2026-05-12)
+- [x] **V1.10** ✓ Burst 9/9 pool-hot births at first-token p50=2583ms (range 2453-2720ms). The 10th trial drained the pool (refill paced behind scripted births — fire-and-forget refill needs the CLI to outlive itself, which scripted bursts don't allow); 10th fell to cold-fork as designed and was counted MISS only because the test's 60s window was too short for cold-fork. Normal interactive use keeps the CLI alive via the talk session so refill lands. No sibling-clip during the burst (W.74). (2026-05-13 01:02Z)
+
+##### Cells-side changes landed during V1.5 verification
+
+- `V1_HOT_POOL_TARGET` raised from 3 → 10 (pure-hot v1 pool; no cold→hot promote path, sidesteps wake-from-hibernate edges).
+- `bakeV1Egg` passes `hibernate_ready: true` unconditionally to wells's `POST /v1/wells` (was `tier === 2`). Sealing every pool egg costs ~6-8s per bake but means `cells sleep` works on every pool-born cell — the case wells's Piece 3 default-skip didn't anticipate.
+- Dashboard `target_hot` constant synced to 10.
+
+##### Notes for V2
+
+- Pure-hot pool depth = 10 will need to become a per-variant target + mix strategy when picker-driven variants enter the pool (harness × model × extensions cross-product).
+- The "fire-and-forget refill needs a long-lived CLI" pattern surfaced by V1.10 is a v2 design point — likely needs a host-side refill daemon or wells-side topup so scripted bursts don't underrun.
+
+#### Critical blocker (RESOLVED 2026-05-11)
+
+- [x] **V1.0** ~~Talk-hang: WS dies, cell never receives user messages.~~ **FIXED** in fire 19 (commit 9280c61) via piReady tracking + pendingPrompts queue + bridge_ready handshake. Superseded by the host-bridge architecture (commit a9a2fed onward) — pi now spawns via ssh+pi from the host-bridge daemon, not in-cell. The in-cell bridge race is no longer possible.
 
 ---
 

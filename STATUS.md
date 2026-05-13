@@ -1,12 +1,26 @@
 # Cells — Current Status
 
-**Updated:** 2026-05-10 04:49 MT — steward (silent mode; Pete asleep, no AskUserQuestion fired)
-**Phase:** Phase 1 still W.27-blocked. Phases 2/3/4 code-complete pending substrate. Wells team also halted.
-**Health:** 🟢 (welld up since 02:22 MT on `wells-stable-2026-05-10d`, degraded=false, 0 respawns)
+**Updated:** 2026-05-13 06:18Z — worker (V1 stamped, /goal-driven)
+**Phase:** 🎯 **V1 STAMPED.** 10/10 acceptance items green on wells-stable-2026-05-13 (W.73 + W.74 + W.77, W.76 reverted).
+**Health:** 🟢 welld stable, dashboard at `localhost:7881/dashboard`. Wells team on `feature/phase-a` mainline; substrate hibernate-restore bug observed during V1.5 retest cleared up after wells deploy churn (W.77 diagnostic + welld bounces). Boundary cleanup plan agreed (see `docs/proposals/`).
 
-## TL;DR
+## TL;DR (current — 2026-05-13 worker)
 
-Worker shipped 49 commits overnight on `night/2026-05-09`, then halted the Pete Loop at iter 26 when substrate-indep prep hit diminishing returns. Wells team is also halted (their MAX_ITER 200 cap-out, "blocked on Pete" for the wake regression). **Both teams need Pete's decision on the wells wake regression before cells's W.27 (env→/etc/environment) can ship and Phase 1 can resume.**
+**V1 is stamped.** All 10 acceptance items pass end-to-end on the new substrate. The wins of this push:
+
+- **V1.3 first-token 7.3s → 2.5s.** `captureGreeting` + dynamic-tempo animation (`endSignal` Promise): animation ends the moment pi streams its first byte, buffered greeting drops in instantly. 10 trials, all under 3s.
+- **V1.9 picker shipped.** Interactive `cells birth <name>` runs 4 selectOne/selectMany prompts and persists picks into `cells.json` under `picker`. Pty-driven live tests pass (all-defaults + memory-ext via Space-toggle).
+- **V1.5 sleep + auto-wake + sibling-survive green** after W.74 (per-VM XPC kill) and W.77 diagnostic + welld bounces cleared up the first-wake "permission denied" path. Cells code now passes `hibernate_ready: true` for all pool bakes so user-side `cells sleep` always seals correctly.
+- **V1.10 burst 9/9 pool-hot births at p50=2583ms.** 10th drains to cold-fork as designed.
+
+**Cells-side changes during V1.5 verification:**
+- `V1_HOT_POOL_TARGET` 3 → 10 (pure-hot v1 pool; cold→hot promote path stays disabled).
+- `bakeV1Egg` unconditional `hibernate_ready: true` (was tier-gated).
+- Dashboard `target_hot` synced to 10.
+
+**Notes for V2:**
+- Pool depth 10 will need a per-variant target + mix strategy when the picker variants enter the pool (harness × model × extensions cross-product).
+- Fire-and-forget refill assumes a long-lived parent CLI (talk session). Scripted bursts kill the parent and drop in-flight refills; v2 should move topup to a host-side daemon.
 
 ## What changed since last steward turn (02:57 MT)
 

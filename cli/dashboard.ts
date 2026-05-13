@@ -1,0 +1,751 @@
+#!/usr/bin/env bun
+/**
+ * cells-dashboard — local Bun.serve daemon that surfaces cells fleet state.
+ *
+ * Eventually accessed at dashboard.cells.md via cloudflared-tunnel
+ * (com.pete.cells-tunnel infra). Today 127.0.0.1-bound, no auth.
+ *
+ * Reads:
+ *   ~/.cells/cells.json  (cell registry)
+ *   ~/.cells/eggs.json   (egg pool)
+ *   welld :7878 /healthz + /v1/wells (substrate liveness + IPs)
+ *   host-bridge :7880 /healthz (open sessions)
+ *
+ * Serves:
+ *   GET /            HTML dashboard (auto-refreshes via JS)
+ *   GET /api/state   JSON snapshot
+ *   GET /healthz     daemon liveness
+ */
+
+import { homedir } from "node:os";
+import { join } from "node:path";
+import { readFile } from "node:fs/promises";
+
+const PORT = Number(process.env.CELLS_DASHBOARD_PORT ?? 7881);
+const WELL_API = process.env.WELL_API_URL ?? "http://127.0.0.1:7878";
+const HOST_BRIDGE_API = `http://127.0.0.1:${process.env.HOST_BRIDGE_PORT ?? 7880}`;
+
+// ── Types ─────────────────────────────────────────────────────────────────
+
+type EggSnapshot = {
+  id: string;
+  well_name: string;
+  state: string;
+  age_minutes: number;
+  tier: number | null;
+  claimed_by: string | null;
+  // Harness (agent runtime) baked into the egg's pi-coding-agent install.
+  // Today: always "pi". v2 variants: claude-code, codex, etc.
+  harness: string;
+  // Default model the egg's harness is configured for. Today: deepseek-v4-flash.
+  // v2 variants will pre-bake different model chains per egg.
+  model: string;
+};
+
+// Map variant_signature → user-facing harness + model strings. Add rows as
+// new variant eggs ship (v2 will introduce claude-code-* and codex-* variants).
+const EGG_VARIANT_META: Record<string, { harness: string; model: string }> = {
+  "v1-generic": { harness: "pi", model: "deepseek-v4-flash" },
+};
+function eggMeta(variantSig: string | undefined): { harness: string; model: string } {
+  if (variantSig && EGG_VARIANT_META[variantSig]) return EGG_VARIANT_META[variantSig];
+  return { harness: "?", model: "?" };
+}
+
+type CellSnapshot = {
+  name: string;
+  status: string;
+  // Agent runtime. Today: always "pi". v2 variants: claude-code, codex, etc.
+  harness: string;
+  model: string;
+  thinking: string;
+  age_minutes: number;
+  hatched_from: string | null;
+  well_status: string | null;
+  ip: string | null;
+  // Birth-to-first-token in milliseconds. Captured by cmdCreateV1Fast's
+  // onFirstToken callback and persisted in ~/.cells/logs/perf/first-token.jsonl.
+  // Null if not yet measured (very fresh cells, or pre-instrumentation births).
+  first_token_ms: number | null;
+};
+
+type StatePayload = {
+  ts: string;
+  eggs: {
+    total: number;
+    warm: number;
+    hot: number;       // tier 4: running, instant-claim
+    cold: number;      // tier 2: hibernated, ~3s wake
+    claimed: number;
+    live: number;
+    culling: number;
+    target_depth: number;
+    target_hot: number;
+    list: EggSnapshot[];
+  };
+  cells: CellSnapshot[];
+  daemons: {
+    welld: { ok: boolean; uptime_minutes: number | null; degraded: boolean; vmnet_orphans: number };
+    host_bridge: { ok: boolean; sessions: number };
+  };
+};
+
+// ── Helpers ───────────────────────────────────────────────────────────────
+
+async function readJSON<T>(path: string, fallback: T): Promise<T> {
+  try {
+    return JSON.parse(await readFile(path, "utf8"));
+  } catch {
+    return fallback;
+  }
+}
+
+async function wellsToken(): Promise<string> {
+  try {
+    return (await readFile(join(homedir(), ".wells", "token"), "utf8")).trim();
+  } catch {
+    return "";
+  }
+}
+
+function ageMinutes(iso: string | undefined): number {
+  if (!iso) return 0;
+  return Math.max(0, Math.round((Date.now() - new Date(iso).getTime()) / 60_000));
+}
+
+async function fetchJSON(url: string, headers: Record<string, string> = {}, timeoutMs = 2000): Promise<any | null> {
+  try {
+    const r = await fetch(url, { headers, signal: AbortSignal.timeout(timeoutMs) });
+    if (!r.ok) return null;
+    return await r.json();
+  } catch {
+    return null;
+  }
+}
+
+// ── State assembly ────────────────────────────────────────────────────────
+
+// Parse ~/.cells/logs/perf/first-token.jsonl and return cell-name → most-recent
+// first_token_ms. Tail-only: reads the whole file (small append-only log).
+// Best-effort: missing/corrupt → empty map.
+async function loadFirstTokenIndex(): Promise<Map<string, number>> {
+  const path = join(homedir(), ".cells", "logs", "perf", "first-token.jsonl");
+  try {
+    const raw = await readFile(path, "utf8");
+    const idx = new Map<string, number>();
+    for (const line of raw.split("\n")) {
+      if (!line.trim()) continue;
+      try {
+        const row = JSON.parse(line);
+        if (typeof row.cell === "string" && typeof row.first_token_ms === "number") {
+          idx.set(row.cell, row.first_token_ms);
+        }
+      } catch { /* skip malformed */ }
+    }
+    return idx;
+  } catch {
+    return new Map();
+  }
+}
+
+async function buildState(): Promise<StatePayload> {
+  const eggsFile = await readJSON<{ eggs: any[] }>(join(homedir(), ".cells", "eggs.json"), { eggs: [] });
+  const regFile = await readJSON<{ cells: any[] }>(join(homedir(), ".cells", "cells.json"), { cells: [] });
+  const token = await wellsToken();
+  const [welldHealth, welldWells, hbHealth, firstTokenIdx] = await Promise.all([
+    fetchJSON(`${WELL_API}/healthz`, { Authorization: `Bearer ${token}` }),
+    fetchJSON(`${WELL_API}/v1/wells`, { Authorization: `Bearer ${token}` }),
+    fetchJSON(`${HOST_BRIDGE_API}/healthz`, {}, 800),
+    loadFirstTokenIndex(),
+  ]);
+
+  const wellByName = new Map<string, any>();
+  for (const w of welldWells?.wells ?? []) wellByName.set(w.name, w);
+
+  // Eggs
+  const eggsList: EggSnapshot[] = (eggsFile.eggs ?? []).map((e: any) => {
+    const meta = eggMeta(e.variant_signature);
+    return {
+      id: String(e.id ?? ""),
+      well_name: String(e.well_name ?? ""),
+      state: String(e.state ?? "?"),
+      age_minutes: ageMinutes(e.born_at),
+      tier: typeof e.tier === "number" ? e.tier : null,
+      claimed_by: e.claimed_by ?? null,
+      harness: meta.harness,
+      model: meta.model,
+    };
+  });
+  const eggCounts: Record<string, number> = {};
+  for (const e of eggsList) eggCounts[e.state] = (eggCounts[e.state] ?? 0) + 1;
+
+  // Cells
+  const cells: CellSnapshot[] = (regFile.cells ?? []).map((c: any) => {
+    const wellName = c.hatched_from ? `egg-${c.hatched_from}` : c.name;
+    const well = wellByName.get(wellName);
+    const head = (c.modelChain?.[0] ?? "").toString();
+    const [providerModel, thinking] = head.split(":");
+    const model = providerModel ? providerModel.split("/").slice(-1)[0] : "?";
+    // Harness defaults to "pi" (today's only harness). v2 will persist
+    // c.harness on the cells.json record at birth time.
+    const harness = (c.harness as string | undefined) ?? "pi";
+    return {
+      name: c.name,
+      status: c.status ?? "alive",
+      harness,
+      model,
+      thinking: thinking ?? "?",
+      age_minutes: ageMinutes(c.created_at),
+      hatched_from: c.hatched_from ?? null,
+      well_status: well?.status ?? null,
+      ip: well?.ip ?? null,
+      first_token_ms: firstTokenIdx.get(c.name) ?? null,
+    };
+  });
+  // Newest first
+  cells.sort((a, b) => a.age_minutes - b.age_minutes);
+
+  const hot = eggsList.filter((e) => e.state === "warm" && e.tier === 4).length;
+  const cold = eggsList.filter((e) => e.state === "warm" && e.tier === 2).length;
+
+  return {
+    ts: new Date().toISOString(),
+    eggs: {
+      total: eggsList.length,
+      warm: eggCounts.warm ?? 0,
+      hot,
+      cold,
+      claimed: eggCounts.claimed ?? 0,
+      live: eggCounts.live ?? 0,
+      culling: eggCounts.culling ?? 0,
+      target_depth: 10,    // matches V1_POOL_TARGET_DEPTH
+      target_hot: 10,      // matches V1_HOT_POOL_TARGET (pure-hot v1)
+      list: eggsList.sort((a, b) => {
+        // warm first, then claimed/culling, live last; secondary: youngest first
+        const rank = (s: string) => (s === "warm" ? 0 : s === "claimed" ? 1 : s === "culling" ? 2 : 3);
+        const r = rank(a.state) - rank(b.state);
+        return r !== 0 ? r : a.age_minutes - b.age_minutes;
+      }),
+    },
+    cells,
+    daemons: {
+      welld: {
+        ok: !!welldHealth?.ok,
+        uptime_minutes: welldHealth?.started_at ? ageMinutes(welldHealth.started_at) : null,
+        degraded: !!welldHealth?.degraded,
+        vmnet_orphans: welldHealth?.vmnet_leases?.orphan_count ?? 0,
+      },
+      host_bridge: {
+        ok: !!hbHealth?.ok,
+        sessions: (hbHealth?.sessions ?? []).length,
+      },
+    },
+  };
+}
+
+// ── HTML page (single self-contained doc, polls /api/state every 4s) ─────
+
+const HTML = `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>cells</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  :root {
+    --cells: #4ca87a;
+    --cells-dark: #2d7050;
+    --cells-light: #e8f5ee;
+    --wells: #3b82c4;
+    --warn: #d99834;
+    --warn-light: #fff5e0;
+    --leak: #d65454;
+    --leak-light: #fce8e8;
+    --neutral: #6b7280;
+    --neutral-light: #f3f4f6;
+    --ink: #1a1a1a;
+    --ink-muted: #6b6b6b;
+    --bg: #fafaf8;
+    --paper: #ffffff;
+  }
+  * { box-sizing: border-box; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, sans-serif;
+    background: var(--bg);
+    color: var(--ink);
+    line-height: 1.5;
+    margin: 0;
+    padding: 24px 28px 64px;
+  }
+  header {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    border-bottom: 1px solid #e0e0dc;
+    padding-bottom: 16px;
+    margin-bottom: 28px;
+  }
+  header h1 {
+    font-size: 22px;
+    font-weight: 700;
+    letter-spacing: -0.01em;
+    margin: 0;
+    color: var(--cells-dark);
+  }
+  header h1 .dot {
+    display: inline-block;
+    width: 9px;
+    height: 9px;
+    border-radius: 50%;
+    background: var(--cells);
+    margin-right: 8px;
+    transform: translateY(-2px);
+  }
+  header .meta {
+    font-size: 12px;
+    color: var(--ink-muted);
+    font-variant-numeric: tabular-nums;
+  }
+
+  .row {
+    display: grid;
+    gap: 14px;
+    margin-bottom: 28px;
+  }
+  .row.cards-3 { grid-template-columns: repeat(3, 1fr); }
+  .row.cards-2 { grid-template-columns: repeat(2, 1fr); }
+
+  .card {
+    background: var(--paper);
+    border: 1px solid #e0e0dc;
+    border-radius: 8px;
+    padding: 18px 20px;
+  }
+  .card .label {
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--ink-muted);
+    margin-bottom: 8px;
+  }
+  .card .big {
+    font-size: 34px;
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
+    line-height: 1;
+    color: var(--cells-dark);
+  }
+  .card .big .small {
+    font-size: 18px;
+    color: var(--ink-muted);
+    font-weight: 400;
+    margin-left: 2px;
+  }
+  .card .sub {
+    margin-top: 8px;
+    font-size: 12px;
+    color: var(--ink-muted);
+  }
+
+  h2 {
+    font-size: 14px;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--ink-muted);
+    margin: 32px 0 12px;
+    font-weight: 600;
+  }
+
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    background: var(--paper);
+    border: 1px solid #e0e0dc;
+    border-radius: 8px;
+    overflow: hidden;
+    font-size: 13px;
+  }
+  table th {
+    background: #f3f3f0;
+    padding: 9px 14px;
+    text-align: left;
+    font-weight: 600;
+    font-size: 11px;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    color: var(--ink-muted);
+    border-bottom: 1px solid #e0e0dc;
+  }
+  table td {
+    padding: 10px 14px;
+    border-bottom: 1px solid #ecebe6;
+    font-variant-numeric: tabular-nums;
+  }
+  table tr:last-child td { border-bottom: none; }
+  table tr.empty td {
+    text-align: center;
+    color: var(--ink-muted);
+    font-style: italic;
+    padding: 24px;
+  }
+
+  .pill {
+    display: inline-block;
+    padding: 2px 9px;
+    border-radius: 11px;
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 0.02em;
+  }
+  .pill-warm { background: var(--cells-light); color: var(--cells-dark); }
+  .pill-hot { background: var(--cells-light); color: var(--cells-dark); font-weight: 700; }
+  .pill-cold { background: var(--neutral-light); color: var(--neutral); }
+  .pill-claimed { background: var(--warn-light); color: #8a6a1f; }
+  .pill-live { background: var(--neutral-light); color: var(--neutral); }
+  .pill-culling { background: var(--leak-light); color: #8a3333; }
+  .pill-alive { background: var(--cells-light); color: var(--cells-dark); }
+  .pill-warming { background: var(--warn-light); color: #8a6a1f; }
+  .pill-running { background: var(--cells-light); color: var(--cells-dark); }
+  .pill-stopped { background: var(--neutral-light); color: var(--neutral); }
+
+  .daemons {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 14px;
+  }
+  .daemon {
+    background: var(--paper);
+    border: 1px solid #e0e0dc;
+    border-radius: 8px;
+    padding: 14px 18px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    font-size: 13px;
+  }
+  .daemon .name {
+    font-weight: 600;
+    color: var(--ink);
+  }
+  .daemon .name code {
+    background: var(--neutral-light);
+    padding: 1px 6px;
+    border-radius: 4px;
+    font-size: 11px;
+    color: var(--ink-muted);
+    margin-left: 6px;
+    font-family: "SF Mono", Menlo, monospace;
+  }
+  .daemon .right { color: var(--ink-muted); font-variant-numeric: tabular-nums; }
+  .daemon.ok .name::before {
+    content: "●";
+    color: var(--cells);
+    margin-right: 8px;
+  }
+  .daemon.bad .name::before {
+    content: "●";
+    color: var(--leak);
+    margin-right: 8px;
+  }
+  .daemon.warn .name::before {
+    content: "●";
+    color: var(--warn);
+    margin-right: 8px;
+  }
+
+  code {
+    font-family: "SF Mono", Menlo, monospace;
+    font-size: 0.92em;
+  }
+  .mono { font-family: "SF Mono", Menlo, monospace; font-size: 12px; }
+  .muted { color: var(--ink-muted); }
+</style>
+</head>
+<body>
+
+<header>
+  <h1><span class="dot"></span>cells</h1>
+  <div class="meta">
+    <span id="updated">connecting…</span>
+  </div>
+</header>
+
+<div class="row cards-3">
+  <div class="card">
+    <div class="label">Live cells</div>
+    <div class="big" id="cell-count">—</div>
+    <div class="sub" id="cell-sub"></div>
+  </div>
+  <div class="card">
+    <div class="label">Pool</div>
+    <div class="big">
+      <span id="egg-warm">—</span><span class="small" id="egg-target"></span>
+    </div>
+    <div class="sub" id="egg-sub"></div>
+  </div>
+  <div class="card">
+    <div class="label">Open talk sessions</div>
+    <div class="big" id="session-count">—</div>
+    <div class="sub">host-bridge</div>
+  </div>
+</div>
+
+<h2>Cells</h2>
+<table id="cells-table">
+  <thead>
+    <tr>
+      <th>Name</th>
+      <th>Status</th>
+      <th>Harness</th>
+      <th>Model</th>
+      <th>Thinking</th>
+      <th>First reply</th>
+      <th>Well</th>
+      <th>IP</th>
+      <th>Age</th>
+    </tr>
+  </thead>
+  <tbody id="cells-body">
+    <tr class="empty"><td colspan="9">…</td></tr>
+  </tbody>
+</table>
+
+<h2>Eggs <span class="muted" style="text-transform: none; letter-spacing: 0; font-weight: 400; font-size: 12px;" id="egg-headline"></span></h2>
+<table id="eggs-table">
+  <thead>
+    <tr>
+      <th>Egg</th>
+      <th>State</th>
+      <th>Harness</th>
+      <th>Model</th>
+      <th>Status</th>
+      <th>Age</th>
+      <th>Claimed by</th>
+    </tr>
+  </thead>
+  <tbody id="eggs-body">
+    <tr class="empty"><td colspan="7">…</td></tr>
+  </tbody>
+</table>
+
+<h2>Substrate</h2>
+<div class="daemons" id="daemons"></div>
+
+<script>
+  const $ = (id) => document.getElementById(id);
+
+  function fmtAge(m) {
+    if (m < 1) return "now";
+    if (m < 60) return m + "m";
+    const h = Math.floor(m / 60);
+    if (h < 24) return h + "h";
+    return Math.floor(h / 24) + "d";
+  }
+
+  function pill(label, klass) {
+    const span = document.createElement("span");
+    span.className = "pill pill-" + klass;
+    span.textContent = label;
+    return span;
+  }
+
+  function setText(id, val) { $(id).textContent = val; }
+
+  async function refresh() {
+    let s;
+    try {
+      const r = await fetch("/api/state");
+      if (!r.ok) throw new Error("http " + r.status);
+      s = await r.json();
+    } catch (e) {
+      setText("updated", "connection lost");
+      $("updated").style.color = "#d65454";
+      return;
+    }
+    $("updated").style.color = "";
+    const now = new Date(s.ts);
+    setText("updated", "updated " + now.toLocaleTimeString());
+
+    // Top cards
+    setText("cell-count", s.cells.length);
+    const warmingCount = s.cells.filter(c => c.status === "warming").length;
+    setText("cell-sub", warmingCount > 0 ? warmingCount + " warming" : "all alive");
+    setText("egg-warm", s.eggs.warm);
+    setText("egg-target", "/" + s.eggs.target_depth);
+    setText(
+      "egg-sub",
+      "hot " + s.eggs.hot + "/" + s.eggs.target_hot + " · cold " + s.eggs.cold,
+    );
+    setText("session-count", s.daemons.host_bridge.sessions);
+
+    // Cells table
+    const cellsBody = $("cells-body");
+    cellsBody.innerHTML = "";
+    if (s.cells.length === 0) {
+      const tr = document.createElement("tr");
+      tr.className = "empty";
+      const td = document.createElement("td");
+      td.colSpan = 9;
+      td.textContent = "no live cells";
+      tr.appendChild(td);
+      cellsBody.appendChild(tr);
+    } else {
+      for (const c of s.cells) {
+        const tr = document.createElement("tr");
+        const nameTd = document.createElement("td");
+        nameTd.innerHTML = '<code>' + c.name + '</code>';
+        tr.appendChild(nameTd);
+        const statTd = document.createElement("td");
+        statTd.appendChild(pill(c.status, c.status));
+        tr.appendChild(statTd);
+        const harnessTd = document.createElement("td");
+        harnessTd.className = "mono";
+        harnessTd.textContent = (c as any).harness ?? "pi";
+        tr.appendChild(harnessTd);
+        const modelTd = document.createElement("td");
+        modelTd.textContent = c.model;
+        tr.appendChild(modelTd);
+        const thinkTd = document.createElement("td");
+        thinkTd.className = "mono muted";
+        thinkTd.textContent = c.thinking;
+        tr.appendChild(thinkTd);
+        const ftTd = document.createElement("td");
+        ftTd.className = "mono";
+        if (c.first_token_ms !== null && c.first_token_ms !== undefined) {
+          // Format: <5s green, 5-8s neutral, >8s warn (visual outlier flag)
+          const ms = c.first_token_ms;
+          const sec = (ms / 1000).toFixed(2);
+          if (ms < 5000) ftTd.style.color = "var(--cells-dark)";
+          else if (ms > 8000) ftTd.style.color = "#8a3333";
+          ftTd.textContent = sec + "s";
+        } else {
+          ftTd.innerHTML = '<span class="muted">—</span>';
+        }
+        tr.appendChild(ftTd);
+        const wellTd = document.createElement("td");
+        if (c.well_status) wellTd.appendChild(pill(c.well_status, c.well_status));
+        else wellTd.innerHTML = '<span class="muted">—</span>';
+        tr.appendChild(wellTd);
+        const ipTd = document.createElement("td");
+        ipTd.className = "mono muted";
+        ipTd.textContent = c.ip || "—";
+        tr.appendChild(ipTd);
+        const ageTd = document.createElement("td");
+        ageTd.textContent = fmtAge(c.age_minutes);
+        tr.appendChild(ageTd);
+        cellsBody.appendChild(tr);
+      }
+    }
+
+    // Eggs table
+    const eggsBody = $("eggs-body");
+    eggsBody.innerHTML = "";
+    if (s.eggs.list.length === 0) {
+      const tr = document.createElement("tr");
+      tr.className = "empty";
+      const td = document.createElement("td");
+      td.colSpan = 7;
+      td.textContent = "no eggs in pool";
+      tr.appendChild(td);
+      eggsBody.appendChild(tr);
+    } else {
+      for (const e of s.eggs.list) {
+        const tr = document.createElement("tr");
+        const idTd = document.createElement("td");
+        idTd.innerHTML = '<code>' + e.well_name + '</code>';
+        tr.appendChild(idTd);
+        const stTd = document.createElement("td");
+        // Show hot/cold for warm eggs (the user-facing tier), state otherwise.
+        const stateLabel =
+          e.state === "warm"
+            ? (e.tier === 4 ? "hot" : e.tier === 2 ? "cold" : "warm")
+            : e.state;
+        stTd.appendChild(pill(stateLabel, stateLabel));
+        tr.appendChild(stTd);
+        const harnessTd = document.createElement("td");
+        harnessTd.className = "mono";
+        harnessTd.textContent = e.harness;
+        tr.appendChild(harnessTd);
+        const modelTd = document.createElement("td");
+        modelTd.className = "mono muted";
+        modelTd.textContent = e.model;
+        tr.appendChild(modelTd);
+        const tierTd = document.createElement("td");
+        tierTd.className = "mono muted";
+        // VM-level status: running (hot) vs hibernated (cold) vs other states.
+        tierTd.textContent = e.tier === 4 ? "running" : e.tier === 2 ? "hibernated" : "—";
+        tr.appendChild(tierTd);
+        const ageTd = document.createElement("td");
+        ageTd.textContent = fmtAge(e.age_minutes);
+        tr.appendChild(ageTd);
+        const claimedTd = document.createElement("td");
+        if (e.claimed_by) {
+          claimedTd.innerHTML = '<code>' + e.claimed_by + '</code>';
+        } else {
+          claimedTd.innerHTML = '<span class="muted">—</span>';
+        }
+        tr.appendChild(claimedTd);
+        eggsBody.appendChild(tr);
+      }
+    }
+    setText("egg-headline", "  ·  hot " + s.eggs.hot + " · cold " + s.eggs.cold + " · claimed " + s.eggs.claimed + " · hatched " + s.eggs.live + (s.eggs.culling ? " · culling " + s.eggs.culling : ""));
+
+    // Daemons
+    const daemonsEl = $("daemons");
+    daemonsEl.innerHTML = "";
+    const welld = s.daemons.welld;
+    const welldEl = document.createElement("div");
+    welldEl.className = "daemon " + (welld.ok ? (welld.degraded ? "warn" : "ok") : "bad");
+    welldEl.innerHTML =
+      '<div class="name">welld<code>:7878</code></div>' +
+      '<div class="right">' +
+      (welld.ok
+        ? "up " + (welld.uptime_minutes !== null ? fmtAge(welld.uptime_minutes) : "?") +
+          (welld.vmnet_orphans > 0 ? " · " + welld.vmnet_orphans + " orphan leases" : "")
+        : "down") +
+      '</div>';
+    daemonsEl.appendChild(welldEl);
+    const hb = s.daemons.host_bridge;
+    const hbEl = document.createElement("div");
+    hbEl.className = "daemon " + (hb.ok ? "ok" : "bad");
+    hbEl.innerHTML =
+      '<div class="name">host-bridge<code>:7880</code></div>' +
+      '<div class="right">' +
+      (hb.ok ? hb.sessions + " session" + (hb.sessions === 1 ? "" : "s") : "down") +
+      '</div>';
+    daemonsEl.appendChild(hbEl);
+  }
+
+  refresh();
+  setInterval(refresh, 4000);
+</script>
+
+</body>
+</html>`;
+
+// ── HTTP server ───────────────────────────────────────────────────────────
+
+const server = Bun.serve({
+  port: PORT,
+  hostname: "127.0.0.1",
+  async fetch(req) {
+    const url = new URL(req.url);
+    if (url.pathname === "/healthz") {
+      return Response.json({ ok: true, port: PORT });
+    }
+    if (url.pathname === "/api/state") {
+      return Response.json(await buildState());
+    }
+    if (url.pathname === "/" || url.pathname === "/dashboard") {
+      return new Response(HTML, {
+        headers: { "Content-Type": "text/html; charset=utf-8" },
+      });
+    }
+    return new Response("not found", { status: 404 });
+  },
+});
+
+console.log(`cells-dashboard listening on http://127.0.0.1:${server.port}/`);
+console.log(`  GET  /              dashboard HTML`);
+console.log(`  GET  /api/state     JSON snapshot`);
+console.log(`  GET  /healthz       daemon liveness`);

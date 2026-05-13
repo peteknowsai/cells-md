@@ -102,6 +102,18 @@ function serveStatic(pathname: string): Response | null {
 let pi: Subprocess<"pipe", "pipe", "pipe"> | null = null;
 let piStdoutBuffer = "";
 let piRespawnTimer: Timer | null = null;
+// Pi setup race: spawnPi() returns immediately, but switch_session +
+// set_model + set_thinking_level are delayed via setTimeout(750). If a
+// client `prompt` arrives during that window, sendToPi succeeds (pi's
+// stdin is open) but pi has no session pinned yet → the prompt is
+// processed against the default/transient session and the response is
+// effectively lost from the user's perspective. Track readiness; queue
+// pre-ready prompts and flush after setup completes.
+let piReady = false;
+const pendingPrompts: object[] = [];
+// Id of the bridge-issued switch_session we're waiting for pi to ack
+// before flushing pendingPrompts. null when no ack outstanding.
+let awaitingSwitchAck: string | null = null;
 const PI_RESPAWN_DELAY_MS = 1000;
 
 // Active WebSocket clients (typically 0 or 1 — the cell Worker DO).
@@ -195,6 +207,7 @@ function onPiStdoutChunk(chunk: string) {
     // and agent_end after the final stream chunk has flushed.
     //   agent_start → cancel any pending sleep, signal busy
     //   agent_end   → signal idle, schedule explicit sleep after grace
+    //   response (command=switch_session, our id) → run setup-acked hook
     try {
       const evt = JSON.parse(trimmed);
       if (evt?.type === "agent_start") {
@@ -203,6 +216,15 @@ function onPiStdoutChunk(chunk: string) {
       } else if (evt?.type === "agent_end") {
         void signalLifecycle("idle");
         scheduleSleepAfterGrace();
+      } else if (
+        evt?.type === "response" &&
+        evt?.command === "switch_session" &&
+        awaitingSwitchAck !== null &&
+        evt?.id === awaitingSwitchAck
+      ) {
+        console.log(`[bridge] switch_session acked`);
+        awaitingSwitchAck = null;
+        onPiSetupAcked();
       }
     } catch {
       // not JSON or partial — broadcast already happened, lifecycle skipped
@@ -251,7 +273,12 @@ async function pumpPiStderr(stream: ReadableStream<Uint8Array>) {
 function sendToPi(cmd: object): boolean {
   if (!pi || pi.stdin == null) return false;
   try {
-    (pi.stdin as any).write(JSON.stringify(cmd) + "\n");
+    const sink = pi.stdin as any;
+    sink.write(JSON.stringify(cmd) + "\n");
+    // Force flush — Bun's FileSink buffers writes; without explicit flush,
+    // rapid back-to-back writes during setup can accumulate and arrive at
+    // pi in a single chunk that pi's RPC dispatcher fails to parse cleanly.
+    if (typeof sink.flush === "function") sink.flush();
     return true;
   } catch (e) {
     console.error(`[bridge] pi stdin write failed: ${String(e).slice(0, 200)}`);
@@ -291,27 +318,51 @@ function spawnPi() {
   // After switching, re-apply settings.json defaults — the session file may
   // have been created under a different model/thinking level, and pi sticks
   // with whatever is recorded in it unless we override per-session.
+  //
+  // Setup race: pi's rpc dispatcher takes a few hundred ms to come fully
+  // online after spawn. We tag switch_session with an id and wait for pi
+  // to ACK it via stdout before sending further commands or flushing
+  // queued prompts. Prior version used a blind setTimeout which was
+  // racy — observed: switch_session/set_model/set_thinking_level landed
+  // fine but immediately-flushed prompts were silently dropped (no user
+  // entry in pi's session jsonl). Waiting on the ACK is deterministic.
+  const SWITCH_ID = `bridge-init-${Date.now()}`;
+  awaitingSwitchAck = SWITCH_ID;
   setTimeout(() => {
-    if (!sendToPi({ type: "switch_session", sessionPath: SESSION_FILE })) {
+    if (!sendToPi({ id: SWITCH_ID, type: "switch_session", sessionPath: SESSION_FILE })) {
       console.error(`[bridge] could not send initial switch_session`);
       return;
     }
-    console.log(`[bridge] pinned pi to ${SESSION_FILE}`);
+    console.log(`[bridge] pinned pi to ${SESSION_FILE} (awaiting ack)`);
+  }, 250);
+}
 
-    try {
-      const settings = JSON.parse(readFileSync(`${HOME}/agent/.pi/settings.json`, "utf8"));
-      if (settings.defaultProvider && settings.defaultModel) {
-        sendToPi({ type: "set_model", provider: settings.defaultProvider, modelId: settings.defaultModel });
-        console.log(`[bridge] set_model ${settings.defaultProvider}/${settings.defaultModel}`);
-      }
-      if (settings.defaultThinkingLevel) {
-        sendToPi({ type: "set_thinking_level", level: settings.defaultThinkingLevel });
-        console.log(`[bridge] set_thinking_level ${settings.defaultThinkingLevel}`);
-      }
-    } catch (e) {
-      console.error(`[bridge] failed to apply settings: ${String(e).slice(0, 200)}`);
+// Called from onPiStdoutChunk when pi acks switch_session for our bridge-init
+// id. Sends set_model + set_thinking_level, flushes queued prompts, signals
+// bridge_ready to all ws clients.
+function onPiSetupAcked() {
+  try {
+    const settings = JSON.parse(readFileSync(`${HOME}/.pi/settings.json`, "utf8"));
+    if (settings.defaultProvider && settings.defaultModel) {
+      sendToPi({ type: "set_model", provider: settings.defaultProvider, modelId: settings.defaultModel });
+      console.log(`[bridge] set_model ${settings.defaultProvider}/${settings.defaultModel}`);
     }
-  }, 750);
+    if (settings.defaultThinkingLevel) {
+      sendToPi({ type: "set_thinking_level", level: settings.defaultThinkingLevel });
+      console.log(`[bridge] set_thinking_level ${settings.defaultThinkingLevel}`);
+    }
+  } catch (e) {
+    console.error(`[bridge] failed to apply settings: ${String(e).slice(0, 200)}`);
+  }
+  piReady = true;
+  if (pendingPrompts.length > 0) {
+    console.log(`[bridge] flushing ${pendingPrompts.length} pending prompt(s)`);
+    for (const cmd of pendingPrompts) sendToPi(cmd);
+    pendingPrompts.length = 0;
+  }
+  for (const c of wsClients) {
+    try { c.ws.send(JSON.stringify({ type: "bridge_ready" })); } catch {}
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -353,8 +404,13 @@ const server = Bun.serve({
       (ws as any).__client = client;
       wsClients.add(client);
       console.log(`[bridge] ws client connected (total=${wsClients.size})`);
-      // Greet so client knows we're alive.
+      // Greet so client knows we're alive. If pi is already fully
+      // configured (post-warm-cell, late client connect), send
+      // bridge_ready immediately so the client doesn't wait.
       try { ws.send(JSON.stringify({ type: "bridge_hello", cell: NAME })); } catch {}
+      if (piReady) {
+        try { ws.send(JSON.stringify({ type: "bridge_ready" })); } catch {}
+      }
     },
     message(ws, message) {
       const text = typeof message === "string" ? message : new TextDecoder().decode(message as Uint8Array);
@@ -368,6 +424,21 @@ const server = Bun.serve({
         // Bridge-level commands (don't forward to pi)
         if (cmd?.type === "ping") {
           try { ws.send(JSON.stringify({ type: "pong" })); } catch {}
+          continue;
+        }
+
+        // Buffer prompts that arrive before pi is fully configured. The
+        // setTimeout(750) in spawnPi() that does switch_session +
+        // set_model + set_thinking_level is a race window — if a prompt
+        // hits pi.stdin before switch_session, pi processes it against
+        // a default/transient session and the user sees nothing back.
+        if (!piReady && cmd?.type === "prompt") {
+          console.log(`[bridge] queuing prompt (pi not ready yet)`);
+          pendingPrompts.push(cmd);
+          // Echo a response so client knows the prompt was accepted.
+          try {
+            ws.send(JSON.stringify({ type: "response", id: cmd.id, command: "prompt", success: true }));
+          } catch {}
           continue;
         }
 

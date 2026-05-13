@@ -10,20 +10,28 @@ The substrate (welld, lume, Cloudflare Workers, cloudflared) is somebody else's 
 
 ### Phase v1 — Magical generic cell (current work)
 
-Type `cells birth`, see a fixed-tempo ~3s animation (waking → warming → ready → alive), get dropped into a talk prompt, type a message, watch the cell respond via LLM. Every cell is the same generic cell — same canned identity, same model chain, same extension set. No personality, no per-cell binding, no mother in the critical path.
+Two birth flows, distinguished by whether the user names the cell:
+
+**`cells birth` (no name)** — the fast magical path. ~3s animation (waking → warming → ready → alive), drop into talk prompt, **the cell speaks first**: introduces itself and asks the user what to call it. User answers, the conversation continues, the name is captured and applied async. This is the wedge demo path. Deterministic critical path, no mother in the loop, LLM-genuine first-token.
+
+**`cells birth <name>` (named)** — the customizable path. After accepting the name, an interactive picker runs in the local CLI (harness, model, personality, channel binding, etc.). Mother then orchestrates the slower, configured birth. Comes back to a talk prompt with the picked configuration. Slower (10–30s) but flexible. Mother stays in this critical path because the choices are turn-by-turn.
+
+Every cell — fast or named — has the same generic identity DNA baked into cell-base. Customization adds layers on top; doesn't fork the base image.
 
 **Acceptance:**
 
 | ID | Test |
 |---|---|
 | V1.1 | `cells birth` shows the 3-stage animation, drops into talk prompt |
-| V1.2 | First user message hits the cell, LLM streams a real response |
-| V1.3 | Birth-to-first-LLM-token ≤ 5s p50 |
+| V1.2 | Cell speaks first via LLM (greeting + name question), user replies, conversation continues |
+| V1.3 | Birth-to-first-LLM-token (cell's greeting) ≤ 5s p50 |
 | V1.4 | Pool refill: second `cells birth` immediately after first hits warm path |
 | V1.5 | `cells sleep` + talk-wakes round-trips |
 | V1.6 | `cells stop` + `cells wake` round-trips |
 | V1.7 | `cells kill` cleans up wells + registry |
 | V1.8 | Two cells coexist; talking to one doesn't affect the other |
+| V1.9 | `cells birth bob` runs the picker (harness/model/etc.), routes to mother slow-birth, finishes at talk prompt |
+| V1.10 | Pool depth 10 maintained; `cells birth` × 10 in quick succession all hit warm path |
 
 ### Phase v2 — Personality + identity layers (next)
 

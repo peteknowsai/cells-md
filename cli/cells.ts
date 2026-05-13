@@ -126,6 +126,7 @@ const RESERVED_NAMES = new Set([
   "checkpoint", "destroy", "kill", "dream", "tui", "sync", "doctor",
   "schedule-pi-patches", "unschedule-pi-patches",
   "schedule-pulse", "unschedule-pulse",
+  "schedule-host-bridge", "unschedule-host-bridge",
   "refresh-extensions", "heartbeat", "pulse",
   "channel", "channels",
 ]);
@@ -223,6 +224,21 @@ const PACKAGE_OPTIONS: SelectOption[] = OPTIONAL_PACKAGES.map((p) => ({
 
 const PACKAGE_DEFAULTS: string[] = OPTIONAL_PACKAGES.filter((p) => p.defaultChecked).map((p) => p.value);
 
+// V1.9 picker choices, written into the cell's record at birth time.
+// host-bridge reads these on session setup and applies model/thinking
+// instead of the hardcoded magical-cell defaults. extensions + channel
+// are stored but unwired in v1 (deferred to v2 — would require dna
+// extension toggling at hatch + provider-channel routing in pi-coding-agent).
+type PickerChoice = {
+  // Resolved provider/modelId so host-bridge can apply them without
+  // duplicating cells.ts's MODEL_IDS mapping.
+  provider: string;
+  modelId: string;
+  thinking: string;
+  extensions: string[];
+  channel: string;
+};
+
 type Cell = {
   name: string;
   created_at: string;
@@ -239,6 +255,9 @@ type Cell = {
   // apply-pi-patches.sh. Mirrored here so harden-birth can verify the
   // birth pipeline wrote it correctly into the cell's settings.json.
   modelChain?: string[];
+  // V1.9 picker output (when user ran `cells birth <name>` no flags).
+  // Absent for the magical-default path (`cells birth`).
+  picker?: PickerChoice;
 };
 type Registry = { cells: Cell[] };
 
@@ -868,13 +887,30 @@ function humanDate(iso: string): string {
 }
 
 async function readCellModel(name: string): Promise<string | null> {
+  // Prefer the vault IDENTITY.md `model:` line if present (legacy mother-
+  // born cells). V1 cells skip the vault entry and just record modelChain
+  // in cells.json — fall back to the first chain entry, stripping the
+  // ":thinking" suffix for display.
   const p = join(VAULT_DIR, name, "IDENTITY.md");
-  if (!existsSync(p)) return null;
+  if (existsSync(p)) {
+    try {
+      const txt = await readFile(p, "utf-8");
+      const m = txt.match(/^model:\s*(\S+)/m);
+      if (m) return m[1]!;
+    } catch { /* fall through */ }
+  }
   try {
-    const txt = await readFile(p, "utf-8");
-    const m = txt.match(/^model:\s*(\S+)/m);
-    return m ? m[1]! : null;
-  } catch { return null; }
+    const reg = await loadRegistry();
+    const cell = reg.cells.find((c: any) => c.name === name);
+    const chain: string[] | undefined = cell?.modelChain;
+    if (chain && chain.length > 0) {
+      // "openai-codex/gpt-5.5:medium" → "gpt-5.5:medium" for compactness
+      const first = chain[0]!;
+      const slash = first.indexOf("/");
+      return slash >= 0 ? first.slice(slash + 1) : first;
+    }
+  } catch { /* fall through */ }
+  return null;
 }
 
 async function cmdList() {
@@ -929,6 +965,17 @@ async function cmdTalk(name: string, args: string[]) {
     return;
   }
   await requireCell(name);
+
+  // V1.5/V1.6: wake the cell's well if it's hibernated or stopped before
+  // we dial the bridge. host-bridge spawns ssh+pi inside the cell, so the
+  // VM must be running and accepting SSH first. No-op if already serving.
+  try {
+    const wellName = await wellNameForCell(name);
+    if (wellName) await ensureWellRunningForTalk(wellName);
+  } catch (e) {
+    console.error(`! wake failed: ${e instanceof Error ? e.message : String(e)}`);
+    process.exit(1);
+  }
 
   if (args.length === 0) {
     // No args → interactive bridge chat. Same session as Slack; each
@@ -1227,6 +1274,10 @@ type CreateOpts = {
   seed?: string;        // first message auto-sent post-birth (default: introduce-yourself)
   seedOff?: boolean;    // true if --seed=off — no seed greeting
   noPool?: boolean;     // true if --no-pool — bypass egg pool, force slow birth (testing)
+  // V1.9 picker output (when cmdCreate ran the picker before falling through).
+  // cmdCreateV1Fast persists this in the cell record so host-bridge can apply
+  // the user's model/thinking overrides on session setup.
+  pickerChoice?: PickerChoice;
 };
 
 // Default seed: the cell greets the user back in one sentence + offers help.
@@ -1352,7 +1403,32 @@ function generateCellName(): string {
 // re-shaped in v2 as personality/binding swaps on the canned cell.
 async function cmdCreateV1Fast(name: string | undefined, opts: CreateOpts): Promise<void> {
   const t0 = Date.now();
-  const cellName = name ?? generateCellName();
+
+  const secret = await readSecret("CELLS_PROXY_SECRET");
+  if (!secret) {
+    console.error("CELLS_PROXY_SECRET missing from ~/.cells/secrets.json");
+    process.exit(1);
+  }
+
+  // Pool-first: the egg comes with its cell-name pre-baked. We don't
+  // rename — we just use the name the egg was created with. The hex
+  // suffix of egg-AAAAAA matches cell-AAAAAA, so the mapping is direct.
+  const claim = await consumeV1Egg();
+  let cellName: string;
+  let wellName: string;
+  let hatchedFrom: string | undefined;
+
+  if (claim) {
+    cellName = claim.cellName;
+    wellName = claim.wellName;
+    hatchedFrom = claim.wellName.slice("egg-".length);
+  } else {
+    // No warm egg → cold-fork path. Auto-name the cell, create a well
+    // under the same name (no separate well/cell name in this path),
+    // and we'll have to do the post-create setup ourselves.
+    cellName = name ?? generateCellName();
+    wellName = cellName;
+  }
 
   if (RESERVED_NAMES.has(cellName)) {
     console.error(`'${cellName}' is reserved. Pick another name.`);
@@ -1363,80 +1439,80 @@ async function cmdCreateV1Fast(name: string | undefined, opts: CreateOpts): Prom
     process.exit(1);
   }
 
-  const secret = await readSecret("CELLS_PROXY_SECRET");
-  if (!secret) {
-    console.error("CELLS_PROXY_SECRET missing from ~/.cells/secrets.json");
-    process.exit(1);
-  }
-
   // Start the animation theater + the real birth pipeline in parallel.
-  // Animation is fixed 3s. Birth pipeline takes 2s (pool) or 10s (cold).
-  // We wait for both before dropping into talk.
+  // The animation accepts an `endSignal` Promise — when first-token arrives
+  // from captureGreeting (below), the animation snaps to "alive" and exits.
+  // Minimum 1.5s so the user always feels the animation; max 6s as a cap
+  // for cold paths that overshoot.
   const useAnim = process.stdout.isTTY;
+  const firstTokenDef = makeDeferred<void>();
   const animPromise: Promise<void> = useAnim
-    ? (await import("./birth-ui.tsx")).runBirthAnimation()
+    ? (await import("./birth-ui.tsx")).runBirthAnimation({
+        endSignal: firstTokenDef.promise,
+        minDurationMs: 1500,
+        maxDurationMs: 6000,
+      })
     : Promise.resolve();
   if (!useAnim) console.log(`birthing ${cellName}…`);
 
-  // Phase A — deterministic, no LLM.
-  // Try the pool first: a hibernated egg wakes in ~3s vs ~9s cold fork.
-  // Falls back to cold-fork transparently if pool is empty or wake fails.
-  const pooledWell = await consumeV1Egg(cellName);
-  let wellName = cellName;
-  let hatchedFrom: string | undefined;
-
   try {
-    if (pooledWell) {
-      // Warm-egg path: wake the hibernated VM. The well is already
-      // forked from cell-base with auth=public and secret in env (set
-      // at bake time by bakeV1Egg). Just wake + register site service.
+    if (claim) {
+      // Warm-egg path: wake (no-op for Tier 4 if running). well-site is
+      // baked into the image and was already started + bridge_ready
+      // before the bake hibernated. After wake, pi resumes with session
+      // pinned, model set, ready to receive prompts.
       try {
-        await wakeV1Egg(pooledWell);
-        wellName = pooledWell;
-        hatchedFrom = pooledWell.slice("egg-".length);
-        await markV1EggLive(pooledWell);
+        await wakeV1Egg(claim.wellName, claim.tier);
+        // Defensive IP check: if the well is "running" but has no IP
+        // (e.g. lease was flush-all'd while it was up), force a
+        // /stop+/start to re-DHCP. Wells-team is also looking at this
+        // server-side (flush-safe-by-default + auto-refresh on lapse),
+        // but until that ships this prevents user-visible "could not
+        // resolve well host" errors.
+        await ensureWellHasIp(claim.wellName);
+        await markV1EggLive(claim.wellName);
       } catch (e) {
-        // Wake failed — pool egg is broken. Cull it and fall through
-        // to cold-fork so the user still gets a working birth.
         console.warn(`! pool wake failed (${e instanceof Error ? e.message : String(e)}), falling back to cold-fork`);
-        await directWellDestroy(pooledWell).catch(() => {});
+        await directWellDestroy(claim.wellName).catch(() => {});
         await withEggLock(async () => {
           const file = await loadEggs();
-          file.eggs = file.eggs.filter((e) => e.well_name !== pooledWell);
+          file.eggs = file.eggs.filter((e) => e.well_name !== claim.wellName);
           await saveEggs(file);
         });
-        // Fall through to cold-fork below.
+        // Cold-fork below.
+        wellName = cellName;
+        hatchedFrom = undefined;
       }
     }
 
     if (!hatchedFrom) {
-      // Cold-fork path: no warm egg available (pool empty or wake failed).
-      await directWellCreate(cellName, {
-        fromImage: "cell-base",
-        env: { CELLS_PROXY_SECRET: secret },
-      });
+      // Cold-fork: no warm egg or wake failed. Create + wait for
+      // firstboot. With host-bridge, no in-cell well-site to wait for —
+      // pi spawns on demand via SSH when the talk session opens.
+      const env = { ...(await collectCellLlmEnv()), CELL_NAME: cellName };
+      await directWellCreate(cellName, { fromImage: "cell-base", env });
       await setWellAuthPublic(cellName);
-      wellName = cellName;
+      await disableAutoSleep(cellName);
+      await waitForCloudInit(cellName);
     }
 
-    // Register site service via welld API. systemd starts well-site
-    // inside the cell → bun spawns server.ts → pi spawns inside that.
-    // wellName != cellName on the pool path — the bun server reads
-    // CELL_NAME from its env so it knows what to call itself.
-    await registerSiteService(wellName, cellName);
-
     // Mark alive in cells.json. Generic cell uses the canned default
-    // chain baked into /cell/.pi/settings.json.
+    // chain baked into /cell/.pi/settings.json. With a V1.9 picker
+    // choice, derive a per-cell chain from the user's primary model so
+    // host-bridge applies it on session setup.
+    const picker = opts.pickerChoice;
+    const modelChain = picker
+      ? buildDefaultChain({ provider: picker.provider, modelId: picker.modelId, thinking: picker.thinking })
+      : ["deepseek/deepseek-v4-flash:off", "openai-codex/gpt-5.5:off"];
+
     const reg = await loadRegistry();
     reg.cells.push({
       name: cellName,
       created_at: new Date().toISOString(),
       status: "alive",
-      modelChain: [
-        "openai-codex/gpt-5.5:medium",
-        "deepseek/deepseek-v4-pro:high",
-      ],
+      modelChain,
       ...(hatchedFrom ? { hatched_from: hatchedFrom } : {}),
+      ...(picker ? { picker } : {}),
     });
     await saveRegistry(reg);
   } catch (e) {
@@ -1446,15 +1522,19 @@ async function cmdCreateV1Fast(name: string | undefined, opts: CreateOpts): Prom
   }
 
   const tPhaseA = Date.now();
+  const tierLabel: "hot" | "cold" | "cold-fork" =
+    claim?.tier === 4 ? "hot" : claim?.tier === 2 ? "cold" : "cold-fork";
 
-  // Wait for the animation to finish if it's still playing (cold fork
-  // typically outlasts the 3s animation; warm-pool birth lands before).
-  await animPromise;
+  // Kick host-bridge to spawn ssh+pi NOW (overlaps with animation +
+  // perf telemetry + refill + greeting capture). By the time captureGreeting
+  // dials the bridge, ssh+pi is already booting; the seed lands as soon
+  // as pi-ready flips. V1.3 fix.
+  void prewarmHostBridge(cellName);
 
+  // Perf telemetry — alive_ms = "real birth complete" (cell registered,
+  // prewarm kicked, ready for a talk session). Captured before the
+  // animation finishes so the row reflects pipeline work, not UI hold.
   const tAlive = Date.now();
-
-  // Perf telemetry — append one JSONL row per birth. Used by V1.STEP6
-  // measurement. Best-effort, never throws.
   try {
     const perfDir = join(homedir(), ".cells", "logs", "perf");
     await mkdir(perfDir, { recursive: true });
@@ -1474,28 +1554,166 @@ async function cmdCreateV1Fast(name: string | undefined, opts: CreateOpts): Prom
     // Telemetry is non-critical; ignore failures.
   }
 
-  if (!useAnim) console.log(`✓ ${cellName} alive${hatchedFrom ? " (from pool)" : ""}`);
-
-  // Fire-and-forget pool refill. Runs while the user talks; the talk
-  // session keeps this process alive long enough for the refill to land.
-  // For non-TTY `cells birth --seed=off` the process exits before refill
-  // finishes — script users should invoke `cells egg refill-v1` separately
-  // or schedule it via launchd. Caught silently — refill failure here
-  // shouldn't poison the user's birth experience.
+  // Fire-and-forget pool refill. Runs while the animation plays + the
+  // user talks; the talk session keeps this process alive long enough
+  // for refill to land. Caught silently — refill failure here shouldn't
+  // poison the user's birth experience.
   refillV1PoolToDepth().catch((e) => {
     console.warn(`! background pool refill failed: ${e instanceof Error ? e.message : String(e)}`);
   });
 
-  // 4. Drop into talk. Pi inside the cell handles the seed via streaming
-  //    WS — every word the user sees from the cell is LLM-generated.
+  // Pre-send path (TTY only): open a WS to host-bridge now, fire the
+  // seed prompt, buffer pi's reply. Animation runs in parallel and ends
+  // when pi streams its first byte (firstTokenSeen → firstTokenDef →
+  // animation endSignal). After animation, we release() the buffer and
+  // the captured greeting prints instantly. Net effect: LLM round-trip
+  // overlaps with animation instead of stacking after it.
+  const seedText = opts.seedOff ? undefined : (opts.seed ?? DEFAULT_SEED);
+  let greetingHandle: GreetingHandle | null = null;
+  if (useAnim && seedText) {
+    try {
+      greetingHandle = await captureGreeting(cellName, seedText);
+      greetingHandle.firstTokenSeen.then(() => {
+        const firstTokenMs = Date.now() - t0;
+        const perfDir = join(homedir(), ".cells", "logs", "perf");
+        writeFile(
+          join(perfDir, "first-token.jsonl"),
+          JSON.stringify({
+            ts: new Date().toISOString(),
+            cell: cellName,
+            first_token_ms: firstTokenMs,
+            tier: tierLabel,
+          }) + "\n",
+          { flag: "a" },
+        ).catch(() => { /* telemetry non-critical */ });
+        firstTokenDef.resolve();
+      }).catch(() => { /* fallback handles errors below */ });
+    } catch (e) {
+      // captureGreeting failed (host-bridge down, cell unreachable, etc.).
+      // Don't break the birth — fall through to the legacy in-session seed
+      // path. The animation will hit its maxDurationMs cap.
+      console.warn(
+        `! pre-send greeting failed: ${e instanceof Error ? e.message : String(e)}; falling back to in-session seed`,
+      );
+      greetingHandle = null;
+    }
+  }
+
+  // Wait for the animation to finish — either ended by firstTokenDef
+  // (greeting captured early) or by maxDurationMs cap.
+  await animPromise;
+
+  if (!useAnim) console.log(`✓ ${cellName} alive${hatchedFrom ? " (from pool)" : ""}`);
+
+  // Release the captured greeting — buffered chunks drain instantly, then
+  // any remaining deltas stream live to stdout. After agent_end the WS
+  // closes and we drop into the interactive talk session below.
+  if (greetingHandle) {
+    greetingHandle.release();
+    try {
+      await greetingHandle.done;
+    } catch (e) {
+      console.warn(`! greeting interrupted: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  }
+
+  // Drop into talk. Pi inside the cell handles follow-up turns via the
+  // same on-disk session — the greeting is already in pi's history, so
+  // the interactive WS connects to a session that knows it just said hi.
   if (process.stdout.isTTY) {
-    const seedText = opts.seedOff ? undefined : (opts.seed ?? DEFAULT_SEED);
-    if (seedText) {
-      await streamCellBridge(cellName, { interactive: true, initialMessage: seedText });
+    if (greetingHandle) {
+      // Greeting already streamed via captureGreeting; interactive talk
+      // opens a fresh WS to the same pi session — no second seed.
+      await streamCellBridge(cellName, { interactive: true });
+    } else if (seedText) {
+      // Fallback: pre-send didn't work (or non-TTY env). streamCellBridge
+      // does its own seed dispatch + first-token logging.
+      const onFirstToken = () => {
+        const firstTokenMs = Date.now() - t0;
+        const perfDir = join(homedir(), ".cells", "logs", "perf");
+        writeFile(
+          join(perfDir, "first-token.jsonl"),
+          JSON.stringify({
+            ts: new Date().toISOString(),
+            cell: cellName,
+            first_token_ms: firstTokenMs,
+            tier: tierLabel,
+          }) + "\n",
+          { flag: "a" },
+        ).catch(() => { /* telemetry non-critical */ });
+      };
+      await streamCellBridge(cellName, { interactive: true, initialMessage: seedText, onFirstToken });
     } else {
       await cmdTalk(cellName, []);
     }
   }
+}
+
+// V1.9 picker — "provider channel" axis. Distinct from CHANNEL_OPTIONS
+// (which is slack/email messaging surfaces). For v1.9 MVP, "auto" is the
+// only fully-wired option; the others are stored for v2 routing.
+const PROVIDER_CHANNEL_OPTIONS: SelectOption[] = [
+  { value: "auto",          label: "auto",          hint: "(inherit from model)" },
+  { value: "claude-code",   label: "claude-code",   hint: "(Claude Max via CLI)" },
+  { value: "anthropic-api", label: "anthropic-api", hint: "(API key, advisory in v1)" },
+  { value: "openai-api",    label: "openai-api",    hint: "(API key, advisory in v1)" },
+  { value: "deepseek",      label: "deepseek",      hint: "(API key, advisory in v1)" },
+];
+
+// V1.9 picker: 4 sequential questions when user types `cells birth <name>`
+// with no flags. Drives an actual fast-path birth (not the legacy slow
+// slow-birth flow at the bottom of cmdCreate). Reuses selectOne/selectMany.
+// ESC at any prompt exits cleanly via selectOne's built-in handler.
+async function runBirthPickerV1(name: string): Promise<PickerChoice> {
+  console.log(`\nbirthing cell '${name}'\n`);
+  const answers: (string | string[] | undefined)[] = [];
+  let i = 0;
+  while (i < 4) {
+    const canGoBack = i > 0;
+    let result: string | string[] | Back;
+    if (i === 0) {
+      result = await selectOne("Model?", MODEL_OPTIONS, {
+        initialValue: (answers[0] as string | undefined) ?? "deepseek-v4-flash",
+      });
+    } else if (i === 1) {
+      const modelKey = answers[0] as ModelKey;
+      result = await selectOne("Thinking?", thinkingOptionsFor(modelKey), {
+        canGoBack,
+        initialValue: (answers[1] as string | undefined) ?? defaultThinkingFor(modelKey),
+      });
+    } else if (i === 2) {
+      result = await selectMany("Extensions?", EXTENSION_OPTIONS, {
+        canGoBack,
+        initialChecked: (answers[2] as string[] | undefined) ?? [],
+      });
+    } else {
+      result = await selectOne("Provider?", PROVIDER_CHANNEL_OPTIONS, {
+        canGoBack,
+        initialValue: (answers[3] as string | undefined) ?? "auto",
+      });
+    }
+    if (result === BACK) {
+      process.stdout.write("\x1b[1A\x1b[2K");
+      i--;
+    } else {
+      answers[i] = result;
+      i++;
+    }
+  }
+  const modelKey = answers[0] as ModelKey;
+  const choice = MODEL_IDS[modelKey];
+  let thinking = answers[1] as string;
+  if (MIN_MEDIUM_THINKING_MODELS.has(modelKey) && SUB_MEDIUM_THINKING.has(thinking)) {
+    console.warn(`note: ${modelKey} requires thinking ≥ medium; bumping '${thinking}' → 'medium'`);
+    thinking = "medium";
+  }
+  return {
+    provider: choice.provider,
+    modelId: choice.modelId,
+    thinking,
+    extensions: answers[2] as string[],
+    channel: answers[3] as string,
+  };
 }
 
 async function cmdCreate(name: string | undefined, opts: CreateOpts) {
@@ -1512,6 +1730,16 @@ async function cmdCreate(name: string | undefined, opts: CreateOpts) {
     opts.slackChannel === undefined;
 
   if (isV1Default) {
+    // V1.9 picker trigger: explicit name + truly no flags + TTY → run picker
+    // first, then fall through to the fast-path with picks attached. `cells
+    // birth` alone (no name) stays magical — no questions asked. Any of
+    // --seed / --seed=off / --no-pool means the caller is scripting and
+    // wants the deterministic fast-path, so skip the picker.
+    const noPickerFlags =
+      opts.seed === undefined && !opts.seedOff && !opts.noPool;
+    if (name && process.stdout.isTTY && noPickerFlags) {
+      opts.pickerChoice = await runBirthPickerV1(name);
+    }
     return cmdCreateV1Fast(name, opts);
   }
 
@@ -1896,7 +2124,7 @@ async function readSecret(key: string): Promise<string | null> {
 // directWellDestroy.
 async function directWellCreate(
   name: string,
-  opts: { fromImage: string; env?: Record<string, string> },
+  opts: { fromImage: string; env?: Record<string, string>; hibernateReady?: boolean },
 ): Promise<void> {
   const body: Record<string, unknown> = {
     name,
@@ -1904,6 +2132,14 @@ async function directWellCreate(
   };
   if (opts.env && Object.keys(opts.env).length > 0) {
     body.env = opts.env;
+  }
+  // Piece 3 (wells, 2026-05-12): default fresh-create skips warming for
+  // speed; hibernate refuses if the well wasn't sealed at create time.
+  // Pass hibernate_ready: true when we know this well needs to hibernate
+  // (Tier 2 pool eggs). Costs ~6-8s extra create time for the warming
+  // sequence. Omit (or false) for Tier 4 / user-facing fresh creates.
+  if (opts.hibernateReady) {
+    body.hibernate_ready = true;
   }
   const base = process.env.WELL_API_URL ?? "http://127.0.0.1:7878";
   const r = await fetch(`${base}/v1/wells`, {
@@ -1941,6 +2177,31 @@ async function setWellAuthPublic(wellName: string): Promise<void> {
   if (!r.ok) {
     throw new Error(
       `set auth=public for '${wellName}' failed: ${r.status} ${(await r.text()).slice(0, 300)}`,
+    );
+  }
+}
+
+// Disable wells's auto-hibernate watchdog on a single well. v1 cells stay
+// alive_running until explicit `cells sleep` or `cells stop`. Without this,
+// the watchdog can race with welld's services API SSH writes: applyToGuest
+// uses `sudo tee` (which truncates) to write the unit file; if hibernation
+// kicks in mid-script, the file ends up 0 bytes and the unit looks `masked`.
+// Filed with wells team — they may also want to fix the lastTouched-on-wake
+// reset semantics.
+async function disableAutoSleep(wellName: string): Promise<void> {
+  const base = process.env.WELL_API_URL ?? "http://127.0.0.1:7878";
+  const r = await fetch(`${base}/v1/wells/${encodeURIComponent(wellName)}`, {
+    method: "PATCH",
+    headers: {
+      Authorization: `Bearer ${await wellsToken()}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ auto_sleep_seconds: null }),
+  });
+  if (!r.ok) {
+    // Non-fatal — birth still works, just with the race window open.
+    console.warn(
+      `! disableAutoSleep '${wellName}' failed: ${r.status} ${(await r.text()).slice(0, 200)}`,
     );
   }
 }
@@ -2005,79 +2266,412 @@ function generateEggWellName(): string {
 // entry into eggs.json with state=warm on success. Returns the well-name
 // or throws. Caller is responsible for the egg-lock dance (use
 // withEggLock around the bake invocation when refilling).
-async function bakeV1Egg(): Promise<string> {
-  const secret = await readSecret("CELLS_PROXY_SECRET");
-  if (!secret) throw new Error("CELLS_PROXY_SECRET missing from ~/.cells/secrets.json");
+// Read all LLM provider keys from ~/.cells/secrets.json so every egg/cell
+// has every supported model available out of the box. Pi-ai natively reads
+// these env vars for direct-API providers; CELLS_PROXY_SECRET is used by
+// the codex-proxy extension for subscription-routed providers (codex,
+// anthropic). Missing keys are silently skipped — model fallback handles it.
+async function collectCellLlmEnv(): Promise<Record<string, string>> {
+  const env: Record<string, string> = {};
+  const keys = [
+    "CELLS_PROXY_SECRET",   // openai-codex (gpt-5.5 via proxy.cells.md/codex), anthropic (via /v1)
+    "DEEPSEEK_API_KEY",     // deepseek-v4-flash, deepseek-v4-pro (direct)
+    "OPENAI_API_KEY",       // openai/* non-codex (direct)
+    "GEMINI_API_KEY",       // google/gemini-* (direct)
+    "EXA_API_KEY",          // web_search tool
+  ];
+  for (const k of keys) {
+    const v = await readSecret(k);
+    if (v) env[k] = v;
+  }
+  return env;
+}
 
+// Hot pool target: keep N eggs running-resident (never hibernated) for
+// instant burst-births. Costs ~1GB RAM per hot egg always-on; the trade-off
+// is zero wake latency for the first N births. Eggs beyond this count fall
+// back to cold (hibernated, pi-not-yet-started) — wake takes ~2-3s.
+//
+// Schema note: eggs.json still carries `tier: 2 | 4` for backwards compat.
+// tier 4 == hot, tier 2 == cold. New code uses hot/cold; we map at the edges.
+// V1 ships with a single variant (pi + deepseek-v4-flash), so the pool is
+// pure-hot: HOT_TARGET = POOL_TARGET_DEPTH (see below) keeps all pool eggs
+// running-resident. No cold eggs means the cold→hot promote path in
+// refillV1PoolToDepth Pass 1 never fires, which keeps wells' wake-from-
+// hibernate path (which kills lume and clips every sibling VM) out of the
+// auto-refill blast radius. When V2 adds variant eggs (harness × model ×
+// extensions), this single number becomes a per-variant target and a mix
+// strategy lives next to it.
+const V1_HOT_POOL_TARGET = 10;
+
+// Count hot (running) eggs currently in the pool. Used to decide whether
+// the next bake should produce a running egg or a hibernated one, and
+// whether to promote a cold→hot on refill.
+async function countV1HotEggs(): Promise<number> {
+  const file = await loadEggs();
+  return file.eggs.filter(
+    (e) =>
+      e.state === "warm" &&
+      e.variant_signature === V1_EGG_VARIANT_SIGNATURE &&
+      (e as any).tier === 4,
+  ).length;
+}
+
+// Count cold (hibernated) eggs in the pool. Used for promote balancing.
+async function countV1ColdEggs(): Promise<number> {
+  const file = await loadEggs();
+  return file.eggs.filter(
+    (e) =>
+      e.state === "warm" &&
+      e.variant_signature === V1_EGG_VARIANT_SIGNATURE &&
+      (e as any).tier === 2,
+  ).length;
+}
+
+// Provision a fresh ubuntu-base well into a fully-formed cell, in-place
+// via SSH. Used by bakeV1Egg (per-egg path) and reusable for any "turn
+// this raw well into a cell" need. Replaces the old cell-base layered
+// image — see docs/proposals/image-ownership.html for the rationale.
+//
+// As of wells-stable-2026-05-12h, ubuntu-base ships with:
+//   - bun pre-installed at /usr/local/bin/bun
+//   - cell user + /cell home + `cell ALL=(ALL) NOPASSWD: ALL` sudoers
+//   - `ubuntu ALL=(cell) NOPASSWD: ALL` sudoers (host-bridge delegation)
+//   - /cell/.ssh/authorized_keys mirrored from /home/well/.ssh
+// So cells-side provisioning is purely cells-shaped layers.
+//
+// Steps:
+//   1. Push dna/cells/base → /cell (DNA)
+//   2. Write per-cell tmux config template
+//   3. bun install /cell deps (--ignore-scripts so postinstall doesn't run
+//      before pi is installed and patchable)
+//   4. npm install pi-coding-agent globally + pre-load pi-web-access ext
+//   5. sudo apply-pi-patches.sh (anthropic baseUrl, codex, adaptive)
+//   6. /etc/profile.d/cells-env.sh
+//   7. chmod +x /cell/bin/cells
+//   8. sync filesystem
+async function provisionCellInWell(wellName: string): Promise<void> {
+  // 1. DNA push (ubuntu-base already has cell user + /cell + sudoers)
+  await pushLocalDirToWellAsCell(wellName, DNA_DIR, "/cell");
+  // 3. tmux conf template
+  const tmuxConf = await readFile(join(REPO_ROOT, "scripts/cell-tmux.conf"), "utf-8");
+  const writeTmux = await wellExecCapture(
+    wellName,
+    `sudo tee /cell/.tmux.conf >/dev/null <<'__TMUX_EOF__'\n${tmuxConf}\n__TMUX_EOF__\nsudo chown cell:cell /cell/.tmux.conf`,
+  );
+  if (!writeTmux.ok) {
+    throw new Error(`write tmux conf failed: ${writeTmux.stderr.slice(0, 200)}`);
+  }
+  // 4. bun install /cell deps. --ignore-scripts so the postinstall hook
+  //    (apply-pi-patches.sh, which writes into /usr/lib/node_modules) doesn't
+  //    fire as the cell user — patches run separately with sudo in step 6.
+  //    Bun is pre-installed in ubuntu-base since wells-stable-2026-05-12f
+  //    (at /usr/local/bin/bun on the system PATH for every user).
+  const bunInstall = await wellExecCapture(
+    wellName,
+    `set -euo pipefail
+sudo chmod 0755 /home/well
+sudo -u cell bash -lc 'cd /cell && bun install --frozen-lockfile --ignore-scripts'
+echo "bun: $(bun --version 2>&1 | head -1 || echo MISSING)"`,
+  );
+  if (!bunInstall.ok) {
+    throw new Error(`bun install failed: ${(bunInstall.stderr + bunInstall.stdout).slice(-600)}`);
+  }
+  // 5. Install pi globally (root-owned at /usr/lib/node_modules), then
+  //    pre-load the default pi extension so birth's step 3e is a no-op.
+  const piInstall = await wellExecCapture(
+    wellName,
+    `set -euo pipefail
+sudo npm install -g @mariozechner/pi-coding-agent
+sudo -u cell bash -lc 'cd /cell && pi install -l npm:pi-web-access'
+echo "pi: $(pi --version 2>&1 | head -1 || echo MISSING)"`,
+  );
+  if (!piInstall.ok) {
+    throw new Error(`pi install failed: ${(piInstall.stderr + piInstall.stdout).slice(-600)}`);
+  }
+  // 6. Apply pi patches with sudo (writes into /usr/lib/node_modules).
+  const patch = await wellExecCapture(wellName, `sudo bash /cell/scripts/apply-pi-patches.sh`);
+  if (!patch.ok) {
+    throw new Error(`apply-pi-patches failed: ${(patch.stderr + patch.stdout).slice(-600)}`);
+  }
+  // 7. /etc/profile.d shim
+  await bakeWriteProfileD(wellName);
+  // 8. chmod /cell/bin/cells
+  const chmod = await wellExecCapture(wellName, `sudo chmod +x /cell/bin/cells`);
+  if (!chmod.ok) {
+    throw new Error(`chmod /cell/bin/cells failed: ${chmod.stderr.slice(0, 200)}`);
+  }
+  // 9. sync — empirically needed so hibernate's stop+save doesn't lose
+  // /cell content / sudoers / pi-patched node_modules (ext4 commit=30
+  // can lag behind the disk-detach).
+  const sync = await wellExecCapture(wellName, `sudo sync && sudo sync`);
+  if (!sync.ok) {
+    throw new Error(`sync failed: ${sync.stderr.slice(0, 200)}`);
+  }
+}
+
+async function bakeV1Egg(): Promise<string> {
+  const baseEnv = await collectCellLlmEnv();
+  if (!baseEnv.CELLS_PROXY_SECRET) throw new Error("CELLS_PROXY_SECRET missing from ~/.cells/secrets.json");
+
+  // Pre-compute the cell-name from the egg's hex suffix. egg-AAAAAA →
+  // cell-AAAAAA. We bake CELL_NAME into the egg's /etc/environment now;
+  // welld's well-site (baked into the image) reads it at boot and pins
+  // pi's session to that name. No rename at birth — we just record the
+  // mapping in eggs.json so consume returns both.
   const wellName = generateEggWellName();
+  const cellName = "cell-" + wellName.slice("egg-".length);
+  const env = { ...baseEnv, CELL_NAME: cellName };
+
+  // Decide tier BEFORE create. Hot = running-resident (first
+  // V1_HOT_POOL_TARGET eggs); cold = hibernated (the rest). Cold
+  // wells need hibernate_ready: true at create so wells's hibernate
+  // gate doesn't refuse later (Piece 3).
+  const hotCount = await countV1HotEggs();
+  const tier: 2 | 4 = hotCount < V1_HOT_POOL_TARGET ? 4 : 2;
+
+  // From ubuntu-base (the wells-team-owned substrate) — NOT cell-base.
+  // The cells-shaped layers (pi, DNA, /cell, cells-env.sh, pi binary +
+  // patches) get applied via provisionCellInWell over SSH right after
+  // firstboot. The cell user, /cell home, sudoers, and ssh keys come
+  // pre-baked from ubuntu-base (wells-stable-2026-05-12h).
+  // Pool eggs must always be sealed: a Tier 4 (hot) egg becomes a user
+  // cell after birth, and `cells sleep <name>` expects to hibernate it.
+  // Wells's default fresh-create skips the seal warming for speed
+  // (Piece 3, 2026-05-12) — hibernate refuses non-sealed wells. The
+  // ~6-8s extra cost at bake is the price of admission for v1 sleep.
   await directWellCreate(wellName, {
-    fromImage: "cell-base",
-    env: { CELLS_PROXY_SECRET: secret },
+    fromImage: "ubuntu-base",
+    env,
+    hibernateReady: true,
   });
   await setWellAuthPublic(wellName);
+  // Disable wells's auto-hibernate watchdog up front. v1 cells stay
+  // alive_running until explicit lifecycle ops. Without this, the
+  // watchdog can race the bake-time hibernate decision.
+  await disableAutoSleep(wellName);
 
-  // Hibernate the freshly-forked VM. welld dumps RAM+device state to
-  // ~/.wells/vms/<n>/hibernate.bin and stops the VM. Wake later restores
-  // from that file in ~3s. We're hibernating PRE-pi-start (Tier 2) — site
-  // service is registered at birth time, pi cold-starts after wake.
-  const base = process.env.WELL_API_URL ?? "http://127.0.0.1:7878";
-  const hibRes = await fetch(
-    `${base}/v1/wells/${encodeURIComponent(wellName)}/hibernate`,
-    {
-      method: "POST",
-      headers: { Authorization: `Bearer ${await wellsToken()}` },
-    },
-  );
-  if (!hibRes.ok) {
-    // Best-effort cleanup of the well so we don't leak.
+  // Wait for well-firstboot (identity injection: hostname, machine-id,
+  // ssh host keys, /etc/environment, authorized_keys). Without this,
+  // hibernating mid-firstboot leaves wake-resumed wells in a broken
+  // state and adds ~30s to the first birth.
+  try {
+    await waitForCloudInit(wellName);
+  } catch (e) {
     await directWellDestroy(wellName);
     throw new Error(
-      `hibernate '${wellName}' failed: ${hibRes.status} ${(await hibRes.text()).slice(0, 300)}`,
+      `bakeV1Egg waitForCloudInit failed for '${wellName}': ${e instanceof Error ? e.message : String(e)}`,
     );
   }
 
-  // Record in eggs.json.
+  // Per-egg provisioning: lift ubuntu-base → fully-formed cell.
+  try {
+    await provisionCellInWell(wellName);
+  } catch (e) {
+    await directWellDestroy(wellName);
+    throw new Error(
+      `bakeV1Egg provisioning failed for '${wellName}': ${e instanceof Error ? e.message : String(e)}`,
+    );
+  }
+
+  // (Bridge readiness was previously asserted here against an in-cell
+  // well-site.service. With the host-bridge architecture, pi is spawned
+  // on-demand via SSH at talk time — there's no in-cell bridge to wait
+  // for. waitForCloudInit above is sufficient: it confirms firstboot
+  // identity injection + SSH readiness, which is everything host-bridge
+  // needs to connect.)
+
+  // Tier decision happened pre-create above (so hibernate_ready could
+  // be passed correctly). Now act on it: Tier 2 → hibernate the
+  // freshly-provisioned well; Tier 4 → leave running with pi configured.
+  if (tier === 2) {
+    const base = process.env.WELL_API_URL ?? "http://127.0.0.1:7878";
+    const hibRes = await fetch(
+      `${base}/v1/wells/${encodeURIComponent(wellName)}/hibernate`,
+      {
+        method: "POST",
+        headers: { Authorization: `Bearer ${await wellsToken()}` },
+      },
+    );
+    if (!hibRes.ok) {
+      await directWellDestroy(wellName);
+      throw new Error(
+        `hibernate '${wellName}' failed: ${hibRes.status} ${(await hibRes.text()).slice(0, 300)}`,
+      );
+    }
+  }
+  // Tier 4: leave the well running with pi pre-configured.
+
   await withEggLock(async () => {
     const file = await loadEggs();
     file.eggs.push({
       id: wellName.slice("egg-".length),
       well_name: wellName,
+      cell_name: cellName,
       variant_signature: V1_EGG_VARIANT_SIGNATURE,
       state: "warm",
+      tier,
       born_at: new Date().toISOString(),
       claimed_at: null,
       claimed_by: null,
       max_age_at: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString(),
-    });
+    } as any);
     await saveEggs(file);
   });
 
   return wellName;
 }
 
+// Ensure a (supposedly running) well actually has a DHCP-assigned IP.
+// If welld reports status=running but ip=null (most often a side-effect
+// of a flush-all that wiped legit leases), force a /stop + /start so the
+// VM re-DHCPs on its next boot. Polls for the IP afterwards for up to 30s.
+// V1.5/V1.6: ensure a well is running + SSH-ready before talk.
+// Different from ensureWellHasIp (which only checks IP, used at birth):
+// this is talk-side, so we treat an idle-hibernated/stopped well as
+// expected and transparently wake it. /wake first (preserves saved RAM
+// state for Tier 2 hibernated eggs), /start as fallback (Tier 4 stopped).
+async function ensureWellRunningForTalk(wellName: string): Promise<void> {
+  const base = process.env.WELL_API_URL ?? "http://127.0.0.1:7878";
+  const token = await wellsToken();
+  const info = await fetch(`${base}/v1/wells/${encodeURIComponent(wellName)}`, {
+    headers: { Authorization: `Bearer ${token}` },
+  }).then(r => r.json()).catch(() => null);
+  if (info?.status === "running" && info?.ip && await tcpProbe(info.ip, 22)) {
+    return; // already serving
+  }
+  // Same path as `cells wake` (cmdWake): `well start -s <wellName>`. The
+  // well CLI handles BOTH hibernated wells (resume from saved RAM) and
+  // cold-stopped wells (cold boot), and blocks until SSH-accept is ready.
+  // Previously this function rolled its own /wake + 3s sleep + /start
+  // fallback + 1s SSH polling, which added ~6s of overhead vs the explicit
+  // wake-then-talk path. Using `well start` collapses talk-auto-wake from
+  // ~8.2s → ~2.2s (matches explicit two-step).
+  try {
+    await $`well start -s ${wellName}`.quiet();
+  } catch (e) {
+    throw new Error(
+      `ensureWellRunningForTalk: 'well start -s ${wellName}' failed: ${e instanceof Error ? e.message : String(e)}`,
+    );
+  }
+  // Defensive verify: confirm SSH-accept on the well's IP. `well start`
+  // should have already gated on this, but a short tight-poll catches the
+  // edge case where it returned slightly early.
+  const deadline = Date.now() + 5_000;
+  let last: any = null;
+  while (Date.now() < deadline) {
+    const i = await fetch(`${base}/v1/wells/${encodeURIComponent(wellName)}`, {
+      headers: { Authorization: `Bearer ${token}` },
+    }).then(r => r.json()).catch(() => null);
+    last = i;
+    if (i?.status === "running" && i?.ip && await tcpProbe(i.ip, 22)) return;
+    await new Promise(r => setTimeout(r, 200));
+  }
+  throw new Error(
+    `ensureWellRunningForTalk: '${wellName}' not SSH-ready 5s post-start (last: status=${last?.status} ip=${last?.ip})`,
+  );
+}
+
+async function tcpProbe(host: string, port: number): Promise<boolean> {
+  try {
+    const sock = await Bun.connect({
+      hostname: host,
+      port,
+      socket: { data() {}, open() {}, close() {}, error() {} },
+    });
+    sock.end();
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function ensureWellHasIp(wellName: string): Promise<void> {
+  const base = process.env.WELL_API_URL ?? "http://127.0.0.1:7878";
+  const token = await wellsToken();
+  const info = await fetch(`${base}/v1/wells/${encodeURIComponent(wellName)}`, {
+    headers: { Authorization: `Bearer ${token}` },
+  }).then(r => r.json()).catch(() => null);
+  if (info?.ip) return; // already good
+  // Cycle the VM to refresh DHCP.
+  await fetch(`${base}/v1/wells/${encodeURIComponent(wellName)}/stop`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${token}` },
+  }).catch(() => {});
+  await new Promise((r) => setTimeout(r, 500));
+  const sr = await fetch(`${base}/v1/wells/${encodeURIComponent(wellName)}/start`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  if (!sr.ok) {
+    throw new Error(`ensureWellHasIp: /start '${wellName}' failed: ${sr.status} ${(await sr.text()).slice(0, 200)}`);
+  }
+  const deadline = Date.now() + 30_000;
+  while (Date.now() < deadline) {
+    const i2 = await fetch(`${base}/v1/wells/${encodeURIComponent(wellName)}`, {
+      headers: { Authorization: `Bearer ${token}` },
+    }).then(r => r.json()).catch(() => null);
+    if (i2?.ip) return;
+    await new Promise((r) => setTimeout(r, 1000));
+  }
+  throw new Error(`ensureWellHasIp: '${wellName}' never got an IP within 30s after restart`);
+}
+
 // Consume one warm v1 egg from the pool. Atomically marks it as claimed in
 // eggs.json and returns the well-name to use as the cell's backing well.
 // Returns null if pool is empty (caller falls back to cold-fork).
-async function consumeV1Egg(cellName: string): Promise<string | null> {
-  let chosen: string | null = null;
+async function consumeV1Egg(): Promise<{ wellName: string; cellName: string; tier: 2 | 4 } | null> {
+  let chosen: { wellName: string; cellName: string; tier: 2 | 4 } | null = null;
   await withEggLock(async () => {
     const file = await loadEggs();
-    const warm = file.eggs.find(
-      (e) => e.state === "warm" && e.variant_signature === V1_EGG_VARIANT_SIGNATURE,
-    );
+    // Prefer hot (running) eggs first — they're instant-consume. Fall
+    // back to cold (hibernated) only when no hot egg is available.
+    const warm =
+      file.eggs.find(
+        (e) =>
+          e.state === "warm" &&
+          e.variant_signature === V1_EGG_VARIANT_SIGNATURE &&
+          (e as any).tier === 4,
+      ) ??
+      file.eggs.find(
+        (e) => e.state === "warm" && e.variant_signature === V1_EGG_VARIANT_SIGNATURE,
+      );
     if (!warm) return;
     warm.state = "claimed";
     warm.claimed_at = new Date().toISOString();
+    const cellName = (warm as any).cell_name ?? ("cell-" + warm.well_name.slice("egg-".length));
     warm.claimed_by = cellName;
-    chosen = warm.well_name;
+    chosen = {
+      wellName: warm.well_name,
+      cellName,
+      tier: ((warm as any).tier ?? 2) as 2 | 4,
+    };
     await saveEggs(file);
   });
   return chosen;
 }
 
-// Wake a hibernated egg. Returns when welld confirms the VM is running again.
-async function wakeV1Egg(wellName: string): Promise<void> {
+// Resume an egg to running state. The right endpoint depends on prior state:
+//   - Tier 4, currently running: no-op (truly hot)
+//   - Tier 4, currently stopped (welld restart killed it): /start
+//   - Tier 2, hibernated: /wake (restores RAM from disk in ~2-3s)
+async function wakeV1Egg(wellName: string, tier: 2 | 4 = 2): Promise<void> {
   const base = process.env.WELL_API_URL ?? "http://127.0.0.1:7878";
+  if (tier === 4) {
+    const info = await fetch(`${base}/v1/wells/${encodeURIComponent(wellName)}`, {
+      headers: { Authorization: `Bearer ${await wellsToken()}` },
+    }).then(r => r.json()).catch(() => null);
+    if (info?.status === "running") return; // truly hot, no-op
+    // welld bounce stopped the VM — use /start (not /wake, which is for hibernated).
+    const sr = await fetch(`${base}/v1/wells/${encodeURIComponent(wellName)}/start`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${await wellsToken()}` },
+    });
+    if (!sr.ok) {
+      throw new Error(`start '${wellName}' failed: ${sr.status} ${(await sr.text()).slice(0, 300)}`);
+    }
+    return;
+  }
   const r = await fetch(
     `${base}/v1/wells/${encodeURIComponent(wellName)}/wake`,
     {
@@ -2104,9 +2698,13 @@ async function markV1EggLive(wellName: string): Promise<void> {
   });
 }
 
-// v1 pool target depth. Always-on, single warm egg ready to go.
+// v1 pool target depth. Pete wants 5–10 agents spinnable fast, so we
+// keep a deep pool of warm eggs. Each egg is a hibernated VM (~1.5GB
+// disk dehydrated, ~1GB live memory image). Refill is fire-and-forget
+// after each birth — pool drains during burst, replenishes in the
+// background.
 // Future: configurable in eggs-config or launchd refill plist.
-const V1_POOL_TARGET_DEPTH = 1;
+const V1_POOL_TARGET_DEPTH = 10;
 
 // Count warm v1 eggs currently in the pool.
 async function countV1WarmEggs(): Promise<number> {
@@ -2116,10 +2714,80 @@ async function countV1WarmEggs(): Promise<number> {
   ).length;
 }
 
-// Refill the v1 pool to the target depth. Bakes new eggs serially (one at
-// a time) — wells's mother concurrency limit serializes anyway, and serial
-// keeps welld traffic predictable. Returns the number of eggs baked.
+// Promote a cold (hibernated) egg to hot (running). Faster than baking a
+// fresh hot egg from scratch: just /wake the well and update its tier
+// marker. The well was created with hibernate_ready: true, but keeping it
+// running (never re-hibernating) is fine — that flag is only consulted by
+// wells when /hibernate is called. Returns true if a cold egg was promoted.
+async function promoteOneColdToHot(): Promise<boolean> {
+  type Target = { wellName: string; cellName: string };
+  let target: Target | null = null;
+  await withEggLock(async () => {
+    const file = await loadEggs();
+    const cold = file.eggs.find(
+      (e) =>
+        e.state === "warm" &&
+        e.variant_signature === V1_EGG_VARIANT_SIGNATURE &&
+        (e as any).tier === 2,
+    );
+    if (!cold) return;
+    target = {
+      wellName: cold.well_name,
+      cellName: (cold as any).cell_name ?? "cell-" + cold.well_name.slice("egg-".length),
+    };
+  });
+  const t = target as Target | null;
+  if (!t) return false;
+
+  // Wake the cold egg. /wake restores RAM from disk (~2-3s). After this
+  // the well is in `running` state and we leave it there.
+  try {
+    await wakeV1Egg(t.wellName, 2);
+  } catch (e) {
+    console.warn(
+      `! promote cold→hot failed for ${t.wellName}: ${e instanceof Error ? e.message : String(e)}`,
+    );
+    return false;
+  }
+
+  // Flip the tier marker. From here on, consume + dashboard treat it as hot.
+  await withEggLock(async () => {
+    const file = await loadEggs();
+    const egg = file.eggs.find((e) => e.well_name === t.wellName);
+    if (egg) {
+      (egg as any).tier = 4;
+      await saveEggs(file);
+    }
+  });
+  return true;
+}
+
+// Refill the v1 pool to the target depth.
+// Two-pass strategy:
+//   1. Promote cold→hot until hot count is at V1_HOT_POOL_TARGET. Promote
+//      is fast (~3s, just /wake) so the hot buffer replenishes quickly
+//      after a consume.
+//   2. Bake new cold eggs serially until total pool is at target. Bake is
+//      slower (~30s/egg) — runs as background fire-and-forget.
+// Serial bakes are required: wells's mother concurrency limit + welld
+// traffic stability. Returns the number of eggs baked (does not count
+// promotions).
 async function refillV1PoolToDepth(target: number = V1_POOL_TARGET_DEPTH): Promise<number> {
+  // Pass 1: promote cold→hot until hot count is at target. Caps at the
+  // smaller of (hot target, current pool size) — never promotes more
+  // than exists to promote.
+  while (true) {
+    const hot = await countV1HotEggs();
+    if (hot >= V1_HOT_POOL_TARGET) break;
+    const cold = await countV1ColdEggs();
+    if (cold === 0) break;
+    const ok = await promoteOneColdToHot();
+    if (!ok) break;
+  }
+
+  // Pass 2: bake fresh cold eggs until total pool is at depth target.
+  // bakeV1Egg() decides the tier internally (it'll bake hot if hot count
+  // is still below target after pass 1 — e.g., the pool was empty).
   let baked = 0;
   while ((await countV1WarmEggs()) < target) {
     try {
@@ -2768,6 +3436,10 @@ async function cmdCheckpoint(name: string) {
 type StreamOpts = {
   interactive: boolean;
   initialMessage?: string;
+  // Fires the first time pi streams a visible response token to stdout.
+  // Used by cmdCreateV1Fast to measure birth-to-first-token latency
+  // (the V1.3 metric) and persist it per-cell for the dashboard.
+  onFirstToken?: () => void;
 };
 
 async function streamCellBridge(name: string, opts: StreamOpts): Promise<void> {
@@ -2786,7 +3458,7 @@ async function streamCellBridge(name: string, opts: StreamOpts): Promise<void> {
   let connectedLocally = ws !== null;
   if (ws) {
     process.stdout.write("\r\x1b[K");
-    process.stdout.write(`\x1b[2m── connected via local welld\x1b[0m\n`);
+    process.stdout.write(`\x1b[2m── connected via local bridge\x1b[0m\n`);
   } else {
     const host = await resolveWellHost(name, secret);
     if (!host) {
@@ -2891,20 +3563,25 @@ async function streamCellBridge(name: string, opts: StreamOpts): Promise<void> {
       const ev = event.assistantMessageEvent;
       if (ev?.type === "text_delta" && typeof ev.delta === "string") {
         if (activeThinking) { process.stdout.write("\n"); activeThinking = false; }
-        if (!activeText) process.stdout.write(`\x1b[1m${name}>\x1b[0m `);
+        if (!activeText) {
+          process.stdout.write(`\x1b[1m${name}>\x1b[0m `);
+          // First visible response token → fire one-shot callback (birth
+          // latency capture). Wrapped in try because perf logging should
+          // never break the talk flow.
+          if (opts.onFirstToken) {
+            try { opts.onFirstToken(); } catch {}
+            opts.onFirstToken = undefined;
+          }
+        }
         process.stdout.write(ev.delta);
         activeText = true;
         if (useLocalDrive) replyAccum += ev.delta;
-      } else if (ev?.type === "thinking_start") {
-        // Mark "thinking" with a static label, not the streaming text —
-        // the body is intentionally hidden so the conversation stays
-        // readable. Replaced with the actual reply once it lands.
-        if (!activeThinking) {
-          process.stdout.write(`\x1b[2m[thinking…]\x1b[0m`);
-          activeThinking = true;
-        }
-      } else if (ev?.type === "thinking_end") {
-        if (activeThinking) { process.stdout.write("\n"); activeThinking = false; }
+      } else if (ev?.type === "thinking_start" || ev?.type === "thinking_end") {
+        // v1 cells run thinking=off — but gpt-5.5 codex still passes
+        // through its reasoning pipeline and emits empty thinking
+        // start/end events. Suppress the [thinking…] indicator entirely;
+        // it's noise when there's no visible reasoning to surface and
+        // it can land mid-stream and corrupt the user's input line.
       } else if (ev?.type === "toolcall_end" && ev.toolCall) {
         // Stash the call's args by id so we can render them alongside
         // the result when tool_execution_end fires.
@@ -3042,8 +3719,15 @@ async function streamCellBridge(name: string, opts: StreamOpts): Promise<void> {
 // keep their original `egg-<harness>-<hash>` name). Welld dispatches by
 // well name, so we resolve the well-name first via wellNameForCell.
 async function tryConnectLocalWelld(name: string, secret: string): Promise<WebSocket | null> {
-  // Quick liveness probe — if welld isn't running we shouldn't burn the
-  // WS upgrade timeout to find out.
+  // First try the host-bridge daemon (cli/host-bridge.ts) on :7880. It
+  // owns the SSH-to-cell + pi spawn — talks-CLI just opens a WS to it.
+  // This sidesteps welld's vhost-dispatch + DHCP-lease-record drift.
+  const hb = await tryConnectHostBridge(name, secret);
+  if (hb) return hb;
+
+  // Fallback: legacy welld vhost-dispatch (for cells whose well still
+  // runs the in-cell well-site bridge). Kept until host-bridge handles
+  // every cell.
   try {
     const probe = await fetch("http://127.0.0.1:7878/healthz", {
       signal: AbortSignal.timeout(500),
@@ -3069,6 +3753,185 @@ async function tryConnectLocalWelld(name: string, secret: string): Promise<WebSo
     } as any);
     await new Promise<void>((resolve, reject) => {
       const t = setTimeout(() => reject(new Error("local-welld timeout")), 4000);
+      ws.addEventListener("open", () => { clearTimeout(t); resolve(); }, { once: true });
+      ws.addEventListener("error", (e: any) => { clearTimeout(t); reject(new Error(String(e?.message ?? e).slice(0, 120))); }, { once: true });
+      ws.addEventListener("close", (e: any) => { clearTimeout(t); reject(new Error(`closed ${e?.code ?? "?"}`)); }, { once: true });
+    });
+    return ws;
+  } catch {
+    return null;
+  }
+}
+
+// Fire-and-forget: nudge host-bridge to spawn ssh+pi for a cell so that
+// the very first `cells talk` lands on an already-warm pi (skips the
+// ~ssh+handshake cost that otherwise blew V1.3's 5s first-token target).
+// Called from cmdCreateV1Fast once the well is verified reachable. Safe
+// Tiny Deferred — manual resolver. Used for the first-token signal that
+// the animation listens on; far less ceremony than wiring an EventEmitter
+// through the call chain. Resolves at most once.
+type Deferred<T> = { promise: Promise<T>; resolve: (v: T) => void; reject: (e: unknown) => void; settled: boolean };
+function makeDeferred<T>(): Deferred<T> {
+  let resolve!: (v: T) => void;
+  let reject!: (e: unknown) => void;
+  const promise = new Promise<T>((res, rej) => { resolve = res; reject = rej; });
+  const d: Deferred<T> = {
+    promise,
+    settled: false,
+    resolve: (v) => { if (!d.settled) { d.settled = true; resolve(v); } },
+    reject:  (e) => { if (!d.settled) { d.settled = true; reject(e);  } },
+  };
+  return d;
+}
+
+// captureGreeting — birth-time pre-send. Opens a WS to host-bridge while
+// the animation is still playing, fires the seed prompt as soon as pi is
+// ready, and accumulates the streamed reply. The animation watches the
+// returned `firstTokenSeen` signal so it can end the moment pi starts
+// responding (no dead time between animation and greeting).
+//
+// Returns a handle:
+//   - firstTokenSeen: resolves when pi streams its first text byte
+//   - release(): drain the buffered greeting to stdout AND start streaming
+//     subsequent deltas live; safe to call from the animation-done path
+//   - done: resolves with the full greeting text on pi's agent_end
+//
+// Failure modes are swallowed: if host-bridge isn't reachable or pi errors,
+// the returned handle's `done` rejects, but `firstTokenSeen` never resolves
+// — so the animation will naturally hit its maxDurationMs cap.
+type GreetingHandle = {
+  firstTokenSeen: Promise<void>;
+  done: Promise<string>;
+  release: () => void;
+};
+
+async function captureGreeting(
+  cellName: string,
+  seedText: string,
+): Promise<GreetingHandle> {
+  const secret = await readSecret("CELLS_PROXY_SECRET");
+  if (!secret) throw new Error("CELLS_PROXY_SECRET missing from ~/.cells/secrets.json");
+
+  // Same connect-path as streamCellBridge: local host-bridge first, cloud
+  // fallback. Don't print "── connecting…" — the animation owns the screen.
+  let ws: WebSocket | null = await tryConnectLocalWelld(cellName, secret);
+  if (!ws) {
+    const host = await resolveWellHost(cellName, secret);
+    if (!host) throw new Error(`could not resolve well host for ${cellName}`);
+    ws = await connectBridgeWS(host, secret);
+  }
+
+  const firstTokenDef = makeDeferred<void>();
+  const doneDef = makeDeferred<string>();
+  let released = false;
+  let prefixWritten = false;
+  let buffered = "";
+  let greeting = "";
+
+  const writePrefix = () => {
+    if (!prefixWritten) {
+      process.stdout.write(`\x1b[1m${cellName}>\x1b[0m `);
+      prefixWritten = true;
+    }
+  };
+
+  const emit = (delta: string) => {
+    if (released) {
+      writePrefix();
+      process.stdout.write(delta);
+    } else {
+      buffered += delta;
+    }
+  };
+
+  ws.addEventListener("message", (ev) => {
+    const data = typeof ev.data === "string" ? ev.data : new TextDecoder().decode(ev.data as any);
+    for (const raw of data.split("\n")) {
+      const line = raw.replace(/\r$/, "").trim();
+      if (!line) continue;
+      let event: any;
+      try { event = JSON.parse(line); } catch { continue; }
+
+      if (event.type === "message_update") {
+        const m = event.assistantMessageEvent;
+        if (m?.type === "text_delta" && typeof m.delta === "string") {
+          greeting += m.delta;
+          firstTokenDef.resolve();
+          emit(m.delta);
+        }
+      } else if (event.type === "agent_end") {
+        if (released) process.stdout.write("\n");
+        try { ws!.close(); } catch {}
+        doneDef.resolve(greeting);
+      } else if (event.type === "response" && event.success === false) {
+        try { ws!.close(); } catch {}
+        doneDef.reject(new Error(`pi error: ${event.error}`));
+      }
+    }
+  });
+
+  ws.addEventListener("close", () => {
+    if (!doneDef.settled) doneDef.reject(new Error("ws closed before agent_end"));
+  });
+  ws.addEventListener("error", (e: any) => {
+    if (!doneDef.settled) doneDef.reject(new Error(`ws error: ${String(e?.message ?? e).slice(0, 200)}`));
+  });
+
+  // Fire the seed prompt right away. Host-bridge's session queues prompts
+  // sent before pi finishes its switch_session/set_model handshake — so
+  // even if pi isn't ready the second we send, it'll dispatch as soon as
+  // pi-ready flips. No "still responding" race.
+  ws.send(JSON.stringify({ type: "prompt", message: seedText, streamingBehavior: "steer" }));
+
+  return {
+    firstTokenSeen: firstTokenDef.promise,
+    done: doneDef.promise,
+    release: () => {
+      if (released) return;
+      released = true;
+      if (buffered) {
+        writePrefix();
+        process.stdout.write(buffered);
+        buffered = "";
+      }
+    },
+  };
+}
+
+// to invoke when the daemon isn't running — silently no-ops.
+async function prewarmHostBridge(cellName: string): Promise<void> {
+  try {
+    const secret = await readSecret("CELLS_PROXY_SECRET");
+    if (!secret) return;
+    const port = Number(process.env.HOST_BRIDGE_PORT ?? 7880);
+    await fetch(`http://127.0.0.1:${port}/prewarm?cell=${encodeURIComponent(cellName)}`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${secret}` },
+      signal: AbortSignal.timeout(35_000),
+    });
+  } catch {
+    // Pure perf optimization — birth must not fail because prewarm did.
+  }
+}
+
+// Dial the host-bridge daemon. Returns null if daemon not running or
+// the cell isn't reachable through it.
+async function tryConnectHostBridge(name: string, secret: string): Promise<WebSocket | null> {
+  const port = Number(process.env.HOST_BRIDGE_PORT ?? 7880);
+  try {
+    const probe = await fetch(`http://127.0.0.1:${port}/healthz`, {
+      signal: AbortSignal.timeout(500),
+    });
+    if (!probe.ok) return null;
+  } catch {
+    return null;
+  }
+  try {
+    const ws = new WebSocket(`ws://127.0.0.1:${port}/agent?cell=${encodeURIComponent(name)}`, {
+      headers: { authorization: `Bearer ${secret}` },
+    } as any);
+    await new Promise<void>((resolve, reject) => {
+      const t = setTimeout(() => reject(new Error("host-bridge timeout")), 8000);
       ws.addEventListener("open", () => { clearTimeout(t); resolve(); }, { once: true });
       ws.addEventListener("error", (e: any) => { clearTimeout(t); reject(new Error(String(e?.message ?? e).slice(0, 120))); }, { once: true });
       ws.addEventListener("close", (e: any) => { clearTimeout(t); reject(new Error(`closed ${e?.code ?? "?"}`)); }, { once: true });
@@ -3348,6 +4211,87 @@ async function cmdUnschedulePiPatches() {
   if (existsSync(piPatchesPlistPath())) {
     await unlink(piPatchesPlistPath());
     console.log(`✓ removed ${piPatchesPlistPath()}`);
+  } else {
+    console.log("(no plist found)");
+  }
+  console.log("✓ unscheduled");
+}
+
+const HOST_BRIDGE_LABEL = "com.pete.cells-host-bridge";
+
+function hostBridgePlistPath(): string {
+  return join(homedir(), "Library/LaunchAgents", `${HOST_BRIDGE_LABEL}.plist`);
+}
+
+function buildHostBridgePlist(): string {
+  const bunBin = "/Users/pete/.bun/bin/bun";
+  const script = join(REPO_ROOT, "cli/host-bridge.ts");
+  const logsDir = join(homedir(), ".cells", "logs");
+  const path = "/Users/pete/.bun/bin:/Users/pete/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin";
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>${HOST_BRIDGE_LABEL}</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>${bunBin}</string>
+    <string>run</string>
+    <string>${script}</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>${path}</string>
+    <key>HOME</key>
+    <string>${homedir()}</string>
+  </dict>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>StandardOutPath</key>
+  <string>${logsDir}/host-bridge.log</string>
+  <key>StandardErrorPath</key>
+  <string>${logsDir}/host-bridge.err</string>
+</dict>
+</plist>
+`;
+}
+
+async function cmdScheduleHostBridge() {
+  const logsDir = join(homedir(), ".cells", "logs");
+  await mkdir(logsDir, { recursive: true });
+  await mkdir(dirname(hostBridgePlistPath()), { recursive: true });
+  await writeFile(hostBridgePlistPath(), buildHostBridgePlist());
+  console.log(`✓ wrote plist: ${hostBridgePlistPath()}`);
+  const uid = process.getuid?.() ?? 501;
+  await Bun.spawn(["launchctl", "bootout", `gui/${uid}/${HOST_BRIDGE_LABEL}`], {
+    stdin: "ignore", stdout: "ignore", stderr: "ignore",
+  }).exited;
+  const proc = Bun.spawn(["launchctl", "bootstrap", `gui/${uid}`, hostBridgePlistPath()], {
+    stdin: "ignore", stdout: "inherit", stderr: "inherit",
+  });
+  const code = await proc.exited;
+  if (code !== 0) {
+    console.error("✗ launchctl bootstrap failed");
+    process.exit(1);
+  }
+  console.log(`✓ scheduled: host-bridge daemon (RunAtLoad + KeepAlive)`);
+  console.log(`  logs: ${logsDir}/host-bridge.log (stdout), host-bridge.err (stderr)`);
+  console.log(`  port: 127.0.0.1:7880`);
+  console.log(`  unschedule with: cells unschedule-host-bridge`);
+}
+
+async function cmdUnscheduleHostBridge() {
+  const uid = process.getuid?.() ?? 501;
+  await Bun.spawn(["launchctl", "bootout", `gui/${uid}/${HOST_BRIDGE_LABEL}`], {
+    stdin: "ignore", stdout: "inherit", stderr: "inherit",
+  }).exited;
+  if (existsSync(hostBridgePlistPath())) {
+    await unlink(hostBridgePlistPath());
+    console.log(`✓ removed ${hostBridgePlistPath()}`);
   } else {
     console.log("(no plist found)");
   }
@@ -5005,7 +5949,11 @@ async function cmdEgg(args: string[]) {
     console.log("baking one v1 egg…");
     const t0 = Date.now();
     const wellName = await bakeV1Egg();
-    console.log(`✓ egg '${wellName}' warm + hibernated (${((Date.now() - t0) / 1000).toFixed(1)}s)`);
+    // Look up the tier we just assigned for accurate logging.
+    const eggs = await loadEggs();
+    const tier = (eggs.eggs.find((e) => e.well_name === wellName) as any)?.tier ?? 2;
+    const state = tier === 4 ? "hot (running)" : "cold (hibernated)";
+    console.log(`✓ egg '${wellName}' ${state} (${((Date.now() - t0) / 1000).toFixed(1)}s)`);
     return;
   }
   if (sub === "refill-v1") {
@@ -5154,12 +6102,18 @@ async function cmdEggList() {
     console.log("(no eggs in pool)");
     return;
   }
-  // Header
+  // Header — `state` shows hot/cold for warm eggs, claimed/live otherwise.
   console.log("id      state       variant                                                    age       claimed_by");
   console.log("------  ----------  ---------------------------------------------------------  --------  -----------");
   for (const e of file.eggs) {
     const id = e.id.padEnd(6);
-    const state = e.state.padEnd(10);
+    let stateLabel: string;
+    if (e.state === "warm") {
+      stateLabel = (e as any).tier === 4 ? "hot" : "cold";
+    } else {
+      stateLabel = e.state;
+    }
+    const state = stateLabel.padEnd(10);
     const sig = e.variant_signature.padEnd(57).slice(0, 57);
     const age = fmtAge(e.born_at).padEnd(8);
     const by = e.claimed_by ?? "—";
@@ -5431,14 +6385,9 @@ async function cmdBake(opts: BakeOpts) {
     console.log(`→ wait for well-firstboot done`);
     await waitForCloudInit(sourceName);
 
-    // 2b. Create user `cell` with HOME=/cell. Wells's substrate ships user
-    //     `well` for its own bookkeeping; the cell is a separate tenant
-    //     and gets its own user + top-level home. SSH to a cell lands here
-    //     directly. /cell sits outside /home so wells's per-fork rinse
-    //     (which scopes to /home/) leaves cells's image content alone.
-    //     See docs/cell-filesystem.md for the layout rationale.
-    console.log(`→ create user cell + /cell home`);
-    await bakeCreateCellUser(sourceName);
+    // 2b. (Removed) — as of wells-stable-2026-05-12h ubuntu-base ships the
+    //     cell user, /cell home, cell sudoers, ubuntu→cell delegation, and
+    //     /cell/.ssh/authorized_keys. Cells-side useradd is no-op now.
 
     // 3. Push DNA — cells-specific package.json, .pi/, scripts/, site/, etc.
     console.log(`→ push DNA → /cell`);
@@ -5519,6 +6468,11 @@ echo "bun: $(/home/well/.bun/bin/bun --version 2>&1 | head -1 || echo MISSING)"`
     if (!linkRes.ok) {
       throw new Error(`cells bin chmod failed: ${linkRes.stderr.slice(0, 200) || linkRes.stdout.slice(0, 200)}`);
     }
+
+    // 7c. (REMOVED) well-site.service install. Bridge logic moved to the
+    //     host-side daemon (cli/host-bridge.ts) which SSHs into the cell
+    //     and spawns pi on demand. Cells become "just a Linux VM with pi
+    //     installed" — no in-cell server. See plan: fizzy-wobbling-globe.md.
 
     // 7b. Force fs journal commit before save. Empirically (2026-05-10)
     //     wells's server-side `stop+save` can hard-kill the guest before
@@ -5751,40 +6705,6 @@ async function pushLocalDirToWellAsCell(name: string, localPath: string, remoteP
   }
 }
 
-// Create user `cell` with HOME=/cell on the bake source well. Idempotent
-// (safe to re-run — the `id cell` short-circuit prevents useradd from
-// erroring on a re-bake against an already-set-up source).
-async function bakeCreateCellUser(name: string): Promise<void> {
-  const r = await wellExecCapture(name, `set -euo pipefail
-# Already set up? bail clean.
-if id cell >/dev/null 2>&1; then
-  echo "user cell already exists"
-else
-  sudo useradd -d /cell -m -s /bin/bash -G sudo cell
-  echo "cell ALL=(ALL) NOPASSWD:ALL" | sudo tee /etc/sudoers.d/90-cell >/dev/null
-  sudo chmod 440 /etc/sudoers.d/90-cell
-fi
-# Grant ubuntu user NOPASSWD sudo to cell. Wells's services API hardcodes
-# User=ubuntu in the systemd unit (see W.28); cells's site service body
-# wraps in \`sudo -u cell\` so pi runs as cell. ubuntu's general sudo via
-# cloud-init default is unreliable to count on, so we set this explicitly.
-echo "ubuntu ALL=(cell) NOPASSWD:ALL" | sudo tee /etc/sudoers.d/91-ubuntu-to-cell >/dev/null
-sudo chmod 440 /etc/sudoers.d/91-ubuntu-to-cell
-# Ensure /cell exists, owned by cell. useradd -m only creates HOME if
-# it doesn't already exist; chown is belt-and-suspenders.
-sudo mkdir -p /cell
-sudo chown cell:cell /cell
-# authorized_keys: cell shares well's host-side keys so SSH-as-cell
-# works the same as SSH-as-well from the host bridge.
-sudo install -d -o cell -g cell -m 0700 /cell/.ssh
-if [ -f /home/well/.ssh/authorized_keys ]; then
-  sudo install -o cell -g cell -m 0600 /home/well/.ssh/authorized_keys /cell/.ssh/authorized_keys
-fi`);
-  if (!r.ok) {
-    throw new Error(`create cell user failed: ${r.stderr.slice(0, 400) || r.stdout.slice(0, 400)}`);
-  }
-}
-
 async function bakeRunBunInstall(name: string): Promise<void> {
   // pi is installed via npm -g (sudo) so its launcher lands at
   // /usr/local/bin/pi — on the default system PATH for every shell,
@@ -5869,6 +6789,8 @@ switch (sub) {
   case "sync":               await cmdSync(rest[0] || undefined); break;
   case "schedule-pi-patches":   await cmdSchedulePiPatches(); break;
   case "unschedule-pi-patches": await cmdUnschedulePiPatches(); break;
+  case "schedule-host-bridge":  await cmdScheduleHostBridge(); break;
+  case "unschedule-host-bridge":await cmdUnscheduleHostBridge(); break;
   case "schedule-pulse":        await cmdSchedulePulse(); break;
   case "unschedule-pulse":      await cmdUnschedulePulse(); break;
   case "schedule-egg-refill":   await cmdScheduleEggRefill(); break;
