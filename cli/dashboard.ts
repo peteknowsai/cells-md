@@ -7,7 +7,7 @@
  *
  * Reads:
  *   ~/.cells/cells.json  (cell registry)
- *   ~/.cells/eggs.json   (egg pool)
+ *   ~/.cells/pool.json   (pool members; falls back to legacy eggs.json)
  *   welld :7878 /healthz + /v1/wells (substrate liveness + IPs)
  *   host-bridge :7880 /healthz (open sessions)
  *
@@ -27,7 +27,7 @@ const HOST_BRIDGE_API = `http://127.0.0.1:${process.env.HOST_BRIDGE_PORT ?? 7880
 
 // ── Types ─────────────────────────────────────────────────────────────────
 
-type EggSnapshot = {
+type PoolMemberSnapshot = {
   id: string;
   well_name: string;
   state: string;
@@ -44,11 +44,11 @@ type EggSnapshot = {
 
 // Map variant_signature → user-facing harness + model strings. Add rows as
 // new variant eggs ship (v2 will introduce claude-code-* and codex-* variants).
-const EGG_VARIANT_META: Record<string, { harness: string; model: string }> = {
+const POOL_VARIANT_META: Record<string, { harness: string; model: string }> = {
   "v1-generic": { harness: "pi", model: "deepseek-v4-flash" },
 };
-function eggMeta(variantSig: string | undefined): { harness: string; model: string } {
-  if (variantSig && EGG_VARIANT_META[variantSig]) return EGG_VARIANT_META[variantSig];
+function poolMemberMeta(variantSig: string | undefined): { harness: string; model: string } {
+  if (variantSig && POOL_VARIANT_META[variantSig]) return POOL_VARIANT_META[variantSig];
   return { harness: "?", model: "?" };
 }
 
@@ -71,7 +71,7 @@ type CellSnapshot = {
 
 type StatePayload = {
   ts: string;
-  eggs: {
+  pool: {
     total: number;
     warm: number;
     hot: number;       // tier 4: running, instant-claim
@@ -81,7 +81,7 @@ type StatePayload = {
     culling: number;
     target_depth: number;
     target_hot: number;
-    list: EggSnapshot[];
+    list: PoolMemberSnapshot[];
   };
   cells: CellSnapshot[];
   daemons: {
@@ -149,7 +149,14 @@ async function loadFirstTokenIndex(): Promise<Map<string, number>> {
 }
 
 async function buildState(): Promise<StatePayload> {
-  const eggsFile = await readJSON<{ eggs: any[] }>(join(homedir(), ".cells", "eggs.json"), { eggs: [] });
+  // Prefer pool.json (post-rename); fall back to legacy eggs.json.
+  const poolPath = join(homedir(), ".cells", "pool.json");
+  const legacyPath = join(homedir(), ".cells", "eggs.json");
+  const poolRaw = await readJSON<{ members?: any[]; eggs?: any[] }>(
+    poolPath,
+    await readJSON<{ members?: any[]; eggs?: any[] }>(legacyPath, { members: [] }),
+  );
+  const poolEntries = poolRaw.members ?? poolRaw.eggs ?? [];
   const regFile = await readJSON<{ cells: any[] }>(join(homedir(), ".cells", "cells.json"), { cells: [] });
   const token = await wellsToken();
   const [welldHealth, welldWells, hbHealth, firstTokenIdx] = await Promise.all([
@@ -163,8 +170,8 @@ async function buildState(): Promise<StatePayload> {
   for (const w of welldWells?.wells ?? []) wellByName.set(w.name, w);
 
   // Eggs
-  const eggsList: EggSnapshot[] = (eggsFile.eggs ?? []).map((e: any) => {
-    const meta = eggMeta(e.variant_signature);
+  const poolMembers: PoolMemberSnapshot[] = poolEntries.map((e: any) => {
+    const meta = poolMemberMeta(e.variant_signature);
     return {
       id: String(e.id ?? ""),
       well_name: String(e.well_name ?? ""),
@@ -176,8 +183,8 @@ async function buildState(): Promise<StatePayload> {
       model: meta.model,
     };
   });
-  const eggCounts: Record<string, number> = {};
-  for (const e of eggsList) eggCounts[e.state] = (eggCounts[e.state] ?? 0) + 1;
+  const memberCounts: Record<string, number> = {};
+  for (const e of poolMembers) memberCounts[e.state] = (memberCounts[e.state] ?? 0) + 1;
 
   // Cells
   const cells: CellSnapshot[] = (regFile.cells ?? []).map((c: any) => {
@@ -205,22 +212,22 @@ async function buildState(): Promise<StatePayload> {
   // Newest first
   cells.sort((a, b) => a.age_minutes - b.age_minutes);
 
-  const hot = eggsList.filter((e) => e.state === "warm" && e.tier === 4).length;
-  const cold = eggsList.filter((e) => e.state === "warm" && e.tier === 2).length;
+  const hot = poolMembers.filter((e) => e.state === "warm" && e.tier === 4).length;
+  const cold = poolMembers.filter((e) => e.state === "warm" && e.tier === 2).length;
 
   return {
     ts: new Date().toISOString(),
-    eggs: {
-      total: eggsList.length,
-      warm: eggCounts.warm ?? 0,
+    pool: {
+      total: poolMembers.length,
+      warm: memberCounts.warm ?? 0,
       hot,
       cold,
-      claimed: eggCounts.claimed ?? 0,
-      live: eggCounts.live ?? 0,
-      culling: eggCounts.culling ?? 0,
+      claimed: memberCounts.claimed ?? 0,
+      live: memberCounts.live ?? 0,
+      culling: memberCounts.culling ?? 0,
       target_depth: 10,    // matches V1_POOL_TARGET_DEPTH
       target_hot: 10,      // matches V1_HOT_POOL_TARGET (pure-hot v1)
-      list: eggsList.sort((a, b) => {
+      list: poolMembers.sort((a, b) => {
         // warm first, then claimed/culling, live last; secondary: youngest first
         const rank = (s: string) => (s === "warm" ? 0 : s === "claimed" ? 1 : s === "culling" ? 2 : 3);
         const r = rank(a.state) - rank(b.state);
@@ -479,9 +486,9 @@ const HTML = `<!DOCTYPE html>
   <div class="card">
     <div class="label">Pool</div>
     <div class="big">
-      <span id="egg-warm">—</span><span class="small" id="egg-target"></span>
+      <span id="pool-warm">—</span><span class="small" id="pool-target"></span>
     </div>
-    <div class="sub" id="egg-sub"></div>
+    <div class="sub" id="pool-sub"></div>
   </div>
   <div class="card">
     <div class="label">Open talk sessions</div>
@@ -510,8 +517,8 @@ const HTML = `<!DOCTYPE html>
   </tbody>
 </table>
 
-<h2>Eggs <span class="muted" style="text-transform: none; letter-spacing: 0; font-weight: 400; font-size: 12px;" id="egg-headline"></span></h2>
-<table id="eggs-table">
+<h2>Pool <span class="muted" style="text-transform: none; letter-spacing: 0; font-weight: 400; font-size: 12px;" id="pool-headline"></span></h2>
+<table id="pool-table">
   <thead>
     <tr>
       <th>Egg</th>
@@ -523,7 +530,7 @@ const HTML = `<!DOCTYPE html>
       <th>Claimed by</th>
     </tr>
   </thead>
-  <tbody id="eggs-body">
+  <tbody id="pool-body">
     <tr class="empty"><td colspan="7">…</td></tr>
   </tbody>
 </table>
@@ -570,11 +577,11 @@ const HTML = `<!DOCTYPE html>
     setText("cell-count", s.cells.length);
     const warmingCount = s.cells.filter(c => c.status === "warming").length;
     setText("cell-sub", warmingCount > 0 ? warmingCount + " warming" : "all alive");
-    setText("egg-warm", s.eggs.warm);
-    setText("egg-target", "/" + s.eggs.target_depth);
+    setText("pool-warm", s.pool.warm);
+    setText("pool-target", "/" + s.pool.target_depth);
     setText(
       "egg-sub",
-      "hot " + s.eggs.hot + "/" + s.eggs.target_hot + " · cold " + s.eggs.cold,
+      "hot " + s.pool.hot + "/" + s.pool.target_hot + " · cold " + s.pool.cold,
     );
     setText("session-count", s.daemons.host_bridge.sessions);
 
@@ -638,24 +645,24 @@ const HTML = `<!DOCTYPE html>
     }
 
     // Eggs table
-    const eggsBody = $("eggs-body");
-    eggsBody.innerHTML = "";
-    if (s.eggs.list.length === 0) {
+    const poolBody = $("pool-body");
+    poolBody.innerHTML = "";
+    if (s.pool.list.length === 0) {
       const tr = document.createElement("tr");
       tr.className = "empty";
       const td = document.createElement("td");
       td.colSpan = 7;
-      td.textContent = "no eggs in pool";
+      td.textContent = "no members in pool";
       tr.appendChild(td);
-      eggsBody.appendChild(tr);
+      poolBody.appendChild(tr);
     } else {
-      for (const e of s.eggs.list) {
+      for (const e of s.pool.list) {
         const tr = document.createElement("tr");
         const idTd = document.createElement("td");
         idTd.innerHTML = '<code>' + e.well_name + '</code>';
         tr.appendChild(idTd);
         const stTd = document.createElement("td");
-        // Show hot/cold for warm eggs (the user-facing tier), state otherwise.
+        // Show hot/cold for warm members (the user-facing tier), state otherwise.
         const stateLabel =
           e.state === "warm"
             ? (e.tier === 4 ? "hot" : e.tier === 2 ? "cold" : "warm")
@@ -685,10 +692,10 @@ const HTML = `<!DOCTYPE html>
           claimedTd.innerHTML = '<span class="muted">—</span>';
         }
         tr.appendChild(claimedTd);
-        eggsBody.appendChild(tr);
+        poolBody.appendChild(tr);
       }
     }
-    setText("egg-headline", "  ·  hot " + s.eggs.hot + " · cold " + s.eggs.cold + " · claimed " + s.eggs.claimed + " · hatched " + s.eggs.live + (s.eggs.culling ? " · culling " + s.eggs.culling : ""));
+    setText("pool-headline", "  ·  hot " + s.pool.hot + " · cold " + s.pool.cold + " · claimed " + s.pool.claimed + " · hatched " + s.pool.live + (s.pool.culling ? " · culling " + s.pool.culling : ""));
 
     // Daemons
     const daemonsEl = $("daemons");

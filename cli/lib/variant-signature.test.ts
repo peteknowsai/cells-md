@@ -2,7 +2,7 @@
 //   bun test cli/lib/variant-signature.test.ts
 
 import { test, expect } from "bun:test";
-import { formatVariant, parseVariant, variantHash, eggWellName, variantsEqual, poolKey, poolKeyMatches, type Variant } from "./variant-signature";
+import { formatVariant, parseVariant, variantHash, poolMemberWellName, variantsEqual, poolKey, poolKeyMatches, type Variant } from "./variant-signature";
 
 test("formatVariant produces canonical sorted form", () => {
   const v: Variant = {
@@ -57,9 +57,9 @@ test("variantHash ignores extension order", () => {
   expect(variantHash(a)).toBe(variantHash(b));
 });
 
-test("eggWellName strips non-alnum from model", () => {
+test("poolMemberWellName strips non-alnum from model and keeps egg- prefix", () => {
   const v: Variant = { model: "gpt-5.5", thinking: "high", extensions: [], packages: [], channels: [] };
-  expect(eggWellName(v)).toMatch(/^egg-gpt55-[0-9a-f]{6}$/);
+  expect(poolMemberWellName(v)).toMatch(/^egg-gpt55-[0-9a-f]{6}$/);
 });
 
 test("variantsEqual treats sort-order-different inputs as equal", () => {

@@ -10,7 +10,7 @@ import { createHash, randomBytes } from "node:crypto";
 import {
   formatVariant,
   variantHash,
-  eggWellName,
+  poolMemberWellName,
   poolKey,
   type Variant,
 } from "./lib/variant-signature";
@@ -26,8 +26,10 @@ const REGISTRY_DIR = join(homedir(), ".cells");
 const REGISTRY_PATH = join(REGISTRY_DIR, "cells.json");
 const CHANNELS_PATH = join(REGISTRY_DIR, "channels.json");
 const CONFIG_PATH = join(REGISTRY_DIR, "config.json");
-const EGGS_PATH = join(REGISTRY_DIR, "eggs.json");
-const EGGS_LOCK_PATH = join(REGISTRY_DIR, ".eggs.lock");
+const POOL_PATH = join(REGISTRY_DIR, "pool.json");
+const POOL_LOCK_PATH = join(REGISTRY_DIR, ".pool.lock");
+// Legacy path retained only for one-shot migration on first load after rename.
+const LEGACY_EGGS_JSON_PATH = join(REGISTRY_DIR, "eggs.json");
 const MOTHER_LOCK_PATH = join(REGISTRY_DIR, "mother.lock");
 
 // Cells-side control-panel for the wells substrate. Operator-owned.
@@ -271,7 +273,7 @@ async function saveRegistry(reg: Registry): Promise<void> {
   await writeFile(REGISTRY_PATH, JSON.stringify(reg, null, 2));
 }
 
-// ───── eggs.json — pre-warmed cell pool ─────
+// ───── pool.json — pre-warmed cell pool ─────
 //
 // Eggs are wells with the toolchain installed but no agent identity.
 // Hatching = claiming an egg, sed-substituting (NAME, MODEL, PROVIDER,
@@ -280,76 +282,95 @@ async function saveRegistry(reg: Registry): Promise<void> {
 // variant signature; if none, falls back to the slow build-from-scratch
 // path. See docs/eggs-phase-1.md for the full design.
 
-type EggState = "warm" | "claimed" | "live" | "culling";
+type PoolMemberState = "warm" | "claimed" | "live" | "culling";
 
-type Egg = {
+type PoolMember = {
   id: string;                  // 6-hex hash of variant signature
   well_name: string;         // egg-<modeltoken>-<id>
   variant_signature: string;   // canonical "v1:..." per cli/lib/variant-signature.ts
-  state: EggState;
+  state: PoolMemberState;
   born_at: string;
   claimed_at: string | null;
   claimed_by: string | null;   // cell name that hatched this egg
   max_age_at: string;          // born_at + 7 days; not enforced in Phase 1
 };
 
-type EggsFile = { version: 1; eggs: Egg[] };
+type PoolFile = { version: 1; members: PoolMember[] };
 
-async function loadEggs(): Promise<EggsFile> {
-  if (!existsSync(EGGS_PATH)) return { version: 1, eggs: [] };
-  try {
-    const parsed = JSON.parse(await readFile(EGGS_PATH, "utf-8"));
-    if (parsed?.version !== 1 || !Array.isArray(parsed.eggs)) {
-      throw new Error("eggs.json malformed (expected {version: 1, eggs: [...]})");
+// Read pool.json. If it doesn't exist but legacy eggs.json does (pre-rename
+// state on disk), migrate the legacy shape ({ eggs: [...] }) to the new
+// shape ({ members: [...] }) and write pool.json atomically. Renames the
+// legacy file to a backup so a second run is idempotent.
+async function loadPool(): Promise<PoolFile> {
+  if (!existsSync(POOL_PATH) && existsSync(LEGACY_EGGS_JSON_PATH)) {
+    try {
+      const legacy = JSON.parse(await readFile(LEGACY_EGGS_JSON_PATH, "utf-8"));
+      const members: PoolMember[] = Array.isArray(legacy?.eggs) ? legacy.eggs : [];
+      const migrated: PoolFile = { version: 1, members };
+      await mkdir(REGISTRY_DIR, { recursive: true });
+      const tmp = POOL_PATH + ".tmp";
+      await writeFile(tmp, JSON.stringify(migrated, null, 2));
+      await rename(tmp, POOL_PATH);
+      try { await rename(LEGACY_EGGS_JSON_PATH, LEGACY_EGGS_JSON_PATH + ".pre-pool-rename.bak"); } catch { /* best-effort */ }
+      return migrated;
+    } catch {
+      // Migration failed; fall through to fresh-state on POOL_PATH miss.
     }
-    return parsed as EggsFile;
+  }
+  if (!existsSync(POOL_PATH)) return { version: 1, members: [] };
+  try {
+    const parsed = JSON.parse(await readFile(POOL_PATH, "utf-8"));
+    if (parsed?.version !== 1 || !Array.isArray(parsed.members)) {
+      throw new Error("pool.json malformed (expected {version: 1, members: [...]})");
+    }
+    return parsed as PoolFile;
   } catch (e) {
-    if ((e as any).code === "ENOENT") return { version: 1, eggs: [] };
+    if ((e as any).code === "ENOENT") return { version: 1, members: [] };
     throw e;
   }
 }
 
-async function saveEggs(file: EggsFile): Promise<void> {
+async function savePool(file: PoolFile): Promise<void> {
   await mkdir(REGISTRY_DIR, { recursive: true });
   // Atomic write: tmp + rename. Survives mid-write crashes.
-  const tmp = EGGS_PATH + ".tmp";
+  const tmp = POOL_PATH + ".tmp";
   await writeFile(tmp, JSON.stringify(file, null, 2));
-  await rename(tmp, EGGS_PATH);
+  await rename(tmp, POOL_PATH);
 }
 
-// Cooperative file lock around eggs.json read-modify-write. Uses an
+// Cooperative file lock around pool.json read-modify-write. Uses an
 // O_EXCL sentinel so two processes cannot both think they hold the
 // lock. Lock timeout is 10s — if a process dies holding the lock the
 // next caller cleans up after the timeout and retries once.
-async function withEggLock<T>(fn: () => Promise<T>): Promise<T> {
+async function withPoolLock<T>(fn: () => Promise<T>): Promise<T> {
   await mkdir(REGISTRY_DIR, { recursive: true });
   const start = Date.now();
   while (Date.now() - start < 10_000) {
-    const fh = await Bun.file(EGGS_LOCK_PATH).exists() ? null : await tryAcquireLock();
+    const fh = await Bun.file(POOL_LOCK_PATH).exists() ? null : await tryAcquireLock();
     if (fh) {
       try {
         return await fn();
       } finally {
-        try { await unlink(EGGS_LOCK_PATH); } catch { /* ignore */ }
+        try { await unlink(POOL_LOCK_PATH); } catch { /* ignore */ }
       }
     }
     // Stale-lock recovery: if the lock is older than 30s, force-clear it.
     try {
-      const s = statSync(EGGS_LOCK_PATH);
+      const s = statSync(POOL_LOCK_PATH);
       if (Date.now() - s.mtimeMs > 30_000) {
-        try { await unlink(EGGS_LOCK_PATH); } catch { /* ignore */ }
+        try { await unlink(POOL_LOCK_PATH); } catch { /* ignore */ }
       }
     } catch { /* lock vanished mid-check */ }
     await new Promise((r) => setTimeout(r, 50));
   }
-  throw new Error(`could not acquire eggs lock at ${EGGS_LOCK_PATH} within 10s`);
+  throw new Error(`could not acquire pool lock at ${POOL_LOCK_PATH} within 10s`);
 }
 
 async function tryAcquireLock(): Promise<boolean> {
   // Bun has no O_EXCL helper; use node:fs.openSync with the wx flag.
   try {
     const fs = await import("node:fs");
-    const fd = fs.openSync(EGGS_LOCK_PATH, "wx");
+    const fd = fs.openSync(POOL_LOCK_PATH, "wx");
     fs.closeSync(fd);
     return true;
   } catch (e: any) {
@@ -362,44 +383,44 @@ async function tryAcquireLock(): Promise<boolean> {
 // claimed egg (state transitioned to "claimed", claimed_at + claimed_by
 // populated) or null if no match.
 async function claimEgg(
-  match: (e: Egg) => boolean,
+  match: (e: PoolMember) => boolean,
   claimedBy: string,
-): Promise<Egg | null> {
-  return withEggLock(async () => {
-    const file = await loadEggs();
-    const egg = file.eggs.find((e) => e.state === "warm" && match(e));
+): Promise<PoolMember | null> {
+  return withPoolLock(async () => {
+    const file = await loadPool();
+    const egg = file.members.find((e) => e.state === "warm" && match(e));
     if (!egg) return null;
     egg.state = "claimed";
     egg.claimed_at = new Date().toISOString();
     egg.claimed_by = claimedBy;
-    await saveEggs(file);
+    await savePool(file);
     return egg;
   });
 }
 
 // Mark an egg as live (after its hatch's site service registered and pi
-// is up). Pete can then `cells egg list` and see hatched eggs that have
+// is up). Pete can then `cells pool list` and see claimed members that have
 // graduated into cells. Phase 3 may auto-cull these once the cell is
 // killed; v1 leaves them as breadcrumbs.
 async function markEggLive(eggId: string): Promise<void> {
-  await withEggLock(async () => {
-    const file = await loadEggs();
-    const egg = file.eggs.find((e) => e.id === eggId);
+  await withPoolLock(async () => {
+    const file = await loadPool();
+    const egg = file.members.find((e) => e.id === eggId);
     if (!egg) return;
     egg.state = "live";
-    await saveEggs(file);
+    await savePool(file);
   });
 }
 
 // Mark an egg for culling (after a hatch failure). Pete cleans up via
-// `cells egg cull <id>`.
+// `cells pool cull <id>`.
 async function markEggCulling(eggId: string): Promise<void> {
-  await withEggLock(async () => {
-    const file = await loadEggs();
-    const egg = file.eggs.find((e) => e.id === eggId);
+  await withPoolLock(async () => {
+    const file = await loadPool();
+    const egg = file.members.find((e) => e.id === eggId);
     if (!egg) return;
     egg.state = "culling";
-    await saveEggs(file);
+    await savePool(file);
   });
 }
 
@@ -1413,7 +1434,7 @@ async function cmdCreateV1Fast(name: string | undefined, opts: CreateOpts): Prom
   // Pool-first: the egg comes with its cell-name pre-baked. We don't
   // rename — we just use the name the egg was created with. The hex
   // suffix of egg-AAAAAA matches cell-AAAAAA, so the mapping is direct.
-  const claim = await consumeV1Egg();
+  const claim = await claimV1PoolMember();
   let cellName: string;
   let wellName: string;
   let hatchedFrom: string | undefined;
@@ -1462,7 +1483,7 @@ async function cmdCreateV1Fast(name: string | undefined, opts: CreateOpts): Prom
       // before the bake hibernated. After wake, pi resumes with session
       // pinned, model set, ready to receive prompts.
       try {
-        await wakeV1Egg(claim.wellName, claim.tier);
+        await wakePoolMember(claim.wellName, claim.tier);
         // Defensive IP check: if the well is "running" but has no IP
         // (e.g. lease was flush-all'd while it was up), force a
         // /stop+/start to re-DHCP. Wells-team is also looking at this
@@ -1470,14 +1491,14 @@ async function cmdCreateV1Fast(name: string | undefined, opts: CreateOpts): Prom
         // but until that ships this prevents user-visible "could not
         // resolve well host" errors.
         await ensureWellHasIp(claim.wellName);
-        await markV1EggLive(claim.wellName);
+        await markPoolMemberLive(claim.wellName);
       } catch (e) {
         console.warn(`! pool wake failed (${e instanceof Error ? e.message : String(e)}), falling back to cold-fork`);
         await directWellDestroy(claim.wellName).catch(() => {});
-        await withEggLock(async () => {
-          const file = await loadEggs();
-          file.eggs = file.eggs.filter((e) => e.well_name !== claim.wellName);
-          await saveEggs(file);
+        await withPoolLock(async () => {
+          const file = await loadPool();
+          file.members = file.members.filter((e) => e.well_name !== claim.wellName);
+          await savePool(file);
         });
         // Cold-fork below.
         wellName = cellName;
@@ -1558,7 +1579,7 @@ async function cmdCreateV1Fast(name: string | undefined, opts: CreateOpts): Prom
   // user talks; the talk session keeps this process alive long enough
   // for refill to land. Caught silently — refill failure here shouldn't
   // poison the user's birth experience.
-  refillV1PoolToDepth().catch((e) => {
+  refillPoolToDepth().catch((e) => {
     console.warn(`! background pool refill failed: ${e instanceof Error ? e.message : String(e)}`);
   });
 
@@ -1889,8 +1910,8 @@ async function cmdCreate(name: string | undefined, opts: CreateOpts) {
       channels: [...channels].sort(),
     };
     const requestedKey = poolKey(fullVariant);
-    const eggsFile = await loadEggs();
-    const matchingEgg = eggsFile.eggs.find(
+    const poolFile = await loadPool();
+    const matchingEgg = poolFile.members.find(
       (e) => e.state === "warm" && e.variant_signature === requestedKey,
     );
     if (matchingEgg) {
@@ -2136,7 +2157,7 @@ async function directWellCreate(
   // Piece 3 (wells, 2026-05-12): default fresh-create skips warming for
   // speed; hibernate refuses if the well wasn't sealed at create time.
   // Pass hibernate_ready: true when we know this well needs to hibernate
-  // (Tier 2 pool eggs). Costs ~6-8s extra create time for the warming
+  // (Tier 2 pool members). Costs ~6-8s extra create time for the warming
   // sequence. Omit (or false) for Tier 4 / user-facing fresh creates.
   if (opts.hibernateReady) {
     body.hibernate_ready = true;
@@ -2254,18 +2275,18 @@ async function registerSiteService(wellName: string, cellName: string): Promise<
 // canned generic cell, baked from cell-base. variant_signature is the
 // constant "v1-generic" so consumers can filter the pool without the
 // variant-aware machinery of the legacy multi-variant pool.
-const V1_EGG_VARIANT_SIGNATURE = "v1-generic";
+const V1_POOL_VARIANT_SIGNATURE = "v1-generic";
 
 // Generate a fresh egg well-name. Distinct from cell-names (cell-<hex>) so
 // `cells list` doesn't pretend pool wells are user-facing cells.
-function generateEggWellName(): string {
+function generatePoolWellName(): string {
   return `egg-${randomBytes(4).toString("hex").slice(0, 6)}`;
 }
 
 // Bake one v1 egg: fork cell-base, set auth=public, hibernate. Inserts an
-// entry into eggs.json with state=warm on success. Returns the well-name
+// entry into pool.json with state=warm on success. Returns the well-name
 // or throws. Caller is responsible for the egg-lock dance (use
-// withEggLock around the bake invocation when refilling).
+// withPoolLock around the bake invocation when refilling).
 // Read all LLM provider keys from ~/.cells/secrets.json so every egg/cell
 // has every supported model available out of the box. Pi-ai natively reads
 // these env vars for direct-API providers; CELLS_PROXY_SECRET is used by
@@ -2287,49 +2308,49 @@ async function collectCellLlmEnv(): Promise<Record<string, string>> {
   return env;
 }
 
-// Hot pool target: keep N eggs running-resident (never hibernated) for
+// Hot pool target: keep N members running-resident (never hibernated) for
 // instant burst-births. Costs ~1GB RAM per hot egg always-on; the trade-off
 // is zero wake latency for the first N births. Eggs beyond this count fall
 // back to cold (hibernated, pi-not-yet-started) — wake takes ~2-3s.
 //
-// Schema note: eggs.json still carries `tier: 2 | 4` for backwards compat.
+// Schema note: pool.json still carries `tier: 2 | 4` for backwards compat.
 // tier 4 == hot, tier 2 == cold. New code uses hot/cold; we map at the edges.
 // V1 ships with a single variant (pi + deepseek-v4-flash), so the pool is
-// pure-hot: HOT_TARGET = POOL_TARGET_DEPTH (see below) keeps all pool eggs
-// running-resident. No cold eggs means the cold→hot promote path in
-// refillV1PoolToDepth Pass 1 never fires, which keeps wells' wake-from-
+// pure-hot: HOT_TARGET = POOL_TARGET_DEPTH (see below) keeps all pool members
+// running-resident. No cold pool members means the cold→hot promote path in
+// refillPoolToDepth Pass 1 never fires, which keeps wells' wake-from-
 // hibernate path (which kills lume and clips every sibling VM) out of the
-// auto-refill blast radius. When V2 adds variant eggs (harness × model ×
+// auto-refill blast radius. When V2 adds variant pool members (harness × model ×
 // extensions), this single number becomes a per-variant target and a mix
 // strategy lives next to it.
 const V1_HOT_POOL_TARGET = 10;
 
-// Count hot (running) eggs currently in the pool. Used to decide whether
+// Count hot (running) members currently in the pool. Used to decide whether
 // the next bake should produce a running egg or a hibernated one, and
 // whether to promote a cold→hot on refill.
-async function countV1HotEggs(): Promise<number> {
-  const file = await loadEggs();
-  return file.eggs.filter(
+async function countHotPoolMembers(): Promise<number> {
+  const file = await loadPool();
+  return file.members.filter(
     (e) =>
       e.state === "warm" &&
-      e.variant_signature === V1_EGG_VARIANT_SIGNATURE &&
+      e.variant_signature === V1_POOL_VARIANT_SIGNATURE &&
       (e as any).tier === 4,
   ).length;
 }
 
-// Count cold (hibernated) eggs in the pool. Used for promote balancing.
-async function countV1ColdEggs(): Promise<number> {
-  const file = await loadEggs();
-  return file.eggs.filter(
+// Count cold (hibernated) members in the pool. Used for promote balancing.
+async function countColdPoolMembers(): Promise<number> {
+  const file = await loadPool();
+  return file.members.filter(
     (e) =>
       e.state === "warm" &&
-      e.variant_signature === V1_EGG_VARIANT_SIGNATURE &&
+      e.variant_signature === V1_POOL_VARIANT_SIGNATURE &&
       (e as any).tier === 2,
   ).length;
 }
 
 // Provision a fresh ubuntu-base well into a fully-formed cell, in-place
-// via SSH. Used by bakeV1Egg (per-egg path) and reusable for any "turn
+// via SSH. Used by bakePoolMember (per-egg path) and reusable for any "turn
 // this raw well into a cell" need. Replaces the old cell-base layered
 // image — see docs/proposals/image-ownership.html for the rationale.
 //
@@ -2410,7 +2431,7 @@ echo "pi: $(pi --version 2>&1 | head -1 || echo MISSING)"`,
   }
 }
 
-async function bakeV1Egg(): Promise<string> {
+async function bakePoolMember(): Promise<string> {
   const baseEnv = await collectCellLlmEnv();
   if (!baseEnv.CELLS_PROXY_SECRET) throw new Error("CELLS_PROXY_SECRET missing from ~/.cells/secrets.json");
 
@@ -2418,16 +2439,16 @@ async function bakeV1Egg(): Promise<string> {
   // cell-AAAAAA. We bake CELL_NAME into the egg's /etc/environment now;
   // welld's well-site (baked into the image) reads it at boot and pins
   // pi's session to that name. No rename at birth — we just record the
-  // mapping in eggs.json so consume returns both.
-  const wellName = generateEggWellName();
+  // mapping in pool.json so consume returns both.
+  const wellName = generatePoolWellName();
   const cellName = "cell-" + wellName.slice("egg-".length);
   const env = { ...baseEnv, CELL_NAME: cellName };
 
   // Decide tier BEFORE create. Hot = running-resident (first
-  // V1_HOT_POOL_TARGET eggs); cold = hibernated (the rest). Cold
+  // V1_HOT_POOL_TARGET members); cold = hibernated (the rest). Cold
   // wells need hibernate_ready: true at create so wells's hibernate
   // gate doesn't refuse later (Piece 3).
-  const hotCount = await countV1HotEggs();
+  const hotCount = await countHotPoolMembers();
   const tier: 2 | 4 = hotCount < V1_HOT_POOL_TARGET ? 4 : 2;
 
   // From ubuntu-base (the wells-team-owned substrate) — NOT cell-base.
@@ -2435,7 +2456,7 @@ async function bakeV1Egg(): Promise<string> {
   // patches) get applied via provisionCellInWell over SSH right after
   // firstboot. The cell user, /cell home, sudoers, and ssh keys come
   // pre-baked from ubuntu-base (wells-stable-2026-05-12h).
-  // Pool eggs must always be sealed: a Tier 4 (hot) egg becomes a user
+  // Pool members must always be sealed: a Tier 4 (hot) member becomes a user
   // cell after birth, and `cells sleep <name>` expects to hibernate it.
   // Wells's default fresh-create skips the seal warming for speed
   // (Piece 3, 2026-05-12) — hibernate refuses non-sealed wells. The
@@ -2460,7 +2481,7 @@ async function bakeV1Egg(): Promise<string> {
   } catch (e) {
     await directWellDestroy(wellName);
     throw new Error(
-      `bakeV1Egg waitForCloudInit failed for '${wellName}': ${e instanceof Error ? e.message : String(e)}`,
+      `bakePoolMember waitForCloudInit failed for '${wellName}': ${e instanceof Error ? e.message : String(e)}`,
     );
   }
 
@@ -2470,7 +2491,7 @@ async function bakeV1Egg(): Promise<string> {
   } catch (e) {
     await directWellDestroy(wellName);
     throw new Error(
-      `bakeV1Egg provisioning failed for '${wellName}': ${e instanceof Error ? e.message : String(e)}`,
+      `bakePoolMember provisioning failed for '${wellName}': ${e instanceof Error ? e.message : String(e)}`,
     );
   }
 
@@ -2502,13 +2523,13 @@ async function bakeV1Egg(): Promise<string> {
   }
   // Tier 4: leave the well running with pi pre-configured.
 
-  await withEggLock(async () => {
-    const file = await loadEggs();
-    file.eggs.push({
+  await withPoolLock(async () => {
+    const file = await loadPool();
+    file.members.push({
       id: wellName.slice("egg-".length),
       well_name: wellName,
       cell_name: cellName,
-      variant_signature: V1_EGG_VARIANT_SIGNATURE,
+      variant_signature: V1_POOL_VARIANT_SIGNATURE,
       state: "warm",
       tier,
       born_at: new Date().toISOString(),
@@ -2516,7 +2537,7 @@ async function bakeV1Egg(): Promise<string> {
       claimed_by: null,
       max_age_at: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString(),
     } as any);
-    await saveEggs(file);
+    await savePool(file);
   });
 
   return wellName;
@@ -2530,7 +2551,7 @@ async function bakeV1Egg(): Promise<string> {
 // Different from ensureWellHasIp (which only checks IP, used at birth):
 // this is talk-side, so we treat an idle-hibernated/stopped well as
 // expected and transparently wake it. /wake first (preserves saved RAM
-// state for Tier 2 hibernated eggs), /start as fallback (Tier 4 stopped).
+// state for Tier 2 hibernated members), /start as fallback (Tier 4 stopped).
 async function ensureWellRunningForTalk(wellName: string): Promise<void> {
   const base = process.env.WELL_API_URL ?? "http://127.0.0.1:7878";
   const token = await wellsToken();
@@ -2618,23 +2639,23 @@ async function ensureWellHasIp(wellName: string): Promise<void> {
 }
 
 // Consume one warm v1 egg from the pool. Atomically marks it as claimed in
-// eggs.json and returns the well-name to use as the cell's backing well.
+// pool.json and returns the well-name to use as the cell's backing well.
 // Returns null if pool is empty (caller falls back to cold-fork).
-async function consumeV1Egg(): Promise<{ wellName: string; cellName: string; tier: 2 | 4 } | null> {
+async function claimV1PoolMember(): Promise<{ wellName: string; cellName: string; tier: 2 | 4 } | null> {
   let chosen: { wellName: string; cellName: string; tier: 2 | 4 } | null = null;
-  await withEggLock(async () => {
-    const file = await loadEggs();
-    // Prefer hot (running) eggs first — they're instant-consume. Fall
+  await withPoolLock(async () => {
+    const file = await loadPool();
+    // Prefer hot (running) members first — they're instant-consume. Fall
     // back to cold (hibernated) only when no hot egg is available.
     const warm =
-      file.eggs.find(
+      file.members.find(
         (e) =>
           e.state === "warm" &&
-          e.variant_signature === V1_EGG_VARIANT_SIGNATURE &&
+          e.variant_signature === V1_POOL_VARIANT_SIGNATURE &&
           (e as any).tier === 4,
       ) ??
-      file.eggs.find(
-        (e) => e.state === "warm" && e.variant_signature === V1_EGG_VARIANT_SIGNATURE,
+      file.members.find(
+        (e) => e.state === "warm" && e.variant_signature === V1_POOL_VARIANT_SIGNATURE,
       );
     if (!warm) return;
     warm.state = "claimed";
@@ -2646,7 +2667,7 @@ async function consumeV1Egg(): Promise<{ wellName: string; cellName: string; tie
       cellName,
       tier: ((warm as any).tier ?? 2) as 2 | 4,
     };
-    await saveEggs(file);
+    await savePool(file);
   });
   return chosen;
 }
@@ -2655,7 +2676,7 @@ async function consumeV1Egg(): Promise<{ wellName: string; cellName: string; tie
 //   - Tier 4, currently running: no-op (truly hot)
 //   - Tier 4, currently stopped (welld restart killed it): /start
 //   - Tier 2, hibernated: /wake (restores RAM from disk in ~2-3s)
-async function wakeV1Egg(wellName: string, tier: 2 | 4 = 2): Promise<void> {
+async function wakePoolMember(wellName: string, tier: 2 | 4 = 2): Promise<void> {
   const base = process.env.WELL_API_URL ?? "http://127.0.0.1:7878";
   if (tier === 4) {
     const info = await fetch(`${base}/v1/wells/${encodeURIComponent(wellName)}`, {
@@ -2686,31 +2707,31 @@ async function wakeV1Egg(wellName: string, tier: 2 | 4 = 2): Promise<void> {
   }
 }
 
-// Mark a consumed egg as "live" (now a cell). Bookkeeping for the eggs
+// Mark a consumed pool member as "live" (now a cell). Bookkeeping for the pool
 // file — the egg's well is now serving as a cell's backing well.
-async function markV1EggLive(wellName: string): Promise<void> {
-  await withEggLock(async () => {
-    const file = await loadEggs();
-    const egg = file.eggs.find((e) => e.well_name === wellName);
+async function markPoolMemberLive(wellName: string): Promise<void> {
+  await withPoolLock(async () => {
+    const file = await loadPool();
+    const egg = file.members.find((e) => e.well_name === wellName);
     if (!egg) return;
     egg.state = "live";
-    await saveEggs(file);
+    await savePool(file);
   });
 }
 
 // v1 pool target depth. Pete wants 5–10 agents spinnable fast, so we
-// keep a deep pool of warm eggs. Each egg is a hibernated VM (~1.5GB
+// keep a deep pool of warm pool members. Each egg is a hibernated VM (~1.5GB
 // disk dehydrated, ~1GB live memory image). Refill is fire-and-forget
 // after each birth — pool drains during burst, replenishes in the
 // background.
-// Future: configurable in eggs-config or launchd refill plist.
+// Future: configurable in pool-config or launchd refill plist.
 const V1_POOL_TARGET_DEPTH = 10;
 
-// Count warm v1 eggs currently in the pool.
-async function countV1WarmEggs(): Promise<number> {
-  const file = await loadEggs();
-  return file.eggs.filter(
-    (e) => e.state === "warm" && e.variant_signature === V1_EGG_VARIANT_SIGNATURE,
+// Count warm v1 members currently in the pool.
+async function countWarmPoolMembers(): Promise<number> {
+  const file = await loadPool();
+  return file.members.filter(
+    (e) => e.state === "warm" && e.variant_signature === V1_POOL_VARIANT_SIGNATURE,
   ).length;
 }
 
@@ -2722,12 +2743,12 @@ async function countV1WarmEggs(): Promise<number> {
 async function promoteOneColdToHot(): Promise<boolean> {
   type Target = { wellName: string; cellName: string };
   let target: Target | null = null;
-  await withEggLock(async () => {
-    const file = await loadEggs();
-    const cold = file.eggs.find(
+  await withPoolLock(async () => {
+    const file = await loadPool();
+    const cold = file.members.find(
       (e) =>
         e.state === "warm" &&
-        e.variant_signature === V1_EGG_VARIANT_SIGNATURE &&
+        e.variant_signature === V1_POOL_VARIANT_SIGNATURE &&
         (e as any).tier === 2,
     );
     if (!cold) return;
@@ -2742,7 +2763,7 @@ async function promoteOneColdToHot(): Promise<boolean> {
   // Wake the cold egg. /wake restores RAM from disk (~2-3s). After this
   // the well is in `running` state and we leave it there.
   try {
-    await wakeV1Egg(t.wellName, 2);
+    await wakePoolMember(t.wellName, 2);
   } catch (e) {
     console.warn(
       `! promote cold→hot failed for ${t.wellName}: ${e instanceof Error ? e.message : String(e)}`,
@@ -2751,12 +2772,12 @@ async function promoteOneColdToHot(): Promise<boolean> {
   }
 
   // Flip the tier marker. From here on, consume + dashboard treat it as hot.
-  await withEggLock(async () => {
-    const file = await loadEggs();
-    const egg = file.eggs.find((e) => e.well_name === t.wellName);
+  await withPoolLock(async () => {
+    const file = await loadPool();
+    const egg = file.members.find((e) => e.well_name === t.wellName);
     if (egg) {
       (egg as any).tier = 4;
-      await saveEggs(file);
+      await savePool(file);
     }
   });
   return true;
@@ -2767,31 +2788,31 @@ async function promoteOneColdToHot(): Promise<boolean> {
 //   1. Promote cold→hot until hot count is at V1_HOT_POOL_TARGET. Promote
 //      is fast (~3s, just /wake) so the hot buffer replenishes quickly
 //      after a consume.
-//   2. Bake new cold eggs serially until total pool is at target. Bake is
+//   2. Bake new cold pool members serially until total pool is at target. Bake is
 //      slower (~30s/egg) — runs as background fire-and-forget.
 // Serial bakes are required: wells's mother concurrency limit + welld
-// traffic stability. Returns the number of eggs baked (does not count
+// traffic stability. Returns the number of members baked (does not count
 // promotions).
-async function refillV1PoolToDepth(target: number = V1_POOL_TARGET_DEPTH): Promise<number> {
+async function refillPoolToDepth(target: number = V1_POOL_TARGET_DEPTH): Promise<number> {
   // Pass 1: promote cold→hot until hot count is at target. Caps at the
   // smaller of (hot target, current pool size) — never promotes more
   // than exists to promote.
   while (true) {
-    const hot = await countV1HotEggs();
+    const hot = await countHotPoolMembers();
     if (hot >= V1_HOT_POOL_TARGET) break;
-    const cold = await countV1ColdEggs();
+    const cold = await countColdPoolMembers();
     if (cold === 0) break;
     const ok = await promoteOneColdToHot();
     if (!ok) break;
   }
 
-  // Pass 2: bake fresh cold eggs until total pool is at depth target.
-  // bakeV1Egg() decides the tier internally (it'll bake hot if hot count
+  // Pass 2: bake fresh cold pool members until total pool is at depth target.
+  // bakePoolMember() decides the tier internally (it'll bake hot if hot count
   // is still below target after pass 1 — e.g., the pool was empty).
   let baked = 0;
-  while ((await countV1WarmEggs()) < target) {
+  while ((await countWarmPoolMembers()) < target) {
     try {
-      await bakeV1Egg();
+      await bakePoolMember();
       baked++;
     } catch (e) {
       console.warn(`! v1 egg bake failed: ${e instanceof Error ? e.message : String(e)}`);
@@ -2825,7 +2846,7 @@ async function directWellDestroy(name: string): Promise<boolean> {
 
 async function cmdDestroyOne(name: string): Promise<boolean> {
   // Mother's cell-destroy prompt resolves cell-name → well-name itself
-  // (via the cell_resolve tool, which reads cells.json + eggs.json), so
+  // (via the cell_resolve tool, which reads cells.json + pool.json), so
   // a single mother path works for both slow-birth and hatched cells.
   // We still resolve locally too — purely as a safety net for when
   // mother dies mid-destroy and we need to call well API directly.
@@ -2855,13 +2876,13 @@ async function cmdDestroyOne(name: string): Promise<boolean> {
   await removeVaultEntry(name);
 
   // If this was a hatched cell, the cell's well IS the egg's well.
-  // It just got destroyed above, so the eggs.json entry is now stale.
-  // Remove it so `cells egg list` doesn't show a phantom "live" entry.
+  // It just got destroyed above, so the pool.json entry is now stale.
+  // Remove it so `cells pool list` doesn't show a phantom "live" entry.
   if (killedCell?.hatched_from) {
-    await withEggLock(async () => {
-      const f = await loadEggs();
-      f.eggs = f.eggs.filter((e) => e.id !== killedCell.hatched_from);
-      await saveEggs(f);
+    await withPoolLock(async () => {
+      const f = await loadPool();
+      f.members = f.members.filter((e) => e.id !== killedCell.hatched_from);
+      await savePool(f);
     });
   }
 
@@ -4376,8 +4397,8 @@ async function cmdSchedulePulse() {
 
 // ───── egg refill agent — launchd-driven pool maintenance ─────
 //
-// `cells schedule-egg-refill` installs a launchd plist that runs
-// `cells egg refill` every 10 minutes. The plist is owned by Pete's
+// `cells schedule-pool-refill` installs a launchd plist that runs
+// `cells pool refill` every 10 minutes. The plist is owned by Pete's
 // gui session (no root). If the pool's at depth, refill no-ops fast
 // (tens of ms). If it's short, refill bakes 1 egg per fire serially
 // — mother concurrency=1 ensures non-overlap with manual `cells birth`
@@ -4387,12 +4408,12 @@ async function cmdSchedulePulse() {
 // is replenished within a tolerable window for the next birth; long
 // enough that bake-overlap risk is low.
 //
-// `cells unschedule-egg-refill` is the inverse.
+// `cells unschedule-pool-refill` is the inverse.
 
-const EGG_REFILL_LABEL = "com.pete.cells-egg-refill";
+const POOL_REFILL_LABEL = "com.pete.cells-pool-refill";
 
 function eggRefillPlistPath(): string {
-  return join(homedir(), "Library/LaunchAgents", `${EGG_REFILL_LABEL}.plist`);
+  return join(homedir(), "Library/LaunchAgents", `${POOL_REFILL_LABEL}.plist`);
 }
 
 function buildEggRefillPlist(): string {
@@ -4408,7 +4429,7 @@ function buildEggRefillPlist(): string {
 <plist version="1.0">
 <dict>
   <key>Label</key>
-  <string>${EGG_REFILL_LABEL}</string>
+  <string>${POOL_REFILL_LABEL}</string>
   <key>ProgramArguments</key>
   <array>
     <string>${bunBin}</string>
@@ -4428,9 +4449,9 @@ function buildEggRefillPlist(): string {
   <key>StartInterval</key>
   <integer>600</integer>
   <key>StandardOutPath</key>
-  <string>${logsDir}/egg-refill.log</string>
+  <string>${logsDir}/pool-refill.log</string>
   <key>StandardErrorPath</key>
-  <string>${logsDir}/egg-refill.err</string>
+  <string>${logsDir}/pool-refill.err</string>
   <key>RunAtLoad</key>
   <false/>
 </dict>
@@ -4438,7 +4459,7 @@ function buildEggRefillPlist(): string {
 `;
 }
 
-async function cmdScheduleEggRefill() {
+async function cmdSchedulePoolRefill() {
   const logsDir = join(homedir(), ".cells", "logs");
   await mkdir(logsDir, { recursive: true });
   await mkdir(dirname(eggRefillPlistPath()), { recursive: true });
@@ -4447,7 +4468,7 @@ async function cmdScheduleEggRefill() {
 
   const uid = process.getuid?.() ?? 501;
 
-  await Bun.spawn(["launchctl", "bootout", `gui/${uid}/${EGG_REFILL_LABEL}`], {
+  await Bun.spawn(["launchctl", "bootout", `gui/${uid}/${POOL_REFILL_LABEL}`], {
     stdin: "ignore",
     stdout: "ignore",
     stderr: "ignore",
@@ -4465,13 +4486,13 @@ async function cmdScheduleEggRefill() {
   }
 
   console.log(`✓ scheduled: egg refill every 10 minutes`);
-  console.log(`  logs: ${logsDir}/egg-refill.log (stdout), egg-refill.err (stderr)`);
-  console.log(`  unschedule with: cells unschedule-egg-refill`);
+  console.log(`  logs: ${logsDir}/pool-refill.log (stdout), pool-refill.err (stderr)`);
+  console.log(`  unschedule with: cells unschedule-pool-refill`);
 }
 
-async function cmdUnscheduleEggRefill() {
+async function cmdUnschedulePoolRefill() {
   const uid = process.getuid?.() ?? 501;
-  await Bun.spawn(["launchctl", "bootout", `gui/${uid}/${EGG_REFILL_LABEL}`], {
+  await Bun.spawn(["launchctl", "bootout", `gui/${uid}/${POOL_REFILL_LABEL}`], {
     stdin: "ignore",
     stdout: "inherit",
     stderr: "inherit",
@@ -5580,7 +5601,7 @@ async function cmdSync(name?: string) {
 
 // Resolve a cell name to the underlying Well name. For slow-birth
 // cells, well name == cell name. For hatched cells, the well is
-// the eggs permanent well (Wells doesn't support rename) and the
+// the pool member's permanent well (Wells doesn't support rename) and the
 // cell name is just our local alias. Anything that touches the
 // Wells API for a cell — well_exec, well_destroy, well info,
 // the worker's WELL_HOST binding — must go through this helper.
@@ -5588,9 +5609,9 @@ async function wellNameForCell(name: string): Promise<string> {
   const reg = await loadRegistry();
   const cell = reg.cells.find((c) => c.name === name);
   if (!cell || !cell.hatched_from) return name;
-  const eggs = await loadEggs();
-  const egg = eggs.eggs.find((e) => e.id === cell.hatched_from);
-  return egg?.well_name ?? name; // fall back if the egg entry is gone
+  const pool = await loadPool();
+  const member = pool.members.find((e) => e.id === cell.hatched_from);
+  return member?.well_name ?? name; // fall back if the pool entry is gone
 }
 
 // ───── hatch — claim an egg, sed identity onto it, start pi ─────
@@ -5625,7 +5646,7 @@ async function restoreEggPristine(wellName: string): Promise<void> {
   }
 }
 
-// Sed + jq inside the eggs well to bake the cell's identity in.
+// Sed + jq inside the pool member's well to bake the cell's identity in.
 // Substitutions:
 //   __NAME__         → cellName  (in DNA + tmux.conf)
 //   __THINKING__     → thinking  (in settings.json)
@@ -5701,11 +5722,11 @@ jq . .pi/settings.json > /dev/null
   }
 }
 
-// Flip the eggs well URL auth from "well" (default, login-walled)
+// Flip the pool member's well URL auth from "well" (default, login-walled)
 // to "public". Without this, external requests to /agent get redirected
 // to the sprites.dev login flow rather than reaching the cell's site
 // server, and the WS upgrade fails. Egg-birth skips step 7 (per design
-// — eggs aren't user-addressable while in the pool); this happens at
+// — pool members aren't user-addressable while in the pool); this happens at
 // hatch instead.
 async function flipWellUrlPublic(wellName: string): Promise<void> {
   const proc = Bun.spawn(["well", "url", "update", "--auth", "public", "-s", wellName], {
@@ -5829,7 +5850,7 @@ async function markCellAlive(name: string): Promise<void> {
 // Main hatch entry. Returns true on success (cell alive, async tail
 // kicked off), false on failure (caller falls back to slow birth).
 async function hatchEgg(
-  egg: Egg,
+  egg: PoolMember,
   cellName: string,
   thinking: string,
   extensions: string[],
@@ -5907,38 +5928,38 @@ async function hatchEgg(
   }
 }
 
-// ───── eggs CLI ─────
+// ───── pool CLI ─────
 //
-// `cells egg [--model=X --extensions=A,B --packages=C,D]`  — pre-warm a
-//                                                            new egg
-// `cells egg list`                                          — show pool
-// `cells egg cull <id>`                                     — destroy an
-//                                                            egg by id
+// `cells pool create [--model=X --extensions=A,B --packages=C,D]`  — pre-warm a
+//                                                            new pool member
+// `cells pool list`                                          — show pool
+// `cells pool cull <id>`                                     — destroy a
+//                                                            pool member by id
 //
-// `--thinking` and `--channels` are deliberately NOT accepted at egg-
-// birth. Eggs are pool stock; thinking and channels are applied at
-// hatch (per cell). Trying to pass them here errors.
+// `--thinking` and `--channels` are deliberately NOT accepted at pool-member
+// bake. Pool members are stock; thinking and channels are applied at hatch
+// (per cell). Trying to pass them here errors.
 
-async function cmdEgg(args: string[]) {
+async function cmdPool(args: string[]) {
   const sub = args[0];
   if (sub === "list") {
-    await cmdEggList();
+    await cmdPoolList();
     return;
   }
   if (sub === "cull") {
     if (!args[1]) {
-      console.error("usage: cells egg cull <id>");
+      console.error("usage: cells pool cull <id>");
       process.exit(1);
     }
-    await cmdEggCull(args[1]);
+    await cmdPoolCull(args[1]);
     return;
   }
   if (sub === "refill") {
-    await cmdEggRefill();
+    await cmdPoolRefill();
     return;
   }
   if (sub === "drain") {
-    await cmdEggDrain(args.slice(1));
+    await cmdPoolDrain(args.slice(1));
     return;
   }
   if (sub === "bake-v1") {
@@ -5948,10 +5969,10 @@ async function cmdEgg(args: string[]) {
     // and pool seeding.
     console.log("baking one v1 egg…");
     const t0 = Date.now();
-    const wellName = await bakeV1Egg();
+    const wellName = await bakePoolMember();
     // Look up the tier we just assigned for accurate logging.
-    const eggs = await loadEggs();
-    const tier = (eggs.eggs.find((e) => e.well_name === wellName) as any)?.tier ?? 2;
+    const pool = await loadPool();
+    const tier = (pool.members.find((e) => e.well_name === wellName) as any)?.tier ?? 2;
     const state = tier === 4 ? "hot (running)" : "cold (hibernated)";
     console.log(`✓ egg '${wellName}' ${state} (${((Date.now() - t0) / 1000).toFixed(1)}s)`);
     return;
@@ -5959,17 +5980,17 @@ async function cmdEgg(args: string[]) {
   if (sub === "refill-v1") {
     // Bring the v1 pool up to the target depth. Idempotent: returns
     // immediately if pool is already full. Logs each bake.
-    const current = await countV1WarmEggs();
+    const current = await countWarmPoolMembers();
     if (current >= V1_POOL_TARGET_DEPTH) {
       console.log(`v1 pool at target depth (${current}/${V1_POOL_TARGET_DEPTH})`);
       return;
     }
     console.log(`refilling v1 pool: ${current} → ${V1_POOL_TARGET_DEPTH}…`);
-    const baked = await refillV1PoolToDepth();
-    console.log(`✓ baked ${baked} egg(s); pool now at ${await countV1WarmEggs()}/${V1_POOL_TARGET_DEPTH}`);
+    const baked = await refillPoolToDepth();
+    console.log(`✓ baked ${baked} egg(s); pool now at ${await countWarmPoolMembers()}/${V1_POOL_TARGET_DEPTH}`);
     return;
   }
-  await cmdEggCreate(args);
+  await cmdPoolCreate(args);
 }
 
 function parseEggCreateArgs(args: string[]): { variant: Variant; payload: object } {
@@ -6023,7 +6044,7 @@ function parseEggCreateArgs(args: string[]): { variant: Variant; payload: object
   void packagesSet;
 
   if (!modelKey) {
-    console.error("usage: cells egg --model=opus|sonnet|haiku|gpt-5.5|gpt-5.5-pro|deepseek-v4-flash|deepseek-v4-pro [--extensions=memory,wiki] [--packages=pi-web-access]");
+    console.error("usage: cells pool create [--model=opus|sonnet|haiku|gpt-5.5|gpt-5.5-pro|deepseek-v4-flash|deepseek-v4-pro] [--extensions=memory,wiki] [--packages=pi-web-access]");
     process.exit(1);
   }
 
@@ -6045,20 +6066,20 @@ function parseEggCreateArgs(args: string[]): { variant: Variant; payload: object
   return { variant, payload };
 }
 
-async function cmdEggCreate(args: string[]) {
+async function cmdPoolCreate(args: string[]) {
   const { variant, payload } = parseEggCreateArgs(args);
   const sig = poolKey(variant);
-  const wellName = eggWellName(variant);
+  const wellName = poolMemberWellName(variant);
   const id = variantHash(variant);
 
   // One egg per pool key in v1. Multiple eggs of the same variant is a
   // Phase 3 (pool maintenance) thing — we'd need a counter suffix in
   // well names to avoid collisions.
-  const existing = await loadEggs();
-  const dup = existing.eggs.find((e) => e.variant_signature === sig);
+  const existing = await loadPool();
+  const dup = existing.members.find((e) => e.variant_signature === sig);
   if (dup) {
     console.error(`egg with this variant already exists: ${dup.id} (well: )`);
-    console.error(`use 'cells egg list' to inspect; cull it first if you want to re-bake.`);
+    console.error(`use 'cells pool list' to inspect; cull it first if you want to re-bake.`);
     process.exit(1);
   }
 
@@ -6078,9 +6099,9 @@ async function cmdEggCreate(args: string[]) {
 
   const now = new Date();
   const maxAge = new Date(now.getTime() + 7 * 24 * 60 * 60 * 1000); // +7 days
-  await withEggLock(async () => {
-    const file = await loadEggs();
-    file.eggs.push({
+  await withPoolLock(async () => {
+    const file = await loadPool();
+    file.members.push({
       id,
       well_name: wellName,
       variant_signature: sig,
@@ -6090,22 +6111,22 @@ async function cmdEggCreate(args: string[]) {
       claimed_by: null,
       max_age_at: maxAge.toISOString(),
     });
-    await saveEggs(file);
+    await savePool(file);
   });
 
   console.log(`✓ egg ${id} (${wellName}) registered as warm`);
 }
 
-async function cmdEggList() {
-  const file = await loadEggs();
-  if (file.eggs.length === 0) {
-    console.log("(no eggs in pool)");
+async function cmdPoolList() {
+  const file = await loadPool();
+  if (file.members.length === 0) {
+    console.log("(no members in pool)");
     return;
   }
-  // Header — `state` shows hot/cold for warm eggs, claimed/live otherwise.
+  // Header — `state` shows hot/cold for warm pool members, claimed/live otherwise.
   console.log("id      state       variant                                                    age       claimed_by");
   console.log("------  ----------  ---------------------------------------------------------  --------  -----------");
-  for (const e of file.eggs) {
+  for (const e of file.members) {
     const id = e.id.padEnd(6);
     let stateLabel: string;
     if (e.state === "warm") {
@@ -6121,12 +6142,12 @@ async function cmdEggList() {
   }
 }
 
-async function cmdEggCull(eggId: string) {
-  const file = await loadEggs();
-  const egg = file.eggs.find((e) => e.id === eggId);
+async function cmdPoolCull(eggId: string) {
+  const file = await loadPool();
+  const egg = file.members.find((e) => e.id === eggId);
   if (!egg) {
     console.error(`egg '${eggId}' not found in registry`);
-    console.error(`run 'cells egg list' to see available ids`);
+    console.error(`run 'cells pool list' to see available ids`);
     process.exit(1);
   }
 
@@ -6137,12 +6158,12 @@ async function cmdEggCull(eggId: string) {
   console.log(`culling egg ${egg.well_name} (id: ${egg.id})`);
   const ok = await directWellDestroy(egg.well_name);
 
-  // Always remove the eggs.json entry — even if well destroy failed,
+  // Always remove the pool.json entry — even if well destroy failed,
   // the entry is stale and Pete can manually `well destroy` later.
-  await withEggLock(async () => {
-    const f = await loadEggs();
-    f.eggs = f.eggs.filter((e) => e.id !== eggId);
-    await saveEggs(f);
+  await withPoolLock(async () => {
+    const f = await loadPool();
+    f.members = f.members.filter((e) => e.id !== eggId);
+    await savePool(f);
   });
 
   if (ok) {
@@ -6154,20 +6175,21 @@ async function cmdEggCull(eggId: string) {
 
 // ───── egg refill / drain — pool maintenance CLI ─────
 //
-// `cells egg refill` reads `~/.cells/eggs-config.json` (or falls back to
+// `cells pool refill` reads `~/.cells/pool-config.json` (or falls back to
 // the default variant matrix from docs/eggs-variants.md), counts warm
 // eggs per variant, and serially bakes any short-stock variants up to
 // configured depth. Per `project_mother_concurrency.md`, mother
 // concurrency=1, so refills serialize naturally.
 //
-// `cells egg drain` culls every warm egg in the registry. Useful before
+// `cells pool drain` culls every warm egg in the registry. Useful before
 // re-baking cell-base or before quitting wells. Idempotent.
 //
 // The variant matrix and rationale are in `docs/eggs-variants.md`.
 
-const EGGS_CONFIG_PATH = join(homedir(), ".cells", "eggs-config.json");
+const POOL_CONFIG_PATH = join(homedir(), ".cells", "pool-config.json");
+const LEGACY_EGGS_CONFIG_PATH = join(homedir(), ".cells", "eggs-config.json");
 
-type EggConfigRow = {
+type PoolConfigRow = {
   model: ModelKey;
   extensions: string[];
   packages: string[];
@@ -6175,31 +6197,41 @@ type EggConfigRow = {
 };
 
 // Default pool config — matches the variant table in docs/eggs-variants.md.
-// Used when ~/.cells/eggs-config.json doesn't exist. Can be regenerated
-// by `cells egg refill` with --reset (TBD).
-const DEFAULT_EGG_CONFIG: EggConfigRow[] = [
+// Used when ~/.cells/pool-config.json doesn't exist. Can be regenerated
+// by `cells pool refill` with --reset (TBD).
+const DEFAULT_POOL_CONFIG: PoolConfigRow[] = [
   { model: "gpt-5.5",         extensions: [],         packages: [], depth: 3 },
   { model: "gpt-5.5",         extensions: ["memory"], packages: [], depth: 2 },
   { model: "deepseek-v4-pro", extensions: [],         packages: [], depth: 1 },
 ];
 
-async function loadEggConfig(): Promise<EggConfigRow[]> {
-  if (!existsSync(EGGS_CONFIG_PATH)) return DEFAULT_EGG_CONFIG;
+async function loadPoolConfig(): Promise<PoolConfigRow[]> {
+  // Prefer pool-config.json; fall back to legacy eggs-config.json with a
+  // one-time warning so Pete can rename his file.
+  let path = POOL_CONFIG_PATH;
+  if (!existsSync(path)) {
+    if (existsSync(LEGACY_EGGS_CONFIG_PATH)) {
+      console.warn(`! using legacy ${LEGACY_EGGS_CONFIG_PATH} — rename to pool-config.json`);
+      path = LEGACY_EGGS_CONFIG_PATH;
+    } else {
+      return DEFAULT_POOL_CONFIG;
+    }
+  }
   try {
-    const raw = await readFile(EGGS_CONFIG_PATH, "utf-8");
+    const raw = await readFile(path, "utf-8");
     const parsed = JSON.parse(raw);
     if (!Array.isArray(parsed)) {
-      console.warn(`! ${EGGS_CONFIG_PATH} is not an array — using defaults`);
-      return DEFAULT_EGG_CONFIG;
+      console.warn(`! ${path} is not an array — using defaults`);
+      return DEFAULT_POOL_CONFIG;
     }
-    return parsed as EggConfigRow[];
+    return parsed as PoolConfigRow[];
   } catch (e) {
-    console.warn(`! ${EGGS_CONFIG_PATH} parse failed (${e}) — using defaults`);
-    return DEFAULT_EGG_CONFIG;
+    console.warn(`! ${path} parse failed (${e}) — using defaults`);
+    return DEFAULT_POOL_CONFIG;
   }
 }
 
-function configRowToVariant(row: EggConfigRow): Variant {
+function configRowToVariant(row: PoolConfigRow): Variant {
   return {
     model: row.model,
     thinking: "",
@@ -6209,18 +6241,18 @@ function configRowToVariant(row: EggConfigRow): Variant {
   };
 }
 
-async function cmdEggRefill() {
-  const config = await loadEggConfig();
+async function cmdPoolRefill() {
+  const config = await loadPoolConfig();
   if (config.length === 0) {
-    console.log("(eggs-config.json has no rows — nothing to refill)");
+    console.log("(pool-config.json has no rows — nothing to refill)");
     return;
   }
 
-  // Count warm eggs per pool key in a single load. Phase 3-future: also
+  // Count warm pool members per pool key in a single load. Phase 3-future: also
   // surface claimed/live for the operator's read.
-  const file = await loadEggs();
+  const file = await loadPool();
   const warmByKey = new Map<string, number>();
-  for (const e of file.eggs) {
+  for (const e of file.members) {
     if (e.state !== "warm") continue;
     warmByKey.set(e.variant_signature, (warmByKey.get(e.variant_signature) ?? 0) + 1);
   }
@@ -6258,12 +6290,12 @@ async function cmdEggRefill() {
         `--extensions=${n.variant.extensions.join(",")}`,
         `--packages=${n.variant.packages.join(",")}`,
       ];
-      console.log(`\n[${++baked}/${total}] cells egg ${args.join(" ")}`);
+      console.log(`\n[${++baked}/${total}] cells pool create ${args.join(" ")}`);
       try {
-        await cmdEggCreate(args);
+        await cmdPoolCreate(args);
       } catch (e) {
         console.error(`! egg-bake failed for ${n.key}: ${e}`);
-        console.error(`  continuing with remaining variants — re-run 'cells egg refill' to retry`);
+        console.error(`  continuing with remaining variants — re-run 'cells pool refill' to retry`);
       }
     }
   }
@@ -6271,13 +6303,13 @@ async function cmdEggRefill() {
   console.log(`\n✓ refill complete — ${baked} egg${baked === 1 ? "" : "s"} baked`);
 }
 
-async function cmdEggDrain(args: string[]) {
+async function cmdPoolDrain(args: string[]) {
   const yes = args.includes("-y") || args.includes("--yes");
-  const file = await loadEggs();
-  const warm = file.eggs.filter((e) => e.state === "warm");
+  const file = await loadPool();
+  const warm = file.members.filter((e) => e.state === "warm");
 
   if (warm.length === 0) {
-    console.log("(no warm eggs to drain)");
+    console.log("(no warm pool members to drain)");
     return;
   }
 
@@ -6294,10 +6326,10 @@ async function cmdEggDrain(args: string[]) {
   for (const e of warm) {
     console.log(`culling ${e.well_name} (id: ${e.id})`);
     const ok = await directWellDestroy(e.well_name);
-    await withEggLock(async () => {
-      const f = await loadEggs();
-      f.eggs = f.eggs.filter((x) => x.id !== e.id);
-      await saveEggs(f);
+    await withPoolLock(async () => {
+      const f = await loadPool();
+      f.members = f.members.filter((x) => x.id !== e.id);
+      await savePool(f);
     });
     if (ok) culled++;
     else console.warn(`! ${e.id} registry-removed but well destroy was uncertain`);
@@ -6793,8 +6825,8 @@ switch (sub) {
   case "unschedule-host-bridge":await cmdUnscheduleHostBridge(); break;
   case "schedule-pulse":        await cmdSchedulePulse(); break;
   case "unschedule-pulse":      await cmdUnschedulePulse(); break;
-  case "schedule-egg-refill":   await cmdScheduleEggRefill(); break;
-  case "unschedule-egg-refill": await cmdUnscheduleEggRefill(); break;
+  case "schedule-pool-refill":   await cmdSchedulePoolRefill(); break;
+  case "unschedule-pool-refill": await cmdUnschedulePoolRefill(); break;
   case "refresh-extensions":    await cmdRefreshExtensions(rest); break;
   case "heartbeat":             await cmdHeartbeat(rest); break;
   case "channel":
@@ -6802,7 +6834,8 @@ switch (sub) {
   case "doctor":             await cmdDoctor(); break;
   case "shell":              await cmdShell(needName(rest, "shell")); break;
   case "see":                await cmdSee(needName(rest, "see")); break;
-  case "egg":                await cmdEgg(rest); break;
+  case "pool":               await cmdPool(rest); break;
+  case "egg":                await cmdPool(rest); break;  // deprecated alias
   case "bake":               await cmdBake(parseBakeArgs(rest)); break;
   default:
     console.log("usage:");
@@ -6836,8 +6869,8 @@ switch (sub) {
     console.log("  cells unschedule-pi-patches remove launchd watcher");
     console.log("  cells schedule-pulse        install launchd plist (pulse ticks every 60s)");
     console.log("  cells unschedule-pulse      remove pulse launchd plist");
-    console.log("  cells schedule-egg-refill   install launchd plist (egg refill ticks every 10min)");
-    console.log("  cells unschedule-egg-refill remove egg refill launchd plist");
+    console.log("  cells schedule-pool-refill   install launchd plist (egg refill ticks every 10min)");
+    console.log("  cells unschedule-pool-refill remove egg refill launchd plist");
     console.log("  cells refresh-extensions <name|--all> [ext...] [--restart] [--remove]");
     console.log("                              push DNA extension(s) onto existing cell(s) (default: heartbeat-watch)");
     console.log("                              --restart kicks pi on the cell so new extensions load (otherwise dormant until next pi start)");

@@ -7,7 +7,7 @@
 //     animation snaps to the final stage and exits. In practice this fires
 //     when pi streams its first byte back to captureGreeting, so the
 //     animation ends just as the greeting is about to print.
-//   - maxDurationMs (default 6000ms): cap. Cold-egg paths can take >5s to
+//   - maxDurationMs (default 6000ms): cap. Cold pool-member paths can take >5s to
 //     thaw+start pi+LLM-RT; we don't want the animation hanging forever.
 //
 // Mounts via `runBirthAnimation()` from cli/cells.ts in cmdCreateV1Fast.

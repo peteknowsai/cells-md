@@ -83,7 +83,7 @@ type CellTarget = {
 };
 
 async function resolveCellTarget(cellName: string): Promise<CellTarget | null> {
-  // cells.json → hatched_from short id; eggs.json → well_name. For cells
+  // cells.json → hatched_from short id; pool.json → well_name. For cells
   // without a hatched_from entry (cold-fork path), the well-name equals
   // the cell-name.
   let wellName = cellName;
@@ -92,9 +92,13 @@ async function resolveCellTarget(cellName: string): Promise<CellTarget | null> {
     const reg = JSON.parse(readFileSync(join(homedir(), ".cells", "cells.json"), "utf8"));
     const cell = reg?.cells?.find((c: any) => c.name === cellName);
     if (cell?.hatched_from) {
-      const eggs = JSON.parse(readFileSync(join(homedir(), ".cells", "eggs.json"), "utf8"));
-      const egg = eggs?.eggs?.find((e: any) => e.id === cell.hatched_from);
-      if (egg?.well_name) wellName = egg.well_name;
+      // Prefer pool.json; fall back to legacy eggs.json (one-shot until cells.ts migrates).
+      let poolRaw: any = null;
+      try { poolRaw = JSON.parse(readFileSync(join(homedir(), ".cells", "pool.json"), "utf8")); }
+      catch { try { poolRaw = JSON.parse(readFileSync(join(homedir(), ".cells", "eggs.json"), "utf8")); } catch { /* none */ } }
+      const entries = poolRaw?.members ?? poolRaw?.eggs ?? [];
+      const member = entries.find((e: any) => e.id === cell.hatched_from);
+      if (member?.well_name) wellName = member.well_name;
     }
     if (cell?.picker?.provider && cell?.picker?.modelId && cell?.picker?.thinking) {
       picker = {
