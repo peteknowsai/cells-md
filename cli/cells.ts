@@ -14,6 +14,7 @@ import {
   poolKey,
   type Variant,
 } from "./lib/variant-signature";
+import { planReconcileEvictions } from "./lib/reconcile";
 
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = dirname(SCRIPT_DIR);
@@ -1431,6 +1432,13 @@ async function cmdCreateV1Fast(name: string | undefined, opts: CreateOpts): Prom
     process.exit(1);
   }
 
+  // Lazy reconcile: evict any stale entries before claim. Defends against
+  // the bobby class (welld bounced, pool.json still thought wells were
+  // warm). Quick — single GET when pool is healthy. Skip refill here
+  // because we're about to claim, and cmdCreateV1Fast fires refill itself
+  // post-claim.
+  await reconcilePool({ silent: false, skipRefill: true }).catch(() => { /* don't fail birth on reconcile error */ });
+
   // Pool-first: the egg comes with its cell-name pre-baked. We don't
   // rename — we just use the name the egg was created with. The hex
   // suffix of egg-AAAAAA matches cell-AAAAAA, so the mapping is direct.
@@ -2781,6 +2789,130 @@ async function promoteOneColdToHot(): Promise<boolean> {
     }
   });
   return true;
+}
+
+// ─── reconcilePool ────────────────────────────────────────────────────
+// Diffs pool.json against welld's actual state. Evicts members welld
+// no longer knows about (W.68 class: pool says warm, welld has no bundle)
+// and tier-4 hot members welld reports stopped (bobby class: welld bounce
+// stopped the running well, no hibernate.bin to /wake from). Background-
+// triggers refill after eviction.
+//
+// Why this exists: today's bobby stall was state drift — wells bounced
+// to pick up the splites→wells rename, all tier-4 pool VMs went to
+// `stopped`, but cells's pool.json still said warm/tier-4. claimV1PoolMember
+// picked the stale entry and downstream timing collapsed. Reconcile is the
+// answer: pool.json reflects welld's truth, not last-known-good.
+//
+// Safe to call frequently. Cheap when pool is healthy (1 HTTP call). Skips
+// eviction when welld is unreachable or /healthz reports degraded — we
+// don't want to nuke the pool during a substrate flap.
+
+type ReconcileReport = {
+  checked_at: string;
+  pool_size_before: number;
+  welld_known: number;
+  evicted: { id: string; well_name: string; reason: string }[];
+  pool_size_after: number;
+  refill_triggered: boolean;
+  errors: string[];
+};
+
+async function reconcilePool(
+  opts: { silent?: boolean; skipRefill?: boolean } = {},
+): Promise<ReconcileReport> {
+  const report: ReconcileReport = {
+    checked_at: new Date().toISOString(),
+    pool_size_before: 0,
+    welld_known: 0,
+    evicted: [],
+    pool_size_after: 0,
+    refill_triggered: false,
+    errors: [],
+  };
+
+  const before = await loadPool();
+  report.pool_size_before = before.members.length;
+  if (before.members.length === 0) {
+    report.pool_size_after = 0;
+    return report;
+  }
+
+  const base = process.env.WELL_API_URL ?? "http://127.0.0.1:7878";
+
+  // /healthz: back-off signal. No auth required.
+  let healthz: any = null;
+  try {
+    const h = await fetch(`${base}/healthz`);
+    if (h.ok) healthz = await h.json();
+  } catch (e: any) {
+    report.errors.push(`healthz unreachable: ${e?.message ?? e}`);
+  }
+  if (!healthz) {
+    report.pool_size_after = report.pool_size_before;
+    return report; // welld down — no-op, not a drift signal
+  }
+  if (healthz.degraded === true) {
+    report.errors.push("welld degraded; reconcile skipped");
+    report.pool_size_after = report.pool_size_before;
+    return report;
+  }
+
+  // GET /v1/wells: the authoritative welld view.
+  let welldRows: { name: string; status: string }[] = [];
+  try {
+    const token = await wellsToken();
+    const r = await fetch(`${base}/v1/wells`, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    if (!r.ok) {
+      report.errors.push(`/v1/wells → ${r.status}`);
+      report.pool_size_after = report.pool_size_before;
+      return report;
+    }
+    const body = await r.json();
+    welldRows = (Array.isArray(body?.wells) ? body.wells : [])
+      .filter((w: any) => typeof w?.name === "string")
+      .map((w: any) => ({ name: String(w.name), status: String(w.status ?? "") }));
+  } catch (e: any) {
+    report.errors.push(`/v1/wells fetch failed: ${e?.message ?? e}`);
+    report.pool_size_after = report.pool_size_before;
+    return report;
+  }
+  report.welld_known = welldRows.length;
+
+  // Mutate pool.json under lock. Re-read inside the lock to avoid TOCTOU
+  // against a concurrent bake/claim that mutated pool.json after our
+  // outer load above.
+  await withPoolLock(async () => {
+    const file = await loadPool();
+    const plan = planReconcileEvictions(file.members, welldRows);
+    if (plan.evicted.length > 0) {
+      file.members = plan.keep;
+      await savePool(file);
+    }
+    report.evicted = plan.evicted;
+    report.pool_size_after = plan.keep.length;
+  });
+
+  // Background refill — fire and forget, don't make the caller wait.
+  if (report.evicted.length > 0 && !opts.skipRefill) {
+    report.refill_triggered = true;
+    refillPoolToDepth().catch((e) => {
+      if (!opts.silent) {
+        console.error(`reconcile-triggered refill failed: ${e?.message ?? e}`);
+      }
+    });
+  }
+
+  if (!opts.silent && report.evicted.length > 0) {
+    console.error(
+      `pool reconcile: evicted ${report.evicted.length} stale member(s); ` +
+        `pool ${report.pool_size_before} → ${report.pool_size_after}` +
+        (report.refill_triggered ? " (refill triggered)" : ""),
+    );
+  }
+  return report;
 }
 
 // Refill the v1 pool to the target depth.
@@ -4506,6 +4638,101 @@ async function cmdUnschedulePoolRefill() {
   console.log("✓ unscheduled");
 }
 
+// `cells schedule-pool-reconcile` installs a launchd plist that runs
+// `cells pool reconcile` every 5 minutes. Eager defense against state
+// drift (welld bounces, manual lume hand-stops, etc) — works even when
+// no one is running cells commands. Cheap when pool is healthy.
+
+const POOL_RECONCILE_LABEL = "com.pete.cells-pool-reconcile";
+
+function poolReconcilePlistPath(): string {
+  return join(homedir(), "Library/LaunchAgents", `${POOL_RECONCILE_LABEL}.plist`);
+}
+
+function buildPoolReconcilePlist(): string {
+  const bunBin = `${homedir()}/.bun/bin/bun`;
+  const cellsCli = join(REPO_ROOT, "cli", "cells.ts");
+  const logsDir = join(homedir(), ".cells", "logs");
+  const path = `${homedir()}/.bun/bin:${homedir()}/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin`;
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>${POOL_RECONCILE_LABEL}</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>${bunBin}</string>
+    <string>${cellsCli}</string>
+    <string>pool</string>
+    <string>reconcile</string>
+  </array>
+  <key>WorkingDirectory</key>
+  <string>${REPO_ROOT}</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>${path}</string>
+    <key>HOME</key>
+    <string>${homedir()}</string>
+  </dict>
+  <key>StartInterval</key>
+  <integer>300</integer>
+  <key>StandardOutPath</key>
+  <string>${logsDir}/pool-reconcile.log</string>
+  <key>StandardErrorPath</key>
+  <string>${logsDir}/pool-reconcile.err</string>
+  <key>RunAtLoad</key>
+  <false/>
+</dict>
+</plist>
+`;
+}
+
+async function cmdSchedulePoolReconcile() {
+  const logsDir = join(homedir(), ".cells", "logs");
+  await mkdir(logsDir, { recursive: true });
+  await mkdir(dirname(poolReconcilePlistPath()), { recursive: true });
+  await writeFile(poolReconcilePlistPath(), buildPoolReconcilePlist());
+  console.log(`✓ wrote plist: ${poolReconcilePlistPath()}`);
+
+  const uid = process.getuid?.() ?? 501;
+  await Bun.spawn(["launchctl", "bootout", `gui/${uid}/${POOL_RECONCILE_LABEL}`], {
+    stdin: "ignore",
+    stdout: "ignore",
+    stderr: "ignore",
+  }).exited;
+  const proc = Bun.spawn(["launchctl", "bootstrap", `gui/${uid}`, poolReconcilePlistPath()], {
+    stdin: "ignore",
+    stdout: "inherit",
+    stderr: "inherit",
+  });
+  const code = await proc.exited;
+  if (code !== 0) {
+    console.error("✗ launchctl bootstrap failed");
+    process.exit(1);
+  }
+  console.log(`✓ scheduled: pool reconcile every 5 minutes`);
+  console.log(`  logs: ${logsDir}/pool-reconcile.log (stdout), pool-reconcile.err (stderr)`);
+  console.log(`  unschedule with: cells unschedule-pool-reconcile`);
+}
+
+async function cmdUnschedulePoolReconcile() {
+  const uid = process.getuid?.() ?? 501;
+  await Bun.spawn(["launchctl", "bootout", `gui/${uid}/${POOL_RECONCILE_LABEL}`], {
+    stdin: "ignore",
+    stdout: "inherit",
+    stderr: "inherit",
+  }).exited;
+  if (existsSync(poolReconcilePlistPath())) {
+    await unlink(poolReconcilePlistPath());
+    console.log(`✓ removed ${poolReconcilePlistPath()}`);
+  } else {
+    console.log("(no plist found)");
+  }
+  console.log("✓ unscheduled");
+}
+
 async function cmdUnschedulePulse() {
   const uid = process.getuid?.() ?? 501;
   await Bun.spawn(["launchctl", "bootout", `gui/${uid}/${PULSE_LABEL}`], {
@@ -5935,6 +6162,10 @@ async function hatchEgg(
 // `cells pool list`                                          — show pool
 // `cells pool cull <id>`                                     — destroy a
 //                                                            pool member by id
+// `cells pool refill`                                        — bake pool up to depth
+// `cells pool drain`                                         — destroy all warm members
+// `cells pool reconcile`                                     — diff pool.json vs welld;
+//                                                            evict stale entries
 //
 // `--thinking` and `--channels` are deliberately NOT accepted at pool-member
 // bake. Pool members are stock; thinking and channels are applied at hatch
@@ -5960,6 +6191,10 @@ async function cmdPool(args: string[]) {
   }
   if (sub === "drain") {
     await cmdPoolDrain(args.slice(1));
+    return;
+  }
+  if (sub === "reconcile") {
+    await cmdPoolReconcile();
     return;
   }
   if (sub === "bake-v1") {
@@ -6118,6 +6353,9 @@ async function cmdPoolCreate(args: string[]) {
 }
 
 async function cmdPoolList() {
+  // Lazy reconcile: cheap defense against state drift since the last
+  // command. Silent on success; logs only when it actually evicted.
+  await reconcilePool({ silent: false }).catch(() => { /* don't fail list on reconcile error */ });
   const file = await loadPool();
   if (file.members.length === 0) {
     console.log("(no members in pool)");
@@ -6139,6 +6377,30 @@ async function cmdPoolList() {
     const age = fmtAge(e.born_at).padEnd(8);
     const by = e.claimed_by ?? "—";
     console.log(`${id}  ${state}  ${sig}  ${age}  ${by}`);
+  }
+}
+
+// `cells pool reconcile` — explicit drift sweep. Same logic as the
+// lazy guards but verbose by default so the operator can see what got
+// evicted and what didn't.
+async function cmdPoolReconcile() {
+  const report = await reconcilePool({ silent: true });
+  console.log(`checked_at:        ${report.checked_at}`);
+  console.log(`pool_size_before:  ${report.pool_size_before}`);
+  console.log(`welld_known:       ${report.welld_known}`);
+  console.log(`pool_size_after:   ${report.pool_size_after}`);
+  console.log(`refill_triggered:  ${report.refill_triggered}`);
+  if (report.evicted.length === 0) {
+    console.log("evicted:           (none — pool is in sync)");
+  } else {
+    console.log(`evicted (${report.evicted.length}):`);
+    for (const e of report.evicted) {
+      console.log(`  ${e.id}  ${e.well_name}  ← ${e.reason}`);
+    }
+  }
+  if (report.errors.length > 0) {
+    console.log("errors:");
+    for (const err of report.errors) console.log(`  ${err}`);
   }
 }
 
@@ -6242,6 +6504,11 @@ function configRowToVariant(row: PoolConfigRow): Variant {
 }
 
 async function cmdPoolRefill() {
+  // Lazy reconcile first: don't bake against stale state. Pass
+  // skipRefill so we don't trigger a recursive refill before our own
+  // bake pass runs.
+  await reconcilePool({ silent: false, skipRefill: true }).catch(() => { /* don't fail refill on reconcile error */ });
+
   const config = await loadPoolConfig();
   if (config.length === 0) {
     console.log("(pool-config.json has no rows — nothing to refill)");
@@ -6827,6 +7094,8 @@ switch (sub) {
   case "unschedule-pulse":      await cmdUnschedulePulse(); break;
   case "schedule-pool-refill":   await cmdSchedulePoolRefill(); break;
   case "unschedule-pool-refill": await cmdUnschedulePoolRefill(); break;
+  case "schedule-pool-reconcile":   await cmdSchedulePoolReconcile(); break;
+  case "unschedule-pool-reconcile": await cmdUnschedulePoolReconcile(); break;
   case "refresh-extensions":    await cmdRefreshExtensions(rest); break;
   case "heartbeat":             await cmdHeartbeat(rest); break;
   case "channel":
@@ -6871,6 +7140,8 @@ switch (sub) {
     console.log("  cells unschedule-pulse      remove pulse launchd plist");
     console.log("  cells schedule-pool-refill   install launchd plist (egg refill ticks every 10min)");
     console.log("  cells unschedule-pool-refill remove egg refill launchd plist");
+    console.log("  cells schedule-pool-reconcile   install launchd plist (pool reconcile every 5min)");
+    console.log("  cells unschedule-pool-reconcile remove pool reconcile launchd plist");
     console.log("  cells refresh-extensions <name|--all> [ext...] [--restart] [--remove]");
     console.log("                              push DNA extension(s) onto existing cell(s) (default: heartbeat-watch)");
     console.log("                              --restart kicks pi on the cell so new extensions load (otherwise dormant until next pi start)");
