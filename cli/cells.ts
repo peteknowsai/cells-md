@@ -1259,6 +1259,32 @@ async function cmdDoctor() {
     console.log(`pi watcher:    ${yellow}not installed${reset}`);
     console.log(`  fix:         cells schedule-pi-patches`);
   }
+
+  // 6. well shim probe — catches gitignored bin wrappers that point at
+  // stale absolute paths after a project folder rename. Bit us on
+  // 2026-05-13 when wells's splites→wells rename left /Users/pete/.local/bin/well
+  // exec'ing a deleted path; every wellExecCapture silently failed under
+  // waitForCloudInit's 5-min retry loop. A single `well --help` probe
+  // catches this in milliseconds.
+  console.log("");
+  try {
+    const probe = Bun.spawn(["well", "--help"], {
+      stdin: "ignore",
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    const stderr = await new Response(probe.stderr).text();
+    const code = await probe.exited;
+    if (code === 0) {
+      console.log(`well shim:     ${green}responsive${reset}`);
+    } else {
+      console.log(`well shim:     ${red}exit ${code}${reset} — ${stderr.slice(0, 200)}`);
+      console.log(`  fix:         check /Users/pete/.local/bin/well exec path; common after wells repo rename`);
+    }
+  } catch (e) {
+    console.log(`well shim:     ${red}unreachable${reset} (${dim}${String(e).slice(0, 80)}${reset})`);
+    console.log(`  fix:         check /Users/pete/.local/bin/well is in PATH and executable`);
+  }
 }
 
 async function checkPiPatches(): Promise<{ ok: boolean; detail: string }> {
@@ -1515,9 +1541,23 @@ async function cmdCreateV1Fast(name: string | undefined, opts: CreateOpts): Prom
     }
 
     if (!hatchedFrom) {
-      // Cold-fork: no warm egg or wake failed. Create + wait for
-      // firstboot. With host-bridge, no in-cell well-site to wait for —
-      // pi spawns on demand via SSH when the talk session opens.
+      // Cold-fork: no warm egg or wake failed. Create + wait for firstboot.
+      // Cold-fork requires the cell-base image — the V1 architecture is
+      // pool-only and cell-base was retired (it was the legacy fast-fork
+      // source baked once via `cells bake`). If it's missing, fail fast
+      // with an actionable message instead of letting welld return a
+      // generic 404 "image not found".
+      const cellBasePath = join(homedir(), ".wells", "images", "cell-base");
+      if (!existsSync(cellBasePath)) {
+        console.error(
+          `birth failed: pool is empty and cold-fork is unavailable (cell-base image missing at ${cellBasePath}).\n` +
+            `  v1 architecture is pool-only. Options:\n` +
+            `    cells pool refill          # bake more pool members\n` +
+            `    cells pool bake-v1         # bake one generic v1 member\n` +
+            `    cells pool reconcile       # sync pool.json with welld in case of stale state`,
+        );
+        process.exit(1);
+      }
       const env = { ...(await collectCellLlmEnv()), CELL_NAME: cellName };
       await directWellCreate(cellName, { fromImage: "cell-base", env });
       await setWellAuthPublic(cellName);
@@ -1675,6 +1715,16 @@ async function cmdCreateV1Fast(name: string | undefined, opts: CreateOpts): Prom
     } else {
       await cmdTalk(cellName, []);
     }
+  } else {
+    // Non-TTY (scripted) birth: cell is registered alive, telemetry
+    // written, refill + prewarm are fire-and-forget. The user-visible
+    // work is done — exit explicitly so the bun process doesn't hang
+    // 5-15s on the background WS + refill promises holding the event
+    // loop alive. If the caller wants refill to land, they should rely
+    // on the launchd `schedule-pool-refill` job or run `cells pool
+    // refill` explicitly. Scripted births shouldn't pay for background
+    // bookkeeping they can't see.
+    process.exit(0);
   }
 }
 
@@ -6902,6 +6952,12 @@ async function waitForCloudInit(name: string): Promise<void> {
   // /var/lib/cloud/instance/boot-finished isn't written by the new path.
   // We still confirm authorized_keys to catch a mid-boot race where the
   // marker landed before SSH key injection completed (defensive).
+  //
+  // Non-transient signatures bail immediately rather than waste the full
+  // 5-minute retry window. Hit on 2026-05-13 when /Users/pete/.local/bin/well
+  // pointed at a deleted splites path — every probe threw "Module not found",
+  // identical to "still booting" to the retry loop. Cost 5min of silent hang.
+  const NON_TRANSIENT = /Module not found|Permission denied \(publickey\)|Host key verification failed|command not found: well|ENOENT.*well\.ts|cli\/well\.ts/i;
   const deadlineMs = Date.now() + 5 * 60 * 1000;
   let lastErr = "";
   while (Date.now() < deadlineMs) {
@@ -6913,6 +6969,9 @@ async function waitForCloudInit(name: string): Promise<void> {
       return;
     }
     lastErr = r.stderr || r.stdout;
+    if (NON_TRANSIENT.test(lastErr)) {
+      throw new Error(`waitForCloudInit non-transient error on '${name}' — bailing without retry: ${lastErr.slice(0, 400)}`);
+    }
     await new Promise((res) => setTimeout(res, 3000));
   }
   throw new Error(`well-firstboot did not finish within 5min on '${name}' (last: ${lastErr.slice(0, 200)})`);
