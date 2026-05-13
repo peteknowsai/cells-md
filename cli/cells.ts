@@ -2203,7 +2203,7 @@ async function readSecret(key: string): Promise<string | null> {
 // directWellDestroy.
 async function directWellCreate(
   name: string,
-  opts: { fromImage: string; env?: Record<string, string>; hibernateReady?: boolean },
+  opts: { fromImage: string; env?: Record<string, string> },
 ): Promise<void> {
   const body: Record<string, unknown> = {
     name,
@@ -2212,14 +2212,10 @@ async function directWellCreate(
   if (opts.env && Object.keys(opts.env).length > 0) {
     body.env = opts.env;
   }
-  // Piece 3 (wells, 2026-05-12): default fresh-create skips warming for
-  // speed; hibernate refuses if the well wasn't sealed at create time.
-  // Pass hibernate_ready: true when we know this well needs to hibernate
-  // (Tier 2 pool members). Costs ~6-8s extra create time for the warming
-  // sequence. Omit (or false) for Tier 4 / user-facing fresh creates.
-  if (opts.hibernateReady) {
-    body.hibernate_ready = true;
-  }
+  // Note: pre-Piece-3 (2026-05-12) we passed hibernate_ready: true here to
+  // trigger inline warming. Pi3 (2026-05-13) deleted that path — wells's
+  // createWell no longer accepts the field. Use sealWell() after
+  // provisioning instead to flip the well hibernate-legal.
   const base = process.env.WELL_API_URL ?? "http://127.0.0.1:7878";
   const r = await fetch(`${base}/v1/wells`, {
     method: "POST",
@@ -2282,6 +2278,33 @@ async function disableAutoSleep(wellName: string): Promise<void> {
     console.warn(
       `! disableAutoSleep '${wellName}' failed: ${r.status} ${(await r.text()).slice(0, 200)}`,
     );
+  }
+}
+
+// Take a freshly-provisioned well to a hibernate-legal disk-only steady
+// state. Post-Piece-3 (2026-05-13), wells's createWell no longer does the
+// warming sequence inline; cells calls /seal explicitly after provisioning
+// to flip runtime.hibernate_ready and detach cidata. Without this, the
+// /hibernate gate refuses the well.
+//
+// Sequence wells's /seal handles internally (mirrors the deleted warming):
+//   1. Stop the well (graceful halt)
+//   2. Restart without cidata (disk-only mount)
+//   3. Wait for SSH-ready
+//   4. Flip runtime.hibernate_ready = true
+//
+// Returns ~6-8s typical (per pre-Pi3 warming cost). Throws if welld's
+// /seal endpoint isn't available — that means the wells side is older
+// than the cells side and someone needs to bounce welld.
+async function sealWell(wellName: string): Promise<void> {
+  const base = process.env.WELL_API_URL ?? "http://127.0.0.1:7878";
+  const r = await fetch(`${base}/v1/wells/${encodeURIComponent(wellName)}/seal`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${await wellsToken()}` },
+  });
+  if (!r.ok) {
+    const body = (await r.text()).slice(0, 400);
+    throw new Error(`seal '${wellName}' failed: ${r.status} ${body}`);
   }
 }
 
@@ -2514,15 +2537,13 @@ async function bakePoolMember(): Promise<string> {
   // patches) get applied via provisionCellInWell over SSH right after
   // firstboot. The cell user, /cell home, sudoers, and ssh keys come
   // pre-baked from ubuntu-base (wells-stable-2026-05-12h).
-  // Pool members must always be sealed: a Tier 4 (hot) member becomes a user
-  // cell after birth, and `cells sleep <name>` expects to hibernate it.
-  // Wells's default fresh-create skips the seal warming for speed
-  // (Piece 3, 2026-05-12) — hibernate refuses non-sealed wells. The
-  // ~6-8s extra cost at bake is the price of admission for v1 sleep.
+  // Post-Piece-3 (2026-05-13): we no longer pass hibernate_ready at
+  // create time (Pi3 deleted that path). Instead, sealWell() is called
+  // after provisionCellInWell to flip the well to a hibernate-legal
+  // disk-only state. ~6-8s cost is paid by /seal instead of /v1/wells.
   await directWellCreate(wellName, {
     fromImage: "ubuntu-base",
     env,
-    hibernateReady: true,
   });
   await setWellAuthPublic(wellName);
   // Disable wells's auto-hibernate watchdog up front. v1 cells stay
@@ -2553,6 +2574,22 @@ async function bakePoolMember(): Promise<string> {
     );
   }
 
+  // Seal the well: halt, restart without cidata, flip hibernate_ready.
+  // Required post-Piece-3 (2026-05-13) — wells's createWell no longer
+  // does this inline. Without /seal, the /hibernate gate refuses every
+  // freshly-baked well. The disk-only steady state captured here is the
+  // POST-provision state, so wake-from-hibernate restores the
+  // provisioned cell — strictly cleaner than pre-Pi3 (where warming
+  // ran inside create, before provisioning had a chance to land).
+  try {
+    await sealWell(wellName);
+  } catch (e) {
+    await directWellDestroy(wellName);
+    throw new Error(
+      `bakePoolMember seal failed for '${wellName}': ${e instanceof Error ? e.message : String(e)}`,
+    );
+  }
+
   // (Bridge readiness was previously asserted here against an in-cell
   // well-site.service. With the host-bridge architecture, pi is spawned
   // on-demand via SSH at talk time — there's no in-cell bridge to wait
@@ -2560,9 +2597,10 @@ async function bakePoolMember(): Promise<string> {
   // identity injection + SSH readiness, which is everything host-bridge
   // needs to connect.)
 
-  // Tier decision happened pre-create above (so hibernate_ready could
-  // be passed correctly). Now act on it: Tier 2 → hibernate the
-  // freshly-provisioned well; Tier 4 → leave running with pi configured.
+  // Tier decision happened pre-create above. Now act on it: Tier 2 →
+  // hibernate the now-sealed well; Tier 4 → leave running with pi
+  // configured (sealed but live; sleep can still seal-and-hibernate it
+  // later if the user cells sleep's it).
   if (tier === 2) {
     const base = process.env.WELL_API_URL ?? "http://127.0.0.1:7878";
     const hibRes = await fetch(
