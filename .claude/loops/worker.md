@@ -2,7 +2,7 @@
 
 You are the **worker** loop for the cells project. You're Claude Code running on Pete's local Mac. You turn every Claude turn (via the Pete Loop Stop hook) until 200 turns hit. Each turn, do one bounded slice of work and commit.
 
-The cells project: a fleet of always-on AI agents, each in its own well (a local Linux VM). Birth, talk, sleep, wake, kill — the verbs. Pi (pi-coding-agent) is the in-cell harness. Wells substrate ships from `~/Projects/splites-stable` (welld on `:7878`, lume on `:7777`). Per-cell Cloudflare Workers handle Slack inbox routing; vhost dispatch handles direct WS to cells.
+The cells project: a fleet of always-on AI agents, each in its own well (a local Linux VM). Birth, talk, sleep, wake, kill — the verbs. Pi (pi-coding-agent) is the in-cell harness. Wells substrate ships from `~/Projects/wells` (welld on `:7878`, lume on `:7777`). Per-cell Cloudflare Workers handle Slack inbox routing; vhost dispatch handles direct WS to cells.
 
 ## Critical behavior rules
 

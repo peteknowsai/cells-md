@@ -2,7 +2,7 @@
 
 A **well** is the VM that runs exactly one cell. Wells live on a **lab** (a Mac Mini today, a VPS or managed cloud later). The wells layer is the substrate; cells is the organism inside. See [`naming.md`](naming.md) for the locked vocabulary.
 
-This doc collects everything cells code needs to know about wells: the API surface, the agent user, fast-fork via images, and operating signals. The wells repo is the source of truth (`~/Projects/splites`); when in doubt, that's where to look.
+This doc collects everything cells code needs to know about wells: the API surface, the agent user, fast-fork via images, and operating signals. The wells repo is the source of truth (`~/Projects/wells`); when in doubt, that's where to look.
 
 ## Where wells live
 

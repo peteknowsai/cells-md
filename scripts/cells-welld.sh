@@ -25,11 +25,11 @@
 # Override paths/ports via env, e.g.:
 #   WELL_PORT=7879 WELL_STATE_DIR=~/.wells-dev scripts/cells-welld.sh start
 #
-# Welld source must live at $WELLD_REPO (default ~/Projects/splites-stable).
+# Welld source must live at $WELLD_REPO (default ~/Projects/wells).
 
 set -euo pipefail
 
-WELLD_REPO="${WELLD_REPO:-$HOME/Projects/splites-stable}"
+WELLD_REPO="${WELLD_REPO:-$HOME/Projects/wells}"
 [ -d "$WELLD_REPO" ] || { echo "welld repo not found: $WELLD_REPO (set WELLD_REPO=...)"; exit 1; }
 [ -f "$WELLD_REPO/daemon/welld.ts" ] || { echo "welld.ts not at $WELLD_REPO/daemon/welld.ts"; exit 1; }
 
