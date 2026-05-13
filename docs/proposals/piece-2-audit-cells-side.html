@@ -1,0 +1,433 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Piece 2 audit — cells side</title>
+<style>
+  :root {
+    --wells: #3b82c4;
+    --wells-light: #e6f0fb;
+    --wells-dark: #1e5a8e;
+    --cells: #4ca87a;
+    --cells-light: #e8f5ee;
+    --cells-dark: #2d7050;
+    --warn: #d99834;
+    --warn-light: #fff8e6;
+    --warn-dark: #7a5a18;
+    --ink: #1a1a1a;
+    --ink-muted: #5a5a5a;
+    --bg: #fafaf8;
+    --code-bg: #f0efec;
+    --rule: #ddd;
+  }
+  * { box-sizing: border-box; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, sans-serif;
+    background: var(--bg);
+    color: var(--ink);
+    line-height: 1.55;
+    max-width: 880px;
+    margin: 0 auto;
+    padding: 32px 24px 80px;
+  }
+  h1 { font-size: 28px; line-height: 1.2; margin: 0 0 6px; }
+  h2 { font-size: 22px; line-height: 1.3; margin: 44px 0 12px; border-bottom: 1px solid var(--rule); padding-bottom: 6px; }
+  h3 { font-size: 17px; line-height: 1.35; margin: 24px 0 6px; }
+  h4 { font-size: 13px; color: var(--ink-muted); text-transform: uppercase; letter-spacing: 0.06em; margin: 18px 0 4px; }
+  .header-meta { color: var(--ink-muted); font-size: 14px; margin-bottom: 24px; }
+  code { background: var(--code-bg); padding: 1px 5px; border-radius: 3px; font-size: 0.92em; font-family: "SF Mono", Menlo, Consolas, monospace; }
+  pre { background: var(--code-bg); padding: 12px 16px; border-radius: 6px; overflow-x: auto; font-size: 13px; line-height: 1.5; }
+  pre code { background: transparent; padding: 0; }
+
+  .tldr {
+    background: linear-gradient(to right, var(--cells-light), var(--wells-light));
+    border-left: 4px solid var(--ink);
+    padding: 16px 20px;
+    border-radius: 4px;
+    margin: 20px 0 28px;
+  }
+  .tldr h3 { margin-top: 0; }
+  .tldr ul { margin: 8px 0 0; padding-left: 22px; }
+  .tldr li { margin-bottom: 5px; }
+
+  .plain {
+    background: var(--warn-light);
+    border: 1px solid #e8d4a0;
+    border-radius: 10px;
+    padding: 20px 24px;
+    margin: 24px 0;
+  }
+  .plain h3 {
+    margin: 0 0 4px;
+    font-size: 18px;
+    color: var(--warn-dark);
+  }
+  .plain .plain-sub {
+    font-size: 12px;
+    color: #8c7035;
+    margin: 0 0 12px;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+  }
+  .plain p { font-size: 15px; line-height: 1.65; margin: 10px 0; }
+  .plain p:first-of-type { margin-top: 0; }
+  .plain p:last-of-type { margin-bottom: 0; }
+
+  .piece {
+    border: 1px solid var(--rule);
+    border-radius: 10px;
+    background: white;
+    padding: 22px 26px;
+    margin: 24px 0;
+  }
+  .piece h2 {
+    margin: 0 0 12px;
+    border-bottom: none;
+    padding-bottom: 0;
+    display: flex;
+    align-items: baseline;
+    gap: 12px;
+  }
+  .piece .badge {
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    padding: 3px 9px;
+    border-radius: 12px;
+    font-weight: 600;
+  }
+  .piece.cells-flavor .badge { background: var(--cells-light); color: var(--cells-dark); }
+  .piece.warn-flavor .badge { background: var(--warn-light); color: var(--warn-dark); }
+  .piece .effort {
+    font-size: 13px;
+    color: var(--ink-muted);
+    margin-left: auto;
+    font-weight: 400;
+    letter-spacing: normal;
+    text-transform: none;
+  }
+
+  .two-col {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 18px;
+    margin: 16px 0;
+  }
+  .col-card {
+    border-radius: 8px;
+    padding: 16px 18px;
+    border: 1px solid var(--rule);
+    font-size: 14px;
+  }
+  .col-wells { background: var(--wells-light); border-color: #c8d8e8; }
+  .col-cells { background: var(--cells-light); border-color: #c8e2d2; }
+  .col-card h4 { margin-top: 0; color: var(--ink); }
+  .col-wells h4 { color: var(--wells-dark); }
+  .col-cells h4 { color: var(--cells-dark); }
+  .col-card ul { margin: 6px 0 0; padding-left: 20px; }
+  .col-card li { margin-bottom: 4px; }
+
+  .take {
+    background: #f3efe6;
+    border-left: 4px solid var(--warn);
+    border-radius: 4px;
+    padding: 18px 22px;
+    margin: 28px 0;
+  }
+  .take h2 {
+    margin: 0 0 12px;
+    border-bottom: none;
+    padding-bottom: 0;
+  }
+  .take ol { margin: 8px 0 0; padding-left: 22px; }
+  .take li { margin-bottom: 8px; }
+  .take strong { color: var(--warn-dark); }
+
+  .recap {
+    font-size: 14px;
+    color: var(--ink-muted);
+  }
+  .recap strong { color: var(--ink); }
+
+  table { border-collapse: collapse; width: 100%; font-size: 14px; margin: 12px 0; }
+  th { background: #efeeeb; text-align: left; padding: 7px 11px; border-bottom: 2px solid #ccc; font-weight: 600; }
+  td { padding: 7px 11px; border-bottom: 1px solid #e8e6e2; vertical-align: top; }
+  td.num { font-family: monospace; text-align: right; }
+
+  .status-pill {
+    display: inline-block;
+    padding: 2px 9px;
+    border-radius: 12px;
+    font-size: 12px;
+    font-weight: 600;
+    vertical-align: middle;
+    white-space: nowrap;
+  }
+  .status-done { background: var(--cells-light); color: var(--cells-dark); }
+  .status-todo { background: var(--warn-light); color: var(--warn-dark); }
+  .status-waits { background: #f0efec; color: var(--ink-muted); }
+  .status-cosmetic { background: #ece6f5; color: #5a3d8a; }
+  .status-skip { background: #f5e6e6; color: #8a3d3d; }
+
+  .incident {
+    background: #fcf2f2;
+    border: 1px solid #ecd4d4;
+    border-radius: 8px;
+    padding: 14px 18px;
+    margin: 16px 0;
+    font-size: 14px;
+  }
+  .incident h4 {
+    margin: 0 0 6px;
+    color: #8a3d3d;
+  }
+  .incident ol {
+    margin: 6px 0 0;
+    padding-left: 22px;
+  }
+  .incident li { margin-bottom: 3px; }
+
+  hr.footer { border: none; border-top: 1px solid var(--rule); margin: 50px 0 20px; }
+  .signoff { font-size: 13px; color: var(--ink-muted); }
+</style>
+</head>
+<body>
+
+<h1>Piece 2 audit — cells side</h1>
+<p class="header-meta">Response to wells team's explainer · 2026-05-13 · updated post-shipment of rename + reconcile</p>
+
+<div class="tldr">
+  <h3>Headline</h3>
+  <ul>
+    <li><strong>Cells doesn't call any of wells's pool API.</strong> Zero hits on <code>/v1/wells/pool</code>, <code>adoptFromPool</code>, <code>reset-identity</code>, or <code>well pool</code> anywhere in cells's codebase.</li>
+    <li>We built our own pool during V1 work. <code>pool.json</code> is the cells-side pool manager — refill, consume, bake, hibernate, all of it.</li>
+    <li><strong><code>identityReset</code> isn't a port we need.</strong> Each pool member pre-bakes its <code>CELL_NAME</code> at create-time via <code>well-firstboot</code>. No rotation at adoption — identity is already unique per-member.</li>
+    <li>The slice2-prep.md effort estimate (~2-3 cells-days) was written under an assumption that proved wrong: we don't have a wells-pool dependency to migrate from.</li>
+    <li><strong>Wells can ship Piece 2 deletion whenever they're ready.</strong> We're not blocking them, and we don't need a port of <code>identityReset.ts</code>.</li>
+  </ul>
+</div>
+
+<div class="tldr" style="background: linear-gradient(to right, var(--cells-light), var(--cells-light)); border-left-color: var(--cells-dark);">
+  <h3>What shipped today (2026-05-13)</h3>
+  <ul>
+    <li><strong>Rename: eggs → pool.</strong> <code>pool.json</code> is canonical; auto-migration from legacy <code>eggs.json</code> on first load. Cells main: <code>bcbc010</code>.</li>
+    <li><strong><code>reconcilePool()</code> shipped.</strong> Diffs <code>pool.json</code> against <code>GET /v1/wells</code>, evicts ghosts + tier-4 stopped members, fires background refill. Lazy guard in <code>cells pool list/refill</code> + <code>cmdCreateV1Fast</code>; eager <code>cells pool reconcile</code> subcommand; launchd job available (5min cadence). Pure-logic kernel in <code>cli/lib/reconcile.ts</code> with 9 unit tests. Cells main: <code>c3f2d8b</code>.</li>
+    <li><strong>Live verification on today's drift:</strong> ran reconcile against the actual post-11:06Z bounce state. Evicted all 9 stale tier-4 hot members. Pool went 9 → 0; refill triggered. The bobby class is officially caught.</li>
+    <li><strong>Wells side:</strong> <code>feature/piece-2-pool-delete</code> squash-merged to wells main as <code>1ab5160</code> (22 files, +34 / -2301, 980 tests green). Piece 3 prep in flight on a separate wells branch.</li>
+    <li><strong>Next:</strong> wells bounces stable welld with the new code; cells re-runs reconcile + V1.5 + V1.10 against the post-Piece-2 substrate.</li>
+  </ul>
+</div>
+
+<div class="plain">
+  <h3>In plain English</h3>
+  <p class="plain-sub">For the version that doesn't require reading the codebase</p>
+
+  <p>Wells's explainer said Piece 2 needed ~2-3 days of cells-side work: build a pool manager, port identity-reset, migrate state. Reasonable estimate at the time it was written.</p>
+
+  <p>Then we went and looked. The cells CLI doesn't actually use any of the things Piece 2 deletes. Wells has a pool feature (<code>well pool</code>, <code>POST /v1/wells/pool/refill</code>, etc.) — we don't call any of it. We have <em>our own</em> pool, which we built during the V1 push because we needed pool eggs to be already-cells-shaped (DNA installed, pi binary in place, hostname pre-set). Wells's generic pool couldn't do that, so we sidestepped it.</p>
+
+  <p>The architecture the wells doc describes as the <em>post-Piece-2</em> state? We're already running it. Cells calls <code>POST /v1/wells</code> with <code>fromImage: ubuntu-base</code>, provisions over SSH, hibernates if Tier 2, records in <code>~/.cells/eggs.json</code>. That's it. Wells's primitives only, no wells-pool involvement.</p>
+
+  <p><strong>The wells team can pull the trigger on Piece 2's deletion immediately.</strong> Wells's pool code can be removed without breaking anything cells-side. The half-day of wells's "deletion + regression" effort still applies — we'll re-run V1.5 and V1.10 acceptance afterward to confirm nothing in our cold-fork path was secretly leaning on a wells-pool side-effect — but the dependency map is empty on our side.</p>
+
+  <p>The one cells-side thing this audit surfaced is unrelated to Piece 2 but related to the <em>spirit</em> of it: today (2026-05-13 11:34Z) <code>cells birth bobby</code> stalled because welld restarted at 11:06, stopped all our pool VMs, and <code>eggs.json</code> didn't notice. State drift across the wells/cells boundary. Adding a one-function reconciliation routine fixes that whole class of bug — and it's the kind of thing that becomes <em>our</em> job to do correctly once we formally own the pool.</p>
+</div>
+
+<h2>What the audit found</h2>
+
+<table>
+  <thead>
+    <tr>
+      <th>Section of slice2-prep.md</th>
+      <th>Status</th>
+      <th>Notes</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><strong>S2.1</strong> — <code>pool.json</code> schema migration</td>
+      <td><span class="status-pill status-done">DONE 2026-05-13</span></td>
+      <td>Rename shipped (<code>bcbc010</code>). <code>pool.json</code> is canonical; auto-migrates from legacy <code>eggs.json</code> on first load (archives source as <code>.pre-pool-rename.bak</code>). The 4 extra fields from slice2-prep aren't load-bearing — left out.</td>
+    </tr>
+    <tr>
+      <td><strong>S2.2</strong> — pool refill logic</td>
+      <td><span class="status-pill status-done">DONE</span></td>
+      <td><code>refillPoolToDepth()</code> already implements this. Fire-and-forget post-birth.</td>
+    </tr>
+    <tr>
+      <td><strong>S2.3</strong> — birth-from-pool path</td>
+      <td><span class="status-pill status-done">DONE</span></td>
+      <td><code>cmdCreateV1Fast</code>: <code>claimV1PoolMember</code> → <code>wakePoolMember</code> → mark live in registry.</td>
+    </tr>
+    <tr>
+      <td><strong>S2.4</strong> — port <code>identityReset.ts</code> from wells</td>
+      <td><span class="status-pill status-skip">NOT NEEDED</span></td>
+      <td>We bake <code>CELL_NAME</code> into each egg's env at <code>POST /v1/wells</code> time; <code>well-firstboot</code> reads it and sets hostname + machine-id + ssh host keys with the egg's identity. Hibernate captures this. Wake restores it. No rotation pass needed.</td>
+    </tr>
+    <tr>
+      <td><strong>S2.5</strong> — reachability recovery</td>
+      <td><span class="status-pill status-todo">PARTIAL</span></td>
+      <td><code>ensureWellHasIp</code> covers DHCP lapse. Doesn't cover "well says running but the VM is actually wedged" — V1 carryover, not Piece-2-blocking.</td>
+    </tr>
+    <tr>
+      <td><strong>S2.6</strong> — remove wells pool calls from cells</td>
+      <td><span class="status-pill status-done">VACUOUSLY DONE</span></td>
+      <td>Grep confirmed: we never made any.</td>
+    </tr>
+    <tr>
+      <td><strong>S2.7</strong> — hibernate-legal bake</td>
+      <td><span class="status-pill status-done">DONE</span></td>
+      <td><code>bakePoolMember</code> passes <code>hibernate_ready: true</code> unconditionally as of V1.5 fix.</td>
+    </tr>
+    <tr>
+      <td><strong>S2.8</strong> — test matrix</td>
+      <td><span class="status-pill status-todo">PENDING BOUNCE</span></td>
+      <td>Re-run V1.5 (sleep + auto-wake + sibling-survive) and V1.10 (burst 10) post-bounce. Wells holds bounce until cells gives the "reconcile shipped, ready" signal — sent 2026-05-13 18:33Z.</td>
+    </tr>
+    <tr>
+      <td><em>New</em> — pool state reconciliation</td>
+      <td><span class="status-pill status-done">DONE 2026-05-13</span></td>
+      <td><code>reconcilePool()</code> shipped (<code>c3f2d8b</code>). Diffs <code>pool.json</code> against <code>GET /v1/wells</code>, evicts ghosts + tier-4 stopped members, fires background refill. Lazy guard in pool list/refill/birth; eager <code>cells pool reconcile</code> subcommand; launchd plist available (5min cadence). Pure logic in <code>cli/lib/reconcile.ts</code> + 9 unit tests. Live-verified on today's drift: evicted 9 stale ghosts cleanly.</td>
+    </tr>
+  </tbody>
+</table>
+
+<h2>Why the prep doc overestimated</h2>
+
+<p>The slice2-prep.md scope was set when we expected to migrate <em>from</em> wells's pool. That model:</p>
+<ul>
+  <li>Wells's pool produces generic pre-baked wells (no cell identity yet).</li>
+  <li>Cells calls <code>adoptFromPool</code> → wells hands over a generic well.</li>
+  <li>Cells then runs <code>identityReset.ts</code> to give the adopted well a cell-shaped identity (hostname, machine-id, ssh host keys).</li>
+</ul>
+
+<p>Under that model, S2.4 (port identityReset) is unavoidable and S2.1 (schema migration) is real because <code>~/.wells/pool/</code> has the source-of-truth pool data.</p>
+
+<p>What we actually built during V1 sidesteps that whole flow:</p>
+<ul>
+  <li><code>bakeV1Egg</code> creates a well with <code>CELL_NAME</code> already in the env passthroughs.</li>
+  <li><code>well-firstboot.service</code> (wells team owns this, per the 2026-05-09 transition) reads <code>CELL_NAME</code> and bakes hostname + machine-id + ssh host keys at first boot.</li>
+  <li>The well hibernates with identity already locked in.</li>
+  <li>Wake restores; identity persists; no rotation needed.</li>
+</ul>
+
+<p>So <code>identityReset</code> conceptually exists for us — it's just <em>baked at create time, not run at adopt time</em>. The work is already done, by a different mechanism, in a different repo.</p>
+
+<div class="piece warn-flavor">
+  <h2><span class="badge">Today's incident</span> Why state reconciliation matters <span class="effort">2026-05-13 11:34Z</span></h2>
+
+  <p>The bobby stall this morning is exactly the bug Piece 2 fixes <em>in spirit</em> — and the bug the proposed reconciliation routine fixes <em>in code</em>.</p>
+
+  <div class="incident">
+    <h4>Sequence</h4>
+    <ol>
+      <li>Welld bounced at 11:06Z (~30 min into Pete's session). Bouncing welld stops the running Tier-4 VMs.</li>
+      <li><code>eggs.json</code> still recorded all 9 pool eggs as <code>state: warm, tier: 4</code> (i.e. "running and ready"). Welld now disagreed: all 9 were <code>status: stopped</code>.</li>
+      <li>Pete ran <code>cells birth bobby</code> at 11:34Z.</li>
+      <li><code>consumeV1Egg</code> claimed a "warm" egg from <code>eggs.json</code>. <code>wakeV1Egg</code> noticed the well was stopped, called <code>/start</code>. Welld returned 200 (start command accepted), but the well was now cold-booting from scratch.</li>
+      <li>The cold-boot took longer than the bridge's prewarm-and-pi-handshake window. Birth fell through to cold-fork. Cold-fork failed too (some other path-of-least-resistance error after the substrate already misbehaved once). <code>process.exit(1)</code>.</li>
+      <li>The Ink animation's render zone overwrote the stderr error line. Pete saw <code>alive</code>, then nothing — looked like the CLI was stalled, but it had already exited.</li>
+    </ol>
+  </div>
+
+  <p><strong>The fix:</strong> a <code>reconcilePool()</code> routine. Called at the top of every cells CLI invocation that touches the pool (<code>birth</code>, <code>egg list</code>, <code>egg refill</code>, etc.):</p>
+
+  <ol>
+    <li>Fetch <code>GET /v1/wells</code> (welld's truth).</li>
+    <li>Walk <code>eggs.json</code>; for each egg whose recorded state disagrees with welld's:
+      <ul>
+        <li>If welld says the well is gone entirely → remove from <code>eggs.json</code>.</li>
+        <li>If welld says <code>stopped</code> but we said <code>tier: 4 warm</code> → mark <code>state: cold</code> and demote to <code>tier: 2</code>, or proactively <code>/start</code> + recheck.</li>
+        <li>If welld says <code>hibernated</code> but we said <code>tier: 4</code> → re-classify as Tier 2.</li>
+      </ul>
+    </li>
+    <li>Write back atomically.</li>
+  </ol>
+
+  <p>This is small (~1-2 hours including a test). It also encapsulates the "what happens when welld bounces" question that wells's doc explicitly leaves to cells (Q4: <em>"Raw state. Hints are cells's reasoning, not wells's."</em>).</p>
+</div>
+
+<h2>Answers to wells's Q1–Q5</h2>
+
+<table>
+  <thead><tr><th>#</th><th>Question</th><th>Cells's answer</th></tr></thead>
+  <tbody>
+    <tr>
+      <td>Q1</td>
+      <td>Pool state location — <code>~/.wells/pool/</code> or <code>~/.cells/pool/</code>?</td>
+      <td><strong><code>~/.cells/</code></strong>. We already have <code>~/.cells/eggs.json</code>. May rename to <code>pool.json</code> as a cosmetic Piece 2 follow-on; no semantic change.</td>
+    </tr>
+    <tr>
+      <td>Q2</td>
+      <td>Does <code>lib/identityReset.ts</code> stay in wells, or move to cells?</td>
+      <td><strong>Delete it from wells; we don't need a port.</strong> We bake identity at <code>POST /v1/wells</code> create-time via <code>CELL_NAME</code> + <code>well-firstboot</code>. If wells wants to retain <code>identityReset.ts</code> as a substrate-level primitive (for ad-hoc operator use), that's fine; we won't be a consumer.</td>
+    </tr>
+    <tr>
+      <td>Q3</td>
+      <td>Timing for the migration window?</td>
+      <td><strong>Now-ish, but very low-risk.</strong> Wells deletes; we re-run V1.5 + V1.10 the same day to confirm. No 5/19-5/23 slice needed — we don't have 2-3 days of work to do.</td>
+    </tr>
+    <tr>
+      <td>Q4</td>
+      <td>Should <code>/healthz</code> report observed state warts-and-all, or include a recovery hint?</td>
+      <td><strong>Raw observed state.</strong> Recovery hints are our domain. <code>reconcilePool()</code> is the cells-side implementation of "what to do about wart X."</td>
+    </tr>
+    <tr>
+      <td>Q5</td>
+      <td>The intermittent pool-refill bug (post-W.70) — comfortable owning it post-migration?</td>
+      <td><strong>Yes.</strong> Bake recipe is ours already; reconciliation will surface most refill-state drift before it becomes user-visible. We'll repro and own it.</td>
+    </tr>
+  </tbody>
+</table>
+
+<div class="take">
+  <h2>What happens next (live status)</h2>
+
+  <ol>
+    <li><span class="status-pill status-done">DONE</span> <strong>Ship <code>reconcilePool()</code> on cells side.</strong> Landed on cells main as <code>c3f2d8b</code> (with rename prerequisite <code>bcbc010</code>). Catches the bobby class — verified live against today's actual drift.</li>
+
+    <li><span class="status-pill status-done">DONE</span> <strong>Send wells the audit + readiness signals.</strong> Wells acked, squash-merged <code>feature/piece-2-pool-delete</code> as <code>1ab5160</code>, and is pre-staging Piece 3 in parallel.</li>
+
+    <li><span class="status-pill status-done">DONE</span> <strong>Skip already-done slice2-prep work.</strong> S2.1 actually got shipped via the rename. S2.2/S2.3/S2.6/S2.7 confirmed done. S2.4 is dead. Only S2.5 (reachability) deferred to V2.</li>
+
+    <li><span class="status-pill status-todo">PENDING</span> <strong>Wells bounces stable welld with the new code.</strong> Their call on the window; cells sent "ready" 2026-05-13 18:33Z.</li>
+
+    <li><span class="status-pill status-todo">PENDING</span> <strong>Cells re-runs reconcile + V1.5 + V1.10 post-bounce.</strong> Acceptance gate for Piece 2. Green → wells ships Piece 3 in the same window.</li>
+  </ol>
+
+  <p><strong>One sentence:</strong> the audit-predicted ~1-2hr of new work shipped today; both sides are in their final pre-bounce state and the only thing left is the bounce window + verification.</p>
+</div>
+
+<h2>What "done" looks like — same as wells's explainer</h2>
+
+<p class="recap">After Piece 2 + 3 ship, the boundary is the same as the wells doc described — we agree on the destination. The only revision: getting there is half the journey we thought.</p>
+
+<div class="two-col">
+  <div class="col-card col-wells">
+    <h4>wells</h4>
+    <ul>
+      <li>VM lifecycle primitives: <code>create</code>, <code>start</code>, <code>stop</code>, <code>hibernate</code>, <code>wake</code>, <code>destroy</code></li>
+      <li>Image store + R2 sync</li>
+      <li>DHCP observe-only</li>
+      <li><code>well-firstboot.service</code> (the substrate-side identity baker)</li>
+      <li>REST + <code>well</code> CLI + WS vhost</li>
+      <li>~1,200 LoC lighter, no pool</li>
+    </ul>
+  </div>
+  <div class="col-card col-cells">
+    <h4>cells</h4>
+    <ul>
+      <li>Pool manager: <code>bakeV1Egg</code>, <code>consumeV1Egg</code>, <code>wakeV1Egg</code>, <code>refillV1PoolToDepth</code>, <code>reconcilePool</code> (new)</li>
+      <li>Bake recipe: <code>provisionCellInWell</code> over SSH (DNA, pi, /cell)</li>
+      <li>Birth flow: claim → wake → host-bridge ssh+pi → talk</li>
+      <li>Reachability recovery: <code>ensureWellHasIp</code> + (V2 carryover) deeper wedge-detection</li>
+      <li><code>~/.cells/eggs.json</code> (or <code>pool.json</code> if we rename)</li>
+    </ul>
+  </div>
+</div>
+
+<hr class="footer">
+<p class="signoff">— cells team · 2026-05-13 · response to <code>wells/docs/proposals/boundary-cleanup-pieces-2-3-explainer.html</code></p>
+
+</body>
+</html>
