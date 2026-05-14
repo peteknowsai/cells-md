@@ -2,7 +2,9 @@
 
 The cell-side state file that lets a hatched cell self-narrate while capabilities install in the background.
 
-Per `docs/eggs-spec.md` Phase 4: when a `cells birth` request can't find an exact-match egg, hatch picks the closest egg and kicks off background install of the missing extensions/packages on the cell. The talk session is live during the install. The cell needs to *know* what's loading so its responses don't look broken.
+**Status (2026-05-14):** V2 paper-design. V1 shipped with a uniform pool (every member is `v1-generic` — no closest-match-and-tweak), so this surface isn't wired yet. The shape below is preserved as a V2 starting point.
+
+**The V2 scenario:** when a `cells birth` request can't find an exact-match pool member, hatch picks the closest member and kicks off background install of the missing extensions/packages on the cell. The talk session is live during the install. The cell needs to *know* what's loading so its responses don't look broken.
 
 ## The problem
 

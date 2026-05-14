@@ -1,95 +1,70 @@
 # Cells — Current Status
 
-**Updated:** 2026-05-13 06:18Z — worker (V1 stamped, /goal-driven)
-**Phase:** 🎯 **V1 STAMPED.** 10/10 acceptance items green on wells-stable-2026-05-13 (W.73 + W.74 + W.77, W.76 reverted).
-**Health:** 🟢 welld stable, dashboard at `localhost:7881/dashboard`. Wells team on `feature/phase-a` mainline; substrate hibernate-restore bug observed during V1.5 retest cleared up after wells deploy churn (W.77 diagnostic + welld bounces). Boundary cleanup plan agreed (see `docs/proposals/`).
+**Updated:** 2026-05-14 — post-V1-stamp + boundary-cleanup retro
+**Phase:** 🎯 **V1 STAMPED + wells/cells boundary cleanup CLOSED.** Ready for V2 design.
+**Health:** 🟢 welld at `46d7e5e` on Pi3+/seal+W.78 binary. Dashboard at `localhost:7881/dashboard`. Pool clean, reconcile no-op.
 
-## TL;DR (current — 2026-05-13 worker)
+## TL;DR
 
-**V1 is stamped.** All 10 acceptance items pass end-to-end on the new substrate. The wins of this push:
+V1 is the magical generic cell flow: `cells birth` → ~3s animation → talk prompt → LLM-streamed response from a generic cell. All 10 acceptance items shipped. The wells/cells substrate boundary was then refactored over a five-hour Pi2 + Pi3 + /seal coordination cycle — wells deleted -2455 LOC of cells-shaped invariants, cells took over pool ownership end-to-end. Both sides now have clean primitives and zero crossed-over state.
 
-- **V1.3 first-token 7.3s → 2.5s.** `captureGreeting` + dynamic-tempo animation (`endSignal` Promise): animation ends the moment pi streams its first byte, buffered greeting drops in instantly. 10 trials, all under 3s.
-- **V1.9 picker shipped.** Interactive `cells birth <name>` runs 4 selectOne/selectMany prompts and persists picks into `cells.json` under `picker`. Pty-driven live tests pass (all-defaults + memory-ext via Space-toggle).
-- **V1.5 sleep + auto-wake + sibling-survive green** after W.74 (per-VM XPC kill) and W.77 diagnostic + welld bounces cleared up the first-wake "permission denied" path. Cells code now passes `hibernate_ready: true` for all pool bakes so user-side `cells sleep` always seals correctly.
-- **V1.10 burst 9/9 pool-hot births at p50=2583ms.** 10th drains to cold-fork as designed.
+## What's running
 
-**Cells-side changes during V1.5 verification:**
-- `V1_HOT_POOL_TARGET` 3 → 10 (pure-hot v1 pool; cold→hot promote path stays disabled).
-- `bakeV1Egg` unconditional `hibernate_ready: true` (was tier-gated).
-- Dashboard `target_hot` synced to 10.
+- **cells CLI** (`bun cli/cells.ts ...`): pool-first birth, sleep/wake/talk, reconcile, doctor
+- **welld** (`md.cells.welld` launchd, port `:7878`): substrate primitives only
+- **host-bridge** (`com.pete.cells-host-bridge`): pi spawn-on-talk via SSH
+- **dashboard** (port `:7881`, optional): pool + cells observability
+- **cloudflared tunnel**: per-cell `wss://<n>.cells.md` dispatch
 
-**Notes for V2:**
-- Pool depth 10 will need a per-variant target + mix strategy when the picker variants enter the pool (harness × model × extensions cross-product).
-- Fire-and-forget refill assumes a long-lived parent CLI (talk session). Scripted bursts kill the parent and drop in-flight refills; v2 should move topup to a host-side daemon.
+## Pool architecture (post-boundary-cleanup)
 
-## What changed since last steward turn (02:57 MT)
+The pool is a **cells concept**, full stop. Wells doesn't know it exists.
 
-**Worker iters 10–22 — pre-staged the post-W.27 birth path:**
+**Storage:** `~/.cells/pool.json` (renamed from `eggs.json` 2026-05-13). PoolMember entries with `state ∈ {warm, claimed, live, culling}` and `tier ∈ {2, 4}`. Lock file `~/.cells/.pool.lock`.
 
-- **P3.6** `--no-pool` flag landed in `cells.ts` (iter 10) — bypass egg lookup for testing/perf-baseline.
-- **wellExecCapture user-aware** (iter 11) — adds optional `{user: "cell"}` param for /cell writes; refreshExtensionOnCell + hatch substitutions (`wellExecOnEgg`) wrapped.
-- **Dead-branch bug fix in 4 dna extensions** (iter 12) — `existsSync("~/agent")` never matched (Node doesn't expand `~`); replaced with mother's HOME-based pattern.
-- **Perf doc skeleton + PLAN polish** (iter 13) — `docs/perf/birth-to-greeting.md` ready for P2.4/P3.7/P4.4 fills.
-- **DNA prose + health-check skill swept** (iter 14) — SOUL/IDENTITY/CELLS/TOOLS, `bin/cells`, `cell-status.sh`, `self/index.ts` (latent ENOENT bug fixed), `self-management/SKILL.md`. Health-check skill /cell-aware end-to-end.
-- **Host scripts + cell-create prompt** (iter 15) — `wells.md` documents the `cell` user; `configure-cell-proxy.sh` deprecated banner; `register-site-service.sh` paths fixed; latent `cat ~/agent/...` ENOENT in `harden-birth.ts` fixed.
-- **birth-checklist §2/§4 + 3 reference docs** (iter 16) — verifies `/etc/profile.d/cells-env.sh` shim + `cell:cell 755` ownership; eggs-phase-1 / eggs-spec / cells_init/README all mark `configure-cell-proxy.sh` deprecated.
-- **register-site-service.sh + server.ts cwd → /cell** (iter 17) — service body wrapped in `sudo -u cell bash -c`; W.28 filed (wells's `ServiceDefinition` schema doesn't expose user, hardcodes `User=ubuntu`).
-- **cmdTui / cmdShell / dreamOne / updateCellStatusChannels** wrapped in `sudo -u cell` (iter 18). C.1 filed: legacy cells (smoke-8/smoke-6) break under these wraps; Pete's plan is kill-and-rebirth.
-- **Bake adds ubuntu→cell NOPASSWD sudoers** (iter 20) — defends the iter-17 wrap regardless of cloud-init defaults.
-- **cells-env.sh PATH includes `/home/well/.bun/bin`** (iter 21) — cell user can find bun.
-- **cell-tmux.conf path fix** (iter 22) — pre-wells `/home/sprite/agent/bin/cell-status.sh` → `/cell/bin/cell-status.sh`. Real bug: every fork would have an empty status bar.
+**Bake flow** (`bakePoolMember`):
+1. `POST /v1/wells` (ubuntu-base, no `hibernate_ready` field — Pi3 deleted it)
+2. `setWellAuthPublic` + `disableAutoSleep`
+3. `waitForCloudInit` (with non-transient error early-bail)
+4. `provisionCellInWell` (DNA install over SSH)
+5. **`sealWell`** — calls wells's `POST /v1/wells/{name}/seal` to halt, restart without cidata, flip `runtime.hibernate_ready=true`. This is the post-Pi3 explicit warming primitive.
+6. If Tier 2: `POST /v1/wells/{name}/hibernate` (gate now accepts because seal flipped the flag)
+7. Atomic append to `pool.json`
 
-**Worker halted at iter 26** with no-ops 23–26 (substrate-indep options exhausted).
+**Birth flow** (`cmdCreateV1Fast`):
+- `reconcilePool` (lazy guard) → `claimV1PoolMember` → `wakePoolMember` → `markPoolMemberLive` → registry write → `process.exit(0)` (non-TTY mode, since the 2026-05-13 fix)
+- Wall-clock alive: ~70-100ms warm-path
 
-## What's stuck
+**Refill:** launchd `com.pete.cells-pool-refill` every 10 min + lazy refill after each consume
+**Reconcile:** launchd `com.pete.cells-pool-reconcile` every 5 min (available; not auto-installed) + lazy guard in pool list/refill/birth
 
-| Item | Why | Who unsticks |
+## Acceptance metrics (last verified 2026-05-13)
+
+| Test | Result | Target |
 |---|---|---|
-| Cells's W.27 (env→/etc/environment) | wells team is at iter 200 MAX_ITER cap-out, halted with "blocked on Pete" | wells team (after Pete decides on the wake regression) |
-| Wells's wake regression (their W.27, separate issue) | every `well wake` returns "permission denied" inside Apple VZ since `wells-stable-2026-05-10c+d`. Wells team needs Pete's call: revert graceful-stop (loses cells's bake-write fix), debug, or hybrid | **Pete** |
-| Phase 1 (P1.3–P1.16, P1b.*) | depends on cells's W.27 | wells team (transitive) |
-| Phase 2/3/4/5 substrate-blocked tasks | depends on Phase 1 | wells team (transitive) |
+| V1.3 first-token | p50 = 2.5s | ≤ 5s |
+| V1.5 sleep | 589–991ms | < 2s |
+| V1.5 sibling-survive | ✓ clean | (W.74 invariant) |
+| V1.5 wake | 380–438ms | < 3s |
+| V1.10 warm-path birth | p50 = 69–96.5ms | < 3s |
+| Pi3 operator create | 6447ms | ~6-8s |
+| /seal cycle | ~7s | (target = pre-Pi3 warming cost) |
+| Reconcile post-bounce | 0 evictions (W.78 holds) | accurate sync |
 
-## Pete needs to decide
+## What's next
 
-**Two questions** in `NEEDS_PETE.md`:
+**V2 — Personality + identity layers.** When the user wants a CoS / Researcher / paired-coder, layer the personality + per-instance bind on top of the generic cell. Streams in during turn 1, takes effect from turn 2. See `PLAN.md` Phase v2.
 
-1. **Wells wake regression** — the more urgent of the two. Wells team is fully halted; cells's W.27 is gated on this. Three options: revert graceful-stop (lose bake fix), debug the regression in place, or ship a hybrid. Wells's `docs/findings-wake-regression-permission-denied.md` has their analysis.
-2. **Night-branch merge** — `night/2026-05-09` is now 49 commits ahead of main. Tonight's prep work is mostly self-contained doc/script sweeps; risk of merging now is low. Recommendation: squash-merge.
-
-Silence window active until 07:30 MT — steward did NOT call AskUserQuestion. NEEDS_PETE.md is the deliverable Pete sees on wake.
-
-## Magical-first-talk dashboard
-
-| Metric | Value | Target | Status |
-|---|---|---|---|
-| birth-to-greeting p50 | unmeasured | <15s with eggs+auto-seed | 🔴 substrate-blocked (W.27) |
-| `--seed` flag wired | yes (slow-birth + hatch) | yes | 🟢 code-complete, untested live |
-| `--no-pool` flag | yes (P3.6) | yes | 🟢 code-complete, untested live |
-| Eggs CLI surface | list + cull + refill + drain + scheduler | full surface | 🟢 code-complete, untested live |
-| Auto-hatch in `cells birth` | yes (cmdCreate L1417) | yes | 🟢 code-complete, untested live |
-| Birth-progress chip | yes (P2.5) | yes | 🟢 code-complete, untested live |
-| Phase 1 birth checklist matrix | 0/13 rows | 13/13 | 🔴 W.27 |
-| Phase 1b CLI smoke | 0/22 tasks | 22/22 | 🔴 W.27 |
-
-## Next planned cycle
-
-When wells ships W.27 (well-firstboot writes --env passthroughs to /etc/environment) — assuming the wake regression is unblocked first:
-
-1. Worker resumes via `/start-pete-loop`.
-2. P1.3 birth `ck-pi-gpt55 --model=gpt-5.5 --seed=off`. Pre-staged: birth + birth-egg + health-check skills /cell-aware; well_exec/push + wellExecCapture user-aware; register-site-service.sh + server.ts wired for /cell + sudo-u-cell; cells-env.sh PATH covers cell user; ubuntu→cell sudoers in bake.
-3. If P1.3 hits failures (likely some — pre-staging is unverified-live), iterate on the failure modes.
-4. P1.4–P1.16 walk the matrix. Phase 1b CLI smoke against `ck-cli`.
-5. P2.4 perf measurement records baseline; P3.7 measures eggs-on; P4.4 measures cap-deferred.
+**V3 — Cloud lifecycle polish.** Per-cell `wss://<n>.cells.md`, Slack binding, vault sync, multi-device access. Pi3's `wss` shape is verified to work; V3 is mostly mother+CF-Worker plumbing.
 
 ## Pointers
 
-- Plan: `PLAN.md`
-- Board: `BOARD.md` (Phase 1+1b+2+3+4+5; Cells follow-up C.1; Wells follow-ups W.27+W.28)
-- Layout: `docs/cell-filesystem.md` (shipped-state)
-- Eggs: `docs/eggs-spec.md` + `docs/eggs-variants.md` + `docs/eggs.md` + `docs/eggs-phase-1.md`
-- In-flight: `docs/in-flight-install.md`
-- Birth checklist: `docs/birth-checklist.md`
-- Perf scaffold: `docs/perf/birth-to-greeting.md`
-- Pete's decisions: `NEEDS_PETE.md`
+- Plan: [`PLAN.md`](PLAN.md)
+- Board: [`BOARD.md`](BOARD.md) (V1 done, V2 todo, wells follow-ups, cells follow-ups)
+- Journal: [`JOURNAL.md`](JOURNAL.md) (append-only history)
+- Pete's decisions: [`NEEDS_PETE.md`](NEEDS_PETE.md) (currently empty)
+- Architecture: `docs/wells.md` (substrate surface), `docs/cell-filesystem.md` (cell layout)
+- Pool: `docs/pool.md` (operator runbook — renamed from `eggs.md` 2026-05-14)
+- Perf: `docs/perf/birth-to-greeting.md`
+- Boundary cleanup retrospective: `docs/proposals/piece-2-audit-cells-side.html`
 - Memory: `~/.claude/projects/-Users-pete-Projects-cells/memory/`

@@ -1098,3 +1098,63 @@ The wake-from-hibernate arc this session:
 
 - Old broken cells from this session (cell-2506fd, cell-90009f) still in registry; will reap on next cleanup pass.
 - Mother lock contention slows kills + births under concurrent refill — surfaced as 45-180s latencies during V1.10 + V1.5 setup. V2 design item.
+
+---
+
+## 2026-05-13 18:00Z — pete-session — wells/cells boundary cleanup (Pi2 + Pi3 + /seal)
+
+Five-hour coordinated cleanup between cells and wells's Claude sessions over the `/tmp/claude-comms/cells_wells/` chat channel (new `/comms` skill replaces the legacy `/tmp/cells-wells-chat/` path; one-time migration done on first comms run). Driven autonomously with Pete intervening only for nudges + the initial coordination authorization.
+
+### What shipped
+
+**Cells main (7 commits):**
+
+- `bcbc010` — rename eggs → pool across the codebase (229 references swept across cells.ts, dashboard.ts, host-bridge.ts, birth-ui.tsx, variant-signature.ts + test). pool.json canonical; auto-migrates from legacy eggs.json on first load. CLI `cells pool` canonical; `cells egg` kept as deprecated alias. Function renames: bakeV1Egg→bakePoolMember, consumeV1Egg→claimV1PoolMember, wakeV1Egg→wakePoolMember, refillV1PoolToDepth→refillPoolToDepth, withEggLock→withPoolLock, loadEggs→loadPool, saveEggs→savePool, eggWellName→poolMemberWellName, +8 others.
+- `c3f2d8b` — reconcilePool() drift defense. Pure-logic kernel in `cli/lib/reconcile.ts` (9 unit tests), wrapper in cells.ts. Lazy guard in pool list/refill/birth; eager `cells pool reconcile` subcommand; launchd job (`cells schedule-pool-reconcile`, 5min cadence). Evicts (a) members welld doesn't know about, (b) tier-4 hot members welld reports non-running. Live-verified against today's actual drift: evicted 9 stale ghosts from the welld bounce at 11:06Z. Exactly the bobby class.
+- `9335e61` — `docs/proposals/piece-2-audit-cells-side.html` updated post-shipment (status pills flipped DONE).
+- `2fb253f` — splites→wells path sweep in cells repo (docs/wells.md, scripts/cells-welld.sh, .claude/loops/worker.md). The big one was `/Users/pete/.local/bin/well` shim exec'ing a deleted splites path — every wellExecCapture failed under waitForCloudInit's 5-min retry loop. Saved as memory.
+- `96e3390` — V1.5/V1.10/Pi3 acceptance scripts (`scripts/v1.5-acceptance.sh`, `v1.10-burst.sh`, `pi3-smoke.sh`).
+- `3ef483c` — four postmortem cleanups from the verification flow:
+  - `cmdCreateV1Fast` non-TTY: `process.exit(0)` after registry+telemetry land (was hanging 5-15s on fire-and-forget refill + prewarmHostBridge). 360s → 120ms scripted birth.
+  - `waitForCloudInit`: classify stderr; bail immediately on non-transient signatures ("Module not found", "Permission denied (publickey)", "Host key verification failed"). 5min → 3s on shim breakage.
+  - `cmdCreateV1Fast` cold-fork: fast-fail with actionable error when pool empty + cell-base missing (v1 is pool-only by design).
+  - `cmdDoctor`: probe `well --help` so gitignored-shim breakage surfaces in ms instead of as silent bake hang.
+- `04daa03` — consume wells's `/seal` endpoint. New `sealWell(name)` helper; wired into `bakePoolMember` between `provisionCellInWell` and the conditional hibernate. `directWellCreate.opts.hibernateReady` removed (Pi3 doesn't accept it anymore). `scripts/post-seal-verify.sh` end-to-end runbook.
+
+**Wells main (7 commits):**
+
+- `1ab5160` — Piece 2: delete pool from wells (`/v1/wells/pool/*`, `well pool` CLI, identityReset.ts). -2301 LOC.
+- `4a4b683` — sweep rename stragglers
+- `ff51dd7` — Piece 3: delete createWell warming sequence (`hibernate_ready` field removed from request body; hibernate is now gated on a flag that nothing flips at create time)
+- `eb47da3` — W.78: fast-skip orphan registry entries during startup resurrect (60s SSH timeout × N failing ghosts → 10ms lume.info round-trip; 32 ghosts: 32min → 320ms)
+- `7fa429c` — POST /v1/wells/{name}/seal — explicit warming primitive. Halt (sysrq sync+s+o), wait disk released, restart without cidata, wait SSH, flip runtime.hibernate_ready=true. Refuse codes 404/409/500. Serializes via withWellLock.
+- `b9040c6` — doc rewrite for `cells-pool-builder-primitives.md` (post-Pi3 surface).
+- `46d7e5e` — 409 well_not_hibernate_ready (was 500 hibernate_failed) + static-IP allocator race fix (mutex around nextStaticIp+addWell; reservedIps Set + try/finally release).
+
+### Verified end-to-end
+
+- Reconcile post-Piece-2 bounce: 9 stale tier-4 ghosts evicted live. Bobby class officially caught.
+- V1.5 (pre-/seal substrate): sleep 991ms, sibling-survive ✓, wake 438ms.
+- V1.10 (pre-/seal): 4/4 warm-path p50=96.5ms.
+- Pi3 smoke: create 6447ms, hibernate refused correctly.
+- V1.5 (post-/seal substrate): sleep 589ms, wake 380ms.
+- V1.10 (post-/seal): 69ms alive_ms on /seal-baked member.
+- Reconcile post-4th-bounce: 12 pool members, 0 drift (W.78 holding).
+
+### Findings filed (wells fixed; cells noted)
+
+- **Resurrect-queue jam** — post-bounce welld blocks new POST /v1/wells behind 60s SSH timeouts for failing-to-resurrect orphan wells. Fixed by W.78.
+- **Static-IP allocator race** — parallel createWells could both pick the same IP (saw .202 collision in cells's parallel bakes). Fixed by reservedIps mutex.
+- **409-vs-500 hibernate-refusal** — hibernate gate threw generic Error → 500 hibernate_failed. Doc said 409 well_not_hibernate_ready. Fixed by tagged HibernateNotReadyError.
+
+### Memory updates
+
+- `project_eggs_v2_architecture.md` → renamed `project_pool_v2_architecture.md`. Content updated to reflect V1's embedded pool + V2 north star (mother-driven variant pool).
+- `feedback_gitignored_shim_trap.md` — new. After project-folder renames, sweep `~/.local/bin/` and project `bin/` for shell wrappers with hardcoded paths. Git grep doesn't see them.
+
+### Retro
+
+Pete: "Let's drive it. Let's get it fixed now even if it's non-blocking." → 4 cells-side cleanups + 1 retrospective memory. Clean cycle.
+
+The whole arc proved the wells/cells boundary model: wells gives primitives, cells orchestrates, no overlap, no W.68-class invariant collisions. 4 welld bounces during the session; the 4th reconcile reported zero drift = the contract held.
+

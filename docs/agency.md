@@ -59,14 +59,14 @@ Self-managing agency means agency-over-other-agents is a natural consequence. Th
 
 What we've actually built that gestures at this thesis:
 
-**Splited's cooperation API** (splites repo, `docs/cooperation.md`).
+**Wells's cooperation API** (wells repo, `docs/cooperation.md`).
 - Two verbs: `/working` and `/sleep`
-- Cells inside a VM signal their own state; splited believes them
+- Cells inside a VM signal their own state; wells believes them
 - Wake is automatic on inbound traffic — no wake-at primitive needed
 
 **Pi's lifecycle hooks** (pi.dev).
 - `agent_start`, `agent_end`, `tool_call`, `tool_result`
-- The harness already exposes the agent's state machine; we just thread it to splited
+- The harness already exposes the agent's state machine; we just thread it to wells
 - 5 lines of extension code = full participation in the cooperation contract
 
 **Pulse** (`docs/pulse.md`).
@@ -75,7 +75,7 @@ What we've actually built that gestures at this thesis:
 - Subjective wake fits naturally: pulse can run a sub-agent to evaluate conditions before deciding to fire
 - Agents talking to agents about agents is the system's natural mode
 
-**The lifecycle model** (splites repo, `docs/lifecycle.md`).
+**The lifecycle model** (wells repo, `docs/lifecycle.md`).
 - Alive / Hibernating / Frozen — three states, all of which preserve agent memory
 - No "Cold" tier (= stopped, agent state lost) by default — losing memory should be exceptional, not normal
 - Self-managing agents protect their own continuity; the substrate respects it

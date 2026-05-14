@@ -10,7 +10,7 @@ Anthropic models (opus / sonnet / haiku) are out-of-bounds for cells until the C
 
 ## In Progress
 
-_(none — all V1.STEP1-6 complete; acceptance items V1.1-V1.8 next)_
+_(none — V1 stamped, boundary cleanup closed. Next epoch is V2 design.)_
 
 ## Blocked
 
@@ -63,7 +63,25 @@ Goal: `cells birth` → ~3s fixed animation → talk prompt → LLM-streamed res
 
 ---
 
-### Phase v2 — Personality + identity layers (deferred until v1 ships)
+### Wells/cells boundary cleanup (CLOSED 2026-05-13)
+
+Five-hour coordination cycle. Wells deleted 2455 LOC of cells-shaped invariants from substrate; cells took over pool ownership end-to-end. Both sides now have clean primitives and zero crossed-over state.
+
+- [x] **Piece 1** Wells deleted lease-publisher (DHCP lease writes). Shipped pre-2026-05-13.
+- [x] **Piece 2** Wells deleted `/v1/wells/pool/*` + `identityReset.ts`. Cells renamed `eggs.json → pool.json` + shipped `reconcilePool()` for drift defense (caught the bobby-class state-drift bug live). Cells: `bcbc010`, `c3f2d8b`. Wells: `1ab5160`.
+- [x] **Piece 3** Wells deleted inline warming sequence in `createWell`. Cells now consumes a new `POST /v1/wells/{name}/seal` primitive between `provisionCellInWell` and the conditional hibernate. Cells: `04daa03`. Wells: `ff51dd7` (Pi3) + `7fa429c` (/seal).
+- [x] **Substrate cleanup** Wells shipped W.78 (resurrect-queue fast-skip for orphan registry entries: 32min→320ms on bounce), static-IP allocator race fix, and 409 well_not_hibernate_ready error code. Wells: `eb47da3`, `46d7e5e`.
+- [x] **Doc rewrite** `docs/cells-pool-builder-primitives.md` describes the post-Pi3 surface (create → exec → seal → hibernate). Wells: `b9040c6`.
+- [x] **Postmortem cleanups (cells side)** Birth-exits-after-alive (was 360s hang → 120ms), `waitForCloudInit` non-transient early-bail (saves 5min on shim breakage), empty-pool fast-fail with actionable error, `cells doctor` adds `well --help` shim probe. Cells: `3ef483c`.
+- [x] **Splites→wells path sweep** Cleared stale string refs in docs/scripts; fixed `/Users/pete/.local/bin/well` shim hardcoded to deleted splites path. Cells: `2fb253f`. Retrospective lesson saved to memory: gitignored shim trap.
+
+Verified end-to-end: reconcile (12 pool members, 0 drift post-4th-bounce), V1.5 (sleep 589ms / wake 380ms / sibling-survive clean), V1.10 (69ms alive_ms on /seal-baked member).
+
+See `docs/proposals/piece-2-audit-cells-side.html` for the full retro.
+
+---
+
+### Phase v2 — Personality + identity layers (next)
 
 When the user wants a specific kind of cell (Chief of Staff, Researcher, etc.), layer personality + per-instance identity on top of the generic cell. Streams in during turn 1, takes effect from turn 2.
 
@@ -103,11 +121,11 @@ The old Phase 1 variant matrix (P1.4–P1.16) and most of Phase 1b CLI walk are 
 
 ### Cells follow-ups (worker-discovered)
 
-- [ ] **C.1** Legacy-cell compat for `cells tui`/`shell`/`dream`/`refresh-extensions` — iter 18 wrapped these in `sudo -u cell`, which 100% works on /cell cells but breaks on pre-migration cells (`smoke-8`, `smoke-6`) since the `cell` user doesn't exist there. Workaround: `well exec -s <name> -- <cmd>` directly. Pete's plan is kill-and-rebirth, no in-place migration. Stays as known gap; cleared automatically when legacy cells get killed in V1.7 cleanup pass.
+- [ ] **C.1** Legacy-cell compat for `cells tui`/`shell`/`dream`/`refresh-extensions` — wrapped in `sudo -u cell`, works for /cell cells but breaks for pre-migration cells (`smoke-8`, `smoke-6`). Pete's plan is kill-and-rebirth, no in-place migration. Stays as known gap until legacy cells are killed.
 
 ### Wells follow-ups (surface to team)
 
-- [ ] **W.28** **needs-wells**: `ServiceDefinition` schema (splites/lib/schemas.ts) doesn't expose a `user` field, and `composeUnit` (splites/lib/services.ts:53) hardcodes `User=ubuntu` in the systemd unit. Cells's site service writes to `/cell` (cell:cell 0755) — ubuntu can read but not write. Cells works around in `register-site-service.sh` by wrapping the service body in `sudo -u cell bash -c '...'`. A native `user: "cell"` field on `ServiceDefinition` would obviate the wrap. Surfaced 2026-05-10 03:35 MT.
+- [ ] **W.28** **needs-wells**: `ServiceDefinition` schema (wells/lib/schemas.ts) doesn't expose a `user` field; `composeUnit` hardcodes `User=ubuntu`. Cells works around in `register-site-service.sh` via `sudo -u cell bash -c '...'`. A native `user: "cell"` field would obviate the wrap. Surfaced 2026-05-10. Low priority — workaround is stable.
 
 ---
 

@@ -30,7 +30,7 @@ else
 fi
 
 # Wells's services API hardcodes the systemd unit's User=ubuntu (see
-# splites/lib/services.ts). To get pi running as the cell user (which
+# wells/lib/services.ts). To get pi running as the cell user (which
 # owns /cell, mode 0755 — ubuntu can read but not write), wrap the
 # service body in `sudo -u cell bash -c '...'`. ubuntu has NOPASSWD
 # sudo via cloud-init default, so the sudo step is silent. The cell
