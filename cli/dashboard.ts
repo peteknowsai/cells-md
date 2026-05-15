@@ -79,6 +79,11 @@ type CellSnapshot = {
   age_minutes: number;
   hatched_from: string | null;
   well_status: string | null;
+  // Wells's wedge-detection signal (commit landing 2026-05-15). One of
+  // "ok" | "suspected" | "confirmed", or null for cells whose well welld
+  // hasn't yet probed (asleep/just-spawned). Cells's recovery loop reacts
+  // on "confirmed"; the dashboard shows "suspected" as a soft warning.
+  wedge: string | null;
   ip: string | null;
   // Birth-to-first-token in milliseconds. Captured by cmdCreateV1Fast's
   // onFirstToken callback and persisted in ~/.cells/logs/perf/first-token.jsonl.
@@ -244,6 +249,7 @@ async function buildState(): Promise<StatePayload> {
       age_minutes: ageMinutes(c.created_at),
       hatched_from: c.hatched_from ?? null,
       well_status: well?.status ?? null,
+      wedge: well?.wedge ?? null,
       ip: well?.ip ?? null,
       first_token_ms: firstTokenIdx.get(c.name) ?? null,
     };
@@ -975,3 +981,85 @@ console.log(`  GET  /                 dashboard HTML`);
 console.log(`  GET  /api/state        JSON snapshot`);
 console.log(`  POST /api/talk/<name>  single-shot roll-call (bearer-gated)`);
 console.log(`  GET  /healthz          daemon liveness`);
+
+// ── Wedge recovery loop ───────────────────────────────────────────────────
+//
+// Welld's watchdog probes each running well's SSH banner and surfaces a
+// per-well `wedge: "ok" | "suspected" | "confirmed"` field on the well
+// record (commit landing 2026-05-15 from wells team). Wedge="confirmed"
+// fires after ~3 min of failed banner-reads + a diag bundle dump to
+// ~/.wells/diag/wedge-<name>-<iso>/. Welld leaves recovery to us — it's
+// a policy call (a wedged cell may be mid-conversation; recovering
+// drops that state). We do the recovery here.
+//
+// Recovery is the simplest possible: POST /v1/wells/<n>/stop, then
+// POST /v1/wells/<n>/start. ~5s, costs the cell's in-VM state. We only
+// trigger on `confirmed` (3 min of confirmed unreachability) so we don't
+// rescue cells that would have unwedged themselves.
+//
+// Pete's standing rule: don't let cells *ever* show as wedged in the
+// dashboard. So the tick is aggressive — every 30s, matching welld's
+// own probe cadence, so we react on the first confirmed event.
+const WEDGE_TICK_MS = Number(process.env.CELLS_WEDGE_TICK_MS ?? 30_000);
+const WEDGE_RECOVERY_COOLDOWN_MS = Number(process.env.CELLS_WEDGE_RECOVERY_COOLDOWN_MS ?? 5 * 60_000);
+const WEDGE_MAX_ATTEMPTS = Number(process.env.CELLS_WEDGE_MAX_ATTEMPTS ?? 3);
+// Per-well: last recovery timestamp + attempt count. Resets to {0, 0}
+// when the well clears (wedge !== "confirmed").
+const wedgeRecoveryState = new Map<string, { lastAttemptMs: number; attempts: number }>();
+
+async function wedgeRecoveryTick(): Promise<void> {
+  let tok: string;
+  try {
+    tok = (await readFile(join(homedir(), ".wells", "token"), "utf8")).trim();
+  } catch { return; }
+
+  let wells: any[];
+  try {
+    const r = await fetch(`${WELL_API}/v1/wells`, {
+      headers: { Authorization: `Bearer ${tok}` },
+      signal: AbortSignal.timeout(5_000),
+    });
+    if (!r.ok) return;
+    const data = await r.json() as any;
+    wells = Array.isArray(data) ? data : (data?.wells ?? []);
+  } catch { return; }
+
+  for (const w of wells) {
+    const name = w?.name as string;
+    if (!name) continue;
+    const wedge = w?.wedge ?? "ok";
+    if (wedge !== "confirmed") {
+      // Clear state on recovery so a future re-wedge gets the full attempt budget.
+      if (wedgeRecoveryState.has(name)) wedgeRecoveryState.delete(name);
+      continue;
+    }
+    const now = Date.now();
+    const st = wedgeRecoveryState.get(name) ?? { lastAttemptMs: 0, attempts: 0 };
+    if (st.attempts >= WEDGE_MAX_ATTEMPTS) {
+      // Gave up — leave it broken visibly. The diag bundle is on disk;
+      // human will look at it.
+      continue;
+    }
+    if (now - st.lastAttemptMs < WEDGE_RECOVERY_COOLDOWN_MS) continue;
+    console.log(`[wedge-recovery] ${name}: confirmed, cycling (attempt ${st.attempts + 1}/${WEDGE_MAX_ATTEMPTS})`);
+    try {
+      const stopR = await fetch(`${WELL_API}/v1/wells/${encodeURIComponent(name)}/stop`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${tok}` },
+        signal: AbortSignal.timeout(15_000),
+      });
+      const startR = await fetch(`${WELL_API}/v1/wells/${encodeURIComponent(name)}/start`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${tok}` },
+        signal: AbortSignal.timeout(30_000),
+      });
+      console.log(`[wedge-recovery] ${name}: stop=${stopR.status} start=${startR.status}`);
+    } catch (e: any) {
+      console.error(`[wedge-recovery] ${name}: ${e?.message ?? e}`);
+    }
+    wedgeRecoveryState.set(name, { lastAttemptMs: now, attempts: st.attempts + 1 });
+  }
+}
+
+setInterval(() => { wedgeRecoveryTick().catch((e) => console.error("[wedge-recovery] tick failed:", e)); }, WEDGE_TICK_MS);
+console.log(`  wedge-recovery tick every ${WEDGE_TICK_MS / 1000}s (max ${WEDGE_MAX_ATTEMPTS} attempts, ${WEDGE_RECOVERY_COOLDOWN_MS / 60_000}min cooldown)`);
