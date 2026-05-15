@@ -2555,8 +2555,26 @@ async function cmdBirthSpecial(rawArgs: string[]): Promise<void> {
   if (spec.name === "pulse") {
     await installPulseTimer(spec.wellName);
   }
-  // mother: nothing extra at Phase 1; mother-tools extension + ritual
-  // rewiring lands in Phase 2.
+  if (spec.name === "mother") {
+    // Strip in-well-incompatible extensions from settings.json:
+    //  - well-tools shells out to the Mac's `well` CLI; doesn't exist in-well.
+    //    Its tools (well_exec, report_outcome) are re-registered by mother-tools
+    //    against the bridge, so the ritual works unchanged.
+    //  - mother-status reads ~/.cells/cells.json directly; in-well that file
+    //    doesn't exist (the registry comes via /bridge/registry/read instead).
+    const stripScript = `set -euo pipefail
+cd /root
+jq '.extensions |= map(select(. != ".pi/extensions/well-tools/index.ts" and . != ".pi/extensions/mother-status/index.ts"))' \
+  .pi/settings.json > /tmp/s.json && sudo mv /tmp/s.json .pi/settings.json
+sudo chown root:root .pi/settings.json
+echo "extensions after strip:"
+jq -r '.extensions[]' .pi/settings.json`;
+    const strip = await wellExecCapture(spec.wellName, stripScript);
+    if (!strip.ok) {
+      throw new Error(`mother settings.json strip failed: ${strip.stderr.slice(0, 300)}`);
+    }
+    console.log(`  stripped well-tools + mother-status from in-well settings.json`);
+  }
 
   // 8. Pin always-on. (provisionCellInWell already called disableAutoSleep
   //    via the bake flow; this is the same operation — kept explicit so the

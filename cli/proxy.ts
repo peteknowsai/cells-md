@@ -723,6 +723,7 @@ async function handlePulseProxy(req: Request): Promise<Response> {
 //   POST /bridge/registry/read  — return ~/.cells/cells.json
 //   POST /bridge/registry/write — replace ~/.cells/cells.json (full doc)
 //   POST /bridge/well/ssh       — exec a script in a well via `well exec`, return {ok, stdout, stderr}
+//   POST /bridge/mac_exec       — exec a bash script on the Mac (cwd=cells repo); logged to ~/.cells/logs/mac_exec.log
 //   POST /bridge/birth/outcome  — receive {birthId, success, message} from mother
 //   POST /bridge/talk           — fire `cells talk <cell> <msg>` (used by pulse)
 //   POST /bridge/inbox/pulse    — push a HEARTBEAT.md payload into pulse-cell's well
@@ -865,6 +866,43 @@ echo "$F"`;
   return new Response(null, { status: 204 });
 }
 
+const MAC_EXEC_LOG = join(homedir(), ".cells/logs/mac_exec.log");
+
+// Mac-side script execution for mother-in-a-well. The ritual uses local
+// bash for cell-color.sh, register-site-service.sh, deploy-cell-worker.sh
+// (which calls wrangler with CF creds). cwd is locked to the cells repo
+// root so relative `scripts/...` paths work as written in the ritual.
+// Every invocation is appended to ~/.cells/logs/mac_exec.log — the
+// CELLS_PROXY_SECRET bearer is the only access boundary, so an audit log
+// is the minimum.
+async function bridgeMacExec(body: { script: string; cell?: string }): Promise<Response> {
+  if (typeof body.script !== "string" || body.script.length === 0) {
+    return new Response("bad script", { status: 400 });
+  }
+  await mkdir(dirname(MAC_EXEC_LOG), { recursive: true });
+  const startTs = new Date().toISOString();
+  const cell = body.cell ?? "?";
+  const proc = Bun.spawn(["bash", "-c", body.script], {
+    cwd: REPO_ROOT,
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  const [stdout, stderr] = await Promise.all([
+    new Response(proc.stdout).text(),
+    new Response(proc.stderr).text(),
+  ]);
+  const exit = await proc.exited;
+  // One JSON line per invocation; script truncated so the log stays scannable.
+  const line = JSON.stringify({
+    ts: startTs,
+    cell,
+    exit,
+    script: body.script.slice(0, 400),
+    stderr_tail: stderr.slice(-200),
+  }) + "\n";
+  try { await writeFile(MAC_EXEC_LOG, line, { flag: "a" }); } catch { /* best-effort */ }
+  return Response.json({ ok: exit === 0, exit, stdout, stderr });
+}
+
 async function handleBridgeProxy(req: Request): Promise<Response> {
   const auth = checkClientAuth(req);
   if (!auth.ok) return new Response(`unauthorized: ${auth.reason}`, { status: 401 });
@@ -886,6 +924,7 @@ async function handleBridgeProxy(req: Request): Promise<Response> {
       case "/registry/read":  return await bridgeRegistryRead();
       case "/registry/write": return await bridgeRegistryWrite(body);
       case "/well/ssh":       return await bridgeWellSsh(body);
+      case "/mac_exec":       return await bridgeMacExec(body);
       case "/birth/outcome":  return await bridgeBirthOutcome(body);
       case "/talk":           return await bridgeTalk(body);
       case "/inbox/pulse":    return await bridgeInboxPulse(body);

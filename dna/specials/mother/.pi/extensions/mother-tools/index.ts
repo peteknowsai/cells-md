@@ -103,8 +103,8 @@ export default function (pi: any) {
   });
 
   pi.registerTool({
-    name: "well_ssh",
-    label: "Exec on a well",
+    name: "well_exec",
+    label: "Run a script on a well",
     description:
       "Run a bash script in a target well (via the Mac's `well exec`). Returns {ok, exit, stdout, stderr}. Use for newborn wells you're imprinting during the birthing ritual.",
     parameters: Type.Object({
@@ -113,12 +113,26 @@ export default function (pi: any) {
     }),
     async execute(_id: string, params: { wellName: string; script: string }) {
       const r = await bridgePost("/well/ssh", params);
-      return { content: [{ type: "text", text: fmt(`well_ssh ${params.wellName}`, r) }] };
+      return { content: [{ type: "text", text: fmt(`well_exec ${params.wellName}`, r) }] };
     },
   });
 
   pi.registerTool({
-    name: "birth_outcome",
+    name: "mac_exec",
+    label: "Run a script on the Mac",
+    description:
+      "Run a bash script on Pete's Mac with cwd locked to the cells repo root. Use this for ritual steps marked `bash …` — e.g. `bash scripts/cell-color.sh`, `bash scripts/register-site-service.sh`, `bash scripts/deploy-cell-worker.sh`. Returns {ok, exit, stdout, stderr}. Every invocation is appended to ~/.cells/logs/mac_exec.log for audit.",
+    parameters: Type.Object({
+      script: Type.String({ description: "Bash script (cwd is the cells repo). Single string; can be multi-line." }),
+    }),
+    async execute(_id: string, params: { script: string }) {
+      const r = await bridgePost("/mac_exec", { script: params.script, cell: "mother" });
+      return { content: [{ type: "text", text: fmt(`mac_exec`, r) }] };
+    },
+  });
+
+  pi.registerTool({
+    name: "report_outcome",
     label: "Report birth outcome",
     description:
       "Final step of the birthing ritual. Write a {success, message} outcome the cells CLI is long-polling for at ~/.cells/birth-outcomes/<birthId>.json. Always call this exactly once per birth — success=true on alive+talk-verified, false otherwise.",
@@ -129,7 +143,7 @@ export default function (pi: any) {
     }),
     async execute(_id: string, params: { birthId: string; success: boolean; message: string }) {
       const r = await bridgePost("/birth/outcome", params);
-      return { content: [{ type: "text", text: fmt(`birth_outcome ${params.birthId} (${params.success ? "ok" : "FAIL"})`, r) }] };
+      return { content: [{ type: "text", text: fmt(`report_outcome ${params.birthId} (${params.success ? "ok" : "FAIL"})`, r) }] };
     },
   });
 }

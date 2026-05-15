@@ -1,16 +1,17 @@
 ---
 name: birth
 description: Turn a claimed generic egg into a configured, live cell. The full ritual — what you're handed, what's on the egg, the ordered steps, the end-test — is the HTML doc at docs/birthing-ritual.html.
-allowed-tools: [bash, well_exec, well_checkpoint, report_outcome, read]
+allowed-tools: [mac_exec, well_exec, pool_claim, pool_sweep, registry_read, registry_write, report_outcome, read]
 ---
 
 # Birth
 
-You have been handed three things in the user's message:
+You have been handed four things in the user's message:
 
-1. **Cell name** — what the new cell will answer to.
-2. **Egg** — the well name of a claimed generic egg from the pool.
-3. **Config blob** — JSON describing how this cell should be configured.
+1. **birthId** (`$1`) — correlation id. Pass it verbatim to `report_outcome` at the end.
+2. **Cell name** (`$2`) — what the new cell will answer to.
+3. **Egg** (`$3`) — the well name of a claimed generic egg from the pool.
+4. **Config blob** (`$4`) — JSON describing how this cell should be configured.
 
 The complete birthing ritual lives at:
 
