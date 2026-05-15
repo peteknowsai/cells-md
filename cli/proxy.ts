@@ -435,6 +435,20 @@ function hostOf(req: Request): string {
   return (req.headers.get("host") ?? url.host).toLowerCase();
 }
 
+// Strip encoding headers before forwarding an upstream response downstream.
+// Bun's fetch transparently decodes the body when it's streamed, but
+// `upstream.headers` still carries the original `content-encoding` plus the
+// now-wrong (compressed) `content-length`. Forwarding those over a decoded
+// body makes a downstream client — notably the `claude` CLI — try to gunzip
+// plaintext and blow up with a ZlibError. Drop both; the runtime re-derives
+// content-length for the body it actually sends.
+function forwardableHeaders(upstream: Headers): Headers {
+  const h = new Headers(upstream);
+  h.delete("content-encoding");
+  h.delete("content-length");
+  return h;
+}
+
 // ───────────────────── proxy (api path) ─────────────────────
 
 function checkClientAuth(req: Request): { ok: true; cell: string } | { ok: false; reason: string } {
@@ -536,7 +550,7 @@ async function handleApiProxy(req: Request): Promise<Response> {
   return new Response(upstream.body, {
     status: upstream.status,
     statusText: upstream.statusText,
-    headers: upstream.headers,
+    headers: forwardableHeaders(upstream.headers),
   });
 }
 
@@ -624,7 +638,7 @@ async function handleCodexProxy(req: Request): Promise<Response> {
   return new Response(upstream.body, {
     status: upstream.status,
     statusText: upstream.statusText,
-    headers: upstream.headers,
+    headers: forwardableHeaders(upstream.headers),
   });
 }
 

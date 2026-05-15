@@ -10,15 +10,16 @@
   "enabledModels": [
     "deepseek/deepseek-v4-flash",
     "deepseek/deepseek-v4-pro",
-    "openai-codex/gpt-5.5"
+    "openai-codex/gpt-5.5",
+    "openai/gpt-5.5-pro",
+    "anthropic/claude-opus-4-7",
+    "anthropic/claude-sonnet-4-6",
+    "anthropic/claude-haiku-4-5"
   ],
-  "defaultProvider": "deepseek",
-  "defaultModel": "deepseek-v4-flash",
-  "defaultThinkingLevel": "off",
-  "modelChain": [
-    "deepseek/deepseek-v4-flash:off",
-    "openai-codex/gpt-5.5:off"
-  ],
+  "defaultProvider": "__PROVIDER__",
+  "defaultModel": "__MODEL__",
+  "defaultThinkingLevel": "__THINKING__",
+  "modelChain": "__MODEL_CHAIN__",
   "warnings": {
     "anthropicExtraUsage": false
   },

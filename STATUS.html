@@ -1,0 +1,125 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Cells — Current Status</title>
+<link rel="stylesheet" href="docs/_assets/doc.css">
+</head>
+<body>
+<div class="page">
+
+  <div class="doc-header">
+    <div class="crumb">cells <span class="sep">/</span> status</div>
+    <div>Updated 2026-05-14</div>
+  </div>
+
+  <h1>Cells — Current Status</h1>
+  <p class="subtitle">Post-V1-stamp + boundary-cleanup retro</p>
+
+  <div class="callout">
+    <div class="label">Phase</div>
+    <p><strong>V1 STAMPED</strong> + wells/cells boundary cleanup <strong>CLOSED</strong>. Ready for V2 design.</p>
+  </div>
+
+  <dl class="kv">
+    <dt>Health</dt>
+    <dd><span class="badge ok">green</span> welld at <code>46d7e5e</code> on Pi3 + /seal + W.78 binary. Pool clean, reconcile no-op.</dd>
+    <dt>Dashboard</dt>
+    <dd><code>localhost:7881/dashboard</code></dd>
+    <dt>Substrate</dt>
+    <dd>wells (local welld on :7878). sprites is legacy.</dd>
+  </dl>
+
+  <h2>TL;DR</h2>
+  <p>V1 is the magical generic cell flow: <code>cells birth</code> → ~3s animation → talk prompt → LLM-streamed response from a generic cell. All 10 acceptance items shipped.</p>
+  <p>The wells/cells substrate boundary was then refactored over a five-hour Pi2 + Pi3 + /seal coordination cycle — wells deleted −2455 LOC of cells-shaped invariants, cells took over pool ownership end-to-end. Both sides now have clean primitives and zero crossed-over state.</p>
+
+  <h2>What's running</h2>
+  <table>
+    <thead>
+      <tr><th>Component</th><th>Where</th><th>Role</th></tr>
+    </thead>
+    <tbody>
+      <tr><td><code>cells</code> CLI</td><td><code>bun cli/cells.ts</code></td><td>Pool-first birth, sleep/wake/talk, reconcile, doctor</td></tr>
+      <tr><td><code>welld</code></td><td><code>md.cells.welld</code> launchd, :7878</td><td>Substrate primitives only</td></tr>
+      <tr><td>host-bridge</td><td><code>com.pete.cells-host-bridge</code></td><td>Pi spawn-on-talk via SSH</td></tr>
+      <tr><td>dashboard</td><td>:7881 (optional)</td><td>Pool + cells observability</td></tr>
+      <tr><td>cloudflared</td><td>tunnel</td><td>Per-cell <code>wss://&lt;n&gt;.cells.md</code> dispatch</td></tr>
+    </tbody>
+  </table>
+
+  <h2>Pool architecture (post-boundary-cleanup)</h2>
+  <p>The pool is a <strong>cells concept</strong>, full stop. Wells doesn't know it exists.</p>
+
+  <h3>Storage</h3>
+  <p><code>~/.cells/pool.json</code> (renamed from <code>eggs.json</code> 2026-05-13). PoolMember entries with <code>state ∈ {warm, claimed, live, culling}</code> and <code>tier ∈ {2, 4}</code>. Lock file <code>~/.cells/.pool.lock</code>.</p>
+
+  <h3>Bake flow (<code>bakePoolMember</code>)</h3>
+  <ol>
+    <li><code>POST /v1/wells</code> (ubuntu-base, no <code>hibernate_ready</code> field — Pi3 deleted it)</li>
+    <li><code>setWellAuthPublic</code> + <code>disableAutoSleep</code></li>
+    <li><code>waitForCloudInit</code> (with non-transient error early-bail)</li>
+    <li><code>provisionCellInWell</code> (DNA install over SSH)</li>
+    <li><strong><code>sealWell</code></strong> — calls wells's <code>POST /v1/wells/{name}/seal</code> to halt, restart without cidata, flip <code>runtime.hibernate_ready=true</code>. Post-Pi3 explicit warming primitive.</li>
+    <li>If Tier 2: <code>POST /v1/wells/{name}/hibernate</code> (gate now accepts because seal flipped the flag)</li>
+    <li>Atomic append to <code>pool.json</code></li>
+  </ol>
+
+  <h3>Birth flow (<code>cmdCreateV1Fast</code>)</h3>
+  <p><code>reconcilePool</code> (lazy guard) → <code>claimV1PoolMember</code> → <code>wakePoolMember</code> → <code>markPoolMemberLive</code> → registry write → <code>process.exit(0)</code> (non-TTY mode, since the 2026-05-13 fix).</p>
+  <p>Wall-clock alive: <strong>~70–100ms warm-path</strong>.</p>
+
+  <h3>Refill &amp; reconcile</h3>
+  <dl class="kv">
+    <dt>Refill</dt>
+    <dd>launchd <code>com.pete.cells-pool-refill</code> every 10 min + lazy refill after each consume</dd>
+    <dt>Reconcile</dt>
+    <dd>launchd <code>com.pete.cells-pool-reconcile</code> every 5 min (available; not auto-installed) + lazy guard in pool list / refill / birth</dd>
+  </dl>
+
+  <h2>Acceptance metrics</h2>
+  <p class="subtitle" style="margin-top:-8px">Last verified 2026-05-13.</p>
+  <table>
+    <thead>
+      <tr><th>Test</th><th>Result</th><th>Target</th><th></th></tr>
+    </thead>
+    <tbody>
+      <tr><td>V1.3 first-token</td><td class="num">p50 = 2.5s</td><td class="num">≤ 5s</td><td><span class="badge ok">pass</span></td></tr>
+      <tr><td>V1.5 sleep</td><td class="num">589–991 ms</td><td class="num">&lt; 2s</td><td><span class="badge ok">pass</span></td></tr>
+      <tr><td>V1.5 sibling-survive</td><td>clean</td><td>(W.74 invariant)</td><td><span class="badge ok">pass</span></td></tr>
+      <tr><td>V1.5 wake</td><td class="num">380–438 ms</td><td class="num">&lt; 3s</td><td><span class="badge ok">pass</span></td></tr>
+      <tr><td>V1.10 warm-path birth</td><td class="num">p50 = 69–96.5 ms</td><td class="num">&lt; 3s</td><td><span class="badge ok">pass</span></td></tr>
+      <tr><td>Pi3 operator create</td><td class="num">6447 ms</td><td class="num">~6–8s</td><td><span class="badge ok">pass</span></td></tr>
+      <tr><td>/seal cycle</td><td class="num">~7s</td><td>(pre-Pi3 warming cost)</td><td><span class="badge ok">pass</span></td></tr>
+      <tr><td>Reconcile post-bounce</td><td>0 evictions</td><td>accurate sync</td><td><span class="badge ok">pass</span></td></tr>
+    </tbody>
+  </table>
+
+  <h2>What's next</h2>
+
+  <h3>V2 — Personality &amp; identity layers</h3>
+  <p>When the user wants a CoS / Researcher / paired-coder, layer the personality + per-instance bind on top of the generic cell. Streams in during turn 1, takes effect from turn 2. See <a href="PLAN.html">PLAN</a> Phase v2.</p>
+
+  <h3>V3 — Cloud lifecycle polish</h3>
+  <p>Per-cell <code>wss://&lt;n&gt;.cells.md</code>, Slack binding, vault sync, multi-device access. Pi3's <code>wss</code> shape is verified to work; V3 is mostly mother + CF-Worker plumbing.</p>
+
+  <div class="pointers">
+    <h4>Pointers</h4>
+    <ul class="bare">
+      <li><a href="PLAN.html">PLAN</a> — phase roadmap (HTML primary)</li>
+      <li><a href="BOARD.html">BOARD</a> — V1 done, V2 todo, follow-ups</li>
+      <li><a href="JOURNAL.md">JOURNAL</a> — append-only history (markdown stays)</li>
+      <li><a href="NEEDS_PETE.md">NEEDS_PETE</a> — Pete's open decisions (currently empty)</li>
+      <li><code>docs/wells.md</code> — substrate surface (rewrite pending)</li>
+      <li><code>docs/cell-filesystem.md</code> — cell layout (rewrite pending)</li>
+      <li><code>docs/pool.md</code> — operator runbook (rewrite pending)</li>
+      <li><code>docs/perf/birth-to-greeting.md</code> — perf log</li>
+      <li><a href="docs/proposals/piece-2-audit-cells-side.html">docs/proposals/piece-2-audit-cells-side.html</a> — boundary cleanup retrospective</li>
+      <li><code>~/.claude/projects/-Users-pete-Projects-cells/memory/</code> — agent memory</li>
+    </ul>
+  </div>
+
+</div>
+</body>
+</html>

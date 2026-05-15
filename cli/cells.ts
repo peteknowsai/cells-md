@@ -1,20 +1,30 @@
 #!/usr/bin/env bun
 import { $ } from "bun";
-import { readFile, writeFile, mkdir, unlink, symlink, cp, readdir, stat, rm, rename } from "node:fs/promises";
+import { readFile, writeFile, appendFile, mkdir, unlink, symlink, cp, readdir, stat, rm, rename } from "node:fs/promises";
 import { homedir, tmpdir, userInfo } from "node:os";
 import { dirname, join, basename } from "node:path";
 import { existsSync, statSync, readFileSync, unlinkSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import * as readline from "node:readline/promises";
 import { createHash, randomBytes } from "node:crypto";
-import {
-  formatVariant,
-  variantHash,
-  poolMemberWellName,
-  poolKey,
-  type Variant,
-} from "./lib/variant-signature";
+import { poolKey, type Variant } from "./lib/variant-signature";
 import { planReconcileEvictions } from "./lib/reconcile";
+import { SECRETS_PATH, readSecret } from "./lib/secrets";
+import {
+  CHANNELS_PATH,
+  type ChannelKind,
+  type ChannelsFile,
+  CHANNEL_ID_PATTERNS,
+  loadChannels,
+  saveChannels,
+  kvUpsert,
+  kvDelete,
+  evictChannelBindingsForCell,
+  ensureSlackChannel,
+  resolveSlackUserId,
+  inviteSlackUser,
+  updateCellStatusChannels,
+} from "./lib/channels";
 
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = dirname(SCRIPT_DIR);
@@ -25,7 +35,6 @@ const PULSE_ROOT = join(PROTO_DIR, "pulse");
 const DNA_DIR = join(DNA_ROOT, "cells/base");
 const REGISTRY_DIR = join(homedir(), ".cells");
 const REGISTRY_PATH = join(REGISTRY_DIR, "cells.json");
-const CHANNELS_PATH = join(REGISTRY_DIR, "channels.json");
 const CONFIG_PATH = join(REGISTRY_DIR, "config.json");
 const POOL_PATH = join(REGISTRY_DIR, "pool.json");
 const POOL_LOCK_PATH = join(REGISTRY_DIR, ".pool.lock");
@@ -143,8 +152,8 @@ type SelectOption = {
 
 const HARNESS_OPTIONS: SelectOption[] = [
   { value: "pi",          label: "pi" },
-  { value: "claude-code", label: "claude-code", hint: "(coming soon)", disabled: true },
-  { value: "codex",       label: "codex",       hint: "(coming soon)", disabled: true },
+  { value: "claude-code", label: "claude-code", hint: "(Anthropic models via Max)" },
+  { value: "codex",       label: "codex",       hint: "(OpenAI models via ChatGPT sub)" },
 ];
 
 const MODEL_OPTIONS: SelectOption[] = [
@@ -227,40 +236,23 @@ const PACKAGE_OPTIONS: SelectOption[] = OPTIONAL_PACKAGES.map((p) => ({
 
 const PACKAGE_DEFAULTS: string[] = OPTIONAL_PACKAGES.filter((p) => p.defaultChecked).map((p) => p.value);
 
-// V1.9 picker choices, written into the cell's record at birth time.
-// host-bridge reads these on session setup and applies model/thinking
-// instead of the hardcoded magical-cell defaults. extensions + channel
-// are stored but unwired in v1 (deferred to v2 — would require dna
-// extension toggling at hatch + provider-channel routing in pi-coding-agent).
-type PickerChoice = {
-  // Resolved provider/modelId so host-bridge can apply them without
-  // duplicating cells.ts's MODEL_IDS mapping.
-  provider: string;
-  modelId: string;
-  thinking: string;
-  extensions: string[];
-  channel: string;
-};
-
 type Cell = {
   name: string;
   created_at: string;
-  // Eggs Phase 1: cells hatched from an egg start as "warming" (pi running,
-  // can be talked to) and flip to "alive" once the async post-birth tail
-  // (worker + slack + vault sync + per-cell checkpoint) completes. Cells
-  // birthed via the slow path skip "warming" and go straight to "alive".
-  // Older entries (predating this field) default to "alive" at read time.
+  // Birth registers a cell straight as "alive" — mother's end-test has
+  // already proven it works. "warming" is legacy (the retired async-tail
+  // path); kept readable for older registry entries.
   status?: "warming" | "alive";
-  // egg id this cell hatched from. null/undefined for slow-birth cells.
+  // The egg id this cell hatched from (the hex suffix of egg-<id>).
   hatched_from?: string;
+  // Which agent runtime the cell runs — host-bridge reads this to pick the
+  // spawn path. Absent on older entries; default to "pi" at read time.
+  harness?: "pi" | "claude-code" | "codex";
   // Model fallback chain (per-cell). First entry is the primary; pi-coding-agent
   // advances to the next entry on retry-exhaustion via the patch in
   // apply-pi-patches.sh. Mirrored here so harden-birth can verify the
   // birth pipeline wrote it correctly into the cell's settings.json.
   modelChain?: string[];
-  // V1.9 picker output (when user ran `cells birth <name>` no flags).
-  // Absent for the magical-default path (`cells birth`).
-  picker?: PickerChoice;
 };
 type Registry = { cells: Cell[] };
 
@@ -1017,29 +1009,53 @@ async function cmdTalk(name: string, args: string[]) {
 }
 
 async function cmdTui(name: string, extra: string[] = []) {
-  await requireCell(name);
-  // Open pi's TUI inside the cell, wrapped in tmux so:
+  const cell = await requireCell(name);
+  const wellName = await wellNameForCell(name);
+  const harness = cell.harness ?? "pi";
+  // Open the cell's harness TUI inside the well, wrapped in tmux so:
   //   - the per-cell status bar (~/.tmux.conf) is visible
-  //   - reattach across well hibernate is automatic — same pi process,
-  //     same in-flight conversation, no /resume needed
+  //   - reattach across well hibernate is automatic — same agent process,
+  //     same in-flight conversation, no resume dance
   //
-  // Session-dir + flag passthrough preserved from the bare-pi version:
-  // TUI sessions live in ~/.pi/agent/sessions/cell-<name>/tui/, isolated
-  // from the bridge's main.jsonl. Pass `-c` to continue the most recent,
-  // `-r` to pick from the list, or any other pi flag.
-  //
-  // Behavior on existing tmux session:
+  // Behavior on an existing tmux session:
   //   - no extra args → attach-or-create (`tmux new -A -s tui`). You land
-  //     back in whatever pi is already running there.
+  //     back in whatever the agent is already running there.
   //   - any extra args  → kill the old `tui` session first, then create
-  //     fresh with the new pi flags. Otherwise tmux silently ignores the
+  //     fresh with the new flags. Otherwise tmux silently ignores the
   //     command on attach and the flags would be a no-op.
   //
-  // For shell access (no pi), use `cells shell <name>`.
-  const sessionDir = `~/.pi/agent/sessions/cell-${name}/tui`;
-  const piArgs = ["--session-dir", sessionDir, ...extra]
-    .map((a) => `'${a.replace(/'/g, "'\\''")}'`).join(" ");
+  // For a bare shell (no agent), use `cells shell <name>`.
+  const quote = (a: string) => `'${a.replace(/'/g, "'\\''")}'`;
   const reset = extra.length > 0 ? "tmux kill-session -t tui 2>/dev/null; " : "";
+  // The agent invocation is the only harness-specific piece — everything
+  // around it (tmux, TERM, well exec --tty, sudo -u cell) is identical.
+  let mkdir = "";
+  let agentInvocation: string;
+  if (harness === "claude-code") {
+    // claude-code's own TUI: bare `claude` (no --print). It keys session
+    // history off cwd under ~/.claude/projects/, so `cd /cell` isolates
+    // this cell's TUI history naturally — no --session-dir needed. extra
+    // args pass straight through as claude's own flags (e.g. --continue).
+    agentInvocation = extra.length ? `claude ${extra.map(quote).join(" ")}` : "claude";
+  } else if (harness === "codex") {
+    // codex's own TUI: bare `codex` (no subcommand → the interactive CLI).
+    // CODEX_HOME keys off HOME=/cell → /cell/.codex/, so session history is
+    // isolated per cell. extra args pass through as codex's own flags.
+    agentInvocation = extra.length ? `codex ${extra.map(quote).join(" ")}` : "codex";
+  } else {
+    // pi's TUI. --session-dir keeps the TUI conversation isolated from the
+    // bridge's main.jsonl; pass `-c` to continue the latest, `-r` to pick.
+    const sessionDir = `~/.pi/agent/sessions/cell-${name}/tui`;
+    mkdir = `mkdir -p ${sessionDir} && `;
+    agentInvocation = `pi ${["--session-dir", sessionDir, ...extra].map(quote).join(" ")}`;
+  }
+  // pi's TUI is tuned for the DNA .tmux.conf default (`mouse off` — pi's
+  // drag-select and wheel→copy-mode get in the way). claude-code and codex
+  // are full-screen TUIs that handle their own mouse + scroll; without
+  // `mouse on` the terminal translates the wheel into arrow keys and the
+  // harness scrolls its input history instead of the conversation. Flip it
+  // on for those — `\;`-chained onto new-session so it also applies on attach.
+  const tmuxOpts = harness === "pi" ? "" : ` \\; set -g mouse on`;
   // Force TERM to a value the cell's terminfo definitely has. Pete's
   // local terminal exports things like xterm-ghostty / xterm-kitty that
   // well VMs don't ship terminfo for, which makes tmux refuse to
@@ -1047,14 +1063,14 @@ async function cmdTui(name: string, extra: string[] = []) {
   // once it's running, so the override only affects the outer shell.
   const remote =
     `export TERM=xterm-256color; ` +
-    `mkdir -p ${sessionDir} && cd /cell && ${reset}` +
-    `exec tmux new-session -A -s tui -c /cell "pi ${piArgs}"`;
-  // Run as cell user so pi's session-dir, memory, and tmux conf land
-  // under /cell (sessionDir = ~/.pi/... resolves to /cell/.pi/... with
-  // HOME=/cell). well user is in NOPASSWD sudoers so the wrap is silent.
+    `${mkdir}cd /cell && ${reset}` +
+    `exec tmux new-session -A -s tui -c /cell "${agentInvocation}"${tmuxOpts}`;
+  // Run as cell user so the agent's session, memory, and tmux conf land
+  // under /cell (HOME=/cell). well user is in NOPASSWD sudoers so the
+  // wrap is silent.
   const proc = Bun.spawn(
     [
-      "well", "exec", "-s", name, "--tty", "--",
+      "well", "exec", "-s", wellName, "--tty", "--",
       "sudo", "-u", "cell", "bash", "-lc", remote,
     ],
     { stdin: "inherit", stdout: "inherit", stderr: "inherit" },
@@ -1321,11 +1337,7 @@ type CreateOpts = {
   slackChannel?: string;
   seed?: string;        // first message auto-sent post-birth (default: introduce-yourself)
   seedOff?: boolean;    // true if --seed=off — no seed greeting
-  noPool?: boolean;     // true if --no-pool — bypass egg pool, force slow birth (testing)
-  // V1.9 picker output (when cmdCreate ran the picker before falling through).
-  // cmdCreateV1Fast persists this in the cell record so host-bridge can apply
-  // the user's model/thinking overrides on session setup.
-  pickerChoice?: PickerChoice;
+  noPool?: boolean;     // deprecated no-op — birth is pool-only now (parsed for back-compat)
 };
 
 // Default seed: the cell greets the user back in one sentence + offers help.
@@ -1441,412 +1453,23 @@ function generateCellName(): string {
   return `cell-${randomBytes(4).toString("hex").slice(0, 6)}`;
 }
 
-// v1 fast-path: deterministic birth, no mother in critical path.
-// Cell-base ships with a canned generic identity — no per-cell substitution.
-// Birth = fork well from cell-base + register site service + mark alive +
-// drop into talk. Targets ~5s birth-to-first-LLM-token.
-//
-// Used when the user passes no customization flags. Customization flags
-// fall through to the legacy slow-birth path (mother LLM-routed) — to be
-// re-shaped in v2 as personality/binding swaps on the canned cell.
-async function cmdCreateV1Fast(name: string | undefined, opts: CreateOpts): Promise<void> {
+// Birth a cell: resolve config, claim a generic egg from the pool, hand
+// [name, egg-well, config-blob] to mother — who follows the birthing ritual
+// (docs/birthing-ritual.html). One linear path, no fast/slow split. Birth
+// isn't a race; it's done when mother's end-test proves the cell works.
+async function cmdCreate(name: string | undefined, opts: CreateOpts): Promise<void> {
   const t0 = Date.now();
 
-  const secret = await readSecret("CELLS_PROXY_SECRET");
-  if (!secret) {
-    console.error("CELLS_PROXY_SECRET missing from ~/.cells/secrets.json");
-    process.exit(1);
-  }
-
-  // Lazy reconcile: evict any stale entries before claim. Defends against
-  // the bobby class (welld bounced, pool.json still thought wells were
-  // warm). Quick — single GET when pool is healthy. Skip refill here
-  // because we're about to claim, and cmdCreateV1Fast fires refill itself
-  // post-claim.
-  await reconcilePool({ silent: false, skipRefill: true }).catch(() => { /* don't fail birth on reconcile error */ });
-
-  // Pool-first: the egg comes with its cell-name pre-baked. We don't
-  // rename — we just use the name the egg was created with. The hex
-  // suffix of egg-AAAAAA matches cell-AAAAAA, so the mapping is direct.
-  const claim = await claimV1PoolMember();
-  let cellName: string;
-  let wellName: string;
-  let hatchedFrom: string | undefined;
-
-  if (claim) {
-    cellName = claim.cellName;
-    wellName = claim.wellName;
-    hatchedFrom = claim.wellName.slice("egg-".length);
-  } else {
-    // No warm egg → cold-fork path. Auto-name the cell, create a well
-    // under the same name (no separate well/cell name in this path),
-    // and we'll have to do the post-create setup ourselves.
-    cellName = name ?? generateCellName();
-    wellName = cellName;
-  }
-
-  if (RESERVED_NAMES.has(cellName)) {
-    console.error(`'${cellName}' is reserved. Pick another name.`);
-    process.exit(1);
-  }
-  if (await findCell(cellName)) {
-    console.error(`cell '${cellName}' already exists in registry`);
-    process.exit(1);
-  }
-
-  // Start the animation theater + the real birth pipeline in parallel.
-  // The animation accepts an `endSignal` Promise — when first-token arrives
-  // from captureGreeting (below), the animation snaps to "alive" and exits.
-  // Minimum 1.5s so the user always feels the animation; max 6s as a cap
-  // for cold paths that overshoot.
-  const useAnim = process.stdout.isTTY;
-  const firstTokenDef = makeDeferred<void>();
-  const animPromise: Promise<void> = useAnim
-    ? (await import("./birth-ui.tsx")).runBirthAnimation({
-        endSignal: firstTokenDef.promise,
-        minDurationMs: 1500,
-        maxDurationMs: 6000,
-      })
-    : Promise.resolve();
-  if (!useAnim) console.log(`birthing ${cellName}…`);
-
-  try {
-    if (claim) {
-      // Warm-egg path: wake (no-op for Tier 4 if running). well-site is
-      // baked into the image and was already started + bridge_ready
-      // before the bake hibernated. After wake, pi resumes with session
-      // pinned, model set, ready to receive prompts.
-      try {
-        await wakePoolMember(claim.wellName, claim.tier);
-        // Defensive IP check: if the well is "running" but has no IP
-        // (e.g. lease was flush-all'd while it was up), force a
-        // /stop+/start to re-DHCP. Wells-team is also looking at this
-        // server-side (flush-safe-by-default + auto-refresh on lapse),
-        // but until that ships this prevents user-visible "could not
-        // resolve well host" errors.
-        await ensureWellHasIp(claim.wellName);
-        await markPoolMemberLive(claim.wellName);
-      } catch (e) {
-        console.warn(`! pool wake failed (${e instanceof Error ? e.message : String(e)}), falling back to cold-fork`);
-        await directWellDestroy(claim.wellName).catch(() => {});
-        await withPoolLock(async () => {
-          const file = await loadPool();
-          file.members = file.members.filter((e) => e.well_name !== claim.wellName);
-          await savePool(file);
-        });
-        // Cold-fork below.
-        wellName = cellName;
-        hatchedFrom = undefined;
-      }
-    }
-
-    if (!hatchedFrom) {
-      // Cold-fork: no warm egg or wake failed. Create + wait for firstboot.
-      // Cold-fork requires the cell-base image — the V1 architecture is
-      // pool-only and cell-base was retired (it was the legacy fast-fork
-      // source baked once via `cells bake`). If it's missing, fail fast
-      // with an actionable message instead of letting welld return a
-      // generic 404 "image not found".
-      const cellBasePath = join(homedir(), ".wells", "images", "cell-base");
-      if (!existsSync(cellBasePath)) {
-        console.error(
-          `birth failed: pool is empty and cold-fork is unavailable (cell-base image missing at ${cellBasePath}).\n` +
-            `  v1 architecture is pool-only. Options:\n` +
-            `    cells pool refill          # bake more pool members\n` +
-            `    cells pool bake-v1         # bake one generic v1 member\n` +
-            `    cells pool reconcile       # sync pool.json with welld in case of stale state`,
-        );
-        process.exit(1);
-      }
-      const env = { ...(await collectCellLlmEnv()), CELL_NAME: cellName };
-      await directWellCreate(cellName, { fromImage: "cell-base", env });
-      await setWellAuthPublic(cellName);
-      await disableAutoSleep(cellName);
-      await waitForCloudInit(cellName);
-    }
-
-    // Mark alive in cells.json. Generic cell uses the canned default
-    // chain baked into /cell/.pi/settings.json. With a V1.9 picker
-    // choice, derive a per-cell chain from the user's primary model so
-    // host-bridge applies it on session setup.
-    const picker = opts.pickerChoice;
-    const modelChain = picker
-      ? buildDefaultChain({ provider: picker.provider, modelId: picker.modelId, thinking: picker.thinking })
-      : ["deepseek/deepseek-v4-flash:off", "openai-codex/gpt-5.5:off"];
-
-    const reg = await loadRegistry();
-    reg.cells.push({
-      name: cellName,
-      created_at: new Date().toISOString(),
-      status: "alive",
-      modelChain,
-      ...(hatchedFrom ? { hatched_from: hatchedFrom } : {}),
-      ...(picker ? { picker } : {}),
-    });
-    await saveRegistry(reg);
-  } catch (e) {
-    console.error(`birth failed: ${e instanceof Error ? e.message : String(e)} — sweeping well`);
-    await directWellDestroy(wellName);
-    process.exit(1);
-  }
-
-  const tPhaseA = Date.now();
-  const tierLabel: "hot" | "cold" | "cold-fork" =
-    claim?.tier === 4 ? "hot" : claim?.tier === 2 ? "cold" : "cold-fork";
-
-  // Kick host-bridge to spawn ssh+pi NOW (overlaps with animation +
-  // perf telemetry + refill + greeting capture). By the time captureGreeting
-  // dials the bridge, ssh+pi is already booting; the seed lands as soon
-  // as pi-ready flips. V1.3 fix.
-  void prewarmHostBridge(cellName);
-
-  // Perf telemetry — alive_ms = "real birth complete" (cell registered,
-  // prewarm kicked, ready for a talk session). Captured before the
-  // animation finishes so the row reflects pipeline work, not UI hold.
-  const tAlive = Date.now();
-  try {
-    const perfDir = join(homedir(), ".cells", "logs", "perf");
-    await mkdir(perfDir, { recursive: true });
-    const row = {
-      ts: new Date().toISOString(),
-      cell: cellName,
-      path: hatchedFrom ? "pool" : "cold",
-      phase_a_ms: tPhaseA - t0,
-      alive_ms: tAlive - t0,
-    };
-    await writeFile(
-      join(perfDir, "birth.jsonl"),
-      JSON.stringify(row) + "\n",
-      { flag: "a" },
-    );
-  } catch {
-    // Telemetry is non-critical; ignore failures.
-  }
-
-  // Fire-and-forget pool refill. Runs while the animation plays + the
-  // user talks; the talk session keeps this process alive long enough
-  // for refill to land. Caught silently — refill failure here shouldn't
-  // poison the user's birth experience.
-  refillPoolToDepth().catch((e) => {
-    console.warn(`! background pool refill failed: ${e instanceof Error ? e.message : String(e)}`);
-  });
-
-  // Pre-send path (TTY only): open a WS to host-bridge now, fire the
-  // seed prompt, buffer pi's reply. Animation runs in parallel and ends
-  // when pi streams its first byte (firstTokenSeen → firstTokenDef →
-  // animation endSignal). After animation, we release() the buffer and
-  // the captured greeting prints instantly. Net effect: LLM round-trip
-  // overlaps with animation instead of stacking after it.
-  const seedText = opts.seedOff ? undefined : (opts.seed ?? DEFAULT_SEED);
-  let greetingHandle: GreetingHandle | null = null;
-  if (useAnim && seedText) {
-    try {
-      greetingHandle = await captureGreeting(cellName, seedText);
-      greetingHandle.firstTokenSeen.then(() => {
-        const firstTokenMs = Date.now() - t0;
-        const perfDir = join(homedir(), ".cells", "logs", "perf");
-        writeFile(
-          join(perfDir, "first-token.jsonl"),
-          JSON.stringify({
-            ts: new Date().toISOString(),
-            cell: cellName,
-            first_token_ms: firstTokenMs,
-            tier: tierLabel,
-          }) + "\n",
-          { flag: "a" },
-        ).catch(() => { /* telemetry non-critical */ });
-        firstTokenDef.resolve();
-      }).catch(() => { /* fallback handles errors below */ });
-    } catch (e) {
-      // captureGreeting failed (host-bridge down, cell unreachable, etc.).
-      // Don't break the birth — fall through to the legacy in-session seed
-      // path. The animation will hit its maxDurationMs cap.
-      console.warn(
-        `! pre-send greeting failed: ${e instanceof Error ? e.message : String(e)}; falling back to in-session seed`,
-      );
-      greetingHandle = null;
-    }
-  }
-
-  // Wait for the animation to finish — either ended by firstTokenDef
-  // (greeting captured early) or by maxDurationMs cap.
-  await animPromise;
-
-  if (!useAnim) console.log(`✓ ${cellName} alive${hatchedFrom ? " (from pool)" : ""}`);
-
-  // Release the captured greeting — buffered chunks drain instantly, then
-  // any remaining deltas stream live to stdout. After agent_end the WS
-  // closes and we drop into the interactive talk session below.
-  if (greetingHandle) {
-    greetingHandle.release();
-    try {
-      await greetingHandle.done;
-    } catch (e) {
-      console.warn(`! greeting interrupted: ${e instanceof Error ? e.message : String(e)}`);
-    }
-  }
-
-  // Drop into talk. Pi inside the cell handles follow-up turns via the
-  // same on-disk session — the greeting is already in pi's history, so
-  // the interactive WS connects to a session that knows it just said hi.
-  if (process.stdout.isTTY) {
-    if (greetingHandle) {
-      // Greeting already streamed via captureGreeting; interactive talk
-      // opens a fresh WS to the same pi session — no second seed.
-      await streamCellBridge(cellName, { interactive: true });
-    } else if (seedText) {
-      // Fallback: pre-send didn't work (or non-TTY env). streamCellBridge
-      // does its own seed dispatch + first-token logging.
-      const onFirstToken = () => {
-        const firstTokenMs = Date.now() - t0;
-        const perfDir = join(homedir(), ".cells", "logs", "perf");
-        writeFile(
-          join(perfDir, "first-token.jsonl"),
-          JSON.stringify({
-            ts: new Date().toISOString(),
-            cell: cellName,
-            first_token_ms: firstTokenMs,
-            tier: tierLabel,
-          }) + "\n",
-          { flag: "a" },
-        ).catch(() => { /* telemetry non-critical */ });
-      };
-      await streamCellBridge(cellName, { interactive: true, initialMessage: seedText, onFirstToken });
-    } else {
-      await cmdTalk(cellName, []);
-    }
-  } else {
-    // Non-TTY (scripted) birth: cell is registered alive, telemetry
-    // written, refill + prewarm are fire-and-forget. The user-visible
-    // work is done — exit explicitly so the bun process doesn't hang
-    // 5-15s on the background WS + refill promises holding the event
-    // loop alive. If the caller wants refill to land, they should rely
-    // on the launchd `schedule-pool-refill` job or run `cells pool
-    // refill` explicitly. Scripted births shouldn't pay for background
-    // bookkeeping they can't see.
-    process.exit(0);
-  }
-}
-
-// V1.9 picker — "provider channel" axis. Distinct from CHANNEL_OPTIONS
-// (which is slack/email messaging surfaces). For v1.9 MVP, "auto" is the
-// only fully-wired option; the others are stored for v2 routing.
-const PROVIDER_CHANNEL_OPTIONS: SelectOption[] = [
-  { value: "auto",          label: "auto",          hint: "(inherit from model)" },
-  { value: "claude-code",   label: "claude-code",   hint: "(Claude Max via CLI)" },
-  { value: "anthropic-api", label: "anthropic-api", hint: "(API key, advisory in v1)" },
-  { value: "openai-api",    label: "openai-api",    hint: "(API key, advisory in v1)" },
-  { value: "deepseek",      label: "deepseek",      hint: "(API key, advisory in v1)" },
-];
-
-// V1.9 picker: 4 sequential questions when user types `cells birth <name>`
-// with no flags. Drives an actual fast-path birth (not the legacy slow
-// slow-birth flow at the bottom of cmdCreate). Reuses selectOne/selectMany.
-// ESC at any prompt exits cleanly via selectOne's built-in handler.
-async function runBirthPickerV1(name: string): Promise<PickerChoice> {
-  console.log(`\nbirthing cell '${name}'\n`);
-  const answers: (string | string[] | undefined)[] = [];
-  let i = 0;
-  while (i < 4) {
-    const canGoBack = i > 0;
-    let result: string | string[] | Back;
-    if (i === 0) {
-      result = await selectOne("Model?", MODEL_OPTIONS, {
-        initialValue: (answers[0] as string | undefined) ?? "deepseek-v4-flash",
-      });
-    } else if (i === 1) {
-      const modelKey = answers[0] as ModelKey;
-      result = await selectOne("Thinking?", thinkingOptionsFor(modelKey), {
-        canGoBack,
-        initialValue: (answers[1] as string | undefined) ?? defaultThinkingFor(modelKey),
-      });
-    } else if (i === 2) {
-      result = await selectMany("Extensions?", EXTENSION_OPTIONS, {
-        canGoBack,
-        initialChecked: (answers[2] as string[] | undefined) ?? [],
-      });
-    } else {
-      result = await selectOne("Provider?", PROVIDER_CHANNEL_OPTIONS, {
-        canGoBack,
-        initialValue: (answers[3] as string | undefined) ?? "auto",
-      });
-    }
-    if (result === BACK) {
-      process.stdout.write("\x1b[1A\x1b[2K");
-      i--;
-    } else {
-      answers[i] = result;
-      i++;
-    }
-  }
-  const modelKey = answers[0] as ModelKey;
-  const choice = MODEL_IDS[modelKey];
-  let thinking = answers[1] as string;
-  if (MIN_MEDIUM_THINKING_MODELS.has(modelKey) && SUB_MEDIUM_THINKING.has(thinking)) {
-    console.warn(`note: ${modelKey} requires thinking ≥ medium; bumping '${thinking}' → 'medium'`);
-    thinking = "medium";
-  }
-  return {
-    provider: choice.provider,
-    modelId: choice.modelId,
-    thinking,
-    extensions: answers[2] as string[],
-    channel: answers[3] as string,
-  };
-}
-
-async function cmdCreate(name: string | undefined, opts: CreateOpts) {
-  // v1 fast-path: no customization flags → canned generic cell, deterministic.
-  // Custom flags → legacy slow-birth (mother) for now; v2 reshapes this
-  // into personality/binding swaps that don't need full mother orchestration.
-  const isV1Default =
-    opts.harness === undefined &&
-    opts.model === undefined &&
-    opts.thinking === undefined &&
-    opts.extensions === undefined &&
-    opts.packages === undefined &&
-    opts.channels === undefined &&
-    opts.slackChannel === undefined;
-
-  if (isV1Default) {
-    // V1.9 picker trigger: explicit name + truly no flags + TTY → run picker
-    // first, then fall through to the fast-path with picks attached. `cells
-    // birth` alone (no name) stays magical — no questions asked. Any of
-    // --seed / --seed=off / --no-pool means the caller is scripting and
-    // wants the deterministic fast-path, so skip the picker.
-    const noPickerFlags =
-      opts.seed === undefined && !opts.seedOff && !opts.noPool;
-    if (name && process.stdout.isTTY && noPickerFlags) {
-      opts.pickerChoice = await runBirthPickerV1(name);
-    }
-    return cmdCreateV1Fast(name, opts);
-  }
-
-  // Legacy slow-birth (mother) path requires an explicit name.
-  if (!name) {
-    console.error(
-      "usage: cells birth <name> [--harness=pi] [--model=...] [--thinking=...] [--extensions=...] [--packages=...] [--channels=...] [--slack-channel=...]\n" +
-      "       cells birth                    (v1 fast-path: auto-named generic cell)",
-    );
-    process.exit(1);
-  }
-
-  if (RESERVED_NAMES.has(name)) {
-    console.error(`'${name}' is reserved. Pick another name.`);
-    process.exit(1);
-  }
-  if (await findCell(name)) {
-    console.error(`cell '${name}' already exists in registry`);
-    process.exit(1);
-  }
-
+  // ── 1. Resolve config ──
+  // Interactive when given a name + a TTY + no config/scripting flags.
+  // `cells birth` with no name births an auto-named default pi cell.
   const interactive =
-    opts.harness === undefined &&
-    opts.model === undefined &&
-    opts.thinking === undefined &&
-    opts.extensions === undefined &&
-    opts.packages === undefined &&
-    opts.channels === undefined;
+    !!name && process.stdout.isTTY &&
+    opts.harness === undefined && opts.model === undefined &&
+    opts.thinking === undefined && opts.extensions === undefined &&
+    opts.packages === undefined && opts.channels === undefined &&
+    opts.slackChannel === undefined &&
+    opts.seed === undefined && !opts.seedOff && !opts.noPool;
 
   let harness: string;
   let modelKey: ModelKey;
@@ -1854,8 +1477,6 @@ async function cmdCreate(name: string | undefined, opts: CreateOpts) {
   let extensions: string[];
   let packages: string[];
   let channels: ChannelValue[];
-
-  let slackChannel: string | undefined = opts.slackChannel;
 
   if (interactive) {
     console.log(`\nbirthing cell '${name}'\n`);
@@ -1910,290 +1531,234 @@ async function cmdCreate(name: string | undefined, opts: CreateOpts) {
     extensions = answers[2] as string[];
     packages = answers[3] as string[];
     thinking = answers[4] as string;
-    const rawChannels = (answers[5] as string[]).filter((c) => (CHANNEL_VALUES as readonly string[]).includes(c));
-    channels = rawChannels as ChannelValue[];
+    channels = (answers[5] as string[]).filter(
+      (c) => (CHANNEL_VALUES as readonly string[]).includes(c),
+    ) as ChannelValue[];
   } else {
     harness = opts.harness ?? "pi";
-    modelKey = opts.model ?? "opus";
+    // Per-harness default model: claude-code → Anthropic (opus); codex →
+    // the ChatGPT-subscription model (gpt-5.5); pi → the cheap/fast
+    // deepseek leaf.
+    modelKey = opts.model ?? (
+      harness === "claude-code" ? "opus" :
+      harness === "codex" ? "gpt-5.5" :
+      "deepseek-v4-flash"
+    );
     thinking = opts.thinking ?? defaultThinkingFor(modelKey);
     extensions = opts.extensions ?? [];
     packages = opts.packages ?? PACKAGE_DEFAULTS;
     channels = opts.channels ?? (opts.slackChannel ? ["slack"] : []);
-    if (harness !== "pi") {
-      console.error(`harness '${harness}' not yet supported (only 'pi' for v1)`);
+  }
+  name = name ?? generateCellName();
+
+  // ── 2. Validate ──
+  if (RESERVED_NAMES.has(name)) {
+    console.error(`'${name}' is reserved. Pick another name.`);
+    process.exit(1);
+  }
+  if (await findCell(name)) {
+    console.error(`cell '${name}' already exists in registry`);
+    process.exit(1);
+  }
+  if (harness !== "pi" && harness !== "claude-code" && harness !== "codex") {
+    console.error(`unknown harness '${harness}' — choose: pi, claude-code, codex`);
+    process.exit(1);
+  }
+  const isAnthropicModel = MODEL_IDS[modelKey].provider === "anthropic";
+  if (harness === "claude-code" && !isAnthropicModel) {
+    console.error(`the claude-code harness runs Anthropic models only (opus, sonnet, haiku)`);
+    process.exit(1);
+  }
+  if (harness === "codex" && MODEL_IDS[modelKey].provider !== "openai-codex") {
+    // The codex harness runs the `codex` CLI on the ChatGPT subscription
+    // (via proxy.cells.md/codex). Only the openai-codex provider is the
+    // subscription path — gpt-5.5-pro (provider "openai") is the metered
+    // API, which the codex harness deliberately does not use.
+    console.error(`the codex harness runs the ChatGPT-subscription model only — use --model=gpt-5.5`);
+    process.exit(1);
+  }
+  if (harness === "pi" && isAnthropicModel) {
+    // pi cells reach Anthropic via a paid ANTHROPIC_API_KEY, direct — not
+    // the Max sub (pi-via-Max is fingerprint-blocked). Require the key.
+    if (!(await readSecret("ANTHROPIC_API_KEY"))) {
+      console.error(
+        `pi cells on Anthropic models need ANTHROPIC_API_KEY in ~/.cells/secrets.json\n` +
+        `  (claude-code is the Max-subscription harness; pi uses a direct paid key)`,
+      );
       process.exit(1);
     }
   }
-
-  // 'adaptive' is opus-only and means "pure adaptive, no effort hint —
-  // model decides depth per-turn." Cell-side configure-cell-proxy.sh
-  // patches pi-ai's mapThinkingLevelToEffort to return undefined for
-  // this level, which makes the anthropic provider omit output_config.effort.
+  // 'adaptive' thinking is opus-only.
   if (thinking === "adaptive" && !ADAPTIVE_THINKING_MODELS.has(modelKey)) {
     console.error(`thinking 'adaptive' is only available for --model=opus`);
     process.exit(1);
   }
-
   // Some models reject low-effort thinking levels server-side. Auto-bump
-  // rather than birth a cell that 400s on its first message. Warn either
-  // way so Pete knows what changed.
+  // rather than birth a cell that 400s on its first message.
   if (MIN_MEDIUM_THINKING_MODELS.has(modelKey) && SUB_MEDIUM_THINKING.has(thinking)) {
     console.warn(`note: ${modelKey} requires thinking ≥ medium; bumping '${thinking}' → 'medium'`);
     thinking = "medium";
   }
+  if (opts.noPool) {
+    console.warn(`note: --no-pool is deprecated and ignored — birth is pool-only now`);
+  }
 
+  // ── 3. Build the config blob handed to mother ──
   const choice = MODEL_IDS[modelKey];
   const chain = buildDefaultChain({ provider: choice.provider, modelId: choice.modelId, thinking });
-  const payload = {
+  const blob = {
     harness,
-    provider: choice.provider,
     model: choice.modelId,
+    provider: choice.provider,
     thinking,
     extensions,
     packages,
+    channels,
     chain,
   };
 
-  // ── Auto-hatch path ──
-  // If a matching warm egg exists, hatch it. Sub-20s to "alive". The
-  // pool key matches on (model, extensions, packages); thinking and
-  // channels are applied at hatch.
-  // --no-pool bypasses the pool entirely (testing/perf-baseline use).
-  if (!opts.noPool) {
-    const fullVariant: Variant = {
-      model: modelKey,
-      thinking,
-      extensions: [...extensions].sort(),
-      packages: [...packages].sort(),
-      channels: [...channels].sort(),
-    };
-    const requestedKey = poolKey(fullVariant);
-    const poolFile = await loadPool();
-    const matchingEgg = poolFile.members.find(
-      (e) => e.state === "warm" && e.variant_signature === requestedKey,
+  // ── 4. Claim a generic egg from the pool ──
+  if (!(await readSecret("CELLS_PROXY_SECRET"))) {
+    console.error("CELLS_PROXY_SECRET missing from ~/.cells/secrets.json");
+    process.exit(1);
+  }
+  // Lazy reconcile first — evict stale entries (welld bounced, pool.json
+  // still says warm) before we claim. Skip refill; we refill post-success.
+  await reconcilePool({ silent: false, skipRefill: true }).catch(() => { /* don't fail birth on reconcile error */ });
+  const claim = await claimGenericEgg(name);
+  if (!claim) {
+    console.error(
+      `birth failed: the egg pool is empty.\n` +
+      `  cells pool refill          # bake more pool members\n` +
+      `  cells pool reconcile       # re-sync pool.json with welld`,
     );
-    if (matchingEgg) {
-      const hatchResult = await hatchEgg(
-        matchingEgg,
-        name,
-        thinking,
-        extensions,
-        channels,
-        chain,
-        slackChannel,
-      );
-      if (hatchResult.ok) {
-        // Magic moment: drop straight into interactive talk + auto-send
-        // the seed greeting (per --seed flag). The async tail (worker,
-        // slack, vault, checkpoint) runs in parallel — by the time the
-        // greeting finishes streaming, most of the tail is done. In
-        // non-TTY mode (script invocations), await the tail so the cell
-        // is fully provisioned on exit.
-        if (process.stdout.isTTY) {
-          const seedText = opts.seedOff ? undefined : (opts.seed ?? DEFAULT_SEED);
-          if (seedText) {
-            await streamCellBridge(name, { interactive: true, initialMessage: seedText });
-          } else {
-            await cmdTalk(name, []);
-          }
-        } else if (hatchResult.tailPromise) {
-          await hatchResult.tailPromise;
-        }
-        return;
-      }
-      // hatch failed — fall through to slow birth. The egg has been
-      // marked "culling" by hatchEgg already.
-      console.warn(`! hatch fell back to slow birth: ${hatchResult.reason}`);
+    process.exit(1);
+  }
+  const eggWell = claim.wellName;
+  const sweepEgg = async () => {
+    await directWellDestroy(eggWell).catch(() => {});
+    await withPoolLock(async () => {
+      const file = await loadPool();
+      file.members = file.members.filter((m) => m.well_name !== eggWell);
+      await savePool(file);
+    });
+  };
+  try {
+    await wakePoolMember(eggWell, claim.tier);
+    await ensureWellHasIp(eggWell);
+    // claude-code and codex cells reach their LLM only through the
+    // subscriptions proxy — neither uses the paid ANTHROPIC_API_KEY the
+    // generic egg bakes into /etc/environment. Strip it now the harness
+    // is known, before mother births the cell.
+    if (harness === "claude-code" || harness === "codex") {
+      await stripAnthropicKeyFromWell(eggWell);
     }
+  } catch (e) {
+    console.error(
+      `birth failed: could not ready egg ${eggWell}: ${e instanceof Error ? e.message : String(e)} — sweeping`,
+    );
+    await sweepEgg();
+    process.exit(1);
   }
 
-  // ── Slow birth path (no matching egg, or hatch failed) ──
+  // ── 5. Hand off to mother — she reads docs/birthing-ritual.html ──
+  if (!process.stdout.isTTY) console.log(`birthing ${name}…`);
   const { outcome } = await runPiWithOutcome(
     "cell-create",
-    [name, JSON.stringify(payload)],
+    [name, eggWell, JSON.stringify(blob)],
     wellsEnv(),
     { progressName: name },
   );
   if (!outcome) {
-    console.error("agent did not report outcome — sweeping potential orphan well and aborting");
-    await directWellDestroy(name);
+    console.error(`birth failed: mother did not report an outcome — sweeping egg ${eggWell}`);
+    await sweepEgg();
     process.exit(1);
   }
   if (!outcome.success) {
-    console.error(`birth failed: ${outcome.message} — sweeping potential orphan well`);
-    await directWellDestroy(name);
+    console.error(`birth failed: ${outcome.message} — sweeping egg ${eggWell}`);
+    await sweepEgg();
     process.exit(1);
   }
-  // Mirror the hatch flow: register as "warming", then fire-and-forget
-  // the post-birth tail (Slack, email, Worker, vault) so the user can
-  // drop into talk immediately. wirePostBirth → markCellAlive flips the
-  // status to "alive" once wiring lands. resolveWellHost has retries
-  // for the case where talk happens before the Worker is up.
+
+  // ── 6. Success: registry + pool bookkeeping ──
+  await markPoolMemberLive(eggWell);
   const reg = await loadRegistry();
   reg.cells.push({
     name,
     created_at: new Date().toISOString(),
-    status: "warming",
+    status: "alive",
+    hatched_from: claim.id,
     modelChain: chain,
+    harness,
   });
   await saveRegistry(reg);
 
-  console.log(`✓ ${name} alive — pi is up; capabilities are warming up async (cf worker, channels, vault).`);
+  // Kick host-bridge to spawn ssh+pi now so the first talk connects warm.
+  void prewarmHostBridge(name);
 
-  const tailPromise = (async () => {
+  // Perf telemetry — alive_ms = birth complete (cell registered, ready).
+  try {
+    const perfDir = join(homedir(), ".cells", "logs", "perf");
+    await mkdir(perfDir, { recursive: true });
+    await writeFile(
+      join(perfDir, "birth.jsonl"),
+      JSON.stringify({ ts: new Date().toISOString(), cell: name, path: "pool", alive_ms: Date.now() - t0 }) + "\n",
+      { flag: "a" },
+    );
+  } catch { /* telemetry non-critical */ }
+
+  // Fire-and-forget: refill the pool, sync the new cell into the vault.
+  refillPoolToDepth().catch((e) =>
+    console.warn(`! background pool refill failed: ${e instanceof Error ? e.message : String(e)}`),
+  );
+  void cmdSync(name).catch((e) => console.error(`! initial vault sync failed: ${e}`));
+
+  // ── Talk UX ──
+  const seedText = opts.seedOff ? undefined : (opts.seed ?? DEFAULT_SEED);
+  if (!process.stdout.isTTY) {
+    // Scripted birth: cell is alive + registered. Exit explicitly so the
+    // bun process doesn't hang on the background refill/sync promises.
+    console.log(`✓ ${name} alive`);
+    process.exit(0);
+  }
+  if (!seedText) {
+    console.log(`✓ ${name} alive`);
+    await cmdTalk(name, []);
+    return;
+  }
+  // Seed greeting: a short snap-to-alive animation plays while the seed's
+  // LLM round-trip happens, then the captured greeting prints and we drop
+  // into the interactive talk session on the same pi session.
+  const firstTokenDef = makeDeferred<void>();
+  const animPromise = (await import("./birth-ui.tsx")).runBirthAnimation({
+    endSignal: firstTokenDef.promise,
+    minDurationMs: 1500,
+    maxDurationMs: 6000,
+  });
+  let greetingHandle: GreetingHandle | null = null;
+  try {
+    greetingHandle = await captureGreeting(name, seedText);
+    greetingHandle.firstTokenSeen
+      .then(() => firstTokenDef.resolve())
+      .catch(() => { /* fallback handled below */ });
+  } catch (e) {
+    console.warn(
+      `! pre-send greeting failed: ${e instanceof Error ? e.message : String(e)}; falling back to in-session seed`,
+    );
+    greetingHandle = null;
+    firstTokenDef.resolve(); // don't make the animation wait on a dead handle
+  }
+  await animPromise;
+  if (greetingHandle) {
+    greetingHandle.release();
     try {
-      await wirePostBirth(name, channels, slackChannel);
-      await markCellAlive(name);
+      await greetingHandle.done;
     } catch (e) {
-      console.error(`! post-birth wiring failed for ${name}: ${e}`);
+      console.warn(`! greeting interrupted: ${e instanceof Error ? e.message : String(e)}`);
     }
-  })();
-
-  if (process.stdout.isTTY) {
-    // Magic moment: drop into talk with the seed greeting auto-sent so the
-    // cell is already saying hi when control returns to the user. The cell
-    // itself answers — pi reads the prompt, generates a one-liner intro,
-    // streams it back, then the user takes over the readline loop.
-    //
-    // --seed=off disables the auto-send (interactive starts blank).
-    // --seed=<text> overrides the default greeting prompt.
-    const seedText = opts.seedOff ? undefined : (opts.seed ?? DEFAULT_SEED);
-    if (seedText) {
-      await streamCellBridge(name, { interactive: true, initialMessage: seedText });
-    } else {
-      await cmdTalk(name, []);
-    }
+    await streamCellBridge(name, { interactive: true });
   } else {
-    // Non-TTY (scripted): await the tail so callers see a fully-wired
-    // cell when the command exits.
-    await tailPromise;
-  }
-}
-
-// Slack: create #cells-<name> via conversations.create (requires
-// channels:manage on the bot scope). If the channel already exists,
-// fall back to looking it up. Returns the channel ID either way.
-async function ensureSlackChannel(cellName: string): Promise<string> {
-  const token = await readSecret("SLACK_BOT_TOKEN");
-  if (!token) throw new Error("SLACK_BOT_TOKEN missing from ~/.cells/secrets.json");
-
-  // Try the bare cell name first; if that's taken, fall back to the
-  // namespaced `cells-<name>` form to avoid colliding with a
-  // pre-existing unrelated channel.
-  const tryCreate = async (name: string) => {
-    const r = await fetch("https://slack.com/api/conversations.create", {
-      method: "POST",
-      headers: { authorization: `Bearer ${token}`, "content-type": "application/json; charset=utf-8" },
-      body: JSON.stringify({ name, is_private: false }),
-    });
-    return (await r.json()) as { ok: boolean; channel?: { id: string }; error?: string };
-  };
-
-  const bare = await tryCreate(cellName);
-  if (bare.ok && bare.channel?.id) return bare.channel.id;
-  if (bare.error !== "name_taken") {
-    throw new Error(`conversations.create #${cellName} failed: ${bare.error ?? "unknown"}`);
-  }
-
-  // Brand prefix comes from the Slack bot's own username so this stays
-  // correct across installs where the project is rebranded (e.g. "zero"
-  // instead of "cells"). Falls back to "cells" only if auth.test fails.
-  const prefix = await getSlackBrandPrefix(token);
-  const prefixed = `${prefix}-${cellName}`;
-  console.log(`! #${cellName} taken; using #${prefixed}`);
-  const pref = await tryCreate(prefixed);
-  if (pref.ok && pref.channel?.id) return pref.channel.id;
-  if (pref.error !== "name_taken") {
-    throw new Error(`conversations.create #${prefixed} failed: ${pref.error ?? "unknown"}`);
-  }
-
-  // Both names taken — look up the prefixed one (which we'd own from a
-  // prior cells run) and bind to it. Walk pagination in case the
-  // workspace has a lot of channels.
-  let cursor: string | undefined;
-  for (let i = 0; i < 10; i++) {
-    const url = new URL("https://slack.com/api/conversations.list");
-    url.searchParams.set("types", "public_channel,private_channel");
-    url.searchParams.set("limit", "1000");
-    if (cursor) url.searchParams.set("cursor", cursor);
-    const r = await fetch(url, { headers: { authorization: `Bearer ${token}` } });
-    const j = (await r.json()) as {
-      ok: boolean;
-      channels?: { id: string; name: string }[];
-      response_metadata?: { next_cursor?: string };
-      error?: string;
-    };
-    if (!j.ok) throw new Error(`conversations.list failed: ${j.error ?? "unknown"}`);
-    const hit = j.channels?.find((c) => c.name === prefixed);
-    if (hit) return hit.id;
-    cursor = j.response_metadata?.next_cursor || undefined;
-    if (!cursor) break;
-  }
-  throw new Error(`#${prefixed} reported name_taken but not found in conversations.list`);
-}
-
-// Slack bot's own username, lowercased and slugged. Used as the
-// channel-name prefix when a cell's bare name collides with an
-// existing channel. Cached per-process — bot name doesn't change.
-let _slackBrandPrefix: string | null = null;
-async function getSlackBrandPrefix(botToken: string): Promise<string> {
-  if (_slackBrandPrefix) return _slackBrandPrefix;
-  try {
-    const r = await fetch("https://slack.com/api/auth.test", {
-      method: "POST",
-      headers: { authorization: `Bearer ${botToken}` },
-    });
-    const j = (await r.json()) as { ok: boolean; user?: string };
-    const raw = j.ok && j.user ? j.user : "cells";
-    _slackBrandPrefix = raw.toLowerCase().replace(/[^a-z0-9-]/g, "-").replace(/-+/g, "-").replace(/^-|-$/g, "") || "cells";
-  } catch {
-    _slackBrandPrefix = "cells";
-  }
-  return _slackBrandPrefix;
-}
-
-// Look up the human owner's Slack user ID via auth.test on
-// SLACK_USER_TOKEN. The user token belongs to whoever installed the
-// app (Pete), so this returns Pete's ID. No extra scope required —
-// auth.test just reflects the token owner.
-async function resolveSlackUserId(): Promise<string | null> {
-  const userToken = await readSecret("SLACK_USER_TOKEN");
-  if (!userToken) return null;
-  const r = await fetch("https://slack.com/api/auth.test", {
-    method: "POST",
-    headers: { authorization: `Bearer ${userToken}` },
-  });
-  const j = (await r.json()) as { ok: boolean; user_id?: string; error?: string };
-  if (!j.ok || !j.user_id) throw new Error(`auth.test failed: ${j.error ?? "unknown"}`);
-  return j.user_id;
-}
-
-async function inviteSlackUser(channelId: string, userId: string): Promise<void> {
-  const botToken = await readSecret("SLACK_BOT_TOKEN");
-  if (!botToken) throw new Error("SLACK_BOT_TOKEN missing");
-  const r = await fetch("https://slack.com/api/conversations.invite", {
-    method: "POST",
-    headers: {
-      authorization: `Bearer ${botToken}`,
-      "content-type": "application/json; charset=utf-8",
-    },
-    body: JSON.stringify({ channel: channelId, users: userId }),
-  });
-  const j = (await r.json()) as { ok: boolean; error?: string };
-  // already_in_channel is fine — idempotent re-runs.
-  if (!j.ok && j.error !== "already_in_channel") {
-    throw new Error(`conversations.invite failed: ${j.error ?? "unknown"}`);
-  }
-}
-
-async function readSecret(key: string): Promise<string | null> {
-  if (!existsSync(SECRETS_PATH)) return null;
-  try {
-    const s = JSON.parse(await readFile(SECRETS_PATH, "utf-8")) as Record<string, unknown>;
-    const v = s[key];
-    return typeof v === "string" && v ? v : null;
-  } catch {
-    return null;
+    await streamCellBridge(name, { interactive: true, initialMessage: seedText });
   }
 }
 
@@ -2376,7 +1941,8 @@ function generatePoolWellName(): string {
 async function collectCellLlmEnv(): Promise<Record<string, string>> {
   const env: Record<string, string> = {};
   const keys = [
-    "CELLS_PROXY_SECRET",   // openai-codex (gpt-5.5 via proxy.cells.md/codex), anthropic (via /v1)
+    "CELLS_PROXY_SECRET",   // openai-codex (gpt-5.5 via proxy.cells.md/codex); claude-code's ANTHROPIC_AUTH_TOKEN
+    "ANTHROPIC_API_KEY",    // pi cells on anthropic models — direct api.anthropic.com (paid key, not the Max sub)
     "DEEPSEEK_API_KEY",     // deepseek-v4-flash, deepseek-v4-pro (direct)
     "OPENAI_API_KEY",       // openai/* non-codex (direct)
     "GEMINI_API_KEY",       // google/gemini-* (direct)
@@ -2491,6 +2057,20 @@ echo "pi: $(pi --version 2>&1 | head -1 || echo MISSING)"`,
   if (!piInstall.ok) {
     throw new Error(`pi install failed: ${(piInstall.stderr + piInstall.stdout).slice(-600)}`);
   }
+  // 5b. codex harness bake — install the `codex` CLI so every generic egg
+  //     ships the codex harness alongside pi. (claude-code's `claude` CLI
+  //     ships in the wells base image; codex does not, so cells bakes it.)
+  //     Pinned: codex's `exec --json` event format moves fast — pin to the
+  //     version the harness was built + verified against.
+  const codexInstall = await wellExecCapture(
+    wellName,
+    `set -euo pipefail
+sudo npm install -g @openai/codex@0.130.0
+echo "codex: $(codex --version 2>&1 | head -1 || echo MISSING)"`,
+  );
+  if (!codexInstall.ok) {
+    throw new Error(`codex install failed: ${(codexInstall.stderr + codexInstall.stdout).slice(-600)}`);
+  }
   // 6. Apply pi patches with sudo (writes into /usr/lib/node_modules).
   const patch = await wellExecCapture(wellName, `sudo bash /cell/scripts/apply-pi-patches.sh`);
   if (!patch.ok) {
@@ -2516,14 +2096,11 @@ async function bakePoolMember(): Promise<string> {
   const baseEnv = await collectCellLlmEnv();
   if (!baseEnv.CELLS_PROXY_SECRET) throw new Error("CELLS_PROXY_SECRET missing from ~/.cells/secrets.json");
 
-  // Pre-compute the cell-name from the egg's hex suffix. egg-AAAAAA →
-  // cell-AAAAAA. We bake CELL_NAME into the egg's /etc/environment now;
-  // welld's well-site (baked into the image) reads it at boot and pins
-  // pi's session to that name. No rename at birth — we just record the
-  // mapping in pool.json so consume returns both.
+  // Generic egg — no baked identity. The cell's name is imprinted at
+  // birth (ritual step 1); register-site-service.sh passes CELL_NAME to
+  // the site service explicitly. Nothing downstream needs a baked one.
   const wellName = generatePoolWellName();
-  const cellName = "cell-" + wellName.slice("egg-".length);
-  const env = { ...baseEnv, CELL_NAME: cellName };
+  const env = { ...baseEnv };
 
   // Decide tier BEFORE create. Hot = running-resident (first
   // V1_HOT_POOL_TARGET members); cold = hibernated (the rest). Cold
@@ -2624,7 +2201,6 @@ async function bakePoolMember(): Promise<string> {
     file.members.push({
       id: wellName.slice("egg-".length),
       well_name: wellName,
-      cell_name: cellName,
       variant_signature: V1_POOL_VARIANT_SIGNATURE,
       state: "warm",
       tier,
@@ -2734,11 +2310,36 @@ async function ensureWellHasIp(wellName: string): Promise<void> {
   throw new Error(`ensureWellHasIp: '${wellName}' never got an IP within 30s after restart`);
 }
 
-// Consume one warm v1 egg from the pool. Atomically marks it as claimed in
-// pool.json and returns the well-name to use as the cell's backing well.
-// Returns null if pool is empty (caller falls back to cold-fork).
-async function claimV1PoolMember(): Promise<{ wellName: string; cellName: string; tier: 2 | 4 } | null> {
-  let chosen: { wellName: string; cellName: string; tier: 2 | 4 } | null = null;
+// Strip the real ANTHROPIC_API_KEY out of a well's /etc/environment.
+// The generic egg bakes every provider key in (it's harness-agnostic —
+// see collectCellLlmEnv), but claude-code and codex cells reach their LLM
+// only through proxy.cells.md and never touch the paid Anthropic key.
+// Left baked in, it's a latent secret on a coding-agent VM with no
+// legitimate use for it — readable by every process, not just login
+// shells (the env shim's `unset` only covers login shells). Run at birth,
+// once the harness is known. pi cells keep it: a pi cell may run a
+// direct-API anthropic model from its chain.
+async function stripAnthropicKeyFromWell(wellName: string): Promise<void> {
+  const r = await wellExecCapture(
+    wellName,
+    `sudo sed -i '/^ANTHROPIC_API_KEY=/d' /etc/environment && ` +
+      `! grep -q '^ANTHROPIC_API_KEY=' /etc/environment && echo STRIPPED`,
+  );
+  if (!r.ok || !r.stdout.includes("STRIPPED")) {
+    throw new Error(
+      `strip ANTHROPIC_API_KEY from '${wellName}' failed: ${(r.stderr + r.stdout).slice(-200)}`,
+    );
+  }
+}
+
+// Claim one warm generic egg from the pool. Atomically flips it to
+// "claimed" in pool.json and returns its well-name, tier, and id (the egg
+// hex suffix, which becomes the cell's `hatched_from`). Returns null if the
+// pool is empty — the caller errors out, since birth is pool-only.
+async function claimGenericEgg(
+  cellName: string,
+): Promise<{ wellName: string; tier: 2 | 4; id: string } | null> {
+  let chosen: { wellName: string; tier: 2 | 4; id: string } | null = null;
   await withPoolLock(async () => {
     const file = await loadPool();
     // Prefer hot (running) members first — they're instant-consume. Fall
@@ -2756,12 +2357,11 @@ async function claimV1PoolMember(): Promise<{ wellName: string; cellName: string
     if (!warm) return;
     warm.state = "claimed";
     warm.claimed_at = new Date().toISOString();
-    const cellName = (warm as any).cell_name ?? ("cell-" + warm.well_name.slice("egg-".length));
     warm.claimed_by = cellName;
     chosen = {
       wellName: warm.well_name,
-      cellName,
       tier: ((warm as any).tier ?? 2) as 2 | 4,
+      id: warm.well_name.slice("egg-".length),
     };
     await savePool(file);
   });
@@ -3065,26 +2665,17 @@ async function directWellDestroy(name: string): Promise<boolean> {
 }
 
 async function cmdDestroyOne(name: string): Promise<boolean> {
-  // Mother's cell-destroy prompt resolves cell-name → well-name itself
-  // (via the cell_resolve tool, which reads cells.json + pool.json), so
-  // a single mother path works for both slow-birth and hatched cells.
-  // We still resolve locally too — purely as a safety net for when
-  // mother dies mid-destroy and we need to call well API directly.
+  // Teardown is pure deterministic CLI work — no mother. Birth routes
+  // through mother because configuring a cell is open-ended; killing one
+  // isn't. We resolve the well locally (wellNameForCell reads cells.json +
+  // pool.json — the same lookup mother's old cell-destroy prompt did via
+  // cell_resolve), destroy it via the well CLI, then sweep local state.
   const wellName = await wellNameForCell(name);
+  const destroyOk = await directWellDestroy(wellName);
 
-  const { outcome } = await runPiWithOutcome("cell-destroy", [name]);
-  let destroyOk = outcome?.success === true;
-  if (!outcome) {
-    console.warn(`! mother did not report outcome for '${name}' — proceeding with local cleanup`);
-  } else if (!outcome.success) {
-    console.warn(`! mother reported destroy failure for '${name}': ${outcome.message} — proceeding with local cleanup`);
-  }
-  if (!destroyOk) {
-    if (await directWellDestroy(wellName)) destroyOk = true;
-  }
-
-  // Local cleanup — always runs. Each helper is best-effort with internal
-  // existsSync / try-catch guards.
+  // Local cleanup — always runs, even if the well destroy reported a
+  // failure, so a half-gone cell doesn't strand registry/channel/vault
+  // state. Each helper is best-effort with internal existsSync/try-catch.
   const reg = await loadRegistry();
   const killedCell = reg.cells.find((c) => c.name === name);
   reg.cells = reg.cells.filter((c) => c.name !== name);
@@ -3104,6 +2695,21 @@ async function cmdDestroyOne(name: string): Promise<boolean> {
       f.members = f.members.filter((e) => e.id !== killedCell.hatched_from);
       await savePool(f);
     });
+  }
+
+  // Journal the teardown. Birth appends a `born` line via mother's
+  // cell-create prompt; mirror that here so the activity log stays a
+  // complete birth/death record. Best-effort — never fail a kill on this.
+  if (destroyOk && killedCell) {
+    try {
+      const activityFile = join(MOTHER_ROOT, "state/memory/project_cells_activity.md");
+      if (existsSync(activityFile)) {
+        const stamp = new Date().toISOString().slice(0, 16).replace("T", " ");
+        await appendFile(activityFile, `${stamp}  destroyed   ${name}\n`);
+      }
+    } catch {
+      /* best-effort journal */
+    }
   }
 
   return destroyOk;
@@ -3254,153 +2860,6 @@ async function evictPulseStateForCell(name: string): Promise<void> {
   } catch { /* corrupt state — leave alone, pulse will read or repair on next run */ }
 }
 
-// ────────────────────────────────────────────────────────────────────────────
-// channels.json — channel-id → cell binding registry. Keyed by channel ID
-// because inbound events arrive with a channel ID and need O(1) routing.
-// One cell can be bound to multiple channels (multiple keys, same .cell).
-// ────────────────────────────────────────────────────────────────────────────
-
-type ChannelKind = "slack" | "email"; // future: "imessage" | "telegram"
-type ChannelBinding = { cell: string; kind: ChannelKind; createdAt: string };
-type ChannelsFile = { version: 1; bindings: Record<string, ChannelBinding> };
-
-const CHANNEL_ID_PATTERNS: Record<ChannelKind, RegExp> = {
-  slack: /^[CDG][A-Z0-9]{8,}$/, // C=public, D=DM, G=private/group/mpdm
-  // Email "channel ID" is the address itself. KV key is shaped
-  // "email:<local-part>" downstream so the email worker's lookup namespace
-  // doesn't collide with Slack channel IDs.
-  email: /^[a-z0-9._-]+@cells\.md$/,
-};
-
-// Map a binding to the KV key used by the front-door workers. Slack uses
-// the bare channel ID (Slack worker reads CHANNELS.get(channelId)); email
-// uses an "email:<local-part>" prefix so the namespaces stay separate.
-function kvKeyFor(kind: ChannelKind, channelId: string): string {
-  if (kind === "email") {
-    const local = channelId.split("@")[0]?.toLowerCase() ?? "";
-    return `email:${local}`;
-  }
-  return channelId;
-}
-
-async function loadChannels(): Promise<ChannelsFile> {
-  if (!existsSync(CHANNELS_PATH)) return { version: 1, bindings: {} };
-  try {
-    const j = JSON.parse(await readFile(CHANNELS_PATH, "utf-8"));
-    if (j && typeof j === "object" && j.bindings) return j as ChannelsFile;
-  } catch { /* fallthrough */ }
-  return { version: 1, bindings: {} };
-}
-
-async function saveChannels(file: ChannelsFile): Promise<void> {
-  await mkdir(REGISTRY_DIR, { recursive: true });
-  const tmp = CHANNELS_PATH + ".tmp";
-  await writeFile(tmp, JSON.stringify(file, null, 2));
-  await rename(tmp, CHANNELS_PATH);
-}
-
-// channels.json mirrors to a Cloudflare KV namespace (CHANNELS) so the
-// Slack Worker can resolve channel→cell at request time without a
-// laptop hop. Best-effort: a KV write failure logs a warning but
-// doesn't roll back the local file. Re-sync via `cells channel sync`.
-//
-// We talk to the CF REST API directly instead of shelling out to
-// `wrangler kv key put` — wrangler 3.x defaults that command to LOCAL
-// (miniflare) emulation, which the live Worker can't read. Wrangler
-// 4 added a `--remote` flag but it's not available in 3.
-async function kvChannelsNamespaceId(): Promise<string | null> {
-  if (process.env.CLOUDFLARE_KV_CHANNELS_ID) return process.env.CLOUDFLARE_KV_CHANNELS_ID;
-  if (existsSync(SECRETS_PATH)) {
-    try {
-      const s = JSON.parse(await readFile(SECRETS_PATH, "utf-8"));
-      if (typeof s.CLOUDFLARE_KV_CHANNELS_ID === "string") return s.CLOUDFLARE_KV_CHANNELS_ID;
-    } catch { /* fallthrough */ }
-  }
-  return null;
-}
-
-async function cfCreds(): Promise<{ accountId: string; token: string } | null> {
-  const accountId = process.env.CLOUDFLARE_ACCOUNT_ID
-    ?? (await readSecretsKey("CLOUDFLARE_ACCOUNT_ID"));
-  // Prefer a long-lived API token; fall back to wrangler's OAuth token
-  // (refreshed by `bunx wrangler login`).
-  let token = process.env.CLOUDFLARE_API_TOKEN
-    ?? (await readSecretsKey("CLOUDFLARE_API_TOKEN"));
-  if (!token) token = await readWranglerOauthToken();
-  if (!accountId || !token) return null;
-  return { accountId, token };
-}
-
-async function readSecretsKey(key: string): Promise<string | null> {
-  if (!existsSync(SECRETS_PATH)) return null;
-  try {
-    const s = JSON.parse(await readFile(SECRETS_PATH, "utf-8"));
-    return typeof s[key] === "string" ? s[key] : null;
-  } catch { return null; }
-}
-
-async function readWranglerOauthToken(): Promise<string | null> {
-  const path = join(homedir(), "Library/Preferences/.wrangler/config/default.toml");
-  if (!existsSync(path)) return null;
-  try {
-    const text = await readFile(path, "utf-8");
-    const m = text.match(/^oauth_token\s*=\s*"([^"]+)"/m);
-    return m ? m[1] : null;
-  } catch { return null; }
-}
-
-async function kvUpsert(kind: ChannelKind, channelId: string, cell: string): Promise<void> {
-  const id = await kvChannelsNamespaceId();
-  const creds = await cfCreds();
-  if (!id || !creds) {
-    console.warn(`[kv] missing CLOUDFLARE_KV_CHANNELS_ID or account/token — local channels.json updated but KV is stale`);
-    return;
-  }
-  const key = kvKeyFor(kind, channelId);
-  const r = await fetch(
-    `https://api.cloudflare.com/client/v4/accounts/${creds.accountId}/storage/kv/namespaces/${id}/values/${encodeURIComponent(key)}`,
-    { method: "PUT", headers: { Authorization: `Bearer ${creds.token}` }, body: cell },
-  );
-  if (!r.ok) {
-    console.warn(`[kv] put ${key}=${cell} failed (${r.status}): ${(await r.text()).slice(0, 200)}`);
-  }
-}
-
-async function kvDelete(kind: ChannelKind, channelId: string): Promise<void> {
-  const id = await kvChannelsNamespaceId();
-  const creds = await cfCreds();
-  if (!id || !creds) {
-    console.warn(`[kv] missing CLOUDFLARE_KV_CHANNELS_ID or account/token — local channels.json updated but KV is stale`);
-    return;
-  }
-  const key = kvKeyFor(kind, channelId);
-  const r = await fetch(
-    `https://api.cloudflare.com/client/v4/accounts/${creds.accountId}/storage/kv/namespaces/${id}/values/${encodeURIComponent(key)}`,
-    { method: "DELETE", headers: { Authorization: `Bearer ${creds.token}` } },
-  );
-  if (!r.ok) {
-    console.warn(`[kv] delete ${key} failed (${r.status}): ${(await r.text()).slice(0, 200)}`);
-  }
-}
-
-async function evictChannelBindingsForCell(name: string): Promise<void> {
-  if (!existsSync(CHANNELS_PATH)) return;
-  try {
-    const file = await loadChannels();
-    const removed: { id: string; kind: ChannelKind }[] = [];
-    for (const [id, b] of Object.entries(file.bindings)) {
-      if (b.cell === name) {
-        removed.push({ id, kind: b.kind });
-        delete file.bindings[id];
-      }
-    }
-    if (removed.length > 0) {
-      await saveChannels(file);
-      for (const r of removed) await kvDelete(r.kind, r.id);
-    }
-  } catch { /* best-effort */ }
-}
-
 async function cmdChannel(args: string[]) {
   const sub = args[0];
   const rest = args.slice(1);
@@ -3513,60 +2972,6 @@ async function cmdChannelUnlink(args: string[]) {
   for (const r of removed) await kvDelete(r.kind, r.id);
   await updateCellStatusChannels(cell);
   console.log(`unlinked ${removed.length} channel${removed.length === 1 ? "" : "s"} from ${cell}`);
-}
-
-// Look up a slack channel's human-readable name (e.g. "cells-pete") so we
-// can show "#cells-pete" in the cell's tmux bar instead of the raw ID.
-// Best-effort: returns the channel ID on any failure.
-async function slackChannelName(channelId: string): Promise<string> {
-  const token = await readSecret("SLACK_BOT_TOKEN");
-  if (!token) return channelId;
-  try {
-    const r = await fetch(`https://slack.com/api/conversations.info?channel=${encodeURIComponent(channelId)}`, {
-      headers: { authorization: `Bearer ${token}` },
-    });
-    const j = (await r.json()) as { ok: boolean; channel?: { name?: string } };
-    return j.ok && j.channel?.name ? `#${j.channel.name}` : channelId;
-  } catch {
-    return channelId;
-  }
-}
-
-// Push the cell's current channel bindings to its on-cell status.json so
-// the tmux status-right shows them. Best-effort — failures log a warning
-// but don't roll back the laptop-side binding.
-async function updateCellStatusChannels(cell: string): Promise<void> {
-  const file = await loadChannels();
-  const ids = Object.entries(file.bindings)
-    .filter(([, b]) => b.cell === cell)
-    .map(([id]) => id);
-  const names = await Promise.all(ids.map(slackChannelName));
-  // Use jq on the cell to merge into status.json, preserving harness and
-  // tolerating a missing file (start from {harness:"pi"} as a safe default).
-  const channelsJson = JSON.stringify(names);
-  // status.json lives under /cell/.pi (cell:cell 0755) so writes need
-  // the cell user. wrap in sudo -u cell.
-  const remote = `
-set -e
-F=/cell/.pi/status.json
-mkdir -p "$(dirname "$F")"
-[ -f "$F" ] || echo '{"harness":"pi","channels":[]}' > "$F"
-tmp=$(mktemp)
-jq --argjson ch '${channelsJson.replace(/'/g, "'\\''")}' '.channels = $ch' "$F" > "$tmp" && mv "$tmp" "$F"
-`.trim();
-  try {
-    const proc = Bun.spawn(["well", "exec", "-s", cell, "--", "sudo", "-u", "cell", "bash", "-c", remote], {
-      stdout: "pipe",
-      stderr: "pipe",
-    });
-    const code = await proc.exited;
-    if (code !== 0) {
-      const err = await new Response(proc.stderr).text();
-      console.warn(`! status.json update for ${cell} failed (exit ${code}): ${err.slice(0, 200)}`);
-    }
-  } catch (e) {
-    console.warn(`! status.json update for ${cell} failed: ${e}`);
-  }
 }
 
 async function cmdChannelList() {
@@ -5137,7 +4542,6 @@ async function cmdDream(arg: string) {
 // ───── sync (Obsidian vault) ─────
 
 const VAULT_DIR = join(homedir(), "Obsidian", "cells");
-const SECRETS_PATH = join(homedir(), ".cells", "secrets.json");
 
 async function wellsToken(): Promise<string> {
   // Cells run on welld locally; the bearer token welld writes at first start
@@ -5334,7 +4738,7 @@ async function pullMarkdown(nameOrCell: string, vaultPath: string): Promise<{ pe
   // observability), plus state/ and the .pi/ markdown trees, plus
   // .pi/settings.json so Pete can browse harness config directly in
   // Obsidian. tar emits two streams (md + json) joined by a single find.
-  const findScript = `cd /cell && { find AGENTS.md SOUL.md IDENTITY.md TOOLS.md CELLS.md CONTACTS.md MEMORY.md HEARTBEAT.md state/memory state/wiki .pi/skills .pi/prompts \\( -name '*.md' -o -name 'SKILL.md' \\) -type f 2>/dev/null; [ -f .pi/settings.json ] && echo .pi/settings.json; } | tar czf - -T -`;
+  const findScript = `cd /cell && { find AGENTS.md CLAUDE.md SOUL.md IDENTITY.md TOOLS.md CELLS.md CONTACTS.md MEMORY.md HEARTBEAT.md state/memory state/wiki .pi/skills .pi/prompts \\( -name '*.md' -o -name 'SKILL.md' \\) -type f 2>/dev/null; [ -f .pi/settings.json ] && echo .pi/settings.json; } | tar czf - -T -`;
   // Post-extract we collapse state/memory -> memory and state/wiki -> wiki so
   // the vault stays flat. Pete reads it in Obsidian; one fewer level to click.
   const send = Bun.spawn(["well", "exec", "-s", name, "--", "bash", "-lc", findScript], {
@@ -5929,320 +5333,6 @@ async function wellNameForCell(name: string): Promise<string> {
   return member?.well_name ?? name; // fall back if the pool entry is gone
 }
 
-// ───── hatch — claim an egg, sed identity onto it, start pi ─────
-//
-// Hatching is pure determinism on the Mac: no LLM, no mother. Steps:
-// (1) atomic claim, (2) restore pristine checkpoint, (3) well_exec
-// the per-cell substitutions, (4) validate settings.json before pi
-// spawns, (5) register site service (pi starts), (6) write registry
-// entry status="warming", (7) async tail for worker+slack+vault.
-// Target: <20s from `hatchEgg` call to "alive" log line.
-
-async function wellExecOnEgg(wellName: string, script: string): Promise<{ ok: boolean; stdout: string; stderr: string }> {
-  // Hatch substitutions write to /cell extensively (sed -i across DNA,
-  // jq+mv on /cell/.pi/settings.json, cat > /cell/.pi/status.json,
-  // sed -i /cell/.tmux.conf). Must run as cell user.
-  return wellExecCapture(wellName, script, { user: "cell" });
-}
-
-// Restore the egg's pristine checkpoint. Eggs have exactly one
-// checkpoint at v1 (taken in birth-egg step 9), so always restore v1.
-// If we ever start taking multiple checkpoints per egg we'll need to
-// track the version-id explicitly.
-async function restoreEggPristine(wellName: string): Promise<void> {
-  const proc = Bun.spawn(["well", "restore", "v1", "-s", wellName], {
-    stdout: "pipe",
-    stderr: "pipe",
-  });
-  const code = await proc.exited;
-  if (code !== 0) {
-    const err = await new Response(proc.stderr).text();
-    throw new Error(`well restore v1 -s ${wellName} failed (exit ${code}): ${err.slice(0, 300)}`);
-  }
-}
-
-// Sed + jq inside the pool member's well to bake the cell's identity in.
-// Substitutions:
-//   __NAME__         → cellName  (in DNA + tmux.conf)
-//   __THINKING__     → thinking  (in settings.json)
-//   __MODEL_CHAIN__  → JSON array literal of fallback chain (in settings.json)
-//   __CELL_BG__/     → palette colors from scripts/cell-color.sh
-//   __CELL_FG__         (cellName-deterministic)
-// Plus: register chosen optional extensions in settings.json (the egg
-// already has them on disk; just adds them to the extensions array).
-// Plus: write status.json with the cell's harness + initial channels.
-async function applyHatchSubstitutions(
-  wellName: string,
-  cellName: string,
-  thinking: string,
-  extensions: string[],
-  channels: string[],
-  chain: string[],
-): Promise<void> {
-  // Compute color locally (same as birth step 4b)
-  const colorProc = Bun.spawn(["bash", join(REPO_ROOT, "scripts/cell-color.sh"), cellName], {
-    stdout: "pipe",
-    stderr: "pipe",
-  });
-  await colorProc.exited;
-  const colorLine = (await new Response(colorProc.stdout).text()).trim();
-  const [bg, fg] = colorLine.split(/\s+/);
-  if (!bg || !fg) {
-    throw new Error(`cell-color.sh produced unexpected output: '${colorLine}'`);
-  }
-
-  // Build the optional-extensions array as JSON for jq (one entry per
-  // chosen extension). If extensions is empty, skip the registration.
-  const extEntries = extensions.map((e) => `.pi/extensions/${e}/index.ts`);
-
-  // status.json content
-  const status = JSON.stringify({ harness: "pi", channels: channels.slice() });
-
-  // Single well_exec batch — each round trip is ~2-5s of overhead, so
-  // we want as few of them as possible. Bash supports multiline heredocs.
-  const script = `
-set -euo pipefail
-cd /cell
-
-# 1. Cell name into DNA + package.json
-sed -i 's/__NAME__/${cellName}/g' \\
-  AGENTS.md SOUL.md IDENTITY.md CELLS.md CONTACTS.md HEARTBEAT.md package.json
-
-# 2. Thinking + fallback chain into settings.json
-sed -i 's/__THINKING__/${thinking}/g' .pi/settings.json
-sed -i 's|__MODEL_CHAIN__|${JSON.stringify(chain)}|g' .pi/settings.json
-
-# 3. Extensions registration (idempotent — only adds if not present)
-${extEntries.length === 0 ? '# (no optional extensions to register)' : extEntries.map((path) => `
-jq --arg p "${path}" '
-  if (.extensions | index($p)) then . else .extensions += [$p] end
-' .pi/settings.json > /tmp/s.json && mv /tmp/s.json .pi/settings.json`).join('')}
-
-# 4. Per-cell color chip + cell name into tmux.conf
-sed -i "s|__CELL_BG__|${bg}|g; s|__CELL_FG__|${fg}|g; s|__NAME__|${cellName}|g" /cell/.tmux.conf
-
-# 5. status.json
-mkdir -p .pi
-cat > .pi/status.json <<'STATUS_EOF'
-${status}
-STATUS_EOF
-
-# 6. Validate settings.json — pi will crash-loop if this fails
-jq . .pi/settings.json > /dev/null
-`;
-
-  const result = await wellExecOnEgg(wellName, script);
-  if (!result.ok) {
-    throw new Error(`hatch substitutions failed: ${result.stderr.slice(0, 400)}`);
-  }
-}
-
-// Flip the pool member's well URL auth from "well" (default, login-walled)
-// to "public". Without this, external requests to /agent get redirected
-// to the sprites.dev login flow rather than reaching the cell's site
-// server, and the WS upgrade fails. Egg-birth skips step 7 (per design
-// — pool members aren't user-addressable while in the pool); this happens at
-// hatch instead.
-async function flipWellUrlPublic(wellName: string): Promise<void> {
-  const proc = Bun.spawn(["well", "url", "update", "--auth", "public", "-s", wellName], {
-    stdout: "pipe",
-    stderr: "pipe",
-  });
-  const code = await proc.exited;
-  if (code !== 0) {
-    const err = await new Response(proc.stderr).text();
-    throw new Error(`well url update --auth public failed for ${wellName}: ${err.slice(0, 300)}`);
-  }
-}
-
-// Wraps scripts/register-site-service.sh — starts pi as a child of the
-// site service. After this returns, pi will (eventually) be on the WS
-// bridge endpoint. Pass cellName + wellName so server.ts gets the
-// user-facing cell name as CELL_NAME (its bridge identity) while the
-// wells API call targets the actual well.
-async function registerCellSiteService(cellName: string, wellName: string): Promise<void> {
-  const proc = Bun.spawn(["bash", join(REPO_ROOT, "scripts/register-site-service.sh"), cellName, wellName], {
-    stdout: "pipe",
-    stderr: "pipe",
-  });
-  const code = await proc.exited;
-  if (code !== 0) {
-    const err = await new Response(proc.stderr).text();
-    throw new Error(`register-site-service.sh ${cellName} ${wellName} failed (exit ${code}): ${err.slice(0, 300)}`);
-  }
-}
-
-// Async post-birth wiring. Called by both auto-hatch and slow-path
-// cmdCreate. Worker deploy + slack/email channel binding + vault sync
-// + per-cell checkpoint. Best-effort — failures here don't block the
-// "alive" signal and Pete can re-run the relevant cells subcommands.
-async function wirePostBirth(
-  name: string,
-  channels: ChannelValue[],
-  slackChannelHint?: string,
-): Promise<void> {
-  let slackChannel: string | undefined = slackChannelHint;
-
-  if (channels.includes("slack")) {
-    try {
-      if (!slackChannel) {
-        slackChannel = await ensureSlackChannel(name);
-        console.log(`✓ slack channel ${slackChannel} (#cells-${name})`);
-        try {
-          const userId = await resolveSlackUserId();
-          if (userId) {
-            await inviteSlackUser(slackChannel, userId);
-            console.log(`✓ invited ${userId} to #cells-${name}`);
-          }
-        } catch (e) {
-          console.warn(`! could not auto-invite to #cells-${name}: ${e}`);
-        }
-      }
-      const file = await loadChannels();
-      file.bindings[slackChannel] = { cell: name, kind: "slack", createdAt: new Date().toISOString() };
-      await saveChannels(file);
-      await kvUpsert("slack", slackChannel, name);
-      await updateCellStatusChannels(name);
-      console.log(`✓ linked ${slackChannel} → ${name} (slack)`);
-    } catch (e) {
-      console.error(`✗ slack wiring failed: ${e}`);
-      console.error(`  retry: cells channel link ${name} <id>`);
-    }
-  }
-
-  if (channels.includes("email")) {
-    try {
-      const address = `${name}@cells.md`;
-      const file = await loadChannels();
-      file.bindings[address] = { cell: name, kind: "email", createdAt: new Date().toISOString() };
-      await saveChannels(file);
-      await kvUpsert("email", address, name);
-      await updateCellStatusChannels(name);
-      console.log(`✓ linked ${address} → ${name} (email)`);
-    } catch (e) {
-      console.error(`✗ email wiring failed: ${e}`);
-      console.error(`  retry: cells channel link ${name} ${name}@cells.md --kind=email`);
-    }
-  }
-
-  // CF Worker — required for `<name>.cells.md` routing and for
-  // `cells talk` (resolveWellHost depends on the worker existing).
-  // Pass well name explicitly so hatched cells (cell name ≠ well
-  // name) get the right WELL_HOST binding.
-  const wellName = await wellNameForCell(name);
-  try {
-    const script = join(REPO_ROOT, "scripts/deploy-cell-worker.sh");
-    const proc = Bun.spawn(["bash", script, name, wellName], { stdout: "inherit", stderr: "inherit" });
-    const code = await proc.exited;
-    if (code !== 0) {
-      console.error(`✗ worker deploy failed (exit ${code})`);
-      console.error(`  retry: scripts/deploy-cell-worker.sh ${name} ${wellName}`);
-    } else {
-      console.log(`✓ deployed cells-front-${name}`);
-    }
-  } catch (e) {
-    console.error(`✗ worker deploy failed: ${e}`);
-  }
-
-  // Vault sync — best-effort.
-  try {
-    await cmdSync(name);
-  } catch (e) {
-    console.error(`! initial vault sync failed: ${e}`);
-  }
-}
-
-// Flip the cell's status from "warming" → "alive" after wirePostBirth completes.
-async function markCellAlive(name: string): Promise<void> {
-  const reg = await loadRegistry();
-  const c = reg.cells.find((c) => c.name === name);
-  if (c) {
-    c.status = "alive";
-    await saveRegistry(reg);
-  }
-}
-
-// Main hatch entry. Returns true on success (cell alive, async tail
-// kicked off), false on failure (caller falls back to slow birth).
-async function hatchEgg(
-  egg: PoolMember,
-  cellName: string,
-  thinking: string,
-  extensions: string[],
-  channels: ChannelValue[],
-  chain: string[],
-  slackChannelHint?: string,
-): Promise<{ ok: boolean; tailPromise?: Promise<void>; reason?: string }> {
-  const t0 = Date.now();
-
-  // Atomic claim (state warm → claimed)
-  const claimed = await claimEgg((e) => e.id === egg.id, cellName);
-  if (!claimed) {
-    return { ok: false, reason: `egg ${egg.id} not warm at claim time (raced)` };
-  }
-
-  console.log(`hatching egg ${claimed.well_name} → ${cellName}...`);
-
-  try {
-    // Restore pristine checkpoint
-    await restoreEggPristine(claimed.well_name);
-
-    // Apply substitutions (sed + jq + status.json)
-    await applyHatchSubstitutions(claimed.well_name, cellName, thinking, extensions, channels, chain);
-
-    // Flip URL auth to public so external WS upgrade requests reach
-    // the cell's site server. Egg-birth left it at the well default.
-    await flipWellUrlPublic(claimed.well_name);
-
-    // Register site service — pi starts here as the supervised child.
-    // Cell name is what server.ts uses as bridge identity; well name
-    // is the API target.
-    await registerCellSiteService(cellName, claimed.well_name);
-
-    // Give pi 6s to come up before declaring alive. Site service start
-    // (~2-4s) + bun + pi --mode rpc startup (~3-5s) = ~10s total. We
-    // sleep ~6s here so the user's first cells talk usually succeeds
-    // on the first WS attempt; resolveWellHost's retry-with-backoff
-    // covers the rest.
-    await new Promise((r) => setTimeout(r, 6000));
-
-    // Write registry entry as "warming" — flips to "alive" when
-    // wirePostBirth completes.
-    const reg = await loadRegistry();
-    reg.cells.push({
-      name: cellName,
-      created_at: new Date().toISOString(),
-      status: "warming",
-      hatched_from: claimed.id,
-      modelChain: chain,
-    });
-    await saveRegistry(reg);
-
-    await markEggLive(claimed.id);
-
-    const elapsed = ((Date.now() - t0) / 1000).toFixed(1);
-    console.log(`✓ ${cellName} alive in ${elapsed}s — pi is up; capabilities are warming up async (cf worker, channels, vault).`);
-
-    // Kick off the async tail. Don't await here — the caller can decide
-    // whether to await (non-TTY scripted use) or to drop into a talk
-    // session that will keep the process alive while the tail runs.
-    const tailPromise = (async () => {
-      try {
-        await wirePostBirth(cellName, channels, slackChannelHint);
-        await markCellAlive(cellName);
-      } catch (e) {
-        console.error(`! post-birth wiring failed for ${cellName}: ${e}`);
-      }
-    })();
-
-    return { ok: true, tailPromise };
-  } catch (e) {
-    console.error(`✗ hatch failed: ${e}`);
-    await markEggCulling(claimed.id);
-    return { ok: false, reason: String(e) };
-  }
-}
-
 // ───── pool CLI ─────
 //
 // `cells pool create [--model=X --extensions=A,B --packages=C,D]`  — pre-warm a
@@ -6313,131 +5403,28 @@ async function cmdPool(args: string[]) {
     console.log(`✓ baked ${baked} egg(s); pool now at ${await countWarmPoolMembers()}/${V1_POOL_TARGET_DEPTH}`);
     return;
   }
-  await cmdPoolCreate(args);
+  if (sub === "create" || sub === undefined) {
+    await cmdPoolCreate(args.slice(1));
+    return;
+  }
+  console.error(`unknown pool subcommand: ${sub}`);
+  console.error(`usage: cells pool <create|list|cull|refill|drain|reconcile>`);
+  process.exit(1);
 }
 
-function parseEggCreateArgs(args: string[]): { variant: Variant; payload: object } {
-  let modelKey: ModelKey | undefined;
-  let extensions: string[] = [];
-  let packages: string[] = [...PACKAGE_DEFAULTS];
-  let packagesSet = false;
-
-  for (const a of args) {
-    if (a.startsWith("--model=")) {
-      const v = a.slice("--model=".length);
-      if (!(v in MODEL_IDS)) {
-        console.error(`unknown model: ${v}. choose: ${Object.keys(MODEL_IDS).join(", ")}`);
-        process.exit(1);
-      }
-      modelKey = v as ModelKey;
-    } else if (a.startsWith("--extensions=")) {
-      const v = a.slice("--extensions=".length);
-      const parts = v ? v.split(",").map((s) => s.trim()).filter(Boolean) : [];
-      for (const p of parts) {
-        if (!(OPTIONAL_EXTENSIONS as readonly string[]).includes(p)) {
-          console.error(`unknown extension: ${p}. choose from: ${OPTIONAL_EXTENSIONS.join(", ")}`);
-          process.exit(1);
-        }
-      }
-      extensions = parts;
-    } else if (a.startsWith("--packages=")) {
-      const v = a.slice("--packages=".length);
-      const parts = v ? v.split(",").map((s) => s.trim()).filter(Boolean) : [];
-      for (const p of parts) {
-        if (!PACKAGE_VALUES.includes(p as (typeof PACKAGE_VALUES)[number])) {
-          console.error(`unknown package: ${p}. choose from: ${PACKAGE_VALUES.join(", ")}`);
-          process.exit(1);
-        }
-      }
-      packages = parts;
-      packagesSet = true;
-    } else if (a.startsWith("--thinking=") || a.startsWith("--channels=")) {
-      console.error(`'${a}' is not valid at egg-birth — thinking and channels are applied at hatch (per cell), not baked into the egg`);
-      process.exit(1);
-    } else if (a.startsWith("--")) {
-      console.error(`unknown flag: ${a}`);
-      process.exit(1);
-    } else {
-      console.error(`unexpected arg: ${a}`);
-      process.exit(1);
-    }
-  }
-  // packages defaults to PACKAGE_DEFAULTS unless explicitly overridden;
-  // user can pass --packages= (empty) to opt out.
-  void packagesSet;
-
-  if (!modelKey) {
-    console.error("usage: cells pool create [--model=opus|sonnet|haiku|gpt-5.5|gpt-5.5-pro|deepseek-v4-flash|deepseek-v4-pro] [--extensions=memory,wiki] [--packages=pi-web-access]");
-    process.exit(1);
-  }
-
-  const variant: Variant = {
-    model: modelKey,
-    thinking: "",   // not baked
-    extensions: [...extensions].sort(),
-    packages: [...packages].sort(),
-    channels: [],   // not baked
-  };
-  const choice = MODEL_IDS[modelKey];
-  const payload = {
-    harness: "pi",
-    provider: choice.provider,
-    model: choice.modelId,
-    extensions,
-    packages,
-  };
-  return { variant, payload };
-}
-
+// `cells pool create` / `cells egg` — bake one generic egg into the pool.
+// The pool is uniform: every egg is identical (variant_signature
+// "v1-generic"); the cell's model / extensions / channels are applied at
+// birth by the ritual, not baked. bakePoolMember does the well-create +
+// provision + seal + tier decision + pool.json push. Any --model /
+// --extensions / --packages args are vestigial — ignored with a warning.
 async function cmdPoolCreate(args: string[]) {
-  const { variant, payload } = parseEggCreateArgs(args);
-  const sig = poolKey(variant);
-  const wellName = poolMemberWellName(variant);
-  const id = variantHash(variant);
-
-  // One egg per pool key in v1. Multiple eggs of the same variant is a
-  // Phase 3 (pool maintenance) thing — we'd need a counter suffix in
-  // well names to avoid collisions.
-  const existing = await loadPool();
-  const dup = existing.members.find((e) => e.variant_signature === sig);
-  if (dup) {
-    console.error(`egg with this variant already exists: ${dup.id} (well: )`);
-    console.error(`use 'cells pool list' to inspect; cull it first if you want to re-bake.`);
-    process.exit(1);
+  if (args.length > 0) {
+    console.warn(`note: 'cells pool create' args are ignored — the pool is uniform (one generic egg shape)`);
   }
-
-  console.log(`birthing egg ${wellName} (variant: ${sig})`);
-
-  const { outcome } = await runPiWithOutcome("egg-birth", [wellName, JSON.stringify(payload)]);
-  if (!outcome) {
-    console.error("agent did not report outcome — sweeping potential orphan well and aborting");
-    await directWellDestroy(wellName);
-    process.exit(1);
-  }
-  if (!outcome.success) {
-    console.error(`egg birth failed: ${outcome.message} — sweeping potential orphan well`);
-    await directWellDestroy(wellName);
-    process.exit(1);
-  }
-
-  const now = new Date();
-  const maxAge = new Date(now.getTime() + 7 * 24 * 60 * 60 * 1000); // +7 days
-  await withPoolLock(async () => {
-    const file = await loadPool();
-    file.members.push({
-      id,
-      well_name: wellName,
-      variant_signature: sig,
-      state: "warm",
-      born_at: now.toISOString(),
-      claimed_at: null,
-      claimed_by: null,
-      max_age_at: maxAge.toISOString(),
-    });
-    await savePool(file);
-  });
-
-  console.log(`✓ egg ${id} (${wellName}) registered as warm`);
+  console.log(`baking a generic pool egg…`);
+  const wellName = await bakePoolMember();
+  console.log(`✓ egg ${wellName} registered as warm`);
 }
 
 async function cmdPoolList() {
@@ -7208,7 +6195,8 @@ switch (sub) {
     console.log("  cells pi                    open the mother Pi TUI (alias: cells talk mother)");
     console.log("  cells bake [--name=cell-base] [--force]  bake the cell-base image (one-time, ~5min)");
     console.log("  cells birth <name> [flags]  provision a new cell in a local well (alias: create)");
-    console.log("                              flags: --harness=pi --model=opus|sonnet|haiku|gpt-5.5|gpt-5.5-pro|deepseek-v4-flash|deepseek-v4-pro");
+    console.log("                              flags: --harness=pi|claude-code|codex");
+    console.log("                                     --model=opus|sonnet|haiku|gpt-5.5|gpt-5.5-pro|deepseek-v4-flash|deepseek-v4-pro");
     console.log("                                     --thinking=off|minimal|low|medium|high|xhigh|adaptive");
     console.log("                                     --extensions=memory,mentality,wiki,dream");
     console.log("                                     --packages=pi-web-access");

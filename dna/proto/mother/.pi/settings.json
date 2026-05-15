@@ -18,9 +18,9 @@
     "deepseek-v4-flash",
     "deepseek-v4-pro"
   ],
-  "defaultProvider": "anthropic",
-  "defaultModel": "claude-opus-4-7",
-  "modelChain": ["anthropic/claude-opus-4-7:adaptive", "openai-codex/gpt-5.5:high", "deepseek/deepseek-v4-pro:high"],
+  "defaultProvider": "openai-codex",
+  "defaultModel": "gpt-5.5",
+  "modelChain": ["openai-codex/gpt-5.5:high", "anthropic/claude-opus-4-7:adaptive", "deepseek/deepseek-v4-pro:high"],
   "warnings": {
     "anthropicExtraUsage": false
   }

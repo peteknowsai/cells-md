@@ -46,15 +46,33 @@ patched_levels=0
 patched_footer=0
 patched_fallback=0
 
-# 1. Anthropic baseUrl swap. Handles both fresh installs (api.anthropic.com)
-# and cells previously pointed at mother.cells.md (the pre-split routing,
-# when the proxy was bundled into mother).
+# 1. Anthropic baseUrl. Default: swap api.anthropic.com → proxy.cells.md so
+# the cell reaches Anthropic via Pete's subscriptions proxy (Claude Max sub,
+# home-IP egress). Exception: if /cell/.anthropic-direct exists, this cell
+# runs Anthropic models on a direct ANTHROPIC_API_KEY — restore the pristine
+# api.anthropic.com baseUrl so pi-ai talks to Anthropic directly, no proxy
+# hop (pi-via-Max is fingerprint-blocked; a paid key is clean). The birthing
+# ritual drops that flag for pi cells on anthropic models. The .bak is the
+# pristine pre-patch file, so restoring from it is the clean revert.
+# Bidirectionally idempotent — safe on every bun install.
+ANTHROPIC_DIRECT=0
+[ -f /cell/.anthropic-direct ] && ANTHROPIC_DIRECT=1
 for F in $(find "${SEARCH_ROOTS[@]}" -name models.generated.js 2>/dev/null); do
-  if grep -qE 'api\.anthropic\.com|mother\.cells\.md' "$F"; then
-    [ -f "$F.bak" ] || cp "$F" "$F.bak"
-    "${SED_INPLACE[@]}" -e 's|https://api.anthropic.com|https://proxy.cells.md|g' \
-                        -e 's|https://mother.cells.md|https://proxy.cells.md|g' "$F"
-    patched_url=$((patched_url+1))
+  if [ "$ANTHROPIC_DIRECT" = "1" ]; then
+    # direct mode: ensure api.anthropic.com — restore from the pristine .bak
+    # if the file has been proxy-swapped (idempotent: skip if already direct)
+    if ! grep -q 'api\.anthropic\.com' "$F" && [ -f "$F.bak" ]; then
+      cp "$F.bak" "$F"
+      patched_url=$((patched_url+1))
+    fi
+  else
+    # proxy mode (default): swap api.anthropic.com / mother.cells.md → proxy
+    if grep -qE 'api\.anthropic\.com|mother\.cells\.md' "$F"; then
+      [ -f "$F.bak" ] || cp "$F" "$F.bak"
+      "${SED_INPLACE[@]}" -e 's|https://api.anthropic.com|https://proxy.cells.md|g' \
+                          -e 's|https://mother.cells.md|https://proxy.cells.md|g' "$F"
+      patched_url=$((patched_url+1))
+    fi
   fi
 done
 

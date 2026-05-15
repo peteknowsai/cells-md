@@ -8,7 +8,9 @@ The substrate (welld, lume, Cloudflare Workers, cloudflared) is somebody else's 
 
 ## Phases
 
-### Phase v1 — Magical generic cell (current work)
+### Phase v1 — Magical generic cell (shipped 2026-05-13)
+
+> The two-birth-flow model below is how v1 originally shipped. The **birth rework** (see section below) later collapsed it into one linear `cmdCreate` path — flag-driven or interactive, but no fast/slow fork. Kept here for the design history.
 
 Two birth flows, distinguished by whether the user names the cell:
 
@@ -72,6 +74,17 @@ All seven implementation steps + V1.1–V1.10 acceptance items closed. See `BOAR
 - Sibling-survive: clean (V1.5, W.74 holding)
 
 **Post-V1 boundary cleanup** (2026-05-13, ~5 hours): the wells/cells substrate boundary was refactored. Wells deleted 2455 LOC of cells-shaped invariants; cells took over pool ownership, reconcile defense, and the explicit `/seal` warming primitive consumption. Full retro in `docs/proposals/piece-2-audit-cells-side.html`.
+
+## Birth rework — multi-harness, generic pool, eval loop (2026-05-14)
+
+V1 shipped with the variations silently not applying — the DNA `settings.json` was hardcoded deepseek, so every `--model`/`--thinking` sed was a no-op — plus two divergent birth paths and a single harness. The birth rework fixed all three. Plan: `docs/proposals/birth-plan.html`. Ritual: `docs/birthing-ritual.html`.
+
+- **One linear `cmdCreate`.** The fast/slow fork is gone. Birth = resolve config (flags or interactive picker) → build a JSON config blob → claim a generic egg from the pool → hand `[name, eggWell, blob]` to mother → mother follows the birthing ritual → talk UX. Deleted `cmdCreateV1Fast`, `runBirthPickerV1`, `hatchEgg`, `applyHatchSubstitutions`, `wirePostBirth`, the `picker` field, and host-bridge's birth-time `set_model` re-apply.
+- **The generic egg is a real template.** DNA `settings.json` carries `__PROVIDER__`/`__MODEL__`/`__THINKING__`/`__MODEL_CHAIN__` placeholders the ritual substitutes — so model/thinking/chain variations actually land on the cell.
+- **Deterministic kill.** `cmdDestroyOne` dropped its mother round-trip — it resolves the well locally, `well destroy --force`, sweeps local state, journals the line. ~9s, no LLM in the teardown path.
+- **Eval loop.** `scripts/eval-birth.ts` (targeted, one combo × N) + `scripts/harden-birth.ts` (matrix sweep) verify birth/kill across the variation matrix — including a deep `settings.json` check that catches "the variations didn't apply." Baseline is `gpt-5.5` at `low` (the ChatGPT-subscription path, flat cost).
+- **Second harness — `claude-code`.** The Anthropic-model harness: the `claude` CLI on the Max subscription via `proxy.cells.md`, no cells-side capability stack. Wired through the egg DNA (`CLAUDE.md`, `.claude/settings.json`), the birthing ritual's claude-code branch, and host-bridge's `HarnessAdapter`. Design: `docs/proposals/claude-code-harness.html`.
+- **Third harness — `codex`.** The OpenAI-model harness: the `codex` CLI on the ChatGPT subscription via `proxy.cells.md/codex`, no cells-side capability stack. Unlike pi/claude-code (persistent processes), `codex exec` is one-shot — so host-bridge's `HarnessAdapter` gained a `per-turn` mode that spawns a fresh process per prompt and resumes the codex thread. Wired through the egg DNA (`.codex/config.toml`, `AGENTS.md`), the birthing ritual's codex branch (`x1`–`x7`), and the `codexAdapter`. Design: `docs/proposals/codex-harness.html`.
 
 ## Phase v2 implementation steps (next)
 

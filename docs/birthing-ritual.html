@@ -1,0 +1,277 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>The Birthing Ritual</title>
+<link rel="stylesheet" href="_assets/doc.css">
+</head>
+<body>
+<div class="page">
+
+  <div class="doc-header">
+    <div class="crumb">cells <span class="sep">/</span> birthing ritual</div>
+    <div>for mother</div>
+  </div>
+
+  <h1>The Birthing Ritual</h1>
+  <p class="subtitle">How mother turns a claimed generic egg into a configured, live cell.</p>
+
+  <div class="callout">
+    <p>This is the ritual mother follows for every <code>cells birth</code>. Work top to bottom — each step gates the next. Don't improvise the order. Birth isn't a race; it's done when the cell is <em>proven</em> working (step 8).</p>
+  </div>
+
+  <h2>What you're handed</h2>
+  <p>When birth begins, mother is given three things:</p>
+  <dl class="kv">
+    <dt>Cell name</dt>
+    <dd>The name the new cell will answer to — e.g. <code>bob</code>.</dd>
+    <dt>Egg</dt>
+    <dd>The well name of a claimed generic egg from the pool. Already running, already loaded. This is your starting material — you don't create it.</dd>
+    <dt>Config blob</dt>
+    <dd>JSON describing how <em>this</em> cell should be configured (below).</dd>
+  </dl>
+
+  <h3>The config blob</h3>
+  <table>
+    <thead><tr><th>Field</th><th>Values</th><th>What it does</th></tr></thead>
+    <tbody>
+      <tr><td><code>harness</code></td><td><code>pi</code> · <code>claude-code</code> · <code>codex</code></td><td>The agent runtime. <code>pi</code> follows the full ritual (steps 1–9); <code>claude-code</code> and <code>codex</code> follow shorter <a href="#claude-code-branch">branches</a> below it.</td></tr>
+      <tr><td><code>model</code></td><td><code>pi</code>: <code>gpt-5.5</code>, <code>gpt-5.5-pro</code>, <code>deepseek-v4-flash</code>, <code>deepseek-v4-pro</code>, or an Anthropic model via API key · <code>claude-code</code>: <code>opus</code>, <code>sonnet</code>, <code>haiku</code> · <code>codex</code>: <code>gpt-5.5</code> (ChatGPT subscription)</td><td>The cell's primary model.</td></tr>
+      <tr><td><code>provider</code></td><td><code>openai-codex</code>, <code>openai</code>, <code>deepseek</code>, <code>anthropic</code></td><td>pi-ai provider ID for the model (pi branch only).</td></tr>
+      <tr><td><code>thinking</code></td><td><code>off</code> · <code>minimal</code> · <code>low</code> · <code>medium</code> · <code>high</code> · <code>xhigh</code> · <code>adaptive</code></td><td>Reasoning effort level.</td></tr>
+      <tr><td><code>extensions</code></td><td>subset of <code>memory</code>, <code>mentality</code>, <code>wiki</code>, <code>dream</code></td><td>Which in-tree extensions to switch on. May be empty.</td></tr>
+      <tr><td><code>packages</code></td><td>subset of <code>pi-web-access</code>, …</td><td>Which optional packages to switch on. May be empty.</td></tr>
+      <tr><td><code>channels</code></td><td>subset of <code>slack</code>, <code>email</code></td><td>Which messaging surfaces to wire up. May be empty.</td></tr>
+      <tr><td><code>chain</code></td><td>array of <code>&lt;provider&gt;/&lt;model&gt;:&lt;thinking&gt;</code></td><td>The model fallback chain. First entry is primary; rest are fallbacks.</td></tr>
+    </tbody>
+  </table>
+
+  <h2>What's already on the egg</h2>
+  <p>The egg is generic and <strong>maximally pre-loaded</strong>. You do not install anything during birth — everything that can be baked ahead of time already is. Your job is to <strong>imprint identity</strong>, <strong>switch on</strong> what this cell needs, and <strong>wire</strong> its external surfaces.</p>
+
+  <table>
+    <thead><tr><th>On every egg</th><th>State</th></tr></thead>
+    <tbody>
+      <tr><td>Toolchain — <code>bun</code>, <code>node</code>, <code>pi</code> (latest), terminal toolkit</td><td>Installed, on PATH</td></tr>
+      <tr><td>The DNA at <code>/cell</code> — identity files, <code>.pi/</code>, <code>site/</code>, <code>scripts/</code>, <code>bin/</code></td><td>Present, with <code>__NAME__</code> / <code>__MODEL__</code> / <code>__PROVIDER__</code> / <code>__THINKING__</code> / <code>__MODEL_CHAIN__</code> placeholders intact</td></tr>
+      <tr><td>All in-tree extensions — <code>memory</code>, <code>mentality</code>, <code>wiki</code>, <code>dream</code></td><td>On disk under <code>.pi/extensions/</code>, none registered</td></tr>
+      <tr><td>All optional packages — <code>pi-web-access</code>, …</td><td>Installed under <code>.pi/npm/</code>, none enabled</td></tr>
+      <tr><td>Proxy patches — pi-ai routed through <code>proxy.cells.md</code>, codex stub</td><td>Applied</td></tr>
+      <tr><td>Env shim — <code>/etc/profile.d/cells-env.sh</code></td><td>Present, re-exports shared secrets</td></tr>
+      <tr><td>Shared secrets — <code>CELLS_PROXY_SECRET</code> and friends</td><td>In <code>/etc/environment</code></td></tr>
+    </tbody>
+  </table>
+
+  <div class="callout info">
+    <p>Eggs are kept fresh — re-baked periodically so the toolchain, pi, and packages stay current. Trust that the egg is recent; you never need to update or install anything on it.</p>
+  </div>
+
+  <h2>The ritual</h2>
+  <p>Run these in order. Use <code>well_exec</code> for commands that run on the egg, local <code>bash</code> for commands that run on the Mac. If a step's command fails with a network-class error (5xx, <code>ECONNRESET</code>, registry timeout), retry it once after 5s before reporting failure.</p>
+  <p>The blob's <code>harness</code> field picks the branch. A <code>pi</code> cell follows the full ritual — steps 1–9 below. A <code>claude-code</code> cell follows <a href="#claude-code-branch">the claude-code branch</a>, and a <code>codex</code> cell follows <a href="#codex-branch">the codex branch</a> — both shorter rituals that skip extensions, packages, and cells-side channels (a claude-code or codex cell is a coding machine, not the full capability stack — see <code>docs/proposals/claude-code-harness.html</code> and <code>docs/proposals/codex-harness.html</code>).</p>
+
+  <h3>1 · Imprint identity</h3>
+  <p>The cell learns its name. Substitute <code>__NAME__</code> across the DNA, and the color chip into the tmux config.</p>
+  <pre><code># on the egg
+sed -i 's/__NAME__/&lt;name&gt;/g' \
+  /cell/AGENTS.md /cell/SOUL.md /cell/IDENTITY.md \
+  /cell/CELLS.md /cell/CONTACTS.md /cell/HEARTBEAT.md /cell/package.json
+
+# on the Mac: compute the cell's color, then substitute on the egg
+read CBG CFG &lt; &lt;(bash scripts/cell-color.sh &lt;name&gt;)
+sed -i "s|__CELL_BG__|$CBG|g; s|__CELL_FG__|$CFG|g; s|__NAME__|&lt;name&gt;|g" /cell/.tmux.conf</code></pre>
+
+  <h3>2 · Apply model config</h3>
+  <p>The cell's brain is configured from the blob's <code>model</code>, <code>provider</code>, <code>thinking</code>, and <code>chain</code>.</p>
+  <pre><code># on the egg — model config lives in settings.json only; the identity
+# files (SOUL.md, IDENTITY.md) are model-agnostic, leave them alone
+sed -i 's/__MODEL__/&lt;model&gt;/g'        /cell/.pi/settings.json
+sed -i 's/__PROVIDER__/&lt;provider&gt;/g'  /cell/.pi/settings.json
+sed -i 's/__THINKING__/&lt;thinking&gt;/g'  /cell/.pi/settings.json
+# chain: the DNA placeholder is a quoted string ("__MODEL_CHAIN__") so the
+# file stays valid JSON — sed swaps the quoted token for a bare JSON array.
+# Use | as the delimiter (chain entries contain /).
+sed -i 's|"__MODEL_CHAIN__"|&lt;chain-json&gt;|g' /cell/.pi/settings.json
+
+# validate — pi crash-loops on a malformed settings.json
+jq . /cell/.pi/settings.json &gt; /dev/null</code></pre>
+  <p>If the blob's <code>provider</code> is <code>anthropic</code> — a <code>pi</code> cell on an Anthropic model — the cell must reach <code>api.anthropic.com</code> directly with its <code>ANTHROPIC_API_KEY</code>, <em>not</em> through the subscriptions proxy (pi-via-Max is fingerprint-blocked; the paid key is clean). Drop the routing flag and re-run the pi patches so the Anthropic baseUrl is restored to direct:</p>
+  <pre><code># on the egg — ONLY when the blob's provider is "anthropic"
+touch /cell/.anthropic-direct
+sudo bash /cell/scripts/apply-pi-patches.sh</code></pre>
+
+  <h3>3 · Write the status file</h3>
+  <p>The tmux bar reads this. Channels start empty — step 6 fills them.</p>
+  <pre><code># on the egg
+mkdir -p /cell/.pi
+echo '{"harness":"&lt;harness&gt;","channels":[]}' &gt; /cell/.pi/status.json</code></pre>
+
+  <h3>4 · Switch on extensions</h3>
+  <p>All four in-tree extensions are already on disk. Register only the ones in the blob's <code>extensions</code> — the rest stay on disk, switched off. <strong>Do not delete the unused ones.</strong> If <code>extensions</code> is empty, skip this step.</p>
+  <pre><code># on the egg, for each &lt;ext&gt; in the blob's extensions array
+jq --arg p ".pi/extensions/&lt;ext&gt;/index.ts" \
+  'if (.extensions | index($p)) then . else .extensions += [$p] end' \
+  /cell/.pi/settings.json &gt; /tmp/s.json &amp;&amp; mv /tmp/s.json /cell/.pi/settings.json</code></pre>
+
+  <h3>5 · Register the site service</h3>
+  <p>The cell's public face at <code>&lt;name&gt;.cells.md</code> is served by the cell itself, and the same server exposes the <code>/agent</code> bridge. Register the service, then flip the well URL public so external requests reach it.</p>
+  <pre><code># on the Mac
+bash scripts/register-site-service.sh &lt;name&gt; &lt;egg-well-name&gt;
+well url update --auth public -s &lt;egg-well-name&gt;</code></pre>
+
+  <h3>6 · Wire channels + the cloud edge</h3>
+  <p>Deploy the per-cell Cloudflare Worker (always), then bind any requested channels.</p>
+  <pre><code># on the Mac — always
+bash scripts/deploy-cell-worker.sh &lt;name&gt; &lt;egg-well-name&gt;
+
+# then, for each entry in the blob's channels array:
+bun scripts/bind-channel.ts &lt;name&gt; slack    # if channels includes "slack"
+bun scripts/bind-channel.ts &lt;name&gt; email    # if channels includes "email"</code></pre>
+  <p><code>bind-channel.ts</code> creates the Slack channel (and invites the owner), writes the channel&rarr;cell binding, mirrors it to the Cloudflare KV the front-door workers read, and updates <code>/cell/.pi/status.json</code>'s channels array — all idempotent. If <code>channels</code> is empty, only the worker deploy runs.</p>
+
+  <h3>7 · Checkpoint</h3>
+  <p>Take a clean restore point of the fully-configured cell before declaring it born.</p>
+  <pre><code>well_checkpoint  name: &lt;egg-well-name&gt;  comment: "born-&lt;name&gt;"</code></pre>
+
+  <h2>8 · The end-test</h2>
+  <p>Birth is not done until the cell is <strong>proven</strong> working. Run every check — collect failures, don't stop at the first.</p>
+  <table>
+    <thead><tr><th>Check</th><th>Pass criteria</th><th>Critical?</th></tr></thead>
+    <tbody>
+      <tr><td>Identity imprinted</td><td><code>grep -c __NAME__</code> across the DNA returns <code>0</code> everywhere</td><td><span class="badge bad">critical</span></td></tr>
+      <tr><td>Env present</td><td><code>/etc/environment</code> has <code>CELLS_PROXY_SECRET</code>; env shim present</td><td><span class="badge bad">critical</span></td></tr>
+      <tr><td>Pi answers</td><td><code>cd /cell &amp;&amp; source /etc/profile.d/cells-env.sh &amp;&amp; pi --print "say ok"</code> exits 0 within 30s</td><td><span class="badge bad">critical</span></td></tr>
+      <tr><td>Site serves</td><td><code>curl localhost:8080/</code> on the egg returns <code>200</code></td><td><span class="badge bad">critical</span></td></tr>
+      <tr><td>Worker live</td><td><code>&lt;name&gt;.cells.md/debug</code> responds</td><td><span class="badge warn">degradation</span></td></tr>
+      <tr><td>Extensions</td><td><code>settings.json</code> lists exactly the requested extensions plus the always-on set</td><td><span class="badge warn">degradation</span></td></tr>
+      <tr><td>Channels</td><td>if <code>slack</code>/<code>email</code> requested, the binding exists</td><td><span class="badge warn">degradation</span></td></tr>
+    </tbody>
+  </table>
+  <p>If any <strong>critical</strong> check fails, the birth failed. Degradations (a channel didn't bind, the worker is slow to come up) are noted in the outcome message but don't fail the birth.</p>
+
+  <h2>9 · Report + record</h2>
+  <p>Call <code>report_outcome</code> — <code>success: true</code> only if every critical end-test check passed.</p>
+  <ul>
+    <li><strong>Success:</strong> <code>report_outcome(success: true, message: "cell &lt;name&gt; alive · &lt;model&gt; · &lt;degradations, if any&gt;")</code></li>
+    <li><strong>Failure:</strong> <code>report_outcome(success: false, message: "step &lt;N&gt;: &lt;what broke&gt;")</code></li>
+  </ul>
+  <p>On success only: append one line to the activity log, then tell the user exactly one line — <em>"Cell <code>&lt;name&gt;</code> is alive. Talk to it with <code>cells talk &lt;name&gt;</code>."</em> No caveats, no warnings.</p>
+
+  <h2 id="claude-code-branch">The claude-code branch</h2>
+  <p>When the blob's <code>harness</code> is <code>claude-code</code>, follow this branch <em>instead of</em> steps 1–9. It's short by design: a claude-code cell is a coding machine — the <code>claude</code> CLI on an Anthropic model through the subscriptions proxy. No extensions, no packages, no cells-side channels. The egg already ships <code>claude</code> and the <code>.claude/</code> config structure alongside pi's.</p>
+
+  <h3>c1 · Imprint identity</h3>
+  <p>Same as the pi branch, plus <code>CLAUDE.md</code> — the entrypoint the <code>claude</code> CLI auto-loads from the cwd.</p>
+  <pre><code># on the egg
+sed -i 's/__NAME__/&lt;name&gt;/g' \
+  /cell/CLAUDE.md /cell/AGENTS.md /cell/SOUL.md /cell/IDENTITY.md \
+  /cell/CELLS.md /cell/CONTACTS.md /cell/HEARTBEAT.md /cell/package.json
+
+# on the Mac: compute the cell's color, then substitute on the egg
+read CBG CFG &lt; &lt;(bash scripts/cell-color.sh &lt;name&gt;)
+sed -i "s|__CELL_BG__|$CBG|g; s|__CELL_FG__|$CFG|g; s|__NAME__|&lt;name&gt;|g" /cell/.tmux.conf</code></pre>
+
+  <h3>c2 · Apply model config</h3>
+  <p>The Anthropic model + thinking level go into <code>.claude/settings.json</code> (<code>model</code> and <code>effortLevel</code>), and the cell's <code>__NAME__</code> goes into its <code>ANTHROPIC_CUSTOM_HEADERS</code> entry — that's the <code>x-cell-name</code> header the proxy logs to attribute this cell's requests. That same file's <code>env</code> block already carries <code>ANTHROPIC_BASE_URL</code> → <code>proxy.cells.md</code>; <code>ANTHROPIC_AUTH_TOKEN</code> → <code>CELLS_PROXY_SECRET</code> comes from the egg's env shim. claude-code sends genuine Claude Code traffic to the proxy, which swaps in the Max OAuth token.</p>
+  <pre><code># on the egg
+sed -i 's/__MODEL__/&lt;model&gt;/g'      /cell/.claude/settings.json
+sed -i 's/__THINKING__/&lt;thinking&gt;/g' /cell/.claude/settings.json
+sed -i 's/__NAME__/&lt;name&gt;/g'        /cell/.claude/settings.json
+
+# validate — a malformed settings.json breaks the claude CLI
+jq . /cell/.claude/settings.json &gt; /dev/null</code></pre>
+
+  <h3>c3 · Write the status file</h3>
+  <pre><code># on the egg
+mkdir -p /cell/.pi
+echo '{"harness":"claude-code","channels":[]}' &gt; /cell/.pi/status.json</code></pre>
+
+  <h3>c4 · Register the site service + cloud edge</h3>
+  <p>Same as the pi branch's steps 5–6, minus channel binding — a claude-code cell has no cells-side channels.</p>
+  <pre><code># on the Mac
+bash scripts/register-site-service.sh &lt;name&gt; &lt;egg-well-name&gt;
+well url update --auth public -s &lt;egg-well-name&gt;
+bash scripts/deploy-cell-worker.sh &lt;name&gt; &lt;egg-well-name&gt;</code></pre>
+
+  <h3>c5 · Checkpoint</h3>
+  <pre><code>well_checkpoint  name: &lt;egg-well-name&gt;  comment: "born-&lt;name&gt;"</code></pre>
+
+  <h3>c6 · The end-test</h3>
+  <p>Birth is proven, not assumed. Run every check — collect failures, don't stop at the first.</p>
+  <table>
+    <thead><tr><th>Check</th><th>Pass criteria</th><th>Critical?</th></tr></thead>
+    <tbody>
+      <tr><td>Identity imprinted</td><td><code>grep -c __NAME__</code> across the DNA (incl. <code>CLAUDE.md</code> and <code>.claude/settings.json</code>) returns <code>0</code> everywhere</td><td><span class="badge bad">critical</span></td></tr>
+      <tr><td>Env present</td><td><code>/etc/environment</code> has <code>CELLS_PROXY_SECRET</code>; the env shim exports <code>ANTHROPIC_AUTH_TOKEN</code>; <code>.claude/settings.json</code>'s <code>env</code> block has <code>ANTHROPIC_BASE_URL</code></td><td><span class="badge bad">critical</span></td></tr>
+      <tr><td>claude answers</td><td><code>cd /cell &amp;&amp; source /etc/profile.d/cells-env.sh &amp;&amp; claude --print "say ok"</code> exits 0 within 60s</td><td><span class="badge bad">critical</span></td></tr>
+      <tr><td>Site serves</td><td><code>curl localhost:8080/</code> on the egg returns <code>200</code></td><td><span class="badge bad">critical</span></td></tr>
+      <tr><td>Worker live</td><td><code>&lt;name&gt;.cells.md/debug</code> responds</td><td><span class="badge warn">degradation</span></td></tr>
+    </tbody>
+  </table>
+
+  <h3>c7 · Report + record</h3>
+  <p>Same as step 9 — <code>report_outcome</code> with <code>success: true</code> only if every critical check passed. On success, append the activity-log line and tell the user exactly one line: <em>"Cell <code>&lt;name&gt;</code> is alive. Talk to it with <code>cells talk &lt;name&gt;</code>."</em></p>
+
+  <h2 id="codex-branch">The codex branch</h2>
+  <p>When the blob's <code>harness</code> is <code>codex</code>, follow this branch <em>instead of</em> steps 1–9. Like claude-code, it's short by design: a codex cell is a coding machine — the <code>codex</code> CLI on an OpenAI model through the subscriptions proxy. No extensions, no packages, no cells-side channels. The egg already ships <code>codex</code> and the <code>.codex/</code> config structure alongside pi's. codex auto-loads <code>AGENTS.md</code> as its entrypoint — the same file pi loads.</p>
+
+  <h3>x1 · Imprint identity</h3>
+  <p>Same as the claude-code branch — substitute <code>__NAME__</code> across the DNA and the tmux color.</p>
+  <pre><code># on the egg
+sed -i 's/__NAME__/&lt;name&gt;/g' \
+  /cell/AGENTS.md /cell/CLAUDE.md /cell/SOUL.md /cell/IDENTITY.md \
+  /cell/CELLS.md /cell/CONTACTS.md /cell/HEARTBEAT.md /cell/package.json
+
+# on the Mac: compute the cell's color, then substitute on the egg
+read CBG CFG &lt; &lt;(bash scripts/cell-color.sh &lt;name&gt;)
+sed -i "s|__CELL_BG__|$CBG|g; s|__CELL_FG__|$CFG|g; s|__NAME__|&lt;name&gt;|g" /cell/.tmux.conf</code></pre>
+
+  <h3>x2 · Apply model config</h3>
+  <p>The OpenAI model + reasoning effort go into <code>.codex/config.toml</code> (<code>model</code> and <code>model_reasoning_effort</code>), and the cell's <code>__NAME__</code> goes into the provider's <code>http_headers</code> — the <code>x-cell-name</code> header the proxy logs to attribute this cell's requests. That file's <code>[model_providers.cells]</code> block already points the codex CLI at <code>proxy.cells.md/codex</code> with <code>env_key = "OPENAI_CODEX_API_KEY"</code> — the egg's env shim exports that to <code>CELLS_PROXY_SECRET</code>, and the proxy swaps it for the real ChatGPT-subscription token. A codex cell runs on the subscription, never the metered API.</p>
+  <pre><code># on the egg
+sed -i 's/__MODEL__/&lt;model&gt;/g'      /cell/.codex/config.toml
+sed -i 's/__THINKING__/&lt;thinking&gt;/g' /cell/.codex/config.toml
+sed -i 's/__NAME__/&lt;name&gt;/g'        /cell/.codex/config.toml
+
+# validate — no placeholder may survive (a no-op sed = a broken cell)
+! grep -q '__' /cell/.codex/config.toml</code></pre>
+
+  <h3>x3 · Write the status file</h3>
+  <pre><code># on the egg
+mkdir -p /cell/.pi
+echo '{"harness":"codex","channels":[]}' &gt; /cell/.pi/status.json</code></pre>
+
+  <h3>x4 · Register the site service + cloud edge</h3>
+  <p>Same as the claude-code branch's <code>c4</code> — no channel binding.</p>
+  <pre><code># on the Mac
+bash scripts/register-site-service.sh &lt;name&gt; &lt;egg-well-name&gt;
+well url update --auth public -s &lt;egg-well-name&gt;
+bash scripts/deploy-cell-worker.sh &lt;name&gt; &lt;egg-well-name&gt;</code></pre>
+
+  <h3>x5 · Checkpoint</h3>
+  <pre><code>well_checkpoint  name: &lt;egg-well-name&gt;  comment: "born-&lt;name&gt;"</code></pre>
+
+  <h3>x6 · The end-test</h3>
+  <p>Birth is proven, not assumed. Run every check — collect failures, don't stop at the first.</p>
+  <table>
+    <thead><tr><th>Check</th><th>Pass criteria</th><th>Critical?</th></tr></thead>
+    <tbody>
+      <tr><td>Identity imprinted</td><td><code>grep -c __NAME__</code> across the DNA returns <code>0</code> everywhere</td><td><span class="badge bad">critical</span></td></tr>
+      <tr><td>Config substituted</td><td><code>.codex/config.toml</code> has no surviving <code>__…__</code> placeholder</td><td><span class="badge bad">critical</span></td></tr>
+      <tr><td>Env present</td><td><code>/etc/environment</code> has <code>CELLS_PROXY_SECRET</code>; the env shim exports <code>OPENAI_CODEX_API_KEY</code></td><td><span class="badge bad">critical</span></td></tr>
+      <tr><td>codex answers</td><td><code>cd /cell &amp;&amp; source /etc/profile.d/cells-env.sh &amp;&amp; codex exec --skip-git-repo-check --dangerously-bypass-approvals-and-sandbox "say ok" &lt;/dev/null</code> exits 0 within 120s</td><td><span class="badge bad">critical</span></td></tr>
+      <tr><td>Site serves</td><td><code>curl localhost:8080/</code> on the egg returns <code>200</code></td><td><span class="badge bad">critical</span></td></tr>
+      <tr><td>Worker live</td><td><code>&lt;name&gt;.cells.md/debug</code> responds</td><td><span class="badge warn">degradation</span></td></tr>
+    </tbody>
+  </table>
+
+  <h3>x7 · Report + record</h3>
+  <p>Same as <code>c7</code> — <code>report_outcome</code> with <code>success: true</code> only if every critical check passed. On success, append the activity-log line and tell the user exactly one line: <em>"Cell <code>&lt;name&gt;</code> is alive. Talk to it with <code>cells talk &lt;name&gt;</code>."</em></p>
+
+  <h2>If something fails</h2>
+  <p>Stop at the first failed step. Skip straight to step 9 (or <code>c7</code>), <code>report_outcome</code> with <code>success: false</code> and a one-line message naming the step and what broke. Don't try to recover the cell in place — the CLI sweeps the egg on a failed outcome, and a fresh egg is faster than a half-born one.</p>
+
+</div>
+</body>
+</html>

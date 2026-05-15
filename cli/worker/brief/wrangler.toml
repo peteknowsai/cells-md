@@ -1,0 +1,16 @@
+name = "cells-front-brief"
+compatibility_date = "2026-01-01"
+
+# Static-asset Worker — serves the "what is cells" deck at brief.cells.md.
+# The asset dir is regenerated from docs/proposals/what-is-cells.html by
+# scripts/deploy-brief.sh at deploy time, so ./public is gitignored.
+# account_id resolved from CLOUDFLARE_ACCOUNT_ID env at deploy time.
+
+[assets]
+directory = "./public"
+
+# Workers Custom Domain. wrangler creates the DNS record + binds the
+# Worker to the hostname on deploy — no manual DNS step.
+[[routes]]
+pattern = "brief.cells.md"
+custom_domain = true

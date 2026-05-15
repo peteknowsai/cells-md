@@ -1,0 +1,29 @@
+# codex harness config — __MODEL__ / __THINKING__ substituted at birth
+# (birthing ritual, codex branch). The `cells` model_provider routes the
+# codex CLI through proxy.cells.md/codex, which swaps the cell's
+# CELLS_PROXY_SECRET bearer for the real ChatGPT-subscription token —
+# so a codex cell runs on the subscription, never the metered API.
+model = "__MODEL__"
+model_reasoning_effort = "__THINKING__"
+model_provider = "cells"
+
+# The cell owns its own VM — the VM is the isolation boundary, so codex
+# runs with no command sandbox and no approval prompts (the same posture
+# the `codex exec` talk path gets via --dangerously-bypass-approvals-and-sandbox).
+# Without this, codex's own sandbox wrapper fails inside the cell and falls
+# back to approval prompts — a cell asking permission to touch its own files.
+sandbox_mode = "danger-full-access"
+approval_policy = "never"
+
+[model_providers.cells]
+name = "cells proxy"
+base_url = "https://proxy.cells.md/codex"
+wire_api = "responses"
+env_key = "OPENAI_CODEX_API_KEY"
+# Identify this cell to the proxy — it logs x-cell-name for per-cell
+# attribution and strips the header before forwarding upstream.
+http_headers = { "x-cell-name" = "__NAME__" }
+
+# The cell owns its own VM — its working directory is trusted.
+[projects."/cell"]
+trust_level = "trusted"

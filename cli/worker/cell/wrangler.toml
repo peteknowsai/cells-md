@@ -13,6 +13,9 @@ CELL_NAME = "{{CELL}}"
 # WebSocket to wss://${WELL_HOST}/agent for prompt push + event
 # stream from pi --mode rpc.
 WELL_HOST = "{{WELL_HOST}}"
+# Cloudflare account for the Images relay (POST /image/upload). The
+# matching CLOUDFLARE_API_TOKEN is pushed as a Worker secret, not here.
+CLOUDFLARE_ACCOUNT_ID = "{{CF_ACCOUNT_ID}}"
 
 # Workers Custom Domain (per cell). wrangler creates the DNS record on deploy.
 [[routes]]

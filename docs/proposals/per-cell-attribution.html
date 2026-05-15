@@ -1,0 +1,147 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Per-cell attribution on the proxy</title>
+<link rel="stylesheet" href="../_assets/doc.css">
+</head>
+<body>
+<div class="page">
+
+  <div class="doc-header">
+    <div class="crumb">cells <span class="sep">/</span> proposals <span class="sep">/</span> per-cell attribution</div>
+    <div>2026-05-14</div>
+  </div>
+
+  <h1>Per-cell attribution on the proxy</h1>
+  <p class="subtitle">Making all three harnesses identify themselves to <code>proxy.cells.md</code> — and the fragile path we checked for, and avoided.</p>
+
+  <div class="callout">
+    <div class="label">Status — 2026-05-14 · resolved across all three harnesses</div>
+    <p><strong>pi, claude-code, and codex all attribute correctly.</strong> Each harness has a supported, first-class config seam for custom request headers — no code-patching needed for any of them. Verified live: the proxy log now reads <code>codex bob</code>, <code>api claudia</code>, <code>codex cody</code>, <code>codex tommy2</code> where every line used to read <code>unknown</code>. The proxy itself needed <strong>zero changes</strong>. Remaining: a pool re-bake so newly-born cells inherit the config (the live fleet is already patched).</p>
+  </div>
+
+  <div class="toc">
+    <h4>Contents</h4>
+    <ol>
+      <li><a href="#problem">The problem — one secret, no caller</a></li>
+      <li><a href="#header">The mechanism — the <code>x-cell-name</code> header</a></li>
+      <li><a href="#fixed">All three harnesses, fixed</a></li>
+      <li><a href="#fragile">The fragile path we avoided</a></li>
+      <li><a href="#left">What's left</a></li>
+    </ol>
+  </div>
+
+  <h2 id="problem">The problem — one secret, no caller</h2>
+
+  <p>Every cell — pi, claude-code, codex — reaches its LLM through <code>proxy.cells.md</code>. And every cell authenticates with the <em>same</em> bearer token: <code>CELLS_PROXY_SECRET</code>, one shared secret across the whole fleet. That's by design — the proxy validates the shared secret and swaps in the real subscription OAuth token before relaying upstream.</p>
+
+  <p>The side effect: the proxy saw every request but <strong>could not tell which cell sent it</strong>. Its access log labelled every caller <code>unknown</code>. As of this morning:</p>
+
+  <pre><code>$ grep -c 'codex unknown' cells-proxy.log     57324
+$ grep -c 'api unknown'   cells-proxy.log      5143
+$ grep -c 'api &lt;a-real-cell-name&gt;' ...            0</code></pre>
+
+  <p>Sixty-two thousand requests, zero attributed. You could not answer "which cell is burning the subscription," "is one cell stuck in a loop," "what is claudia's token usage." For a fleet meant to scale, that's a real blind spot.</p>
+
+  <h2 id="header">The mechanism — the <code>x-cell-name</code> header</h2>
+
+  <p>The proxy was <em>built</em> expecting an answer to "who's calling." On every request it reads an <code>x-cell-name</code> HTTP header, logs it as the caller, and — importantly — <strong>strips it before forwarding upstream</strong>, so it never leaks to Anthropic or OpenAI. It's a cells-private header, purely for our own attribution.</p>
+
+  <pre><code>// cli/proxy.ts — checkClientAuth()
+const cell = req.headers.get("x-cell-name") ?? "unknown";</code></pre>
+
+  <p>The proxy side was always correct. The entire gap was upstream of it: <strong>no harness was sending the header.</strong> Not pi, not claude-code, not codex — the <code>?? "unknown"</code> fallback fired 100% of the time. So the fix was never "change the proxy." It was "make each harness announce itself" — and the cell already knows its own name, it just had to put it on the wire.</p>
+
+  <h2 id="fixed">All three harnesses, fixed</h2>
+
+  <p>The key question was whether each harness had a <em>supported</em> way to attach a custom header — a config field — versus needing its code patched. The answer, for all three: <strong>yes, there's a config seam.</strong></p>
+
+  <h3>claude-code — <code>ANTHROPIC_CUSTOM_HEADERS</code></h3>
+  <p>The <code>claude</code> CLI honours an <code>ANTHROPIC_CUSTOM_HEADERS</code> environment variable (newline-separated <code>Name: value</code> pairs). It goes into the <code>env</code> block of <code>.claude/settings.json</code>:</p>
+  <pre><code>{
+  "env": {
+    "ANTHROPIC_BASE_URL": "https://proxy.cells.md",
+    "ANTHROPIC_CUSTOM_HEADERS": "x-cell-name: __NAME__"
+  }
+}</code></pre>
+
+  <h3>codex — <code>http_headers</code></h3>
+  <p>The <code>codex</code> CLI's <code>config.toml</code> supports an <code>http_headers</code> table on any model provider. It goes into the <code>[model_providers.cells]</code> block:</p>
+  <pre><code>[model_providers.cells]
+base_url = "https://proxy.cells.md/codex"
+env_key  = "OPENAI_CODEX_API_KEY"
+http_headers = { "x-cell-name" = "__NAME__" }</code></pre>
+
+  <h3>pi — <code>registerProvider({ headers })</code></h3>
+  <p>This was the open question — pi has no settings.json field or env var for request headers. But pi-ai's <em>extension API</em> does: <code>pi.registerProvider()</code> takes a documented <code>headers</code> option (<code>docs/custom-provider.md</code>: <em>"Custom headers to include in requests"</em>). The <code>codex-proxy</code> extension already calls <code>registerProvider</code> to route pi through the proxy — it just gained the header:</p>
+  <pre><code>// dna/cells/base/.pi/extensions/codex-proxy/index.ts
+pi.registerProvider("openai-codex", {
+  baseUrl: "https://proxy.cells.md/codex",
+  apiKey: secret,
+  authHeader: true,
+  headers: { "x-cell-name": cellName() },   // ← added
+});</code></pre>
+  <p>So pi gets a clean extension-based fix — an extra line in an extension that already exists, not a code patch.</p>
+
+  <div class="callout info">
+    <div class="label">Where the name comes from — and a pool-cell gotcha</div>
+    <p>claude-code and codex take the name from the egg's <code>__NAME__</code> placeholder, substituted at birth — the same machinery that imprints identity everywhere else. pi's extension reads it at runtime. The obvious first try — <code>os.hostname()</code> — is <strong>wrong</strong> for pool-born cells: the egg keeps its generic <code>egg-XXXXXX</code> well name as its hostname, so <code>os.hostname()</code> returns the well, not the cell (verified — bob logged as <code>egg-277845</code>). The fix reads <code>/cell/package.json</code>'s <code>name</code> field, which the birth ritual substitutes from <code>__NAME__</code>. Note: the <code>heartbeat-watch</code> extension has the same <code>os.hostname()</code> assumption and the same latent bug — out of scope here, but worth a follow-up if the pulse path is still live.</p>
+  </div>
+
+  <h2 id="fragile">The fragile path we avoided</h2>
+
+  <p>The reason the pi answer mattered so much: the <em>only</em> alternative, if pi-ai had no config seam, was to patch pi-ai's code — and that would have been the one genuinely fragile piece. It's worth recording what that would have meant, because it's why "check for a config seam first" was the right move.</p>
+
+  <p>cells already patches pi-ai. <code>dna/cells/base/scripts/apply-pi-patches.sh</code> runs at egg-bake and on every <code>bun install</code>, doing targeted <code>sed</code>/<code>awk</code> surgery on pi-ai's bundled, generated JavaScript. The patches that exist today work well — and <em>why</em> they work well is the whole point:</p>
+
+  <table>
+    <thead><tr><th>Existing patch</th><th>What it anchors to</th><th>Why it's safe</th></tr></thead>
+    <tbody>
+      <tr><td>URL swap — <code>api.anthropic.com</code> → <code>proxy.cells.md</code></td><td>A literal string</td><td>Unambiguous. If pi-ai moves it, the patch no-ops — visible in the counter, harmless.</td></tr>
+      <tr><td><code>extractAccountId</code> stub</td><td>A named function signature</td><td>Replaces a whole function body. The signature is a stable, named anchor.</td></tr>
+      <tr><td>adaptive-thinking tweak</td><td>A named function signature</td><td>One-line insertion after a named function. Anchored to a name.</td></tr>
+    </tbody>
+  </table>
+
+  <p>Every existing patch targets a <strong>stable, named anchor</strong>. A header-injection patch would have been a different animal:</p>
+
+  <ul>
+    <li><strong>It targets logic, not a name.</strong> It would have to find where pi-ai constructs the <code>fetch()</code> headers object — a code site inside request-building logic, in minified output. No function name, no unique string to pin to.</li>
+    <li><strong>It's two sites, not one.</strong> The Anthropic and codex provider paths build requests separately — two independent needles.</li>
+    <li><strong>It splices in runtime code.</strong> Not a constant or a stub — a line that has to <em>run</em> to read the cell name and set it on the headers.</li>
+    <li><strong>It fails badly on upgrades.</strong> A logic-site splice that misses either silently reverts pi to <code>unknown</code>, or — if surrounding code shifted — lands wrong and breaks pi's LLM path. Every pi-ai bump becomes a patch-maintenance event with a real failure mode.</li>
+  </ul>
+
+  <div class="callout">
+    <div class="label">The lesson</div>
+    <p>"Fragile" didn't mean "impossible" — it meant: a patch anchored to generated-code internals instead of a stable name, doubled across two providers, splicing runtime code, with a failure mode that reaches pi's whole model path on a routine dependency update. For a release whose point is <em>stability across all three harnesses</em>, that's the opposite of what you want. Thirty minutes checking the extension API instead of reaching for the patch was the difference between a fragile fix and a clean one.</p>
+  </div>
+
+  <h2 id="left">What's left</h2>
+
+  <p>The code, DNA, and birth ritual are done — and the <strong>live fleet is already patched and verified</strong> (bob, claudia, cody, tommy2 all attribute correctly). Two things remain to make it true for <em>new</em> cells:</p>
+
+  <ul>
+    <li><strong>Pool re-bake.</strong> The warm eggs in the pool were baked before these DNA changes, so a cell born from one today would not carry the attribution config. <code>cells pool drain</code> + <code>cells pool refill</code> bakes fresh eggs with the new <code>.claude/settings.json</code>, <code>.codex/config.toml</code>, and <code>codex-proxy</code> extension. Needed before the stable release regardless.</li>
+    <li><strong>Fresh-birth verification.</strong> Once the pool is re-baked, one birth per harness confirms the full path — DNA → ritual <code>__NAME__</code> substitution → born cell → attributed in the proxy log.</li>
+  </ul>
+
+  <p><em>Open question, lower stakes now:</em> what is attribution <em>for</em>? If it's observability — billing visibility, spotting a looping cell, debugging — it's done. If something <em>functional</em> is meant to depend on it (per-cell rate limiting, routing, quotas), that's a separate build on top of the logging that now works.</p>
+
+  <div class="pointers">
+    <h4>Pointers</h4>
+    <ul class="bare">
+      <li><code>cli/proxy.ts</code> — <code>checkClientAuth</code> reads <code>x-cell-name</code>; <code>handleApiProxy</code> / <code>handleCodexProxy</code> log it and strip it — correct as-is, no changes</li>
+      <li><code>dna/cells/base/.claude/settings.json</code> — claude-code's <code>ANTHROPIC_CUSTOM_HEADERS</code></li>
+      <li><code>dna/cells/base/.codex/config.toml</code> — codex's <code>http_headers</code></li>
+      <li><code>dna/cells/base/.pi/extensions/codex-proxy/index.ts</code> — pi's <code>registerProvider({ headers })</code></li>
+      <li><code>docs/birthing-ritual.html</code> — c2 / x2 substitute <code>__NAME__</code> into the harness config files</li>
+      <li><code>dna/cells/base/scripts/apply-pi-patches.sh</code> — the existing pi-ai patch set; the fragile path would have added to it</li>
+    </ul>
+  </div>
+
+</div>
+</body>
+</html>

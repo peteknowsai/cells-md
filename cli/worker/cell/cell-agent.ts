@@ -65,6 +65,12 @@ type ToolCall = {
 
 type ChannelKind = "slack" | "email";
 
+// A single file in the cell's published site snapshot. `data` is base64
+// — uniform for text and binary; DO storage caps a value at 128 KiB.
+type SiteFile = { ct: string; data: string };
+// Index of the current snapshot: what's published and when.
+type SiteMeta = { paths: string[]; publishedAt: number };
+
 type TurnState = {
   channel: string;
   threadTs: string;
@@ -137,7 +143,12 @@ export class CellAgent {
   async fetch(req: Request): Promise<Response> {
     const url = new URL(req.url);
     if (req.method === "POST" && url.pathname === "/append") return this.handleAppend(req);
+    if (req.method === "POST" && url.pathname === "/site-publish") return this.handleSitePublish(req);
     if (req.method === "GET" && url.pathname === "/debug") return this.handleDebug();
+    // Public site serve — the worker names this route and passes the real
+    // request path in x-site-path, so public traffic can never reach the
+    // control-plane routes above.
+    if (url.pathname === "/site-serve") return this.serveSite(req.headers.get("x-site-path") ?? "/");
     return new Response("not found", { status: 404 });
   }
 
@@ -240,11 +251,15 @@ export class CellAgent {
     return new Response(null, { status: 202 });
   }
 
-  private handleDebug(): Response {
+  private async handleDebug(): Promise<Response> {
+    const siteMeta = await this.state.storage.get<SiteMeta>("site:__meta__");
     return Response.json({
       cell: this.env.CELL_NAME,
       well: this.env.WELL_HOST,
       wsState: this.ws ? this.ws.readyState : null,
+      site: siteMeta
+        ? { files: siteMeta.paths.length, paths: siteMeta.paths, publishedAt: siteMeta.publishedAt }
+        : null,
       turn: this.currentTurn ? {
         channel: this.currentTurn.channel,
         slackTs: this.currentTurn.slackTs,
@@ -253,6 +268,73 @@ export class CellAgent {
         tools: this.currentTurn.tools.length,
         ended: this.currentTurn.ended,
       } : null,
+    });
+  }
+
+  // ---- site snapshot: stored here, served while the cell sleeps ----
+
+  // The cell's site server pushes a full snapshot of its public/ dir.
+  // A publish is a full replace, not a merge — old keys are cleared so
+  // deletes propagate. Each file is { ct, data:base64 }; DO storage caps
+  // a value at 128 KiB, so oversized files are skipped (reported back).
+  private async handleSitePublish(req: Request): Promise<Response> {
+    let body: any;
+    try { body = await req.json(); } catch { return new Response("bad json", { status: 400 }); }
+    const files = body?.files;
+    if (!files || typeof files !== "object") {
+      return new Response("missing files", { status: 400 });
+    }
+
+    const old = await this.state.storage.list({ prefix: "site:" });
+    if (old.size > 0) await this.state.storage.delete([...old.keys()]);
+
+    const stored: string[] = [];
+    const skipped: string[] = [];
+    for (const [rawPath, entry] of Object.entries(files)) {
+      const path = normalizeSitePath(rawPath);
+      const e = entry as any;
+      const data = typeof e?.data === "string" ? e.data : "";
+      const ct = (typeof e?.ct === "string" && e.ct) ? e.ct : "application/octet-stream";
+      if (!path || !data || data.length > 128 * 1024) {
+        skipped.push(String(rawPath));
+        continue;
+      }
+      await this.state.storage.put(`site:${path}`, { ct, data } satisfies SiteFile);
+      stored.push(path);
+    }
+    const meta: SiteMeta = { paths: stored, publishedAt: Date.now() };
+    await this.state.storage.put("site:__meta__", meta);
+    console.log(`[${this.env.CELL_NAME}] site publish: ${stored.length} file(s)` +
+      (skipped.length ? `, ${skipped.length} skipped` : ""));
+    return Response.json({ stored, skipped });
+  }
+
+  // Serve a path from the stored snapshot. "/" → "/index.html"; a missing
+  // index when nothing was ever published returns a friendly placeholder
+  // (not a 404) so a freshly-born cell's domain looks alive immediately.
+  private async serveSite(rawPath: string): Promise<Response> {
+    const path = normalizeSitePath(rawPath) || "/index.html";
+    let lookup = path === "/" ? "/index.html" : path;
+    if (lookup.endsWith("/")) lookup += "index.html";
+
+    let entry = await this.state.storage.get<SiteFile>(`site:${lookup}`);
+    if (!entry && !lookup.includes(".")) {
+      // Extensionless path — try it as a directory index.
+      entry = await this.state.storage.get<SiteFile>(`site:${lookup}/index.html`);
+    }
+    if (!entry) {
+      if (lookup === "/index.html") {
+        const meta = await this.state.storage.get<SiteMeta>("site:__meta__");
+        if (!meta || meta.paths.length === 0) {
+          return new Response(sitePlaceholder(this.env.CELL_NAME), {
+            headers: { "content-type": "text/html; charset=utf-8" },
+          });
+        }
+      }
+      return new Response("not found", { status: 404 });
+    }
+    return new Response(base64ToBytes(entry.data), {
+      headers: { "content-type": entry.ct },
     });
   }
 
@@ -526,9 +608,9 @@ export class CellAgent {
     const chunks = splitForCap(fullText, SLACK_MSG_CAP);
 
     try {
-      for (let i = 0; i < chunks.length; i++) {
+      for (const [i, chunk] of chunks.entries()) {
         const isLast = i === chunks.length - 1;
-        const chunkText = isLast ? chunks[i] : chunks[i] + SLACK_CONTINUE_FOOTER;
+        const chunkText = isLast ? chunk : chunk + SLACK_CONTINUE_FOOTER;
 
         if (i === 0) {
           if (await this.postOrEditParent(t, chunkText)) continue;
@@ -536,12 +618,13 @@ export class CellAgent {
         }
 
         const overflowIdx = i - 1;
-        if (overflowIdx < t.overflow.length) {
+        const existing = t.overflow[overflowIdx];
+        if (existing) {
           // Existing continuation — edit it.
-          if (chunkText === t.overflow[overflowIdx].text) continue; // unchanged, skip
-          const ok = await this.postSlackEdit(t.channel, t.overflow[overflowIdx].ts, chunkText);
+          if (chunkText === existing.text) continue; // unchanged, skip
+          const ok = await this.postSlackEdit(t.channel, existing.ts, chunkText);
           if (!ok) return false;
-          t.overflow[overflowIdx].text = chunkText;
+          existing.text = chunkText;
         } else {
           // New continuation — post into the thread under the parent.
           if (!t.slackTs) return false; // shouldn't happen: parent posted above
@@ -819,4 +902,35 @@ function unwrapResult(raw: string): string {
 function truncate(s: string, n: number): string {
   if (s.length <= n) return s.replace(/\n+/g, " ");
   return s.slice(0, n).replace(/\n+/g, " ") + "…";
+}
+
+// ---- site helpers ----
+
+// Site paths become DO storage keys (site:<path>) and are echoed into
+// Response handling. Constrain them: absolute, no traversal, no control
+// chars. Empty return = reject this entry.
+function normalizeSitePath(p: unknown): string {
+  if (typeof p !== "string" || !p) return "";
+  const path = p.startsWith("/") ? p : `/${p}`;
+  if (path.includes("..")) return "";
+  for (let i = 0; i < path.length; i++) {
+    if (path.charCodeAt(i) < 0x20) return "";
+  }
+  return path;
+}
+
+function base64ToBytes(b64: string): Uint8Array {
+  const bin = atob(b64);
+  const out = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+  return out;
+}
+
+// Shown at <cell>.cells.md before the cell has published anything.
+function sitePlaceholder(name: string): string {
+  return `<!doctype html><html lang="en"><meta charset="utf-8"><title>${name}</title>` +
+    `<style>body{font:16px/1.5 ui-sans-serif,system-ui,sans-serif;max-width:640px;` +
+    `margin:4em auto;padding:0 1em;color:#ddd;background:#111}h1{font-size:2em;margin:0 0 .2em}` +
+    `.sub{color:#888}</style><body><h1>🧬 ${name}</h1>` +
+    `<p class="sub">A living cell.</p><p>${name} hasn't published a page yet.</p></body></html>`;
 }

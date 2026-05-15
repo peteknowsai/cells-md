@@ -1,0 +1,88 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Adding the codex harness</title>
+<link rel="stylesheet" href="../_assets/doc.css">
+</head>
+<body>
+<div class="page">
+
+  <div class="doc-header">
+    <div class="crumb">cells <span class="sep">/</span> proposals <span class="sep">/</span> codex harness</div>
+    <div>2026-05-14</div>
+  </div>
+
+  <h1>Adding the codex harness</h1>
+  <p class="subtitle">A third harness — the OpenAI coding machine. The <code>codex</code> CLI on the ChatGPT subscription, through the existing proxy.</p>
+
+  <div class="callout">
+    <div class="label">Implemented — 2026-05-14</div>
+    <p>Code-complete and verified. The egg ships the <code>codex</code> CLI + <code>.codex/config.toml</code>, the birthing ritual has the codex branch (<code>x1</code>–<code>x7</code>), and host-bridge's <code>HarnessAdapter</code> gained a <code>codexAdapter</code> that drives <code>codex exec</code> per-turn and translates its JSONL event stream to the talk CLI's vocabulary. The Phase 0 spike confirmed both gates: the codex CLI routes through <code>proxy.cells.md/codex</code> on the ChatGPT subscription, and <code>codex exec --json</code> + <code>resume</code> gives multi-turn continuity.</p>
+  </div>
+
+  <div class="toc">
+    <h4>Contents</h4>
+    <ol>
+      <li><a href="#what">What codex is (and isn't)</a></li>
+      <li><a href="#sub">How the ChatGPT subscription works — the proxy, unchanged</a></li>
+      <li><a href="#egg">What's on the egg</a></li>
+      <li><a href="#branch">The birth ritual branch</a></li>
+      <li><a href="#hostbridge">host-bridge — per-turn, not persistent</a></li>
+      <li><a href="#sequence">What shipped</a></li>
+    </ol>
+  </div>
+
+  <h2 id="what">What codex is (and isn't)</h2>
+  <p>A cell's harness now has three shapes. <code>pi</code> is the full agent — packages, extensions, channels, a model fallback chain. <code>claude-code</code> and <code>codex</code> are coding machines: a single CLI on a subscription model, no cells-side capability stack. You talk to them, they code.</p>
+  <p>The <code>codex</code> harness is, in effect, the OpenAI-model harness — the counterpart to <code>claude-code</code>. It exists to run OpenAI's <code>codex</code> CLI on Pete's <strong>ChatGPT subscription</strong>, legitimately — not the metered OpenAI API. A codex cell gets no extensions, no packages, none of the cells-side Slack/email machinery; any integrations a codex cell has come through Codex's own surface (MCP servers and the like) — the harness's domain, not birth's.</p>
+
+  <h2 id="sub">How the ChatGPT subscription works — the proxy, unchanged</h2>
+  <div class="callout">
+    <div class="label">The key finding</div>
+    <p><code>cli/proxy.ts</code> needs zero changes. It already has everything codex needs.</p>
+  </div>
+  <p>The subscriptions proxy already routes a <code>/codex/*</code> path: a client sends <code>Authorization: Bearer &lt;CELLS_PROXY_SECRET&gt;</code>; the proxy validates it, swaps in the real ChatGPT-subscription OAuth JWT (kept fresh by the proxy's own 30-minute codex refresh manager), injects <code>chatgpt-account-id</code> + <code>originator: codex_cli</code>, and relays to <code>chatgpt.com/backend-api/codex/responses</code>. This is the exact path pi's <code>gpt-5.5</code> already uses via the <code>openai-codex</code> provider.</p>
+  <p>So a codex cell needs only to point the <code>codex</code> CLI at the proxy. The egg's <code>.codex/config.toml</code> declares a custom model provider:</p>
+  <pre><code>model = "&lt;model&gt;"
+model_reasoning_effort = "&lt;thinking&gt;"
+model_provider = "cells"
+
+[model_providers.cells]
+base_url = "https://proxy.cells.md/codex"
+wire_api = "responses"
+env_key = "OPENAI_CODEX_API_KEY"</code></pre>
+  <p>The egg's env shim (<code>/etc/profile.d/cells-env.sh</code>) already exports <code>OPENAI_CODEX_API_KEY=$CELLS_PROXY_SECRET</code> — it has, since pi's codex provider needed it. codex sends genuine Codex-CLI traffic to the proxy; the proxy makes it legitimate subscription usage. No <code>codex login</code> on the cell, no OAuth token on the cell — only the shared secret, same as claude-code.</p>
+
+  <h2 id="egg">What's on the egg</h2>
+  <p>One uniform generic egg, all three harnesses baked on. The <code>codex</code> CLI is <code>npm install -g @openai/codex</code> (pinned) — added to <code>provisionCellInWell</code>, since unlike <code>claude</code> it isn't in the wells base image. The <code>.codex/config.toml</code> template carries <code>__MODEL__</code> / <code>__THINKING__</code> placeholders and the proxy provider block. codex auto-loads <code>AGENTS.md</code> as its entrypoint — the same file <code>pi</code> loads, now carrying <code>__NAME__</code> so a codex cell knows itself. Birth activates one harness; it never installs one.</p>
+
+  <h2 id="branch">The birth ritual branch</h2>
+  <p>The config blob's <code>harness</code> field picks the branch. <code>codex</code> follows a short branch (<code>x1</code>–<code>x7</code> in <code>docs/birthing-ritual.html</code>), parallel to claude-code's: imprint identity, substitute the model config into <code>.codex/config.toml</code>, write <code>status.json</code>, register the site service + cloud edge, checkpoint, end-test (<code>codex exec "say ok"</code> answers), report outcome. No extensions, no packages, no channels.</p>
+
+  <h2 id="hostbridge">host-bridge — per-turn, not persistent</h2>
+  <p>This is the one place codex genuinely differs. <code>pi</code> and <code>claude-code</code> are <em>persistent</em> harnesses — host-bridge spawns one long-lived process and drives it over stdin. codex has no equivalent: <code>codex exec</code> is one-shot — it runs a turn to completion and exits. Multi-turn rides on <code>codex exec resume &lt;thread_id&gt;</code>.</p>
+  <p>So the <code>HarnessAdapter</code> interface gained a <code>mode</code> discriminator. The <code>codexAdapter</code> is <code>mode: "per-turn"</code>: instead of <code>buildRemoteCmd</code> + a persistent process, it provides <code>buildTurnCmd(sess, prompt)</code>, and <code>CellSession.runTurn</code> spawns a fresh <code>ssh + codex exec</code> per prompt. The first turn's <code>thread.started</code> id is captured and replayed via <code>resume</code> on every later turn, so the conversation persists across spawns. <code>translateOutbound</code> maps codex's JSONL events (<code>thread.started</code>, <code>item.completed</code>/<code>agent_message</code>, <code>turn.completed</code>, <code>turn.failed</code>) into the same pi-shaped events the talk CLI renders — so <code>cells talk</code> and <code>cells tui</code> work identically across all three harnesses, and the CLI never knows the difference.</p>
+
+  <h2 id="sequence">What shipped</h2>
+  <ol>
+    <li><strong>Phase 0 — spike.</strong> Confirmed the codex CLI routes through <code>proxy.cells.md/codex</code> via a custom <code>model_provider</code>, and that <code>codex exec --json</code> + <code>resume</code> is the driver protocol.</li>
+    <li><strong>Phase 1 — egg.</strong> <code>codex</code> baked into <code>provisionCellInWell</code>; <code>dna/cells/base/.codex/config.toml</code> added; <code>AGENTS.md</code> made the shared pi+codex entrypoint.</li>
+    <li><strong>Phase 2 — host-bridge.</strong> The <code>codexAdapter</code> + the per-turn <code>CellSession.runTurn</code> path.</li>
+    <li><strong>Phase 3 — CLI + ritual.</strong> <code>codex</code> enabled in <code>HARNESS_OPTIONS</code>, <code>cmdCreate</code> defaults + validation, <code>cmdTui</code> branch, the birthing-ritual codex branch.</li>
+    <li><strong>Phase 4 — eval, docs, verify.</strong> codex rows in the eval matrix; end-to-end birth + talk + tui verification.</li>
+  </ol>
+
+  <h3>Pointers</h3>
+  <ul>
+    <li><code>cli/proxy.ts</code> — the subscriptions proxy (<code>handleCodexProxy</code>, the codex refresh manager) — reused as-is</li>
+    <li><code>cli/host-bridge.ts</code> — <code>codexAdapter</code>, the <code>per-turn</code> mode, <code>CellSession.runTurn</code></li>
+    <li><code>dna/cells/base/.codex/config.toml</code> — the proxy provider template</li>
+    <li><code>docs/birthing-ritual.html</code> — the codex branch (<code>x1</code>–<code>x7</code>)</li>
+    <li><code>docs/proposals/claude-code-harness.html</code> — the sibling harness it mirrors</li>
+  </ul>
+
+</div>
+</body>
+</html>

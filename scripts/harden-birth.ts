@@ -23,7 +23,7 @@ import { existsSync } from "node:fs";
 const HOME = homedir();
 const REGISTRY_PATH   = join(HOME, ".cells", "cells.json");
 const CHANNELS_PATH   = join(HOME, ".cells", "channels.json");
-const SECRETS_PATH    = join(HOME, ".cells", "secrets.json");
+const POOL_PATH       = join(HOME, ".cells", "pool.json");
 const PULSE_CACHE_DIR = join(HOME, ".cells", "pulse-cache");
 const PULSE_INBOX_DIR = join(HOME, ".cells", "pulse-inbox");
 const VAULT_DIR       = join(HOME, "Obsidian", "cells");
@@ -72,6 +72,7 @@ async function releaseRunLock(): Promise<void> {
 
 type Combo = {
   id: string;
+  harness: string;
   model: string;
   thinking: string;
   extensions: string[];
@@ -79,18 +80,48 @@ type Combo = {
   channels: string[];
 };
 
+// The variation matrix. Every row is a valid `cells birth` invocation.
+// Baseline = gpt-5.5 at low thinking — the free path (ChatGPT subscription
+// via codex), so it's cheap to run every fire. The held-constant model on
+// the thinking/extension/channel axes is gpt-5.5 for the same reason. The
+// model axis is where the paid providers (deepseek, anthropic, gpt-5.5-pro
+// all bill per-token) get exercised — those rows only run when hour/random
+// picks them, not every fire. The claude-code and codex rows ride the
+// subscription path (flat cost), so they're safe to exercise often.
 const COMBOS: Combo[] = [
-  { id: "min",            model: "sonnet",            thinking: "off",      extensions: [],                                  packages: [],                channels: [] },
-  { id: "opus-high",      model: "opus",              thinking: "high",     extensions: [],                                  packages: ["pi-web-access"], channels: [] },
-  { id: "opus-adaptive",  model: "opus",              thinking: "adaptive", extensions: ["memory"],                          packages: ["pi-web-access"], channels: [] },
-  { id: "haiku-mem",      model: "haiku",             thinking: "high",     extensions: ["memory"],                          packages: [],                channels: [] },
-  { id: "sonnet-full",    model: "sonnet",            thinking: "high",     extensions: ["memory","mentality","wiki","dream"], packages: ["pi-web-access"], channels: [] },
-  { id: "sonnet-slack",   model: "sonnet",            thinking: "high",     extensions: [],                                  packages: ["pi-web-access"], channels: ["slack"] },
-  { id: "gpt55",          model: "gpt-5.5",           thinking: "medium",   extensions: [],                                  packages: [],                channels: [] },
-  { id: "deepseek-flash", model: "deepseek-v4-flash", thinking: "medium",   extensions: [],                                  packages: [],                channels: [] },
+  { id: "smoke",          harness: "pi", model: "gpt-5.5",           thinking: "low",    extensions: [],                                    packages: [],                channels: [] },
+  // model axis — the paid providers. Thinking sits at low to isolate the
+  // model dimension; gpt-5.5-pro rejects sub-medium and the anthropic
+  // models disable thinking below high, so those four hold at high.
+  { id: "deepseek-flash", harness: "pi", model: "deepseek-v4-flash", thinking: "low",    extensions: [],                                    packages: [],                channels: [] },
+  { id: "deepseek-pro",   harness: "pi", model: "deepseek-v4-pro",   thinking: "low",    extensions: [],                                    packages: [],                channels: [] },
+  { id: "gpt55-pro",      harness: "pi", model: "gpt-5.5-pro",       thinking: "high",   extensions: [],                                    packages: [],                channels: [] },
+  { id: "opus",           harness: "pi", model: "opus",              thinking: "high",   extensions: [],                                    packages: [],                channels: [] },
+  { id: "sonnet",         harness: "pi", model: "sonnet",            thinking: "high",   extensions: [],                                    packages: [],                channels: [] },
+  { id: "haiku",          harness: "pi", model: "haiku",             thinking: "high",   extensions: [],                                    packages: [],                channels: [] },
+  // harness axis — claude-code runs Anthropic models through the Max sub,
+  // codex runs gpt-5.5 through the ChatGPT sub (both flat subscription cost,
+  // like pi's gpt-5.5); both skip extensions/packages/channels.
+  { id: "cc-opus",        harness: "claude-code", model: "opus",      thinking: "high",   extensions: [],                                    packages: [],                channels: [] },
+  { id: "codex-gpt55",    harness: "codex",       model: "gpt-5.5",   thinking: "low",    extensions: [],                                    packages: [],                channels: [] },
+  // thinking axis — model held at gpt-5.5 (free); baseline covers `low`.
+  { id: "think-off",      harness: "pi", model: "gpt-5.5",           thinking: "off",    extensions: [],                                    packages: [],                channels: [] },
+  { id: "think-high",     harness: "pi", model: "gpt-5.5",           thinking: "high",   extensions: [],                                    packages: [],                channels: [] },
+  // extension axis — model held at gpt-5.5 low (free).
+  { id: "ext-mem",        harness: "pi", model: "gpt-5.5",           thinking: "low",    extensions: ["memory"],                            packages: [],                channels: [] },
+  { id: "ext-memwiki",    harness: "pi", model: "gpt-5.5",           thinking: "low",    extensions: ["memory","wiki"],                      packages: [],                channels: [] },
+  { id: "ext-all",        harness: "pi", model: "gpt-5.5",           thinking: "low",    extensions: ["memory","mentality","wiki","dream"],  packages: [],                channels: [] },
+  // channel axis — model held at gpt-5.5 low (free).
+  { id: "ch-slack",       harness: "pi", model: "gpt-5.5",           thinking: "low",    extensions: [],                                    packages: [],                channels: ["slack"] },
+  { id: "ch-email",       harness: "pi", model: "gpt-5.5",           thinking: "low",    extensions: [],                                    packages: [],                channels: ["email"] },
+  { id: "ch-both",        harness: "pi", model: "gpt-5.5",           thinking: "low",    extensions: [],                                    packages: [],                channels: ["slack","email"] },
+  // crosses — multiple axes at once (paid models, occasional).
+  { id: "combo-gpt",      harness: "pi", model: "gpt-5.5-pro",       thinking: "high",   extensions: ["memory"],                            packages: ["pi-web-access"], channels: ["slack"] },
+  { id: "combo-deepseek", harness: "pi", model: "deepseek-v4-pro",   thinking: "high",   extensions: ["memory","mentality","wiki","dream"],  packages: ["pi-web-access"], channels: ["slack","email"] },
+  { id: "combo-opus",     harness: "pi", model: "opus",              thinking: "high",   extensions: ["memory"],                            packages: [],                channels: [] },
 ];
 
-const BASELINE_ID = "min";
+const BASELINE_ID = "smoke";
 
 // ───── args ─────
 
@@ -100,23 +131,16 @@ type Args = {
   orphans: string[];
   age: string | null;
   dryRun: boolean;
-  // --hatch (opt-in): before each birth, bake an egg matching the combo so
-  // the subsequent `cells birth` auto-hatches from the egg pool. Adds ~5min
-  // per combo (egg bake) but exercises the egg lifecycle end-to-end. Default
-  // off because the cron's regular cadence runs slow-birth, which is faster.
-  // Pete invokes this manually when he wants to test the hatch path.
-  hatch: boolean;
 };
 
 function parseArgs(argv: string[]): Args {
-  const a: Args = { combos: 3, combo: null, orphans: [], age: null, dryRun: false, hatch: false };
+  const a: Args = { combos: 3, combo: null, orphans: [], age: null, dryRun: false };
   for (const x of argv) {
     if (x.startsWith("--combos=")) a.combos = Math.max(1, Math.min(5, parseInt(x.slice(9), 10) || 3));
     else if (x.startsWith("--combo=")) a.combo = x.slice(8);
     else if (x.startsWith("--orphans=")) a.orphans = x.slice(10).split(",").filter(Boolean);
     else if (x.startsWith("--age=")) a.age = x.slice(6);
     else if (x === "--dry-run") a.dryRun = true;
-    else if (x === "--hatch") a.hatch = true;
     else { console.error(`unknown flag: ${x}`); process.exit(2); }
   }
   return a;
@@ -157,7 +181,7 @@ function nameFor(combo: Combo, ts: Date): string {
 
 // ───── verification ─────
 
-type Registry = { cells: Array<{ name: string; created_at: string; modelChain?: string[] }> };
+type Registry = { cells: Array<{ name: string; created_at: string; modelChain?: string[]; hatched_from?: string | null }> };
 type ChannelsFile = { version: 1; bindings: Record<string, { cell: string; kind: string; createdAt: string }> };
 
 async function loadRegistry(): Promise<Registry> {
@@ -166,36 +190,62 @@ async function loadRegistry(): Promise<Registry> {
   catch { return { cells: [] }; }
 }
 
+// The egg pool. Every birth claims one warm member; the harness runs a
+// `cells pool refill` before the birth phase, so this just sanity-counts.
+type PoolFile = { version: number; members: Array<{ id: string; well_name: string; state: string }> };
+
+async function loadPool(): Promise<PoolFile> {
+  if (!existsSync(POOL_PATH)) return { version: 1, members: [] };
+  try { return JSON.parse(await readFile(POOL_PATH, "utf-8")); }
+  catch { return { version: 1, members: [] }; }
+}
+
+// Resolve a cell to the well it actually runs on. Birth claims a generic
+// egg from the pool, so the well name is the egg's permanent well_name —
+// not the cell name. The registry's `hatched_from` points at the pool
+// member's `id`; fall back to the cell name if the entry is gone.
+async function wellForCell(name: string): Promise<string> {
+  const reg = await loadRegistry();
+  const cell = reg.cells.find((c) => c.name === name);
+  if (!cell?.hatched_from) return name;
+  const pool = await loadPool();
+  const member = pool.members.find((m) => m.id === cell.hatched_from);
+  return member?.well_name ?? name;
+}
+
+async function countWarmEggs(): Promise<number> {
+  const pool = await loadPool();
+  return pool.members.filter((m) => m.state === "warm").length;
+}
+
 async function loadChannels(): Promise<ChannelsFile> {
   if (!existsSync(CHANNELS_PATH)) return { version: 1, bindings: {} };
   try { return JSON.parse(await readFile(CHANNELS_PATH, "utf-8")); }
   catch { return { version: 1, bindings: {} }; }
 }
 
-async function wellsToken(): Promise<string | null> {
-  if (process.env.WELL_TOKEN) return process.env.WELL_TOKEN;
-  if (!existsSync(SECRETS_PATH)) return null;
-  try {
-    const s = JSON.parse(await readFile(SECRETS_PATH, "utf-8"));
-    return typeof s.WELL_TOKEN === "string" ? s.WELL_TOKEN : null;
-  } catch { return null; }
-}
+type WellCheck = { exists: boolean; status: string | null; error?: string };
 
-type WellCheck = { exists: boolean; status: string | null; httpStatus: number; error?: string };
-
+// Query welld for a well through the `well` CLI, which authenticates
+// itself via ~/.wells/token. `well info` exits 0 even when the well is
+// absent — it prints a "404 not_found" line instead of JSON — so absence
+// is detected by the JSON parse failing.
 async function wellCheck(name: string): Promise<WellCheck> {
-  const token = await wellsToken();
-  if (!token) return { exists: false, status: null, httpStatus: 0, error: "no WELL_TOKEN" };
   try {
-    const r = await fetch(`https://api.sprites.dev/v1/sprites/${encodeURIComponent(name)}`, {
-      headers: { Authorization: `Bearer ${token}` },
-    });
-    if (r.status === 404) return { exists: false, status: null, httpStatus: 404 };
-    if (!r.ok) return { exists: false, status: null, httpStatus: r.status, error: (await r.text()).slice(0, 200) };
-    const j = await r.json();
-    return { exists: true, status: typeof j.status === "string" ? j.status : "?", httpStatus: r.status };
-  } catch (e) {
-    return { exists: false, status: null, httpStatus: 0, error: String(e) };
+    const proc = Bun.spawn(["well", "info", "-s", name, "--json"], { stdout: "pipe", stderr: "pipe" });
+    const [stdout, stderr, exitCode] = await Promise.all([
+      new Response(proc.stdout).text(),
+      new Response(proc.stderr).text(),
+      proc.exited,
+    ]);
+    if (exitCode !== 0) return { exists: false, status: null, error: stderr.slice(0, 200) };
+    const j = JSON.parse(stdout);
+    return { exists: true, status: typeof j.status === "string" ? j.status : "?" };
+  } catch {
+    // JSON.parse threw → `well info` printed its 404 line, not JSON, so
+    // the well is gone. A genuine spawn failure also lands here; rare
+    // enough that treating it as "absent" is acceptable for the harness.
+    return { exists: false, status: null };
   }
 }
 
@@ -247,15 +297,19 @@ async function runCells(args: string[]): Promise<CmdResult> {
 
 // ───── birth + verify ─────
 
-type BirthFlags = { harness: string; model: string; thinking: string; extensions: string[]; packages: string[]; channels: string[] };
-
-// Read the cell's settings.json on the well via `well exec` and compare
-// its `modelChain` to the expected chain (the one we wrote into the
-// laptop-side registry). Returns:
-//   true  → chain on well matches expected exactly (same length, same order)
-//   false → chain present but differs, OR missing/null on the well
+// Read the cell's settings.json on the well via `well exec` and verify the
+// birth-time substitutions actually landed:
+//   - modelChain matches the expected chain (the laptop-side registry
+//     mirror) exactly — same length, same order;
+//   - no `__…__` placeholder survives anywhere in the file — the check
+//     that catches "the variations silently didn't apply" (a no-op sed);
+//   - defaultProvider / defaultModel / defaultThinkingLevel are
+//     self-consistent with modelChain[0] (`<provider>/<modelId>:<thinking>`).
+// Returns:
+//   true  → every check passed
+//   false → settings.json present on the well but a check failed
 // On any error (well CLI missing, exec fails, JSON malformed) the caller
-// gets `null` via the wrapper above — we don't fail birth on infra hiccups.
+// gets `null` — we don't fail birth on infra hiccups.
 async function verifyChainOnWell(wellName: string, expected: string[]): Promise<boolean | null> {
   try {
     const proc = Bun.spawn(
@@ -268,6 +322,11 @@ async function verifyChainOnWell(wellName: string, expected: string[]): Promise<
       proc.exited,
     ]);
     if (exitCode !== 0) return null;
+
+    // Any surviving `__…__` token means a birth-time sed was a no-op —
+    // exactly the failure mode the rework set out to kill.
+    if (/__[A-Z_]+__/.test(stdout)) return false;
+
     const parsed = JSON.parse(stdout);
     const onWell = parsed?.modelChain;
     if (!Array.isArray(onWell)) return false;
@@ -275,6 +334,16 @@ async function verifyChainOnWell(wellName: string, expected: string[]): Promise<
     for (let i = 0; i < expected.length; i++) {
       if (onWell[i] !== expected[i]) return false;
     }
+
+    // The three default* fields must agree with the chain's primary
+    // entry, shape `<provider>/<modelId>:<thinking>`.
+    const m = String(onWell[0] ?? "").match(/^([^/]+)\/(.+):([^:]+)$/);
+    if (!m) return false;
+    const [, provider, modelId, thinking] = m;
+    if (parsed.defaultProvider !== provider) return false;
+    if (parsed.defaultModel !== modelId) return false;
+    if (parsed.defaultThinkingLevel !== thinking) return false;
+
     return true;
   } catch {
     return null;
@@ -284,7 +353,7 @@ async function verifyChainOnWell(wellName: string, expected: string[]): Promise<
 function birthArgs(name: string, c: Combo): string[] {
   const flags: string[] = [
     "birth", name,
-    `--harness=pi`,
+    `--harness=${c.harness}`,
     `--model=${c.model}`,
     `--thinking=${c.thinking}`,
   ];
@@ -296,43 +365,6 @@ function birthArgs(name: string, c: Combo): string[] {
   flags.push(`--packages=${c.packages.join(",")}`);
   flags.push(`--channels=${c.channels.join(",")}`);
   return flags;
-}
-
-// `cells egg --model=... --extensions=... --packages=...` — bakes a single
-// egg into the pool. `cells birth` for a matching variant will then
-// auto-hatch from this egg. Eggs don't take --thinking or --channels;
-// those are hatch-time. Used by --hatch mode below.
-function eggArgs(c: Combo): string[] {
-  return [
-    "egg",
-    `--model=${c.model}`,
-    `--extensions=${c.extensions.join(",")}`,
-    `--packages=${c.packages.join(",")}`,
-  ];
-}
-
-type EggBakeRecord = {
-  combo: string;
-  ok: boolean;
-  exitCode: number;
-  durationMs: number;
-  stderrTail: string;
-};
-
-// Bake a single egg matching `combo` so that the subsequent `cells birth`
-// for that combo auto-hatches from the pool. Egg-bake is slow (~5min on
-// happy path; longer if mother chains through fallback tiers), so we use a
-// 12-min timeout per egg. Returns an EggBakeRecord regardless of outcome.
-async function bakeEgg(combo: Combo): Promise<EggBakeRecord> {
-  const t0 = Date.now();
-  const r = await runCells(eggArgs(combo));
-  return {
-    combo: combo.id,
-    ok: r.exitCode === 0,
-    exitCode: r.exitCode,
-    durationMs: Date.now() - t0,
-    stderrTail: tail(r.stderr, 600),
-  };
 }
 
 type BirthVerify = {
@@ -399,7 +431,7 @@ function tail(s: string, n = 1500): string {
 // `parentId` pointing at an `assistant` message whose `stopReason === "error"`.
 const MOTHER_SESSION_DIR = join(
   homedir(),
-  ".pi/agent/sessions/--Users-pete-Projects-cells-proto-mother--",
+  ".pi/agent/sessions/--Users-pete-Projects-cells-dna-proto-mother--",
 );
 
 // Find any mother session JSONL that started in [windowStartMs, windowEndMs]
@@ -519,14 +551,17 @@ async function birthOne(name: string, combo: Combo): Promise<BirthRecord> {
   const wantsSlack = combo.channels.includes("slack");
   const reg = await loadRegistry();
   const regEntry = reg.cells.find((c) => c.name === name);
-  const well = await wellCheck(name);
+  // Birth claims a generic egg — the cell's well is the egg's well_name,
+  // not the cell name. Resolve it before any well-layer check.
+  const wellName = await wellForCell(name);
+  const well = await wellCheck(wellName);
   // Deep verify of chain on the well. Only attempt when the well is
   // reachable; otherwise mark null and move on. The registry mirror should
   // match what's on the well — if it doesn't, the substitution pipeline
   // dropped or corrupted the chain at some step.
   const expectedChain = Array.isArray(regEntry?.modelChain) ? regEntry.modelChain : null;
   const modelChainOnWell = (expectedChain && well.exists)
-    ? await verifyChainOnWell(name, expectedChain)
+    ? await verifyChainOnWell(wellName, expectedChain)
     : null;
   const verify: BirthVerify = {
     registry: regEntry !== undefined,
@@ -569,7 +604,7 @@ type KillVerify = {
 
 type KillRecoveryAction =
   | { kind: "retry-cells-kill"; ok: boolean }
-  | { kind: "direct-well-destroy"; httpStatus: number; ok: boolean };
+  | { kind: "direct-well-destroy"; ok: boolean };
 
 type KillRecord = {
   name: string;
@@ -584,21 +619,23 @@ type KillRecord = {
   reason: "paired" | "orphan" | "aged";
 };
 
-// Direct well destroy via the wells API. Used as a last-ditch recovery
-// when `cells kill` failed to remove the well (e.g. mother's destroy
-// session crashed mid-flight, registry got cleaned but well is still up).
-async function directWellDestroyApi(name: string): Promise<{ ok: boolean; httpStatus: number }> {
-  const token = await wellsToken();
-  if (!token) return { ok: false, httpStatus: 0 };
+// Last-ditch well destroy via the `well` CLI. Used as a recovery when
+// `cells kill` failed to remove the well (e.g. cleanup crashed mid-flight,
+// registry got cleaned but the well is still up).
+async function directWellDestroyCli(name: string): Promise<{ ok: boolean }> {
   try {
-    const r = await fetch(`https://api.sprites.dev/v1/sprites/${encodeURIComponent(name)}`, {
-      method: "DELETE",
-      headers: { Authorization: `Bearer ${token}` },
-    });
-    // 404 means already gone — treat as success.
-    return { ok: r.ok || r.status === 404, httpStatus: r.status };
+    const proc = Bun.spawn(["well", "destroy", name, "--force"], { stdout: "pipe", stderr: "pipe" });
+    const [, stderr, exitCode] = await Promise.all([
+      new Response(proc.stdout).text(),
+      new Response(proc.stderr).text(),
+      proc.exited,
+    ]);
+    if (exitCode === 0) return { ok: true };
+    // "not found / already destroyed" means the goal state is reached.
+    if (/not found|already destroyed/i.test(stderr)) return { ok: true };
+    return { ok: false };
   } catch {
-    return { ok: false, httpStatus: 0 };
+    return { ok: false };
   }
 }
 
@@ -610,12 +647,15 @@ async function directWellDestroyApi(name: string): Promise<{ ok: boolean; httpSt
 async function killOne(name: string, reason: KillRecord["reason"]): Promise<KillRecord> {
   const args = ["kill", name, "--yes"];
   const cmd = `cells ${args.join(" ")}`;
+  // Resolve the egg well BEFORE the kill — afterwards the registry entry is
+  // gone and the cell→well mapping with it.
+  const wellName = await wellForCell(name);
   const t0 = Date.now();
   const r = await runCells(args);
 
   const computeVerify = async (): Promise<KillVerify> => {
     const inbox = await pulseInboxFiles(name);
-    const well = await wellCheck(name);
+    const well = await wellCheck(wellName);
     return {
       registry:      !(await inRegistry(name)),
       well: !well.exists,
@@ -640,10 +680,10 @@ async function killOne(name: string, reason: KillRecord["reason"]): Promise<Kill
     verify = await computeVerify();
   }
 
-  // Last-ditch: well still live → direct DELETE via the well API.
+  // Last-ditch: well still live → destroy it via the `well` CLI.
   if (!verify.well) {
-    const direct = await directWellDestroyApi(name);
-    recoveries.push({ kind: "direct-well-destroy", httpStatus: direct.httpStatus, ok: direct.ok });
+    const direct = await directWellDestroyCli(wellName);
+    recoveries.push({ kind: "direct-well-destroy", ok: direct.ok });
     verify = await computeVerify();
   }
 
@@ -684,9 +724,6 @@ type RunRecord = {
   hostHour: number;
   preExistingHardenCells: string[];
   combosPicked: Combo[];
-  // Egg bakes that ran before the birth phase (only present in --hatch mode).
-  // Empty array on slow-birth-only runs.
-  eggBakes: EggBakeRecord[];
   birth: BirthRecord[];
   kill: KillRecord[];
   ok: boolean;
@@ -740,19 +777,19 @@ async function main() {
     return;
   }
 
-  // --hatch (opt-in): bake one egg per planned combo BEFORE the birth phase.
-  // The subsequent `cells birth` for each matching combo will auto-hatch
-  // from the egg pool. Eggs and births are mother-orchestrated, so we run
-  // them sequentially under the same lock as the births. Egg-bake is slow
-  // (~5min happy-path) so this nearly doubles iteration time.
-  const eggBakeRecords: EggBakeRecord[] = [];
-  if (args.hatch) {
-    console.log(`\n--hatch: baking ${plan.length} egg(s) sequentially before births...`);
-    for (const p of plan) {
-      const r = await bakeEgg(p.combo);
-      eggBakeRecords.push(r);
-      console.log(`  egg ${p.combo.id} → ${r.ok ? "OK" : "FAIL"}  exit=${r.exitCode}  ${r.durationMs}ms${r.ok ? "" : "  stderr=" + r.stderrTail.slice(-200)}`);
-    }
+  // Pre-flight: every birth claims a warm egg from the uniform pool, so
+  // stock the pool before the birth phase. `cells pool refill` brings it to
+  // target depth; then sanity-check there's at least one egg per planned
+  // birth (refill can fall short if a bake failed).
+  console.log(`\nrefilling egg pool before births...`);
+  const refill = await runCells(["pool", "refill"]);
+  if (refill.exitCode !== 0) {
+    console.warn(`  pool refill exited ${refill.exitCode}: ${tail(refill.stderr, 300)}`);
+  }
+  const warmEggs = await countWarmEggs();
+  console.log(`  pool: ${warmEggs} warm egg(s); plan needs ${plan.length}`);
+  if (warmEggs < plan.length) {
+    console.warn(`  ⚠ pool short by ${plan.length - warmEggs} — births may fail with "pool empty"`);
   }
 
   // Birth sequentially. Parallel mothers contend for the same OAuth /
@@ -793,7 +830,9 @@ async function main() {
   for (const n of args.orphans) if (!killTargets.some((t) => t.name === n)) killTargets.push({ name: n, reason: "orphan" });
   if (args.age && !killTargets.some((t) => t.name === args.age)) killTargets.push({ name: args.age, reason: "aged" });
 
-  // Kill is mother-orchestrated too — same concurrency rule. Sequential.
+  // Kill is deterministic (no mother) but still does read-modify-write on
+  // the shared registry + pool files, so run it sequentially to avoid
+  // lost-update races between concurrent saveRegistry calls.
   console.log(`\nkilling ${killTargets.length} cell(s) sequentially...`);
   const killRecords: KillRecord[] = [];
   for (const t of killTargets) killRecords.push(await killOne(t.name, t.reason));
@@ -801,14 +840,12 @@ async function main() {
     const failed = Object.entries(k.verify).filter(([, ok]) => !ok).map(([key]) => key);
     console.log(`  kill ${k.name} (${k.reason}) → ${k.ok ? "OK" : "FAIL"}  exit=${k.exitCode}  ${k.durationMs}ms  ${failed.length === 0 ? "" : "failed: " + failed.join(",")}`);
     for (const r of k.recoveries) {
-      const status = r.kind === "direct-well-destroy" ? `http=${r.httpStatus}` : "";
-      console.log(`    ↻ recovery: ${r.kind} ${status} → ${r.ok ? "OK" : "FAIL"}`);
+      console.log(`    ↻ recovery: ${r.kind} → ${r.ok ? "OK" : "FAIL"}`);
     }
   }
 
   const endedAt = new Date();
-  const eggBakesOk = eggBakeRecords.every((e) => e.ok);
-  const ok = eggBakesOk && birthRecords.every((b) => b.ok) && killRecords.every((k) => k.ok);
+  const ok = birthRecords.every((b) => b.ok) && killRecords.every((k) => k.ok);
   const rec: RunRecord = {
     schemaVersion: 1,
     startedAt: startedAt.toISOString(),
@@ -818,7 +855,6 @@ async function main() {
     hostHour: hour,
     preExistingHardenCells: preExisting,
     combosPicked: combos,
-    eggBakes: eggBakeRecords,
     birth: birthRecords,
     kill: killRecords,
     ok,

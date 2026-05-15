@@ -28,7 +28,18 @@ SECRETS="$HOME/.cells/secrets.json"
 SECRET=$(jq -r '.CELLS_PROXY_SECRET // empty' "$SECRETS")
 [ -n "$SECRET" ] || { echo "no CELLS_PROXY_SECRET in $SECRETS"; exit 1; }
 
-REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+# Cloudflare account for the Worker's /image/upload → Cloudflare Images
+# relay. The account id is rendered into wrangler.toml [vars]; the API
+# token is pushed as a Worker secret below. The token is optional — if
+# absent the Worker still deploys and /image/upload returns a 503.
+CF_ACCOUNT_ID=$(jq -r '.CLOUDFLARE_ACCOUNT_ID // empty' "$SECRETS")
+[ -n "$CF_ACCOUNT_ID" ] || { echo "no CLOUDFLARE_ACCOUNT_ID in $SECRETS"; exit 1; }
+CF_API_TOKEN=$(jq -r '.CLOUDFLARE_API_TOKEN // empty' "$SECRETS")
+
+# -P resolves symlinks physically. Mother invokes this script through
+# dna/proto/mother/scripts (a symlink to the repo's scripts/); a logical
+# `cd` would collapse `scripts/..` back to mother's dir, not the repo root.
+REPO_ROOT="$(cd -P "$(dirname "$0")/.." && pwd)"
 TEMPLATE="$REPO_ROOT/cli/worker/cell/wrangler.toml"
 [ -f "$TEMPLATE" ] || { echo "missing template $TEMPLATE"; exit 1; }
 
@@ -54,7 +65,8 @@ WELL_HOST="${SPRITE_NAME}.${WELL_BASE}"
 RENDERED="$REPO_ROOT/cli/worker/cell/.wrangler.${NAME}.toml"
 LOG="$(mktemp -t deploy-cell-${NAME}.XXXXXX)"
 trap 'rm -f "$RENDERED" "$LOG"' EXIT
-sed -e "s/{{CELL}}/${NAME}/g" -e "s/{{WELL_HOST}}/${WELL_HOST}/g" "$TEMPLATE" > "$RENDERED"
+sed -e "s/{{CELL}}/${NAME}/g" -e "s/{{WELL_HOST}}/${WELL_HOST}/g" \
+    -e "s/{{CF_ACCOUNT_ID}}/${CF_ACCOUNT_ID}/g" "$TEMPLATE" > "$RENDERED"
 
 cd "$REPO_ROOT/cli/worker/cell"
 
@@ -70,4 +82,13 @@ if ! echo "$SECRET" | bunx wrangler --config "$RENDERED" secret put CELLS_PROXY_
   echo "✗ wrangler secret put failed:"
   cat "$LOG"
   exit 1
+fi
+if [ -n "$CF_API_TOKEN" ]; then
+  if ! echo "$CF_API_TOKEN" | bunx wrangler --config "$RENDERED" secret put CLOUDFLARE_API_TOKEN >>"$LOG" 2>&1; then
+    echo "✗ wrangler secret put CLOUDFLARE_API_TOKEN failed:"
+    cat "$LOG"
+    exit 1
+  fi
+else
+  echo "⚠ no CLOUDFLARE_API_TOKEN in $SECRETS — /image/upload returns 503 until one is set"
 fi

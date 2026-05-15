@@ -1,0 +1,8 @@
+{
+  "model": "__MODEL__",
+  "effortLevel": "__THINKING__",
+  "env": {
+    "ANTHROPIC_BASE_URL": "https://proxy.cells.md",
+    "ANTHROPIC_CUSTOM_HEADERS": "x-cell-name: __NAME__"
+  }
+}

@@ -1,10 +1,16 @@
 /**
- * cell site server (v2) — the public face of this cell at <name>.cells.md
- * AND the Slack ↔ pi bridge.
+ * cell site server (v2) — supervises pi, bridges it to Slack, and
+ * publishes the cell's website.
  *
- * Two responsibilities:
+ * Three responsibilities:
  *
- *  1. Static site at /  (homepage, public/ overrides)
+ *  1. Site publishing — the cell's website lives in public/. This server
+ *     pushes a snapshot of it up to the per-cell Worker (on boot, and
+ *     debounced on any change under public/). The Worker serves
+ *     <name>.cells.md from that snapshot, so the site stays up even
+ *     while the cell sleeps or hibernates — availability is decoupled
+ *     from cell liveness. public/ is also served locally at / for
+ *     in-cell preview.
  *  2. WebSocket bridge at /agent
  *     - The cell Worker (Cloudflare DO) opens an outbound WS to this
  *       server and holds it open. That inbound TCP keeps the well
@@ -18,11 +24,12 @@
  * messages. No slack_post tool, no skill enforcement, no safety-net
  * session-tail. The bridge is the only delivery path.
  *
- * Auth: WS upgrade requires Authorization: Bearer <CELLS_PROXY_SECRET>.
+ * Auth: WS upgrade + site publish both require
+ * Authorization: Bearer <CELLS_PROXY_SECRET>.
  */
 
 import { type Subprocess, spawn } from "bun";
-import { existsSync, mkdirSync, readFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, watch } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -366,6 +373,123 @@ function onPiSetupAcked() {
 }
 
 // ---------------------------------------------------------------------------
+// Site publishing — push public/ up to the per-cell Worker.
+//
+// The Worker (cells-front-<name>) serves <name>.cells.md from a snapshot
+// held in its Durable Object. We push that snapshot here: once on boot,
+// and debounced on any change under public/. The Worker then serves the
+// site whether this cell is awake, asleep, or hibernating. The cell only
+// needs to be awake to *change* the site, not to serve it.
+// ---------------------------------------------------------------------------
+
+const SITE_PUBLISH_URL = `https://${NAME}.cells.md/site/publish`;
+const PUBLISH_DEBOUNCE_MS = 800;
+// Per-file ceiling. The Worker's DO storage caps a value at 128 KiB and
+// base64 inflates ~33%, so an on-disk file must stay under ~96 KiB. v1 is
+// text-first (HTML/CSS/JS/markdown); large media is a later, R2-backed path.
+const SITE_FILE_CAP = 96 * 1024;
+
+let publishing = false;
+let dirtyDuringPublish = false;
+let publishTimer: Timer | null = null;
+
+function collectSiteFiles(dir: string, base: string, out: Record<string, { ct: string; data: string }>) {
+  for (const name of readdirSync(dir)) {
+    const full = join(dir, name);
+    const st = statSync(full);
+    if (st.isDirectory()) {
+      collectSiteFiles(full, base, out);
+    } else if (st.isFile()) {
+      if (st.size > SITE_FILE_CAP) {
+        console.error(`[site] skipping ${full} — ${Math.round(st.size / 1024)}KB over ${SITE_FILE_CAP / 1024}KB cap`);
+        continue;
+      }
+      const rel = "/" + full.slice(base.length).replace(/^\/+/, "");
+      const ext = name.includes(".") ? name.slice(name.lastIndexOf(".")) : "";
+      out[rel] = {
+        ct: MIME[ext] ?? "application/octet-stream",
+        data: readFileSync(full).toString("base64"),
+      };
+    }
+  }
+}
+
+// Build the current public/ snapshot and POST it to the Worker. Returns
+// true iff the Worker accepted it. Swallows + logs all errors.
+async function publishSite(): Promise<boolean> {
+  if (publishing) { dirtyDuringPublish = true; return false; }
+  publishing = true;
+  try {
+    if (!SECRET) {
+      console.error(`[site] no CELLS_PROXY_SECRET — cannot publish`);
+      return false;
+    }
+    const files: Record<string, { ct: string; data: string }> = {};
+    if (existsSync(PUBLIC_DIR)) collectSiteFiles(PUBLIC_DIR, PUBLIC_DIR, files);
+    // Nothing in public/ yet — seed /index.html from defaultHome() so
+    // <name>.cells.md is live from birth, not a 404.
+    if (!files["/index.html"]) {
+      files["/index.html"] = {
+        ct: "text/html; charset=utf-8",
+        data: Buffer.from(defaultHome()).toString("base64"),
+      };
+    }
+    const res = await fetch(SITE_PUBLISH_URL, {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: `Bearer ${SECRET}` },
+      body: JSON.stringify({ files }),
+      signal: AbortSignal.timeout(15_000),
+    });
+    if (!res.ok) {
+      console.error(`[site] publish failed ${res.status}: ${(await res.text()).slice(0, 200)}`);
+      return false;
+    }
+    const j: any = await res.json().catch(() => ({}));
+    const skipped = Array.isArray(j?.skipped) ? j.skipped.length : 0;
+    console.log(`[site] published ${Object.keys(files).length} file(s) to ${NAME}.cells.md` +
+      (skipped ? ` (${skipped} skipped server-side)` : ""));
+    return true;
+  } catch (e) {
+    console.error(`[site] publish error: ${String(e).slice(0, 200)}`);
+    return false;
+  } finally {
+    publishing = false;
+    // A change landed mid-publish — fold it into the next debounced run.
+    if (dirtyDuringPublish) {
+      dirtyDuringPublish = false;
+      schedulePublish();
+    }
+  }
+}
+
+function schedulePublish() {
+  if (publishTimer) clearTimeout(publishTimer);
+  publishTimer = setTimeout(() => {
+    publishTimer = null;
+    void publishSite();
+  }, PUBLISH_DEBOUNCE_MS);
+}
+
+// Boot: ensure public/ exists (a dir to watch + a place for the agent to
+// write), publish the initial snapshot — retrying, since the Worker may
+// still be deploying during birth — then re-publish on any change.
+function startSitePublishing() {
+  mkdirSync(PUBLIC_DIR, { recursive: true });
+  void (async () => {
+    for (let i = 0; i < 6; i++) {
+      if (await publishSite()) break;
+      await new Promise((r) => setTimeout(r, 2500 * (i + 1)));
+    }
+  })();
+  try {
+    watch(PUBLIC_DIR, { recursive: true }, () => schedulePublish());
+    console.log(`[site] watching ${PUBLIC_DIR} for changes`);
+  } catch (e) {
+    console.error(`[site] watch unavailable — site publishes at boot only: ${String(e).slice(0, 160)}`);
+  }
+}
+
+// ---------------------------------------------------------------------------
 // HTTP + WebSocket server
 // ---------------------------------------------------------------------------
 
@@ -458,3 +582,4 @@ const server = Bun.serve({
 
 console.log(`${NAME} site listening on :${server.port}`);
 spawnPi();
+startSitePublishing();

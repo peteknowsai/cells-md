@@ -1,18 +1,19 @@
 # Cells — Current Status
 
-**Updated:** 2026-05-14 — post-V1-stamp + boundary-cleanup retro
-**Phase:** 🎯 **V1 STAMPED + wells/cells boundary cleanup CLOSED.** Ready for V2 design.
-**Health:** 🟢 welld at `46d7e5e` on Pi3+/seal+W.78 binary. Dashboard at `localhost:7881/dashboard`. Pool clean, reconcile no-op.
+**Updated:** 2026-05-14 — birth rework (multi-harness, generic pool, eval loop)
+**Phase:** ✅ **Birth rework shipped + codex harness added.** All 4 birth-rework phases done; the codex harness landed as a follow-on. All three harnesses (pi + claude-code + codex) birth, talk, and tui green.
+**Health:** 🟢 welld + host-bridge healthy. Pool refills clean. Smoke eval green 3/3.
 
 ## TL;DR
 
-V1 is the magical generic cell flow: `cells birth` → ~3s animation → talk prompt → LLM-streamed response from a generic cell. All 10 acceptance items shipped. The wells/cells substrate boundary was then refactored over a five-hour Pi2 + Pi3 + /seal coordination cycle — wells deleted -2455 LOC of cells-shaped invariants, cells took over pool ownership end-to-end. Both sides now have clean primitives and zero crossed-over state.
+V1 shipped the magical generic cell flow, then the wells/cells substrate boundary was refactored (wells deleted -2455 LOC of cells-shaped invariants; cells took over pool ownership end-to-end). The **birth rework** is the current epoch: the two divergent birth flows collapse into one linear `cmdCreate` (claim a generic egg → JSON config blob → mother runs the birthing ritual), kill drops its mother round-trip for a deterministic teardown, the DNA `settings.json` becomes a real placeholder template so model/thinking/chain variations actually apply, and the eval loop (`scripts/eval-birth.ts` + `scripts/harden-birth.ts`) is reworked to verify the matrix. A second harness — `claude-code` — is wired through the egg DNA, the birthing ritual, and host-bridge's new `HarnessAdapter`; a third — `codex` (the OpenAI coding machine on the ChatGPT subscription) — followed, adding a per-turn adapter mode.
 
 ## What's running
 
-- **cells CLI** (`bun cli/cells.ts ...`): pool-first birth, sleep/wake/talk, reconcile, doctor
+- **cells CLI** (`bun cli/cells.ts ...`): pool-first birth, deterministic kill, sleep/wake/talk, reconcile, doctor
 - **welld** (`md.cells.welld` launchd, port `:7878`): substrate primitives only
-- **host-bridge** (`com.pete.cells-host-bridge`): pi spawn-on-talk via SSH
+- **host-bridge** (`com.pete.cells-host-bridge`): harness spawn-on-talk via SSH — `HarnessAdapter` branches pi / claude-code (persistent) and codex (per-turn)
+- **eval loop** (`scripts/eval-birth.ts` targeted, `scripts/harden-birth.ts` matrix sweep): birth/kill verification across the variation matrix
 - **dashboard** (port `:7881`, optional): pool + cells observability
 - **cloudflared tunnel**: per-cell `wss://<n>.cells.md` dispatch
 
@@ -31,9 +32,14 @@ The pool is a **cells concept**, full stop. Wells doesn't know it exists.
 6. If Tier 2: `POST /v1/wells/{name}/hibernate` (gate now accepts because seal flipped the flag)
 7. Atomic append to `pool.json`
 
-**Birth flow** (`cmdCreateV1Fast`):
-- `reconcilePool` (lazy guard) → `claimV1PoolMember` → `wakePoolMember` → `markPoolMemberLive` → registry write → `process.exit(0)` (non-TTY mode, since the 2026-05-13 fix)
-- Wall-clock alive: ~70-100ms warm-path
+**Birth flow** (`cmdCreate` — one linear path, post-rework):
+1. Resolve config — interactive 6-question picker or flags/defaults; harness ∈ {pi, claude-code, codex}
+2. Build the JSON config blob — `{harness, model, provider, thinking, extensions, packages, channels, chain}`
+3. Claim a generic egg — `reconcilePool` → `claimGenericEgg` → `wakePoolMember` → `ensureWellHasIp` → `restoreEggPristine`
+4. Hand off — `runPiWithOutcome("cell-create", [name, eggWell, blob])`; mother reads `docs/birthing-ritual.html` and follows it top to bottom
+5. On success — `markPoolMemberLive`, registry push (incl. `harness`), `prewarmHostBridge`, refill, talk UX
+
+**Kill flow** (`cmdDestroyOne` — deterministic, no mother): resolve the well locally → `well destroy --force` → sweep registry/pulse/channels/worker/vault/pool → journal the `destroyed` line. ~9s.
 
 **Refill:** launchd `com.pete.cells-pool-refill` every 10 min + lazy refill after each consume
 **Reconcile:** launchd `com.pete.cells-pool-reconcile` every 5 min (available; not auto-installed) + lazy guard in pool list/refill/birth
@@ -51,11 +57,23 @@ The pool is a **cells concept**, full stop. Wells doesn't know it exists.
 | /seal cycle | ~7s | (target = pre-Pi3 warming cost) |
 | Reconcile post-bounce | 0 evictions (W.78 holds) | accurate sync |
 
+## Birth rework — progress
+
+| Phase | State |
+|---|---|
+| 1 — Pi birth rework (collapsed `cmdCreate`, DNA placeholder template, deterministic kill, retired the old egg-baker skills) | ✅ shipped + verified (birth → talk → kill all green) |
+| 2 — Eval loop (eval scripts reworked to gpt-5.5/low baseline, dead sprites API → `well` CLI) | ✅ shipped; smoke combo 3/3 green; axis sweep substantiated |
+| 3 — claude-code harness (`.claude/` egg DNA, ritual branch, host-bridge `HarnessAdapter`) | ✅ shipped + verified — birth, `cells talk` (one-shot + interactive + multi-turn), `cells tui` all green |
+| 4 — Doc sweep | ✅ done |
+| + codex harness (follow-on — `.codex/` egg DNA, ritual codex branch, host-bridge per-turn `codexAdapter`) | ✅ shipped + verified — birth, `cells talk` (one-shot + interactive + multi-turn), `cells tui` all green |
+
 ## What's next
 
-**V2 — Personality + identity layers.** When the user wants a CoS / Researcher / paired-coder, layer the personality + per-instance bind on top of the generic cell. Streams in during turn 1, takes effect from turn 2. See `PLAN.md` Phase v2.
+The birth rework is shipped and all three harnesses (pi, claude-code, codex) birth, talk, and tui. Next:
 
-**V3 — Cloud lifecycle polish.** Per-cell `wss://<n>.cells.md`, Slack binding, vault sync, multi-device access. Pi3's `wss` shape is verified to work; V3 is mostly mother+CF-Worker plumbing.
+**V2 — Personality + identity layers.** When the user wants a CoS / Researcher / paired-coder, layer the personality + per-instance bind on top of the generic cell. See `PLAN.md` Phase v2.
+
+**V3 — Cloud lifecycle polish.** Per-cell `wss://<n>.cells.md`, Slack binding, vault sync, multi-device access.
 
 ## Pointers
 

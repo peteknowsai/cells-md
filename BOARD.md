@@ -4,13 +4,13 @@ Tasks have IDs `V{phase}.{n}` for new work or legacy `P{phase}.{n}` for deferred
 
 For test wells, use prefixes: `ck-` (checklist), `wk-` (worker experiments), `nt-` (night experiments). Never touch `mother`, `smoke-*` (Pete's manual smoke wells), or any cell with status `alive` and a real channel binding.
 
-Anthropic models (opus / sonnet / haiku) are out-of-bounds for cells until the Claude Code harness ships — they trip Pete's Claude Max OAuth fingerprint detection. Default cell model chain: `openai-codex/gpt-5.5:high → deepseek-v4-pro:high`.
+Anthropic models: a `pi` cell reaches them via a paid `ANTHROPIC_API_KEY` (direct, clean); the Claude Max subscription is reachable only through the `claude-code` harness (genuine Claude Code traffic, via `proxy.cells.md`). pi-via-Max is fingerprint-dead. Default cell model chain: `openai-codex/gpt-5.5:high → deepseek-v4-pro:high`.
 
 ---
 
 ## In Progress
 
-_(none — V1 stamped, boundary cleanup closed. Next epoch is V2 design.)_
+**Birth rework** — multi-harness, generic pool, eval loop. All 4 phases shipped, plus a codex harness as a follow-on — all three harnesses (pi + claude-code + codex) birth, talk, and tui green. See the "Birth rework" + "Codex harness" sections below.
 
 ## Blocked
 
@@ -78,6 +78,43 @@ Five-hour coordination cycle. Wells deleted 2455 LOC of cells-shaped invariants 
 Verified end-to-end: reconcile (12 pool members, 0 drift post-4th-bounce), V1.5 (sleep 589ms / wake 380ms / sibling-survive clean), V1.10 (69ms alive_ms on /seal-baked member).
 
 See `docs/proposals/piece-2-audit-cells-side.html` for the full retro.
+
+---
+
+### Birth rework — multi-harness, generic pool, eval loop
+
+`cells birth` was supposed to produce a configured, live cell across a matrix of options (harness, model, thinking, extensions, packages, channels) — but the variations silently didn't apply (DNA `settings.json` was hardcoded, every sed a no-op), birth had two divergent paths, and only one harness existed. This rework collapses birth to one reliable path, makes the generic egg a real placeholder template, and adds a second harness. Plan: `docs/proposals/birth-plan.html`.
+
+**Phase 1 — Pi birth rework** (✅ shipped + verified)
+- [x] **BR.1.1** DNA `settings.json` → placeholder template (`__PROVIDER__`/`__MODEL__`/`__THINKING__`/`__MODEL_CHAIN__`) — the root-cause fix; variations now actually apply. `channels.ts` lib extracted; ritual doc + `cell-create.md` rewritten to the blob model.
+- [x] **BR.1.2** `cmdCreate` collapsed to one linear path (resolve config → build blob → claim generic egg → hand to mother → talk UX). Deleted `cmdCreateV1Fast`, `runBirthPickerV1`, `hatchEgg`, `applyHatchSubstitutions`, `wirePostBirth`, and the `picker` field; removed host-bridge's `picker`/`set_model` birth re-apply.
+- [x] **BR.1.3** Kill dropped its mother round-trip — `cmdDestroyOne` is now deterministic (`well destroy --force` + local sweep + journal line). ~9s vs a multi-minute mother session that could hang.
+- [x] **BR.1.4** Retired the old egg-baker skills (`birth-egg/SKILL.md`, `egg-birth.md`). Pool re-baked with the corrected DNA. Verified: birth → talk (via host-bridge local bridge) → kill all green on a freshly-baked egg.
+
+**Phase 2 — Eval loop** (✅ shipped)
+- [x] **BR.2.1** `scripts/eval-birth.ts` + `scripts/harden-birth.ts` reworked: `COMBOS` gains a `harness` field, baseline + held-constant axes default to `gpt-5.5` at `low` (the ChatGPT-subscription path — flat cost; deepseek/anthropic/gpt-5.5-pro bill per-token and stay as occasional model-axis rows). `verifyChainOnWell` extended to catch surviving placeholders + default*/chain drift.
+- [x] **BR.2.2** Eval scripts moved off the dead `api.sprites.dev` endpoint (404 — legacy cloud backend) to the local `well` CLI, which authenticates itself. Before the fix harden marked every birth FAIL and eval's kill-verify passed unconditionally.
+- [x] **BR.2.3** Smoke combo (`pi · gpt-5.5 · low`) verified 3/3 green end-to-end (birth → checkpoint → settings → alive → talk → kill). Axis sweep run to substantiate that thinking/extension/channel/cross variations apply.
+
+**Phase 3 — claude-code harness** (✅ shipped + verified)
+- [x] **BR.3.1** `.claude/` egg DNA — `CLAUDE.md` identity entrypoint (carries `__NAME__`), `.claude/settings.json` (`model` + `effortLevel` placeholders + `ANTHROPIC_BASE_URL` env). `claude` confirmed present in the wells base image.
+- [x] **BR.3.2** Birthing ritual gains the claude-code branch (`c1`–`c7`): a short ritual that skips extensions/packages/channels. `harness` field picks pi (steps 1–9) vs claude-code (c1–c7).
+- [x] **BR.3.3** host-bridge `HarnessAdapter` — `piAdapter` is a faithful lift of the existing path; `claudeCodeAdapter` spawns `claude --print` in stream-json mode and translates its event stream into the pi-shaped events the talk CLI renders.
+- [x] **BR.3.4** Flipped `claude-code` live in `HARNESS_OPTIONS`, removed the `cmdCreate` birth guard, added the `cc-opus` eval row. **Birth verified** — `ccprobe` came up alive.
+- [x] **BR.3.5** **claude-code talk — fixed.** Root cause was two host-bridge bugs, not anything in-cell. (1) `CellSession.start` wrapped the remote command in `bash -lc`, but ssh re-joins argv with spaces and the remote shell re-parses — so `bash -lc <remoteCmd>` collapsed to a bare no-op `exec` and claude never launched (pi survived by luck: a `;` in its remoteCmd split the statement so the `exec` half ran directly). (2) `claudeCodeAdapter.translateOutbound` emitted `{type:"message_update",event:…}` where the talk CLI reads `assistantMessageEvent` — so response text was silently dropped. Both fixed; `cells talk` (one-shot + interactive + multi-turn) verified against live cell `claudia`.
+- [x] **BR.3.6** `cells tui` made harness-aware — a claude-code cell drops into claude's own TUI (bare `claude` in tmux); pi cells unchanged. Also fixed a latent bug: `cmdTui` passed the cell name to `well exec`, which needs the well name. (`cmdShell` still has this same cell-name-vs-well-name bug — separate fix.)
+
+---
+
+### Codex harness — a third harness (subscription-only)
+
+The OpenAI `codex` CLI as a harness, on Pete's ChatGPT subscription (not the metered API) — the OpenAI counterpart to claude-code. `cli/proxy.ts` needed zero changes (its `/codex` route + OAuth refresh already existed for pi's gpt-5.5). Plan: `docs/proposals/codex-harness.html`.
+
+- [x] **CDX.0** Spike — confirmed both gates: the codex CLI routes through `proxy.cells.md/codex` via a custom `config.toml` `model_provider` (no `auth.json` on cells, no patch needed); `codex exec --json` is one-shot, multi-turn via `codex exec resume <thread_id>`.
+- [x] **CDX.1** Egg — `codex` baked into `provisionCellInWell` (pinned `@openai/codex@0.130.0`; not in the wells base image, so cells bakes it). New `dna/cells/base/.codex/config.toml` (proxy provider + `__MODEL__`/`__THINKING__` placeholders). `AGENTS.md` made the shared pi+codex entrypoint (now carries `__NAME__`). Pool re-baked.
+- [x] **CDX.2** host-bridge `codexAdapter` — `HarnessAdapter` gained a `mode` discriminator; codex is `per-turn` (each prompt spawns a fresh `codex exec`, `CellSession.runTurn` drives it, `thread_id` captured + replayed via `resume`). `translateOutbound` maps codex JSONL → pi-shaped events.
+- [x] **CDX.3** CLI + ritual — `codex` enabled in `HARNESS_OPTIONS`, `cmdCreate` default model + subscription-only model guard, `cmdTui` codex branch, birthing-ritual codex branch (`x1`–`x7`).
+- [x] **CDX.4** Eval + docs + verify — codex `COMBOS` rows; `/cells` skill, STATUS/BOARD, `codex-harness.html`. **Verified end-to-end** — `cody` born, `cells talk` (one-shot + interactive + multi-turn/resume) + `cells tui` all green; pi + claude-code regression green.
 
 ---
 

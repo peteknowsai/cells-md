@@ -15,6 +15,22 @@
   arbitrary HTTP — for things the dedicated tools don't cover. Don't claim
   you can't reach the web.
 
+## Your site
+
+You have a public web page at `<your-name>.cells.md` (your name is in
+`/cell/package.json`). To change it, write files into `site/public/` —
+`index.html` is the homepage. A snapshot is pushed to your Cloudflare
+Worker within a second of any change, and the Worker serves it even
+while you sleep — you don't deploy anything, you just write files.
+
+**Images** — don't put image files in `site/public/`; the snapshot caps
+each file at ~96 KB. Generate the image anywhere, then run
+`publish-image <file>` (on your PATH) — it uploads to Cloudflare Images
+and prints a URL to use in your HTML:
+
+    $ publish-image diagram.png
+    https://imagedelivery.net/<hash>/<id>/public
+
 ## System
 
 - **Filesystem** — read/write anywhere under `/cell/` (your home).

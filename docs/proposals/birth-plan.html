@@ -1,0 +1,204 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Birth — implementation plan</title>
+<link rel="stylesheet" href="../_assets/doc.css">
+</head>
+<body>
+<div class="page">
+
+  <div class="doc-header">
+    <div class="crumb">cells <span class="sep">/</span> proposals <span class="sep">/</span> birth plan</div>
+    <div>2026-05-14</div>
+  </div>
+
+  <h1>Birth — implementation plan</h1>
+  <p class="subtitle">Generic pool → deterministic CLI handoff → mother follows the birthing ritual.</p>
+
+  <div class="callout">
+    <div class="label">Implemented — 2026-05-14</div>
+    <p>This plan shipped. Phase 1 (pi birth rework) and Phase 2 (eval loop) are done and verified; Phase 3 (claude-code harness) is code-complete. See <code>BOARD.md</code> → "Birth rework" for per-item status and <code>STATUS.md</code> for current ground truth.</p>
+  </div>
+
+  <div class="toc">
+    <h4>Contents</h4>
+    <ol>
+      <li><a href="#model">The model</a></li>
+      <li><a href="#ritual-doc">The birthing ritual doc</a></li>
+      <li><a href="#reassembly">The reassembly — what changes</a></li>
+      <li><a href="#steps">The ritual steps</a></li>
+      <li><a href="#options">The options handed in</a></li>
+      <li><a href="#decisions">Open decisions</a></li>
+      <li><a href="#sequence">Build sequence</a></li>
+    </ol>
+  </div>
+
+  <h2 id="model">The model</h2>
+
+  <div class="callout">
+    <div class="label">Terminology</div>
+    <p>It's <strong>birth</strong> and <strong>the birthing ritual</strong>. No "pregnancy," no "phase 1 / phase 2."</p>
+  </div>
+
+  <p>Birth is a return to the original design: a small deterministic handoff in the CLI, then a mother-driven ritual that does the real work. Birth does not need to be fast — ~30s to a minute is fine. The goal is that every agent is <strong>always configured correctly</strong>.</p>
+
+  <ol>
+    <li><strong>Generic pool.</strong> Pool members are blank eggs — no baked identity, DNA placeholders (<code>__NAME__</code>, <code>__THINKING__</code>, <code>__MODEL_CHAIN__</code>) left intact.</li>
+    <li><strong>Deterministic handoff.</strong> <code>cells birth &lt;name&gt; [flags]</code> claims a generic egg and builds a JSON config blob. It hands mother <code>[name, egg, blob]</code>.</li>
+    <li><strong>Mother follows the birthing ritual.</strong> Mother reads the ritual doc and works through it: imprint identity, apply config, register the site service, wire channels + the CF worker, run an end-to-end verification test, report the outcome.</li>
+  </ol>
+
+  <div class="callout info">
+    <div class="label">Why this works</div>
+    <p>The path still largely exists in code. <code>cmdCreate</code>'s slow-birth branch already builds a <code>payload</code> JSON and calls <code>runPiWithOutcome("cell-create", …)</code>. Two things broke it: the deterministic pool-match in front of it always fails (it matches a variant <em>hash</em>, never the literal <code>v1-generic</code> signature), so it falls through to mother — and then mother's <code>birth</code> skill cold-forks the retired <code>cell-base</code> image. Un-bypass the mother path, repoint the ritual at a claimed generic egg, and the original design is back.</p>
+  </div>
+
+  <h2 id="ritual-doc">The birthing ritual doc</h2>
+
+  <p>The ritual mother follows is a single <strong>dual-purpose HTML document</strong> — <code>docs/birthing-ritual.html</code>:</p>
+
+  <dl class="kv">
+    <dt>For a human</dt>
+    <dd>Open it in a browser. It's the readable, authoritative explanation of exactly how a cell is born.</dd>
+    <dt>For mother</dt>
+    <dd><code>read</code> the file and follow it step-by-step — the same way mother follows a <code>SKILL.md</code> today. HTML is just structured text; an LLM follows it fine.</dd>
+  </dl>
+
+  <p>Same document, two readers. Styled with the shared <code>doc.css</code>. The <code>cell-create</code> prompt shrinks to a thin entry point: <em>"you've been handed a claimed egg and a config blob — read <code>docs/birthing-ritual.html</code> and follow it, substituting from the blob."</em></p>
+
+  <h2 id="reassembly">The reassembly — what changes</h2>
+
+  <p>Most of this already exists, scattered across files. The work is reassembly, not greenfield.</p>
+
+  <table>
+    <thead><tr><th>File</th><th>Today</th><th>Change</th></tr></thead>
+    <tbody>
+      <tr>
+        <td><code>cli/cells.ts</code> — <code>bakePoolMember</code></td>
+        <td>Bakes <code>CELL_NAME=cell-&lt;hex&gt;</code> identity into every egg.</td>
+        <td>Strip the baked identity. Bake fully generic eggs (placeholders intact). This <em>is</em> the old <code>birth-egg</code> philosophy, returning.</td>
+      </tr>
+      <tr>
+        <td><code>cli/cells.ts</code> — <code>cmdCreate</code></td>
+        <td>Pool-match always fails → dead <code>cell-base</code> fallback. Default model is <code>opus</code>.</td>
+        <td>Claim any warm generic egg; default model → <code>deepseek-v4-flash</code>; drop the dead <code>cell-base</code> fallback; hand <code>[name, egg, blob]</code> to mother.</td>
+      </tr>
+      <tr>
+        <td><code>dna/proto/mother/.pi/prompts/cell-create.md</code></td>
+        <td>Parses the blob, delegates to the <code>birth</code> skill.</td>
+        <td>Parses the blob, points mother at <code>docs/birthing-ritual.html</code>, passes the claimed egg's well name.</td>
+      </tr>
+      <tr>
+        <td><code>docs/birthing-ritual.html</code></td>
+        <td>Does not exist.</td>
+        <td><strong>New.</strong> The dual-purpose ritual. Reassembled from <code>birth/SKILL.md</code> (the ordered steps, repointed to start-from-egg) + <code>health-check</code> (folded in as the final verification) + the channel/worker wiring currently in <code>wirePostBirth</code>.</td>
+      </tr>
+      <tr>
+        <td><code>dna/proto/mother/.pi/skills/birth/SKILL.md</code></td>
+        <td>The ordered ritual — but step 1 forks <code>cell-base</code>.</td>
+        <td>Retired. Content moves into <code>birthing-ritual.html</code>, repointed to start from a claimed egg.</td>
+      </tr>
+      <tr>
+        <td><code>birth-egg/SKILL.md</code> + <code>egg-birth.md</code></td>
+        <td>Mother-driven egg baking.</td>
+        <td>Retired. Egg baking stays deterministic TS (<code>bakePoolMember</code>) — no LLM judgment needed for a background pool-refill job.</td>
+      </tr>
+      <tr>
+        <td><code>health-check/SKILL.md</code></td>
+        <td>Standalone end-to-end test.</td>
+        <td>Its core folds into the ritual's final verification step. Keep the standalone <code>cells health-check</code> command too.</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h2 id="steps">The ritual steps</h2>
+
+  <p>What mother works through, once it's been handed the egg + blob. Reassembled and repointed from the existing <code>birth</code> skill.</p>
+
+  <table>
+    <thead><tr><th>#</th><th>Step</th><th>What it does</th></tr></thead>
+    <tbody>
+      <tr><td class="num">0</td><td>Handoff</td><td>Mother is given: the cell name, the claimed generic egg's well name, the JSON config blob.</td></tr>
+      <tr><td class="num">1</td><td>Imprint identity</td><td>Substitute <code>__NAME__</code> / <code>__MODEL__</code> / <code>__PROVIDER__</code> / <code>__THINKING__</code> / <code>__MODEL_CHAIN__</code> into the egg's DNA.</td></tr>
+      <tr><td class="num">2</td><td>Color + status</td><td>Per-cell tmux color chip; write <code>.pi/status.json</code>.</td></tr>
+      <tr><td class="num">3</td><td>Extensions</td><td>Prune the unselected in-tree extensions; register the selected ones in <code>settings.json</code>.</td></tr>
+      <tr><td class="num">4</td><td>Packages</td><td><code>pi install</code> the selected optional packages.</td></tr>
+      <tr><td class="num">5</td><td>Site service</td><td>Register the <code>site</code> service; flip the well URL to <code>--auth public</code>.</td></tr>
+      <tr><td class="num">6</td><td>Channels + cloud edge</td><td>Deploy the per-cell CF worker; if requested, auto-create + bind Slack and/or email.</td></tr>
+      <tr><td class="num">7</td><td>Verify (end-test)</td><td>The folded-in health check: env landed, pi answers a prompt, site serves <code>200</code>, worker <code>/debug</code> responds, channels bound. Birth only "succeeds" if this passes.</td></tr>
+      <tr><td class="num">8</td><td>Report outcome</td><td><code>report_outcome</code> back to the CLI — success only if step 7 passed.</td></tr>
+      <tr><td class="num">9</td><td>Record + tell</td><td>Append to the activity log; one-line success message to the user.</td></tr>
+    </tbody>
+  </table>
+
+  <h2 id="options">The options handed in</h2>
+
+  <p>The JSON config blob — the full variant space mother has to handle. Nothing ambiguous; every field is enumerated.</p>
+
+  <table>
+    <thead><tr><th>Field</th><th>Values</th><th>Default</th></tr></thead>
+    <tbody>
+      <tr><td><code>harness</code></td><td><code>pi</code> (only — <code>claude-code</code> / <code>codex</code> are stubbed)</td><td><code>pi</code></td></tr>
+      <tr><td><code>model</code></td><td><code>gpt-5.5</code>, <code>gpt-5.5-pro</code>, <code>deepseek-v4-flash</code>, <code>deepseek-v4-pro</code> &nbsp;(<code>opus</code>/<code>sonnet</code>/<code>haiku</code> out-of-bounds — OAuth fingerprint)</td><td><code>deepseek-v4-flash</code></td></tr>
+      <tr><td><code>thinking</code></td><td><code>off</code> / <code>minimal</code> / <code>low</code> / <code>medium</code> / <code>high</code> / <code>xhigh</code> / <code>adaptive</code></td><td><code>medium</code></td></tr>
+      <tr><td><code>extensions</code></td><td>any subset of <code>memory</code>, <code>mentality</code>, <code>wiki</code>, <code>dream</code></td><td><code>[]</code></td></tr>
+      <tr><td><code>packages</code></td><td><code>pi-web-access</code> (+ future)</td><td>package defaults</td></tr>
+      <tr><td><code>channels</code></td><td>any subset of <code>slack</code>, <code>email</code></td><td><code>[]</code></td></tr>
+      <tr><td><code>chain</code></td><td>derived fallback chain — <code>&lt;provider&gt;/&lt;model&gt;:&lt;thinking&gt;</code> entries</td><td>derived from <code>model</code></td></tr>
+    </tbody>
+  </table>
+
+  <h2 id="decisions">Open decisions</h2>
+
+  <p>Four forks. Recommendations attached — flag any you want to change.</p>
+
+  <div class="card">
+    <h3>1. Generic pool — uniform, or model-sharded?</h3>
+    <p class="goal">The old <code>birth-egg</code> skill baked <code>model</code> + <code>provider</code> per egg ("they shard the pool"). A truly generic pool bakes neither — model becomes a birth-time substitution.</p>
+    <p><strong>Recommend: truly uniform for V1.</strong> One pool, every egg identical. Model/provider applied at birth like everything else. Variant-sharded pools are a later optimization, not a V1 concern.</p>
+  </div>
+
+  <div class="card">
+    <h3>2. The ritual HTML — a formal pi skill, or a doc the prompt points at?</h3>
+    <p class="goal">Pi skills are <code>SKILL.md</code> files with YAML frontmatter (<code>name</code>, <code>allowed-tools</code>). HTML can't carry that frontmatter cleanly.</p>
+    <p><strong>Recommend: a doc the prompt points at.</strong> <code>cell-create.md</code> stays a real prompt; it tells mother to <code>read</code> and follow <code>birthing-ritual.html</code>. This is exactly "use that doc like it would an md file." Tool constraints, if we want them, live in the prompt.</p>
+  </div>
+
+  <div class="card">
+    <h3>3. Egg baking — deterministic TS, or the mother <code>birth-egg</code> skill?</h3>
+    <p class="goal">Two implementations exist: <code>bakePoolMember</code> (TS) and the <code>birth-egg</code> skill (mother-driven).</p>
+    <p><strong>Recommend: deterministic TS.</strong> Egg baking is a background pool-refill job with no per-egg judgment calls — determinism beats an LLM here. Make <code>bakePoolMember</code> generic; retire the <code>birth-egg</code> skill.</p>
+  </div>
+
+  <div class="card">
+    <h3>4. <code>health-check</code> — fold into birth only, or keep standalone too?</h3>
+    <p><strong>Recommend: both.</strong> Its core becomes the ritual's step 7 (birth isn't "done" until verification passes). Keep <code>cells health-check &lt;name&gt;</code> as a standalone command for checking a cell later.</p>
+  </div>
+
+  <h2 id="sequence">Build sequence</h2>
+
+  <ol>
+    <li><strong>Generic eggs.</strong> Strip baked identity from <code>bakePoolMember</code>; bake a fresh generic pool. Confirm an egg has placeholders intact and no committed name.</li>
+    <li><strong>Write <code>docs/birthing-ritual.html</code>.</strong> The dual-purpose ritual — reassemble from <code>birth/SKILL.md</code> + <code>health-check</code> + the channel/worker wiring, repointed to start-from-egg.</li>
+    <li><strong>Rewrite <code>cell-create.md</code>.</strong> Thin entry point: take name + egg + blob, point mother at the ritual HTML.</li>
+    <li><strong>Fix <code>cmdCreate</code>.</strong> Generic-egg claim, default model fix, drop the dead <code>cell-base</code> fallback, hand <code>[name, egg, blob]</code> to mother.</li>
+    <li><strong>Retire</strong> <code>birth/SKILL.md</code>, <code>birth-egg/SKILL.md</code>, <code>egg-birth.md</code>.</li>
+    <li><strong>Birth a real cell end-to-end.</strong> Verify every feature: identity, model/thinking, extensions, site, CF worker, Slack, email, remote talk.</li>
+    <li><strong>Doc sweep.</strong> Update <code>PLAN</code> / <code>BOARD</code> / <code>STATUS</code> to the new birth model with verified ground truth.</li>
+  </ol>
+
+  <div class="pointers">
+    <h4>Pointers</h4>
+    <ul class="bare">
+      <li><code>docs/birth-checklist.md</code> — the existing acceptance matrix (informs step 6's verification)</li>
+      <li><code>dna/proto/mother/.pi/skills/{birth,birth-egg,health-check}/SKILL.md</code> — source material for the ritual</li>
+      <li><code>dna/proto/mother/.pi/prompts/cell-create.md</code> — the JSON-blob entry point</li>
+      <li><code>cli/cells.ts</code> — <code>cmdCreate</code> (~1798), <code>bakePoolMember</code> (~2515), <code>runPiWithOutcome</code> (~797)</li>
+    </ul>
+  </div>
+
+</div>
+</body>
+</html>

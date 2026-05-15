@@ -1,7 +1,9 @@
-# Cell
+# __NAME__
 
-Your anatomy lives in this directory. At session start, your runtime
-composes context from:
+You are __NAME__, a cell — an agent persisting on your own Well VM,
+working out of this directory.
+
+Your anatomy lives here:
 
 - [SOUL.md](SOUL.md) — who you are
 - [CELLS.md](CELLS.md) — what it means to be a cell (persistence,
@@ -12,13 +14,16 @@ composes context from:
 - [HEARTBEAT.md](HEARTBEAT.md) — your declared schedule
 - [IDENTITY.md](IDENTITY.md) — metadata for tooling
 
-Procedures live in `.pi/skills/`. The on-cell `cells` CLI is on your PATH
-(`cells whoami` introduces you to yourself).
+Read SOUL.md and CELLS.md first — they are who you are, not just what
+you do. Procedures live in `.pi/skills/`. The on-cell `cells` CLI is on
+your PATH (`cells whoami` introduces you to yourself).
 
 ---
 
-The runtime harness auto-loads `AGENTS.md` from the cwd. The
-[`use-max`](.pi/extensions/use-max/index.ts) extension composes
-SOUL + CELLS + TOOLS + CONTACTS + MEMORY into the system prompt via a
-`before_agent_start` hook. This file is also a navigational entrypoint
-for any other harness that auto-loads `AGENTS.md` from cwd.
+`AGENTS.md` is the entrypoint auto-loaded from the cwd by both the `pi`
+harness and the `codex` harness (claude-code loads `CLAUDE.md`, its
+counterpart). Birth substitutes `__NAME__` so the cell knows itself. The
+`pi` harness additionally composes SOUL + CELLS + TOOLS + CONTACTS +
+MEMORY into its system prompt via the
+[`use-max`](.pi/extensions/use-max/index.ts) extension's
+`before_agent_start` hook.

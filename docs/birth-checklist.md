@@ -1,8 +1,13 @@
 # Birth checklist
 
-A deterministic checklist for verifying that `cells birth` works across all the dimensions a user can pick. Run top-to-bottom; each section gates the next. If a step fails, stop and fix before continuing — partial passes are noise.
+A one-shot acceptance pass for `cells birth` across the dimensions a user can pick. Run top-to-bottom; each section gates the next. If a step fails, stop and fix before continuing — partial passes are noise.
 
-This is not the harden-birth loop (`/harden-birth`) — that runs continuously to catch flakes. This is a one-shot acceptance pass: when this whole doc passes clean, birth is shippable for the matrix it covers.
+This is the **manual** acceptance pass. The **automated** path is the eval loop:
+
+- `bun scripts/eval-birth.ts --combo=<id> --repeat=N --talk-verify` — targeted: one combo, N times, with assertions (birth exits 0, `born-<name>` checkpoint landed, `settings.json` on the well has no surviving `__…__` placeholder and its `default*` fields agree with `modelChain[0]`, registry flips alive, talk round-trips, kill leaves nothing behind).
+- `bun scripts/harden-birth.ts --combos=N` — matrix sweep: picks N combos, births them, verifies, kills, writes a JSON run record.
+
+When the eval loop is green across two consecutive sweeps **and** this manual checklist passes, birth is shippable for the matrix it covers.
 
 ## 0. Setup once
 
@@ -12,115 +17,101 @@ This is not the harden-birth loop (`/harden-birth`) — that runs continuously t
 
 ## 1. Pre-flight — substrate health
 
-These check welld + lume + the cell-base image are alive and the operator's machine is in a fit state to birth anything at all.
+These check welld + lume + the egg pool are alive and the operator's machine is in a fit state to birth anything at all.
 
-- [ ] `curl -s http://127.0.0.1:7878/healthz | jq` → `ok: true`, `degraded: false`, `respawns_last_5min: 0`
-- [ ] `well doctor` exits 0 (`RESULT: wells is HEALTHY`)
-- [ ] `well image list` shows `cell-base` (any age, any size)
-- [ ] `~/.cells/secrets.json` exists and has at minimum `CELLS_PROXY_SECRET`, `CLOUDFLARE_API_TOKEN`, `CLOUDFLARE_ACCOUNT_ID` (Slack tokens too if you'll exercise the slack row in §3)
-- [ ] `~/.wells/token` exists (welld API bearer; auto-generated on welld first-start, separate from secrets.json)
+- [ ] `curl -s http://127.0.0.1:7878/healthz | jq` → `ok: true`, `degraded: false`
+- [ ] `well doctor` exits 0 and is not VM-saturated (`VMs:` count well under the host ceiling)
+- [ ] host-bridge healthy: `curl -s http://127.0.0.1:7880/healthz | jq` → `ok: true`
+- [ ] `~/.cells/secrets.json` has at minimum `CELLS_PROXY_SECRET`, `CLOUDFLARE_API_TOKEN`, `CLOUDFLARE_ACCOUNT_ID` (Slack tokens too if you'll exercise the slack row; `ANTHROPIC_API_KEY` if you'll birth a `pi` cell on an Anthropic model)
+- [ ] `~/.wells/token` exists (welld API bearer; auto-generated on welld first-start)
 - [ ] `cat ~/.cells/config.json` shows `well_public_base: "cells.md"`
 - [ ] Cloudflared tunnel running: `pgrep -f cloudflared`
 - [ ] Mother cell talkable: `bun cli/cells.ts talk mother "say ok" -p` returns within 30s
 
 If any of these fail, fix substrate before touching birth.
 
-## 2. Bake verification — cell-base actually has what birth assumes
+## 2. Pool verification — a warm egg has what birth assumes
 
-Birth's prose says cell-base ships "bun, pi-coding-agent, terminal toolkit, the DNA at `/cell` (with placeholders intact), `bun install` done, pi-ai patches applied, and `/etc/profile.d/cells-env.sh` shim in place." That has historically lied. Verify before betting on it.
+Birth claims a generic egg from the pool and never installs anything — so the egg must already ship the toolchain, both harnesses, the DNA with placeholders intact, and the env shim. Verify a freshly-baked warm egg before betting on it.
 
-Fork a throwaway well from cell-base and inspect:
+- [ ] `bun cli/cells.ts pool refill` brings the pool to depth; `jq '[.members[]|select(.state!="live")]|length' ~/.cells/pool.json` ≥ 1
+- [ ] Pick a warm egg's `well_name` and resolve its IP with `well info -s <egg> --json`
+- [ ] `well exec -s <egg> -- bash -c 'grep -c CELLS_PROXY_SECRET /etc/environment'` ≥ 1
+- [ ] `well exec -s <egg> -- bash -c 'test -f /etc/profile.d/cells-env.sh && echo OK'` prints `OK`
+- [ ] `well exec -s <egg> -- bash -c 'which pi && which claude'` shows both harnesses present
+- [ ] `well exec -s <egg> -- bash -c 'ls /cell/'` shows the DNA root (AGENTS.md, CLAUDE.md, SOUL.md, IDENTITY.md, .pi/, .claude/, site/, scripts/, package.json, bin/)
+- [ ] `well exec -s <egg> -- bash -c 'grep -l "__[A-Z_]*__" /cell/.pi/settings.json /cell/.claude/settings.json /cell/package.json'` — placeholders **intact** on a warm egg (birth substitutes them)
+- [ ] `well exec -s <egg> -- bash -c 'grep -c CELL_NAME /etc/environment'` returns `0` — no baked identity (the egg is generic)
 
-- [ ] `well create bake-verify --from-image cell-base --env CELLS_PROXY_SECRET=$SECRET` succeeds
-- [ ] `well exec -s bake-verify -- bash -c 'cat /etc/environment | grep CELLS_PROXY_SECRET'` returns the secret (well-firstboot lands `--env` passthroughs into `/etc/environment` — gated on W.27 today)
-- [ ] `well exec -s bake-verify -- bash -c 'test -f /etc/profile.d/cells-env.sh && echo OK'` prints `OK` (env shim that re-exports CELLS_PROXY_SECRET as ANTHROPIC_OAUTH_TOKEN / ANTHROPIC_AUTH_TOKEN / OPENAI_CODEX_API_KEY)
-- [ ] `well exec -s bake-verify -- bash -c 'ls /cell/'` shows the DNA root (AGENTS.md, SOUL.md, IDENTITY.md, .pi/, site/, scripts/, package.json, node_modules/, .tmux.conf, bin/)
-- [ ] `well exec -s bake-verify -- id cell` returns `uid=1002(cell) gid=1002(cell) groups=1002(cell),27(sudo)` (the tenant user)
-- [ ] `well exec -s bake-verify -- stat -c '%U:%G %a' /cell` returns `cell:cell 755` (cell-owned, others-readable)
-- [ ] `well exec -s bake-verify -- bash -c 'ls /cell/node_modules/@mariozechner/' | wc -l` is non-zero (bun install was done in bake)
-- [ ] `well exec -s bake-verify -- bash -c 'grep -c "" /cell/.pi/settings.json'` shows `__NAME__` / `__MODEL__` / `__PROVIDER__` placeholders intact
-- [ ] `well exec -s bake-verify -- bash -lc 'source /etc/profile.d/cells-env.sh && echo OPENAI_CODEX_API_KEY=${OPENAI_CODEX_API_KEY:0:14}'` — should print 14 chars (not empty), gated on W.27 landing
-
-Cleanup: `well destroy bake-verify --yes`
-
-If any fail, the bake is incomplete — re-bake (`cells bake --force`) before continuing. Don't paper over with manual pushes.
+If any fail, the bake is incomplete — `cells pool drain -y && cells pool refill` and re-verify.
 
 ## 3. Birth matrix — by harness × model × thinking
 
-For each combination below, run `bun cli/cells.ts birth <name> [flags]` and let mother do the work. Each row's expected outcome is "Agent `<name>` is alive" and ≤ 6 minutes wall-clock.
+The automated sweep (`scripts/eval-birth.ts` / `scripts/harden-birth.ts`, see the `COMBOS` list) is the source of truth for the matrix. For a manual pass, exercise at least one row per axis:
 
-| Cell name           | Flags                                                        | Tests                                              |
-|---------------------|--------------------------------------------------------------|----------------------------------------------------|
-| ck-pi-gpt55         | `--harness=pi --model=gpt-5.5`                               | Default-shape birth (fastest model that works)     |
-| ck-pi-gpt55-pro     | `--harness=pi --model=gpt-5.5-pro`                           | gpt-5.5-pro path through codex-proxy               |
-| ck-pi-deepseek-pro  | `--harness=pi --model=deepseek-v4-pro --thinking=high`       | Deepseek pro path                                  |
-| ck-pi-deepseek-fl   | `--harness=pi --model=deepseek-v4-flash`                     | Deepseek flash path                                |
-| ck-pi-think-low     | `--harness=pi --model=gpt-5.5 --thinking=low`                | Thinking level honored in `.pi/settings.json`      |
-| ck-pi-think-adapt   | `--harness=pi --model=gpt-5.5 --thinking=adaptive`           | Adaptive (model decides); pi-coding-agent patches needed |
-| ck-pi-ext-memory    | `--harness=pi --model=gpt-5.5 --extensions=memory`           | Extension installed, others pruned                 |
-| ck-pi-ext-many      | `--harness=pi --model=gpt-5.5 --extensions=memory,wiki,dream`| Multi-extension                                    |
-| ck-pi-pkg-web       | `--harness=pi --model=gpt-5.5 --packages=pi-web-access`      | Optional pi package install via `pi install`       |
-| ck-pi-slack         | `--harness=pi --model=gpt-5.5 --channels=slack`              | Auto-creates `#cells-ck-pi-slack`, binds, mirrors  |
-| ck-pi-tui           | (no flags — interactive TUI walks defaults)                  | Sanity check the picker UX                         |
+| Cell name        | Flags                                                          | Tests                                          |
+|------------------|----------------------------------------------------------------|------------------------------------------------|
+| ck-smoke         | `--harness=pi --model=gpt-5.5 --thinking=low`                  | Baseline — the free subscription path          |
+| ck-deepseek      | `--harness=pi --model=deepseek-v4-flash --thinking=low`        | Direct-API-key model path                      |
+| ck-think-high    | `--harness=pi --model=gpt-5.5 --thinking=high`                 | Thinking level honored in `.pi/settings.json`  |
+| ck-ext-memory    | `--harness=pi --model=gpt-5.5 --extensions=memory`             | Extension switched on, others left on disk     |
+| ck-slack         | `--harness=pi --model=gpt-5.5 --channels=slack`                | Auto-creates `#cells-ck-slack`, binds, mirrors |
+| ck-cc-opus       | `--harness=claude-code --model=opus --thinking=high`           | claude-code harness — Anthropic model via Max  |
+| ck-tui           | (no flags — interactive picker walks defaults)                 | Sanity check the picker UX                     |
 
-For each row, run section §4 immediately after birth before moving on.
+For each row, run §4 immediately after birth before moving on.
 
-**Anthropic models (`opus`, `sonnet`, `haiku`) are deliberately omitted from this matrix.** The pi harness on a cell IP gets terminated by Anthropic's OAuth detection — Pete's Claude Max subscription is at ban risk if we exercise that path. Anthropic models will be re-enabled in a future phase only via the Claude Code harness (which sends genuinely Claude-Code bytes, not pi-emulated). Until then: don't birth Anthropic-routed cells.
+`pi` cells reach Anthropic models via a paid `ANTHROPIC_API_KEY` (direct, clean). The Claude Max subscription is reachable only through the `claude-code` harness — genuine Claude Code traffic via `proxy.cells.md`. pi-via-Max is fingerprint-dead; don't birth a `pi` cell expecting Max.
 
 ## 4. Per-birth verification
 
-Run for each cell birthed in §3, in order:
+Run for each cell birthed in §3. The cell's well is the egg's `well_name` (resolve via `hatched_from` → `pool.json`), not the cell name.
 
-- [ ] Outcome reported: `cells list | grep <name>` shows status `alive`
-- [ ] Step 4b verify hit (re-read `~/.cells/logs/birth-timings/<name>.log`) — should include lines for steps 1, 2, 3, 3b-3e, 4, 4b, 5, 6, 7, 8 in order. No step skipped
-- [ ] Env landed: `well exec -s <name> -- bash -c 'grep -q CELLS_PROXY_SECRET /etc/environment && echo OK'` prints `OK`
-- [ ] Identity substituted: `well exec -s <name> -- bash -c 'grep -c __NAME__ /cell/IDENTITY.md /cell/.pi/settings.json'` returns `0` for both files (no leftover placeholders)
-- [ ] `well exec -s <name> -- bash -c 'cat /cell/.pi/status.json | jq -r .harness'` matches the requested harness
-- [ ] Tmux color set: `well exec -s <name> -- bash -c 'grep -c __CELL_BG__ /cell/.tmux.conf'` returns `0`
-- [ ] Site service running: `well exec -s <name> -- bash -c 'curl -s -o /dev/null -w "%{http_code}\n" http://localhost:8080/'` returns `200`
-- [ ] CF Worker deployed: `curl -s -H "Authorization: Bearer $SECRET" https://<name>.cells.md/debug | jq -r .well` returns `<name>.cells.md`
-- [ ] **Talk smoke**: `bun cli/cells.ts talk <name> "reply with just the word ok" 2>&1 | tail -3` shows `<name>> ok` within 30s
-- [ ] If row has `--channels=slack`: Slack channel `#cells-<name>` exists; channel binding visible in `cells channel list`
-- [ ] If row has `--extensions=...`: `well exec -s <name> -- bash -c 'jq .extensions /cell/.pi/settings.json'` includes only the requested extensions plus the always-on five (`use-max`, `codex-proxy`, `self`, `thinking`, `heartbeat-watch`)
-- [ ] If row has `--packages=pi-web-access`: `well exec -s <name> -- bash -c 'pi list 2>&1 | grep pi-web-access'` shows it installed
+- [ ] `cells list | grep <name>` shows status `alive`
+- [ ] `well checkpoint list -s <egg-well>` includes a `born-<name>` checkpoint (ritual step 7 / c5)
+- [ ] No surviving placeholders: `well exec -s <egg-well> -- bash -c 'grep -rl "__[A-Z_]*__" /cell/*.md /cell/.pi/settings.json /cell/.claude/settings.json /cell/package.json'` returns nothing
+- [ ] For a `pi` cell: `well exec -s <egg-well> -- bash -c 'cat /cell/.pi/settings.json'` — `defaultProvider`/`defaultModel`/`defaultThinkingLevel` agree with `modelChain[0]`
+- [ ] For a `claude-code` cell: `well exec -s <egg-well> -- bash -c 'cat /cell/.claude/settings.json'` — `model` + `effortLevel` substituted, `env.ANTHROPIC_BASE_URL` present
+- [ ] `well exec -s <egg-well> -- bash -c 'cat /cell/.pi/status.json | jq -r .harness'` matches the requested harness
+- [ ] Site service: `well exec -s <egg-well> -- bash -c 'curl -s -o /dev/null -w "%{http_code}" http://localhost:8080/'` returns `200`
+- [ ] **Talk smoke**: `bun cli/cells.ts talk <name> "reply with just the word ok"` shows `<name>> ok` (connects via the local bridge)
+- [ ] If `--channels=slack`: Slack channel `#cells-<name>` exists and the binding shows in `cells channel list`
+- [ ] If `--extensions=...`: `well exec -s <egg-well> -- bash -c 'jq .extensions /cell/.pi/settings.json'` lists exactly the requested extensions plus the always-on baseline
 
 ## 5. Lifecycle
 
-After all rows in §3-§4 are green, exercise the rest of the lifecycle on one cell (`ck-pi-gpt55`):
+After §3–§4 are green, exercise the rest of the lifecycle on one cell (`ck-smoke`):
 
-- [ ] `cells sleep ck-pi-gpt55` → `cells list` shows `hibernating`
-- [ ] `cells talk ck-pi-gpt55 "still here?"` wakes the cell and replies within 60s
-- [ ] `cells stop ck-pi-gpt55` → `cells list` shows `stopped`
-- [ ] `cells wake ck-pi-gpt55` → returns to `alive`
-- [ ] `cells checkpoint ck-pi-gpt55` succeeds
-- [ ] `cells see ck-pi-gpt55` opens the browser to `https://ck-pi-gpt55.cells.md` (manual eyeball: page renders)
+- [ ] `cells sleep ck-smoke` → `cells list` shows `hibernating`
+- [ ] `cells talk ck-smoke "still here?"` wakes the cell and replies within 60s
+- [ ] `cells stop ck-smoke` → `cells list` shows `stopped`
+- [ ] `cells wake ck-smoke` → returns to `alive`
+- [ ] `cells checkpoint ck-smoke` succeeds
 
 ## 6. Cleanup
 
-`cells kill ck-pi-gpt55 ck-pi-gpt55-pro ck-pi-deepseek-pro ck-pi-deepseek-fl ck-pi-think-low ck-pi-think-adapt ck-pi-ext-memory ck-pi-ext-many ck-pi-pkg-web ck-pi-slack ck-pi-tui --yes`
+`cells kill ck-smoke ck-deepseek ck-think-high ck-ext-memory ck-slack ck-cc-opus ck-tui --yes`
 
-Verify clean:
+Verify clean (kill is deterministic — `well destroy --force` + local sweep):
 
 - [ ] `cells list` empty of `ck-*` cells
-- [ ] `well list` empty of `ck-*` wells
-- [ ] `~/.cells/logs/birth-timings/ck-*.log` deleted (kill should sweep these; if not, file a bug)
+- [ ] `well list` empty of `ck-*` / their `egg-*` wells
+- [ ] `pool.json` has no `live` members pointing at the killed cells
 - [ ] `~/Obsidian/cells/ck-*/` directories absent
-- [ ] No CF Workers named `cells-front-ck-*` (`bunx wrangler deployments list 2>/dev/null | grep ck-`)
+- [ ] No CF Workers named `cells-front-ck-*`
 
 ## 7. Sign-off
 
-When all of §1-§6 pass clean in a single run, birth is shippable for the harness=pi matrix. Tag the run in `state/memory/project_cells_activity.md`:
+When §1–§6 pass clean in a single run, birth is shippable for the matrix it covers. Tag the run in `state/memory/project_cells_activity.md`:
 
 ```
-<UTC date HH:MM>  birth-checklist-pass  <commit-sha>  matrix=pi×11rows
+<UTC date HH:MM>  birth-checklist-pass  <commit-sha>  matrix=<rows exercised>
 ```
 
-If any row failed, the failure mode + which row goes in the same line — incomplete checklist passes are signal worth keeping.
+If any row failed, the failure mode + which row goes in the same line — incomplete passes are signal worth keeping.
 
 ## What this doesn't cover (yet)
 
-- `harness=claude-code` — stubbed, not in v1 matrix
-- `harness=codex` — stubbed, not in v1 matrix
-- Off-Mac talk path (`wss://<name>.cells.md/agent`) — known broken on the per-cell CF Worker (1002 protocol error). Surface it when it comes up
-- Eggs (pre-warmed cell pool) — see `docs/eggs.md`; separate checklist when shipped
-- `cells dream`, `cells refresh-extensions`, `cells channel link` to legacy IDs — exercise as needed but not gating
+- Off-Mac talk path (`wss://<name>.cells.md/agent`) via the per-cell CF Worker — exercise when it comes up
+- `harness=codex` — still stubbed, not wired
+- `cells dream`, `cells refresh-extensions` — exercise as needed but not gating

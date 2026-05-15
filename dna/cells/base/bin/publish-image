@@ -1,0 +1,54 @@
+#!/usr/bin/env bash
+# publish-image — upload an image to Cloudflare Images, print its URL.
+#
+# A cell can't serve large image files from its own site: the snapshot
+# its Worker holds caps each file at ~96 KB. So when you make an image,
+# don't drop it in site/public/ — generate it anywhere, publish-image
+# it, and reference the URL it prints.
+#
+#   $ publish-image diagram.png
+#   https://imagedelivery.net/<hash>/<id>/public
+#
+# The upload goes through this cell's own Worker (<name>.cells.md), which
+# holds the Cloudflare credential — it never lives on the cell.
+#
+# Usage: publish-image <path-to-image>
+set -euo pipefail
+
+FILE="${1:?usage: publish-image <path-to-image>}"
+[ -f "$FILE" ] || { echo "publish-image: no such file: $FILE" >&2; exit 1; }
+
+# CELLS_PROXY_SECRET is normally in the environment (/etc/environment);
+# fall back to the profile.d shim if a non-login context dropped it.
+if [ -z "${CELLS_PROXY_SECRET:-}" ] && [ -f /etc/profile.d/cells-env.sh ]; then
+  # shellcheck disable=SC1091
+  . /etc/profile.d/cells-env.sh
+fi
+[ -n "${CELLS_PROXY_SECRET:-}" ] || { echo "publish-image: CELLS_PROXY_SECRET not set" >&2; exit 1; }
+
+# This cell's name — imprinted into /cell/package.json at birth. NOT
+# `hostname`: a pool-born cell keeps its generic egg-XXXXXX well hostname.
+NAME=$(jq -r '.name // empty' /cell/package.json 2>/dev/null || true)
+[ -n "$NAME" ] || { echo "publish-image: can't read cell name from /cell/package.json" >&2; exit 1; }
+
+MIME=$(file --mime-type -b "$FILE" 2>/dev/null || echo "application/octet-stream")
+BASENAME=$(basename "$FILE")
+
+TMP=$(mktemp)
+trap 'rm -f "$TMP"' EXIT
+
+CODE=$(curl -sS -X POST "https://${NAME}.cells.md/image/upload" \
+  -H "Authorization: Bearer ${CELLS_PROXY_SECRET}" \
+  -H "Content-Type: ${MIME}" \
+  -H "X-Filename: ${BASENAME}" \
+  --data-binary "@${FILE}" \
+  -o "$TMP" -w '%{http_code}') || { echo "publish-image: could not reach ${NAME}.cells.md" >&2; exit 1; }
+
+if [ "$CODE" != "200" ]; then
+  echo "publish-image: upload failed (HTTP $CODE): $(cat "$TMP")" >&2
+  exit 1
+fi
+
+URL=$(jq -r '.url // empty' "$TMP" 2>/dev/null || true)
+[ -n "$URL" ] || { echo "publish-image: no URL in response: $(cat "$TMP")" >&2; exit 1; }
+echo "$URL"

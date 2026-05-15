@@ -1,0 +1,145 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Adding the claude-code harness</title>
+<link rel="stylesheet" href="../_assets/doc.css">
+</head>
+<body>
+<div class="page">
+
+  <div class="doc-header">
+    <div class="crumb">cells <span class="sep">/</span> proposals <span class="sep">/</span> claude-code harness</div>
+    <div>2026-05-14</div>
+  </div>
+
+  <h1>Adding the claude-code harness</h1>
+  <p class="subtitle">A second harness — the coding machine. Claude on the Max subscription, through the existing proxy.</p>
+
+  <div class="callout">
+    <div class="label">Implemented — 2026-05-14</div>
+    <p>Code-complete. The egg ships <code>CLAUDE.md</code> + <code>.claude/settings.json</code>, the birthing ritual has the claude-code branch (<code>c1</code>–<code>c7</code>), and host-bridge's <code>HarnessAdapter</code> spawns <code>claude</code> in stream-json mode and translates its event stream to the talk CLI's vocabulary. The Phase 0 spike confirmed Q1 (Max path) and Option A (stream-json). Remaining: end-to-end birth + talk verification.</p>
+  </div>
+
+  <div class="toc">
+    <h4>Contents</h4>
+    <ol>
+      <li><a href="#what">What claude-code is (and isn't)</a></li>
+      <li><a href="#max">How Max works with it — the proxy, unchanged</a></li>
+      <li><a href="#egg">What's on the egg</a></li>
+      <li><a href="#branch">The birth ritual branch</a></li>
+      <li><a href="#blob">The config blob, by harness</a></li>
+      <li><a href="#hostbridge">host-bridge — the real work</a></li>
+      <li><a href="#sequence">Build sequence</a></li>
+    </ol>
+  </div>
+
+  <h2 id="what">What claude-code is (and isn't)</h2>
+
+  <p>A cell's harness now has two shapes, and they are genuinely different — not the same cell with a flag flipped.</p>
+
+  <dl class="kv">
+    <dt>A <code>pi</code> cell</dt>
+    <dd>The full agent. Packages, extensions, channels (Slack/email), a web presence, a model fallback chain. The rich "cell."</dd>
+    <dt>A <code>claude-code</code> cell</dt>
+    <dd>A <strong>coding machine</strong>. The <code>claude</code> CLI + an Anthropic model on the Max subscription + codebase access. It doesn't get the cells-project capability stack — no packages, no extensions, none of the cells-side Slack/email machinery. Any channels a claude-code cell has come through Claude Code's own integration surface (MCP servers and the like) — the harness's domain, not birth's. You talk to it, it codes.</dd>
+  </dl>
+
+  <p>claude-code is, in effect, <strong>the Anthropic-model harness</strong>. It exists to run Claude on the Max subscription, legitimately. A pi cell covers every other model and every other capability.</p>
+
+  <h2 id="max">How Max works with it — the proxy, unchanged</h2>
+
+  <div class="callout">
+    <div class="label">The key finding</div>
+    <p><code>cli/proxy.ts</code> needs <strong>zero changes</strong>. It already does exactly what claude-code needs.</p>
+  </div>
+
+  <p>The subscriptions proxy already works like this: a client sends <code>Authorization: Bearer &lt;CELLS_PROXY_SECRET&gt;</code>; the proxy validates it, swaps in the real Max OAuth access token (read from <code>~/.pi/agent/auth.json</code>, kept fresh by the proxy's own refresh timer), and relays the request to <code>api.anthropic.com</code>. It self-heals on a 401.</p>
+
+  <p>The fingerprint problem was <strong>never the token</strong> — it's the request <em>shape</em>. pi's outbound request shape reads as agent/bot traffic; Anthropic's cat-and-mouse keys on that. claude-code's request shape <em>is</em> genuine Claude Code, because it is claude-code.</p>
+
+  <p>So a claude-code cell needs only two env values:</p>
+  <pre><code>ANTHROPIC_BASE_URL  = https://proxy.cells.md
+ANTHROPIC_AUTH_TOKEN = &lt;CELLS_PROXY_SECRET&gt;   # same shared secret pi cells use</code></pre>
+  <p>claude-code sends genuine Claude Code traffic to the proxy; the proxy swaps in the Max OAuth token and relays. Genuine traffic + the Max token = legitimate Max usage. The proxy is already the sole owner of OAuth refresh — nothing about that changes.</p>
+
+  <div class="callout info">
+    <p>Pi's Max access stays dead — Anthropic's fingerprinting killed it. pi cells route Anthropic models (if ever used) through a paid <code>ANTHROPIC_API_KEY</code> instead, which has zero OAuth-fingerprint surface. Max lives only on claude-code now.</p>
+  </div>
+
+  <h2 id="egg">What's on the egg</h2>
+
+  <p>One uniform generic egg, both harnesses baked on — consistent with "maximally pre-load, switch on at birth." Every egg ships:</p>
+  <ul>
+    <li><code>pi</code> + its <code>.pi/</code> config structure + the in-tree extensions and packages (as already planned)</li>
+    <li><code>claude</code> (the Claude Code CLI) + its <code>.claude/</code> config structure</li>
+    <li>The DNA identity files in both conventions — pi reads its set; claude-code reads <code>CLAUDE.md</code></li>
+  </ul>
+  <p>Birth <em>activates</em> one harness. It never installs one. No harness-sharded pools.</p>
+
+  <h2 id="branch">The birth ritual branch</h2>
+
+  <p>The config blob's <code>harness</code> field picks the branch. The pi branch is the full ritual. The claude-code branch is <strong>short</strong> — it skips packages, channels, and extensions entirely:</p>
+
+  <table>
+    <thead><tr><th>#</th><th>claude-code branch</th></tr></thead>
+    <tbody>
+      <tr><td class="num">1</td><td>Imprint identity — <code>__NAME__</code> into <code>CLAUDE.md</code> and the shared identity files; tmux color.</td></tr>
+      <tr><td class="num">2</td><td>Configure model + proxy — set <code>ANTHROPIC_BASE_URL</code> → <code>proxy.cells.md</code>, <code>ANTHROPIC_AUTH_TOKEN</code> → <code>CELLS_PROXY_SECRET</code>, and the chosen Anthropic model + thinking level in the <code>.claude/</code> config.</td></tr>
+      <tr><td class="num">3</td><td>Site service — register it so the cell is talkable + flip the well URL public.</td></tr>
+      <tr><td class="num">4</td><td>Verify — the end-test: env present, <code>claude</code> answers a prompt, site serves <code>200</code>.</td></tr>
+      <tr><td class="num">5</td><td>Checkpoint, report outcome, tell the user.</td></tr>
+    </tbody>
+  </table>
+  <p>No extensions step, no packages, no cells-side channel/cloud-edge wiring. If a claude-code cell talks to Slack, that's Claude Code's own integration doing it — not something birth sets up.</p>
+
+  <h2 id="blob">The config blob, by harness</h2>
+
+  <table>
+    <thead><tr><th>Field</th><th><code>pi</code></th><th><code>claude-code</code></th></tr></thead>
+    <tbody>
+      <tr><td><code>harness</code></td><td><code>pi</code></td><td><code>claude-code</code></td></tr>
+      <tr><td><code>model</code></td><td>any non-Anthropic (Anthropic via API key)</td><td>Anthropic only — <code>opus</code> / <code>sonnet</code> / <code>haiku</code></td></tr>
+      <tr><td><code>thinking</code></td><td>✓</td><td>✓</td></tr>
+      <tr><td><code>extensions</code></td><td>✓</td><td>—</td></tr>
+      <tr><td><code>packages</code></td><td>✓</td><td>—</td></tr>
+      <tr><td><code>channels</code></td><td>✓ (slack / email)</td><td>—</td></tr>
+      <tr><td><code>chain</code></td><td>✓ (fallback chain)</td><td>—</td></tr>
+    </tbody>
+  </table>
+  <p><code>provider</code> is gone from the blob entirely — it's derived from <code>model</code> for both harnesses. The <code>—</code> entries for claude-code mean "not a cells-blob concern," not "unavailable" — extensions and packages don't apply, and channels, if a claude-code cell has them, come from Claude Code's own integrations, configured outside the birth blob.</p>
+
+  <h2 id="hostbridge">host-bridge — the real work</h2>
+
+  <p>This is the one substantial piece. <code>cli/host-bridge.ts</code> is hardcoded to spawn <code>pi --mode rpc</code> and speaks pi's RPC protocol end to end — the <code>switch_session</code> handshake, <code>set_model</code> / <code>set_thinking_level</code> RPCs, the JSON command stream.</p>
+
+  <p>A claude-code cell needs a <code>CellSession</code> variant that spawns <code>claude</code> instead, and translates between the cells talk WebSocket protocol and claude-code's headless protocol. host-bridge already resolves the cell's record from <code>cells.json</code> — it just needs to read the <code>harness</code> field and branch.</p>
+
+  <div class="callout warn">
+    <div class="label">Needs a spike</div>
+    <p>The exact claude-code integration shape — driving the CLI in a streaming JSON mode vs. embedding the Claude Agent SDK — should be pinned down with a short spike before committing to host-bridge changes. This is the one genuinely unknown piece; everything else above is mechanical.</p>
+  </div>
+
+  <h2 id="sequence">Build sequence</h2>
+  <ol>
+    <li><strong>Spike.</strong> Drive <code>claude</code> headless from a script on the Mac, pointed at <code>proxy.cells.md</code> with <code>CELLS_PROXY_SECRET</code>. Prove two things: the Max path works (genuine traffic passes), and the protocol shape host-bridge will speak.</li>
+    <li><strong>Egg.</strong> Bake <code>claude</code> + the <code>.claude/</code> structure onto the generic egg, alongside pi.</li>
+    <li><strong>host-bridge.</strong> A claude-code <code>CellSession</code> — spawn <code>claude</code>, translate the protocol.</li>
+    <li><strong>Birth ritual.</strong> Add the claude-code branch to <code>docs/birthing-ritual.html</code>.</li>
+    <li><strong>CLI + prompt.</strong> Make <code>cmdCreate</code> and <code>cell-create.md</code> harness-aware — the blob shape depends on the harness.</li>
+  </ol>
+
+  <div class="pointers">
+    <h4>Pointers</h4>
+    <ul class="bare">
+      <li><code>cli/proxy.ts</code> — the subscriptions proxy (<code>checkClientAuth</code>, <code>handleApiProxy</code>) — reused as-is</li>
+      <li><code>docs/oauth-refresh.md</code> — the proxy's OAuth-refresh contract</li>
+      <li><code>cli/host-bridge.ts</code> — the pi-only talk path that needs a claude-code branch</li>
+      <li><code>docs/birthing-ritual.html</code> — the ritual that gets the harness branch</li>
+    </ul>
+  </div>
+
+</div>
+</body>
+</html>

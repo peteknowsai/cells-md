@@ -1,0 +1,184 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Cells — Board</title>
+<link rel="stylesheet" href="docs/_assets/doc.css">
+</head>
+<body>
+<div class="page">
+
+  <div class="doc-header">
+    <div class="crumb">cells <span class="sep">/</span> board</div>
+    <div>Updated 2026-05-13</div>
+  </div>
+
+  <h1>Cells — Board</h1>
+  <p class="subtitle">In progress, todo, follow-ups, and the done log.</p>
+
+  <div class="callout">
+    <div class="label">Conventions</div>
+    <p>Task IDs <code>V{phase}.{n}</code> for new work, legacy <code>P{phase}.{n}</code> for deferred items. Owner: <code>worker</code>, <code>steward</code>, or <code>pete</code>.</p>
+    <p>Test wells use prefixes <code>ck-</code> (checklist), <code>wk-</code> (worker experiments), <code>nt-</code> (night experiments). Never touch <code>mother</code>, <code>smoke-*</code> (Pete's manual smoke wells), or any cell with status <code>alive</code> and a real channel binding.</p>
+  </div>
+
+  <div class="callout warn">
+    <div class="label">Model policy</div>
+    <p>Anthropic models (opus / sonnet / haiku) are out-of-bounds for cells until the Claude Code harness ships — they trip Pete's Claude Max OAuth fingerprint detection. Default cell model chain: <code>openai-codex/gpt-5.5:high → deepseek-v4-pro:high</code>.</p>
+  </div>
+
+  <h2>In progress</h2>
+  <p class="subtitle">none — V1 stamped, boundary cleanup closed. Next epoch is V2 design.</p>
+
+  <h2>Blocked</h2>
+  <p class="subtitle">empty.</p>
+
+  <h2>Todo (priority order)</h2>
+
+  <h3>Phase v2 — Personality + identity layers</h3>
+  <p>When the user wants a specific kind of cell (CoS, Researcher, etc.), layer personality + per-instance identity on top of the generic cell. Streams in during turn 1, takes effect from turn 2.</p>
+  <div class="card">
+    <div class="task"><span class="id">V2.1</span><span class="status"><span class="badge todo">todo</span></span><span class="body">Define <strong>Chief of Staff personality template</strong> (system prompt, persona, default behaviors). Bake into cell-base alongside the generic identity, opt-in via flag at birth.<span class="note">Owner: <code>pete</code> + <code>worker</code></span></span></div>
+    <div class="task"><span class="id">V2.2</span><span class="status"><span class="badge todo">todo</span></span><span class="body"><strong>Per-instance bind payload</strong>: name, color, owner identity (slack handle, email), bound channel. Surfaced via <code>--bind=…</code> flag at birth or <code>cells bind &lt;name&gt;</code> command.</span></div>
+    <div class="task"><span class="id">V2.3</span><span class="status"><span class="badge todo">todo</span></span><span class="body"><strong>"Become" extension in DNA.</strong> Runtime identity injection without pi restart. Pi accepts a <code>/become</code> message, updates internal state, future turns use new identity.</span></div>
+    <div class="task"><span class="id">V2.4</span><span class="status"><span class="badge todo">todo</span></span><span class="body"><strong>Hot-reload of personality MD</strong> during turn 1 (while user reads the generic greeting). Takes effect on turn 2's LLM call.</span></div>
+  </div>
+
+  <h3>Phase v3 — Cloud lifecycle + polish</h3>
+  <div class="card">
+    <div class="task"><span class="id">V3.1</span><span class="status"><span class="badge deferred">deferred</span></span><span class="body"><strong>CF Worker reliable WS upgrade</strong> (was old P5.1/P5.2). Per-cell <code>wss://&lt;name&gt;.cells.md/agent</code> returns 101 cleanly and proxies WS messages bidirectionally.</span></div>
+    <div class="task"><span class="id">V3.2</span><span class="status"><span class="badge deferred">deferred</span></span><span class="body"><strong>Slack channel binding</strong>: <code>#cells-&lt;name&gt;</code> created automatically; inbound/outbound messages mirror between Slack and the cell's talk session.</span></div>
+    <div class="task"><span class="id">V3.3</span><span class="status"><span class="badge deferred">deferred</span></span><span class="body"><strong>Vault markdown sync</strong>: cell's IDENTITY.md, CELLS.md, SOUL.md sync to <code>~/Obsidian/cells/&lt;name&gt;/</code> on schedule.</span></div>
+    <div class="task"><span class="id">V3.4</span><span class="status"><span class="badge deferred">deferred</span></span><span class="body"><strong>Multi-device access verified</strong>: from iPhone Mac browser, <code>wss://&lt;name&gt;.cells.md/agent</code> opens, prompt round-trips, closes clean.</span></div>
+    <div class="task"><span class="id">V3.5</span><span class="status"><span class="badge deferred">deferred</span></span><span class="body"><strong>Mother's post-talk birth ritual</strong> runs async in tailPromise: deploys CF Worker, binds Slack, saves vault, records memory.</span></div>
+  </div>
+
+  <h3>Cells follow-ups (worker-discovered)</h3>
+  <div class="card">
+    <div class="task"><span class="id">C.1</span><span class="status"><span class="badge warn">known gap</span></span><span class="body"><strong>Legacy-cell compat</strong> for <code>cells tui</code> / <code>shell</code> / <code>dream</code> / <code>refresh-extensions</code> — wrapped in <code>sudo -u cell</code>, works for /cell cells but breaks for pre-migration cells (<code>smoke-8</code>, <code>smoke-6</code>). Pete's plan is kill-and-rebirth, no in-place migration. Stays as known gap until legacy cells are killed.</span></div>
+  </div>
+
+  <h3>Wells follow-ups (surface to team)</h3>
+  <div class="card">
+    <div class="task"><span class="id">W.28</span><span class="status"><span class="badge info">needs-wells</span></span><span class="body"><code>ServiceDefinition</code> schema (<code>wells/lib/schemas.ts</code>) doesn't expose a <code>user</code> field; <code>composeUnit</code> hardcodes <code>User=ubuntu</code>. Cells works around in <code>register-site-service.sh</code> via <code>sudo -u cell bash -c '...'</code>. A native <code>user: "cell"</code> field would obviate the wrap.<span class="note">Surfaced 2026-05-10. Low priority — workaround is stable.</span></span></div>
+  </div>
+
+  <h2>Closed work</h2>
+
+  <details>
+    <summary>Phase v1 — Magical generic cell <span class="badge shipped">stamped 2026-05-13 · 10/10 ✓</span></summary>
+    <div class="body">
+      <p>Re-verified on the wells-stable-2026-05-13 substrate (W.73 SSH-ready resurrect + W.74 per-VM XPC kill + W.77 diagnostic, W.76 reverted). Cells code: <code>V1_HOT_POOL_TARGET = V1_POOL_TARGET_DEPTH = 10</code> (pure-hot v1) and <code>bakeV1Egg</code> passes <code>hibernate_ready: true</code> for all pool bakes so user-side <code>cells sleep</code> always works.</p>
+
+      <h4>Implementation steps</h4>
+      <table>
+        <thead><tr><th>ID</th><th>Description</th><th>Done</th></tr></thead>
+        <tbody>
+          <tr><td>V1.STEP1</td><td>Bake canned generic cell identity into cell-base. <code>dna/{proto,cells/base}</code> restructure.</td><td class="num">2026-05-10 21:24 MT · c3a1bbc</td></tr>
+          <tr><td>V1.STEP2</td><td>Refactor <code>cmdCreate</code> fast-path: deterministic TS, no mother in critical path. Auto-name <code>cell-&lt;6hex&gt;</code>.</td><td class="num">2026-05-10 21:34 MT · 687a399</td></tr>
+          <tr><td>V1.STEP3</td><td>Hibernated cell-base pool (Tier 2). <code>bakeV1Egg</code>, <code>consumeV1Egg</code>, <code>wakeV1Egg</code>. Pool-first birth ~2s perceived vs 10s cold-fork.</td><td class="num">2026-05-10 21:51 MT</td></tr>
+          <tr><td>V1.STEP4</td><td>React Ink birth-animation component. 4 stages × 750ms, fleet color, TTY-gated, dynamic import for <code>cmdCreateV1Fast</code>.</td><td class="num">2026-05-10 22:10 MT</td></tr>
+          <tr><td>V1.STEP5</td><td>Skipped — welld's PATCH doesn't support rename. Friendly cell names via <code>wellNameForCell()</code> mapping.</td><td class="num">2026-05-10 22:15 MT</td></tr>
+          <tr><td>V1.STEP6</td><td>Perf measurement: <code>alive_ms</code> telemetry, <code>scripts/perf-birth.sh</code>. Cold-fork p50 9.60s, warm-pool p50 2.36s. 4.07× speedup.</td><td class="num">2026-05-10 22:36 MT</td></tr>
+        </tbody>
+      </table>
+
+      <h4>Acceptance</h4>
+      <table>
+        <thead><tr><th>ID</th><th>Result</th><th>Notes</th></tr></thead>
+        <tbody>
+          <tr><td>V1.1</td><td><span class="badge ok">pass</span></td><td>Animation + talk prompt drop-in clean. 4-stage Ink animation now dynamic-tempo (1.5-6s) ending on first byte.</td></tr>
+          <tr><td>V1.2</td><td><span class="badge ok">pass</span></td><td>Cell speaks first via LLM. host-bridge <code>cd /cell</code> fix held.</td></tr>
+          <tr><td>V1.3</td><td><span class="badge ok">2.5s p50</span></td><td>10 trials, range 2469–2969 ms. Win from <code>captureGreeting</code> + dynamic-tempo animation. Was 7.3s. (commit e112a2c+)</td></tr>
+          <tr><td>V1.4</td><td><span class="badge ok">pass</span></td><td>Second birth hits warm path. W.72 (static-IP allocator) shipped, vmnet 4-DHCP wall gone.</td></tr>
+          <tr><td>V1.5</td><td><span class="badge ok">pass</span></td><td>Sleep 0.6s. Sibling cell answered talk within 1.6s while another was hibernated. Auto-wake 1.9s / 1.8s.</td></tr>
+          <tr><td>V1.6</td><td><span class="badge ok">pass</span></td><td>Stop 7.2s. Wake 3.5s. Talk after wake 2.7s. 2 siblings answered within 1.2s during cold-cycle.</td></tr>
+          <tr><td>V1.7</td><td><span class="badge ok">pass</span></td><td>Kill leaves <code>cells.json</code> clean, wells registry returns 404.</td></tr>
+          <tr><td>V1.8</td><td><span class="badge ok">pass</span></td><td>Multi-cell coexistence + per-cell session isolation.</td></tr>
+          <tr><td>V1.9</td><td><span class="badge ok">pass</span></td><td>Interactive picker — 4 selectOne/selectMany prompts. Egg consumed from pool renamed post-picker.</td></tr>
+          <tr><td>V1.10</td><td><span class="badge ok">9/9 + designed 10th cold-fork</span></td><td>Burst 9/9 pool-hot at p50 = 2583 ms. 10th drained the pool (refill paced behind scripted births).</td></tr>
+        </tbody>
+      </table>
+
+      <h4>Cells-side changes during V1.5 verification</h4>
+      <ul class="compact">
+        <li><code>V1_HOT_POOL_TARGET</code> raised 3 → 10 (pure-hot v1; no cold→hot promote path).</li>
+        <li><code>bakeV1Egg</code> passes <code>hibernate_ready: true</code> unconditionally (was <code>tier === 2</code>). Sealing every egg costs ~6-8s but means <code>cells sleep</code> works on every pool-born cell.</li>
+        <li>Dashboard <code>target_hot</code> synced to 10.</li>
+      </ul>
+
+      <h4>Critical blocker (RESOLVED 2026-05-11)</h4>
+      <p><strong>V1.0</strong> — Talk-hang: WS dies, cell never receives user messages. <strong>FIXED</strong> in fire 19 (commit 9280c61) via piReady tracking + pendingPrompts queue + bridge_ready handshake. Superseded by host-bridge architecture (commit a9a2fed onward) — pi now spawns via ssh+pi from host-bridge daemon, not in-cell.</p>
+    </div>
+  </details>
+
+  <details>
+    <summary>Wells/cells boundary cleanup <span class="badge closed">closed 2026-05-13</span></summary>
+    <div class="body">
+      <p>Five-hour coordination cycle. Wells deleted 2455 LOC of cells-shaped invariants from substrate; cells took over pool ownership end-to-end. Both sides now have clean primitives and zero crossed-over state.</p>
+      <table>
+        <thead><tr><th>Piece</th><th>What</th><th>Cells</th><th>Wells</th></tr></thead>
+        <tbody>
+          <tr><td>1</td><td>Wells deleted lease-publisher (DHCP lease writes)</td><td>—</td><td>pre-2026-05-13</td></tr>
+          <tr><td>2</td><td>Wells deleted <code>/v1/wells/pool/*</code> + <code>identityReset.ts</code>. Cells renamed <code>eggs.json → pool.json</code> + <code>reconcilePool()</code>.</td><td><code>bcbc010</code>, <code>c3f2d8b</code></td><td><code>1ab5160</code></td></tr>
+          <tr><td>3</td><td>Wells deleted inline warming. Cells consumes new <code>POST /v1/wells/{name}/seal</code> between provision and hibernate.</td><td><code>04daa03</code></td><td><code>ff51dd7</code> + <code>7fa429c</code></td></tr>
+          <tr><td>—</td><td>Substrate: W.78 resurrect-queue fast-skip (32min→320ms), static-IP race fix, 409 error code</td><td>—</td><td><code>eb47da3</code>, <code>46d7e5e</code></td></tr>
+          <tr><td>—</td><td>Doc rewrite: <code>docs/cells-pool-builder-primitives.md</code> (post-Pi3 surface)</td><td>—</td><td><code>b9040c6</code></td></tr>
+          <tr><td>—</td><td>Postmortem cleanups: birth-exits-after-alive (360s hang → 120 ms), <code>waitForCloudInit</code> non-transient early-bail, empty-pool fast-fail, <code>cells doctor</code> shim probe</td><td><code>3ef483c</code></td><td>—</td></tr>
+          <tr><td>—</td><td>Splites→wells path sweep; gitignored shim trap lesson saved</td><td><code>2fb253f</code></td><td>—</td></tr>
+        </tbody>
+      </table>
+      <p>Verified end-to-end: reconcile (12 pool members, 0 drift post-4th-bounce), V1.5 (sleep 589 ms / wake 380 ms / sibling-survive clean), V1.10 (69 ms <code>alive_ms</code> on /seal-baked member).</p>
+      <p>Full retro: <a href="docs/proposals/piece-2-audit-cells-side.html"><code>docs/proposals/piece-2-audit-cells-side.html</code></a></p>
+    </div>
+  </details>
+
+  <details>
+    <summary>Deferred from previous plan <span class="badge deferred">superseded</span></summary>
+    <div class="body">
+      <p>The old Phase 1 variant matrix (P1.4–P1.16) and most of Phase 1b CLI walk are superseded by v1's acceptance items.</p>
+      <ul class="compact">
+        <li><strong>P1.4</strong> ck-pi-gpt55-pro — dropped. gpt-5.5-pro is paid-API (not subscription); never belonged in the matrix.</li>
+        <li><strong>P1.5–P1.13</strong> Variant births — superseded by "every cell is the canned generic cell" in v1. Variants come back as v2 personality+binding swaps.</li>
+        <li><strong>P1.14</strong> Lifecycle on a cell — covered by V1.5/V1.6.</li>
+        <li><strong>P1.15</strong> Cleanup verification — covered by V1.7.</li>
+        <li><strong>P1.16</strong> Matrix sign-off — replaced by v1 acceptance sign-off.</li>
+        <li><strong>P1b.1–P1b.20</strong> CLI surface walk — partially absorbed (V1.5/V1.6/V1.7 cover sleep/wake/stop/wake/kill/list). Other items move to v3 / future.</li>
+        <li><strong>P2.1–P2.5</strong> Auto-seed — already implemented; default behavior in v1's <code>cmdCreate</code>.</li>
+        <li><strong>P3.1–P3.7</strong> Eggs — design persists, but v1's pool is just 1 generic egg. Multi-variant pools come back if we ever want per-variant cells.</li>
+        <li><strong>P4.1–P4.4</strong> Capability-deferred install — v2 territory.</li>
+        <li><strong>P5.1–P5.3</strong> Cloud talk — V3 territory.</li>
+      </ul>
+    </div>
+  </details>
+
+  <details>
+    <summary>Historical done log <span class="badge done">archived</span></summary>
+    <div class="body">
+      <p>P-prefix items from the pre-V1 plan that did ship.</p>
+      <ul class="compact">
+        <li><strong>P1.3</strong> Birth + verify <code>ck-pi-gpt55</code> on <code>wells-stable-2026-05-10h</code>. First end-to-end birth-to-talk. <em>(2026-05-10 15:32 MT)</em></li>
+        <li><strong>W.29</strong> Root cause: wells's rinse was <code>rm /etc/machine-id; touch /etc/machine-id</code>, leaving 0-byte file. <code>ConditionFirstBoot=yes</code> fired on empty machine-id → sshd-keygen hang. Fixed in <code>wells-stable-2026-05-10g</code>. <em>(2026-05-10 15:03 MT)</em></li>
+        <li><strong>W.27</strong> Wells shipped well-firstboot etc-environment.append handler. <em>(2026-05-10 10:35 MT)</em></li>
+        <li><strong>W.23/W.24/W.25</strong> Wells: pool zombie auto-prune, welld plist PATH fix, per-entry tolerance in <code>GET /v1/wells/images</code>. <em>(2026-05-10 02:57 MT)</em></li>
+        <li><strong>P2.5</strong> Birth progress chip — superseded by V1.STEP3's Ink animation. <em>(2026-05-10 02:48 MT)</em></li>
+        <li><strong>P1.2a / P1.2</strong> Migrated cells DNA + harness state to <code>/cell/</code> with user <code>cell</code>. Bake produces cell-base, verify-fork passes. <em>(2026-05-10 02:14 MT)</em></li>
+        <li><strong>P1.1</strong> Pre-flight 7 checks. Mother answered. Substrate healthy. <em>(2026-05-09 23:00 MT)</em></li>
+      </ul>
+    </div>
+  </details>
+
+  <div class="pointers">
+    <h4>Pointers</h4>
+    <ul class="bare">
+      <li><a href="STATUS.html">STATUS</a> — current state</li>
+      <li><a href="PLAN.html">PLAN</a> — phase roadmap + acceptance</li>
+      <li><a href="JOURNAL.md">JOURNAL</a> — append-only history (markdown stays)</li>
+      <li><a href="NEEDS_PETE.md">NEEDS_PETE</a> — Pete's open decisions</li>
+    </ul>
+  </div>
+
+</div>
+</body>
+</html>
