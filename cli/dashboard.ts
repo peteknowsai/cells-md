@@ -1030,28 +1030,36 @@ console.log(`  GET  /healthz          daemon liveness`);
 
 // ── Wedge recovery loop ───────────────────────────────────────────────────
 //
-// Welld's watchdog probes each running well's SSH banner and surfaces a
-// per-well `wedge: "ok" | "suspected" | "confirmed"` field on the well
-// record (commit landing 2026-05-15 from wells team). Wedge="confirmed"
-// fires after ~3 min of failed banner-reads + a diag bundle dump to
-// ~/.wells/diag/wedge-<name>-<iso>/. Welld leaves recovery to us — it's
-// a policy call (a wedged cell may be mid-conversation; recovering
-// drops that state). We do the recovery here.
+// Two flavors of "stuck cell" recovery, both running on the same 30s tick:
 //
-// Recovery is the simplest possible: POST /v1/wells/<n>/stop, then
-// POST /v1/wells/<n>/start. ~5s, costs the cell's in-VM state. We only
-// trigger on `confirmed` (3 min of confirmed unreachability) so we don't
-// rescue cells that would have unwedged themselves.
+// 1. Welld-detected wedge (wedge === "confirmed"). Welld probes the SSH
+//    banner on every running well; 3 min of failed banner-reads + a diag
+//    bundle dump → wedge="confirmed". Welld leaves recovery to cells per
+//    the wells/cells boundary — it's a policy call (cycling drops in-VM
+//    state). Recovery: POST /v1/wells/<n>/stop + /start. ~5s.
+//
+// 2. Pinned-cell unreachability (cells-side fallback for the gap in
+//    welld's wedge detection). Welld only probes wells whose status is
+//    "running" — but a cell can land in `status: stopped, runtime: alive_running`
+//    (lume thinks running, welld thinks stopped, network dead) and welld
+//    won't probe it. Pete hit this when the narrator wedged that way and
+//    the dashboard itself went down. So for any well with auto_sleep_seconds
+//    === null (pinned awake — the user's "this MUST stay alive" knob), we
+//    do our own TCP-22 probe each tick. Three consecutive failures (~90s)
+//    → cycle. Less aggressive than welld's 3-min banner probe because
+//    we're only watching cells the user explicitly pinned.
 //
 // Pete's standing rule: don't let cells *ever* show as wedged in the
-// dashboard. So the tick is aggressive — every 30s, matching welld's
-// own probe cadence, so we react on the first confirmed event.
+// dashboard. The tick runs every 30s, matching welld's own cadence.
 const WEDGE_TICK_MS = Number(process.env.CELLS_WEDGE_TICK_MS ?? 30_000);
 const WEDGE_RECOVERY_COOLDOWN_MS = Number(process.env.CELLS_WEDGE_RECOVERY_COOLDOWN_MS ?? 5 * 60_000);
 const WEDGE_MAX_ATTEMPTS = Number(process.env.CELLS_WEDGE_MAX_ATTEMPTS ?? 3);
+const PINNED_UNREACHABLE_TOLERANCE = Number(process.env.CELLS_PINNED_UNREACHABLE_TICKS ?? 3);
 // Per-well: last recovery timestamp + attempt count. Resets to {0, 0}
-// when the well clears (wedge !== "confirmed").
+// when the well clears.
 const wedgeRecoveryState = new Map<string, { lastAttemptMs: number; attempts: number }>();
+// Per-pinned-well: consecutive failed TCP-22 probes this tick.
+const pinnedUnreachableTicks = new Map<string, number>();
 
 async function wedgeRecoveryTick(): Promise<void> {
   let tok: string;
@@ -1075,6 +1083,48 @@ async function wedgeRecoveryTick(): Promise<void> {
     const name = w?.name as string;
     if (!name) continue;
     const wedge = w?.wedge ?? "ok";
+
+    // Wedge signature: welld API reports status="stopped" but the well's
+    // runtime says state="alive_running". Means lume is still tracking
+    // the VM as up but welld's pid tracking lost it (or lume's network
+    // bind never landed). The narrator hit exactly this and went dark.
+    // Welld's banner-probe skips it (only probes running-status wells),
+    // so wedge stays "ok" forever. We catch the signature here.
+    //
+    // Distinct from a hibernated cell: hibernated = status="stopped" +
+    // runtime="hibernating", which is the healthy paused state.
+    const statusVal = w?.status as string | undefined;
+    const runtime = w?.runtime_state as string | undefined;
+    const signatureWedged = statusVal === "stopped" && runtime === "alive_running";
+
+    if (signatureWedged && wedge !== "confirmed") {
+      const fails = (pinnedUnreachableTicks.get(name) ?? 0) + 1;
+      pinnedUnreachableTicks.set(name, fails);
+      if (fails >= PINNED_UNREACHABLE_TOLERANCE) {
+        const st = wedgeRecoveryState.get(name) ?? { lastAttemptMs: 0, attempts: 0 };
+        if (st.attempts < WEDGE_MAX_ATTEMPTS && Date.now() - st.lastAttemptMs >= WEDGE_RECOVERY_COOLDOWN_MS) {
+          console.log(`[wedge-recovery] ${name}: signature-wedged ${fails}× (status=${statusVal}, runtime=${runtime}), cycling`);
+          try {
+            await fetch(`${WELL_API}/v1/wells/${encodeURIComponent(name)}/stop`, {
+              method: "POST", headers: { Authorization: `Bearer ${tok}` },
+              signal: AbortSignal.timeout(15_000),
+            });
+            await fetch(`${WELL_API}/v1/wells/${encodeURIComponent(name)}/start`, {
+              method: "POST", headers: { Authorization: `Bearer ${tok}` },
+              signal: AbortSignal.timeout(30_000),
+            });
+            wedgeRecoveryState.set(name, { lastAttemptMs: Date.now(), attempts: st.attempts + 1 });
+            pinnedUnreachableTicks.delete(name);
+          } catch (e: any) {
+            console.error(`[wedge-recovery] ${name}: signature cycle failed: ${e?.message ?? e}`);
+          }
+        }
+      }
+    } else if (!signatureWedged && pinnedUnreachableTicks.has(name)) {
+      // Clear the streak when the signature clears.
+      pinnedUnreachableTicks.delete(name);
+    }
+
     if (wedge !== "confirmed") {
       // Clear state on recovery so a future re-wedge gets the full attempt budget.
       if (wedgeRecoveryState.has(name)) wedgeRecoveryState.delete(name);
