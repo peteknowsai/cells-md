@@ -26,6 +26,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { readFile } from "node:fs/promises";
 import { readFileSync } from "node:fs";
+import { connect as netConnect } from "node:net";
 
 const PORT = Number(process.env.CELLS_DASHBOARD_PORT ?? 7881);
 const WELL_API = process.env.WELL_API_URL ?? "http://127.0.0.1:7878";
@@ -122,6 +123,28 @@ async function wellsToken(): Promise<string> {
   } catch {
     return "";
   }
+}
+
+// Promise-wrapped TCP-connect probe. Returns true if the host:port accepts
+// a TCP connection within timeoutMs, false otherwise. We end the socket
+// immediately on connect — we only care that the handshake landed. Used
+// by wake-on-talk to confirm sshd is actually reachable before we hand
+// the cell to host-bridge.
+function tcpReachable(host: string, port: number, timeoutMs: number): Promise<boolean> {
+  return new Promise((resolve) => {
+    const sock = netConnect({ host, port });
+    let done = false;
+    const finish = (ok: boolean) => {
+      if (done) return;
+      done = true;
+      try { sock.destroy(); } catch {}
+      resolve(ok);
+    };
+    sock.setTimeout(timeoutMs);
+    sock.once("connect", () => finish(true));
+    sock.once("timeout", () => finish(false));
+    sock.once("error", () => finish(false));
+  });
 }
 
 function ageMinutes(iso: string | undefined): number {
@@ -802,23 +825,43 @@ async function handleTalk(req: Request, name: string): Promise<Response> {
   // Wake-on-talk. host-bridge SSHs straight to the cell IP — it does NOT
   // route through welld's vhost-dispatch, so welld's auto-wake-on-touch
   // never fires. If the cell is hibernated, SSH would just time out with
-  // `Host is down`. Touch welld first to wake the well; idempotent
-  // (already-running wells return 200 in a few ms). Best-effort: failure
-  // here just means the SSH-then-fail behavior kicks in, which is the
-  // pre-fix status quo.
+  // `Host is down`. Touch welld first to wake the well.
+  //
+  // welld's /wake returns once lume's restore call returns, NOT once the
+  // well has a usable IP — DHCP can take an extra second or two on a
+  // cold-wake. host-bridge's session-create asks welld for `ip`, gets
+  // `null`, and immediately fails the session (bridge_closed before we
+  // even send the prompt). So after /wake, poll welld until the well
+  // record carries a non-null ip. Idempotent on already-running wells:
+  // poll #1 finds the ip and returns in ~10ms.
   if (wake && cellWellName) {
     try {
       const tok = (await readFile(join(homedir(), ".wells", "token"), "utf8")).trim();
-      // welld's /wake is synchronous — it returns when the well is back to
-      // alive_running (sshd accepting connections). Cold-wake from a real
-      // hibernated state can take 5-15s; budget 20s so we don't drop the
-      // window. Best-effort failure: we still try SSH, which will surface
-      // the real error.
       await fetch(`${WELL_API}/v1/wells/${encodeURIComponent(cellWellName)}/wake`, {
         method: "POST",
         headers: { Authorization: `Bearer ${tok}` },
         signal: AbortSignal.timeout(20_000),
       }).catch(() => {});
+      // Poll for IP + SSH-port reachability. welld reports an IP as soon
+      // as it has one cached, but the well may be wedged ("alive_running"
+      // with no actual network — a wells-team-known state). host-bridge's
+      // SSH attempt fails fast on a wedged well ("Host is down") and the
+      // talk turns into an SSH-retry slog. We probe TCP 22 directly so
+      // we only proceed when SSH is truly reachable. Budget 15s.
+      const pollDeadline = Date.now() + 15_000;
+      while (Date.now() < pollDeadline) {
+        try {
+          const r = await fetch(`${WELL_API}/v1/wells/${encodeURIComponent(cellWellName)}`, {
+            headers: { Authorization: `Bearer ${tok}` },
+            signal: AbortSignal.timeout(2_000),
+          });
+          if (r.ok) {
+            const d = await r.json() as any;
+            if (d?.ip && (await tcpReachable(d.ip, 22, 1_500))) break;
+          }
+        } catch { /* transient — keep polling */ }
+        await new Promise((r) => setTimeout(r, 250));
+      }
     } catch { /* token unreadable — skip */ }
   }
 
