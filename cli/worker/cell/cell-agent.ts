@@ -25,6 +25,91 @@ interface Env {
   WELL_HOST: string;
   CELLS_PROXY_SECRET: string;
   CELL_AGENT: DurableObjectNamespace;
+  // Clerk publishable key — embedded in the served HTML so the Clerk
+  // widget can bootstrap client-side. Optional: if absent, the DO skips
+  // widget injection and the site looks exactly like it did pre-Clerk.
+  CLERK_PUBLISHABLE_KEY?: string;
+}
+
+// Derive the Clerk frontend API host from a publishable key. The pk
+// format is `pk_(test|live)_<base64url-of-frontend-api$>`. Decoding
+// gives us the script src host without a separate env var. Returns
+// empty string on any parse error; callers should skip widget injection
+// in that case.
+function frontendApiFromPk(pk: string): string {
+  const i = pk.lastIndexOf("_");
+  if (i < 0) return "";
+  const enc = pk.slice(i + 1);
+  try {
+    const padded = enc + "=".repeat((4 - (enc.length % 4)) % 4);
+    const decoded = atob(padded.replace(/-/g, "+").replace(/_/g, "/"));
+    return decoded.replace(/\$+$/, "");
+  } catch {
+    return "";
+  }
+}
+
+// Markup injected before </body> on every served HTML page when a
+// Clerk publishable key is configured. Renders:
+//   - the official Clerk JS bootstrap script (loaded from the app's
+//     frontend API host)
+//   - a fixed top-right mount point that becomes either the UserButton
+//     (signed-in) or a "Sign in" pill (anon)
+// Pure client-side from here: the Worker has already gated the bytes
+// based on session, this snippet is just UX scaffolding.
+function clerkWidgetSnippet(pk: string, frontendApi: string): string {
+  const escPk = pk.replace(/"/g, "&quot;");
+  const escApi = frontendApi.replace(/"/g, "&quot;");
+  // Clerk v6 split the UI components out of clerk-js into a separate
+  // @clerk/ui package — clerk.browser.js is headless-only by default.
+  // The supported pattern is: load @clerk/ui first (registers
+  // window.__internal_ClerkUICtor), then clerk-js, then pass the UI
+  // constructor into Clerk.load(). Script-tag order matters; `defer`
+  // preserves it.
+  //
+  // UX: a pill top-right (UserButton when signed in, "Sign in" button
+  // when anon). Click → fixed-position overlay with the inline sign-in
+  // form centered. Click outside or hit Esc to dismiss.
+  return `
+<script defer crossorigin="anonymous" src="https://${escApi}/npm/@clerk/ui@1/dist/ui.browser.js" type="text/javascript"></script>
+<script defer crossorigin="anonymous" data-clerk-publishable-key="${escPk}" src="https://${escApi}/npm/@clerk/clerk-js@6/dist/clerk.browser.js" type="text/javascript"></script>
+<div id="cells-clerk-mount" style="position:fixed;top:12px;right:12px;z-index:9999;font:14px system-ui"></div>
+<script>
+(function(){
+  function openSignInOverlay(){
+    if (document.getElementById("cells-clerk-overlay")) return;
+    var overlay = document.createElement("div");
+    overlay.id = "cells-clerk-overlay";
+    overlay.style.cssText = "position:fixed;inset:0;background:rgba(0,0,0,0.6);display:flex;align-items:center;justify-content:center;z-index:99999;padding:1em";
+    var formHost = document.createElement("div");
+    formHost.id = "cells-clerk-form";
+    overlay.appendChild(formHost);
+    overlay.addEventListener("click", function(e){ if (e.target === overlay) close(); });
+    function close(){ try { Clerk.unmountSignIn(formHost); } catch(_){}; overlay.remove(); document.removeEventListener("keydown", onKey); }
+    function onKey(e){ if (e.key === "Escape") close(); }
+    document.addEventListener("keydown", onKey);
+    document.body.appendChild(overlay);
+    try { Clerk.mountSignIn(formHost); } catch (e) { console.error("mountSignIn:", e); }
+  }
+  window.addEventListener("load", async function(){
+    try {
+      if (typeof Clerk === "undefined") { console.error("clerk widget: Clerk global missing"); return; }
+      await Clerk.load({ ui: { ClerkUI: window.__internal_ClerkUICtor } });
+      var mount = document.getElementById("cells-clerk-mount");
+      if (!mount) return;
+      if (Clerk.user) {
+        Clerk.mountUserButton(mount);
+      } else {
+        var btn = document.createElement("button");
+        btn.textContent = "Sign in";
+        btn.style.cssText = "padding:6px 14px;border-radius:999px;background:#111;color:#fff;border:none;cursor:pointer;font:14px system-ui;box-shadow:0 1px 3px rgba(0,0,0,.2)";
+        btn.onclick = openSignInOverlay;
+        mount.appendChild(btn);
+      }
+    } catch (e) { console.error("clerk widget:", e); }
+  });
+})();
+</script>`;
 }
 
 const SLACK_SEND_URL = "https://slack.cells.md/send";
@@ -148,7 +233,10 @@ export class CellAgent {
     // Public site serve — the worker names this route and passes the real
     // request path in x-site-path, so public traffic can never reach the
     // control-plane routes above.
-    if (url.pathname === "/site-serve") return this.serveSite(req.headers.get("x-site-path") ?? "/");
+    if (url.pathname === "/site-serve") {
+      const signedIn = req.headers.get("x-signed-in") === "1";
+      return this.serveSite(req.headers.get("x-site-path") ?? "/", signedIn);
+    }
     return new Response("not found", { status: 404 });
   }
 
@@ -312,7 +400,17 @@ export class CellAgent {
   // Serve a path from the stored snapshot. "/" → "/index.html"; a missing
   // index when nothing was ever published returns a friendly placeholder
   // (not a 404) so a freshly-born cell's domain looks alive immediately.
-  private async serveSite(rawPath: string): Promise<Response> {
+  //
+  // Clerk gating: every served HTML page gets two transforms via
+  // HTMLRewriter — (1) when `signedIn` is false, all elements matching
+  // `[data-private]` are stripped at the edge so private bytes never
+  // reach an anonymous client; (2) when CLERK_PUBLISHABLE_KEY is set,
+  // the Clerk widget snippet is injected before `</body>` so the
+  // sign-in / user-button shows on every page. Non-HTML files (CSS,
+  // images, JSON) pass through untouched — they're treated as already
+  // public; private blobs should live inside data-private wrappers in
+  // an HTML page, not as separate files.
+  private async serveSite(rawPath: string, signedIn: boolean): Promise<Response> {
     const path = normalizeSitePath(rawPath) || "/index.html";
     let lookup = path === "/" ? "/index.html" : path;
     if (lookup.endsWith("/")) lookup += "index.html";
@@ -326,16 +424,50 @@ export class CellAgent {
       if (lookup === "/index.html") {
         const meta = await this.state.storage.get<SiteMeta>("site:__meta__");
         if (!meta || meta.paths.length === 0) {
-          return new Response(sitePlaceholder(this.env.CELL_NAME), {
-            headers: { "content-type": "text/html; charset=utf-8" },
-          });
+          return this.maybeTransformHtml(
+            new Response(sitePlaceholder(this.env.CELL_NAME), {
+              headers: { "content-type": "text/html; charset=utf-8" },
+            }),
+            signedIn,
+          );
         }
       }
       return new Response("not found", { status: 404 });
     }
-    return new Response(base64ToBytes(entry.data), {
+    const response = new Response(base64ToBytes(entry.data), {
       headers: { "content-type": entry.ct },
     });
+    return this.maybeTransformHtml(response, signedIn);
+  }
+
+  // Apply the Clerk-aware HTML transforms (strip data-private for anon,
+  // inject widget) only when the response is HTML. Anything else (CSS,
+  // images, JSON) is returned untouched. HTMLRewriter is a Workers-
+  // native streaming HTML parser — no DOM, no full-doc buffering.
+  private maybeTransformHtml(response: Response, signedIn: boolean): Response {
+    const ct = response.headers.get("content-type") ?? "";
+    if (!ct.toLowerCase().includes("text/html")) return response;
+
+    const pk = this.env.CLERK_PUBLISHABLE_KEY ?? "";
+    const frontendApi = pk ? frontendApiFromPk(pk) : "";
+    const widget = (pk && frontendApi) ? clerkWidgetSnippet(pk, frontendApi) : "";
+
+    let rewriter = new HTMLRewriter();
+    if (!signedIn) {
+      // Strip every element marked with `data-private`. The agent
+      // (alongside the human) decides what wears this attribute when
+      // composing pages in public/. Stripping happens before any byte
+      // is sent downstream — anon clients literally never receive
+      // private content.
+      rewriter = rewriter.on("[data-private]", { element(el) { el.remove(); } });
+    }
+    if (widget) {
+      // Inject the Clerk widget right before </body>. If a page omits
+      // <body> for some reason, fall back to appending to <html>.
+      rewriter = rewriter
+        .on("body", { element(el) { el.append(widget, { html: true }); } });
+    }
+    return rewriter.transform(response);
   }
 
   // ---- WebSocket to well ----

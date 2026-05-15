@@ -92,3 +92,28 @@ if [ -n "$CF_API_TOKEN" ]; then
 else
   echo "⚠ no CLOUDFLARE_API_TOKEN in $SECRETS — /image/upload returns 503 until one is set"
 fi
+
+# Clerk auth — one app across all cells, cookie domain `.cells.md` so a
+# single sign-in covers every cell. Both keys are optional; if either is
+# missing, the Worker just skips the auth path and the site behaves
+# exactly as it did pre-Clerk. That makes the rollout safe: deploy code
+# first, drop the keys into ~/.cells/secrets.json + redeploy when ready.
+CLERK_PK=$(jq -r '.CLERK_PUBLISHABLE_KEY // empty' "$SECRETS")
+CLERK_JWT=$(jq -r '.CLERK_JWT_KEY // empty' "$SECRETS")
+if [ -n "$CLERK_PK" ]; then
+  if ! echo "$CLERK_PK" | bunx wrangler --config "$RENDERED" secret put CLERK_PUBLISHABLE_KEY >>"$LOG" 2>&1; then
+    echo "✗ wrangler secret put CLERK_PUBLISHABLE_KEY failed:"
+    cat "$LOG"
+    exit 1
+  fi
+fi
+if [ -n "$CLERK_JWT" ]; then
+  if ! printf '%s' "$CLERK_JWT" | bunx wrangler --config "$RENDERED" secret put CLERK_JWT_KEY >>"$LOG" 2>&1; then
+    echo "✗ wrangler secret put CLERK_JWT_KEY failed:"
+    cat "$LOG"
+    exit 1
+  fi
+fi
+if [ -z "$CLERK_PK" ] || [ -z "$CLERK_JWT" ]; then
+  echo "⚠ Clerk keys missing in $SECRETS — site stays public-only until both CLERK_PUBLISHABLE_KEY + CLERK_JWT_KEY are set"
+fi

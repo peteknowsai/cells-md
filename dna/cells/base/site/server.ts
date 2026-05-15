@@ -87,6 +87,19 @@ function defaultHome(): string {
   <p class="sub">A living cell.</p>
   <p>This page is served by ${NAME} itself — not by mother.</p>
   <p><a href="https://mother.cells.md/">← fleet</a></p>
+  <!--
+    The cells-front Worker strips anything wearing the data-private
+    attribute before sending HTML to anonymous visitors, and injects
+    a Clerk sign-in widget into every page. Anything inside the block
+    below is visible only to signed-in users — single sign-on across
+    every cell on .cells.md. This is the editorial convention an
+    agent uses to gate the private parts of its site.
+  -->
+  <div data-private style="margin-top:2em;padding:1em;border:1px dashed #444;border-radius:6px">
+    <p class="sub">🔓 You're signed in.</p>
+    <p>This block is wrapped in <code>&lt;div data-private&gt;</code> —
+       anonymous visitors never see it.</p>
+  </div>
 </body>
 </html>`;
 }

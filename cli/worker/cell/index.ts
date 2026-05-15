@@ -29,6 +29,8 @@
  * No slack_post tool needed.
  */
 
+import { jwtVerify, importSPKI } from "jose";
+
 export { CellAgent } from "./cell-agent";
 
 export interface Env {
@@ -41,6 +43,56 @@ export interface Env {
   // secret — it never lands on a cell VM. The account id is a plain var.
   CLOUDFLARE_ACCOUNT_ID: string;
   CLOUDFLARE_API_TOKEN: string;
+  // Clerk auth — one app across all cells, cookie domain `.cells.md` so
+  // sign-in on one cell unlocks every cell. Both are Worker secrets:
+  //   - CLERK_PUBLISHABLE_KEY: the pk_(test|live)_… string. Embedded in
+  //     the served HTML so the Clerk widget can bootstrap. Public by
+  //     definition; kept as a secret for rotation convenience.
+  //   - CLERK_JWT_KEY: PEM-encoded RSA public key for networkless JWT
+  //     verification (no extra hop to clerk.com on every request).
+  // Both are optional — if either is missing, the Worker skips the auth
+  // path and the site behaves exactly as it did pre-Clerk.
+  CLERK_PUBLISHABLE_KEY?: string;
+  CLERK_JWT_KEY?: string;
+}
+
+// Cached parsed public key — survives across requests within the same
+// isolate so we don't re-parse the PEM on every hit.
+let clerkKey: Promise<CryptoKey> | null = null;
+function getClerkKey(pem: string): Promise<CryptoKey> {
+  if (!clerkKey) clerkKey = importSPKI(pem, "RS256") as Promise<CryptoKey>;
+  return clerkKey;
+}
+
+// Read the Clerk session cookie. Clerk names it `__session` on the
+// satellite/apex domain; nothing fancy in parsing — just split on `;`.
+function getSessionCookie(req: Request): string | null {
+  const cookie = req.headers.get("cookie");
+  if (!cookie) return null;
+  for (const part of cookie.split(";")) {
+    const eq = part.indexOf("=");
+    if (eq < 0) continue;
+    const k = part.slice(0, eq).trim();
+    if (k === "__session") return part.slice(eq + 1).trim();
+  }
+  return null;
+}
+
+// Verify the Clerk session JWT. Returns true iff a `__session` cookie is
+// present, signed by CLERK_JWT_KEY, and within its expiry. Any failure
+// (no key, no cookie, bad sig, expired) falls back to anonymous — we
+// never throw on the auth check, the site must keep serving.
+async function verifyClerkSession(req: Request, env: Env): Promise<boolean> {
+  if (!env.CLERK_JWT_KEY) return false;
+  const token = getSessionCookie(req);
+  if (!token) return false;
+  try {
+    const key = await getClerkKey(env.CLERK_JWT_KEY);
+    await jwtVerify(token, key, { algorithms: ["RS256"] });
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 function doStub(env: Env): DurableObjectStub {
@@ -136,15 +188,26 @@ export default {
       return new Response("not found", { status: 404 });
     }
 
-    // Public site — <cell>.cells.md, the cell's public face. No auth.
-    // Served by the DO from the last published snapshot, whether the
-    // cell is awake, asleep, or hibernating. The DO never sees the
-    // control-plane paths here: the worker names every internal route.
+    // Public site — <cell>.cells.md, the cell's public face. Served by
+    // the DO from the last published snapshot, whether the cell is
+    // awake, asleep, or hibernating. The DO never sees the control-
+    // plane paths here: the worker names every internal route.
+    //
+    // Clerk gating: verify the `__session` cookie networklessly against
+    // CLERK_JWT_KEY. We pass the result into the DO as `x-signed-in`,
+    // and the DO uses HTMLRewriter to strip `[data-private]` elements
+    // for anon visitors. Private bytes never leave the edge for users
+    // without a valid session. Cookie domain `.cells.md` means one
+    // sign-in covers every cell in the fleet.
     if (req.method !== "GET" && req.method !== "HEAD") {
       return new Response("method not allowed", { status: 405 });
     }
+    const signedIn = await verifyClerkSession(req, env);
     return doStub(env).fetch("https://do/site-serve", {
-      headers: { "x-site-path": path },
+      headers: {
+        "x-site-path": path,
+        "x-signed-in": signedIn ? "1" : "0",
+      },
     });
   },
 };
