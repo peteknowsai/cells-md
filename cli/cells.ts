@@ -29,9 +29,9 @@ import {
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = dirname(SCRIPT_DIR);
 const DNA_ROOT = join(REPO_ROOT, "dna");
-const PROTO_DIR = join(DNA_ROOT, "proto");
-const MOTHER_ROOT = join(PROTO_DIR, "mother");
-const PULSE_ROOT = join(PROTO_DIR, "pulse");
+const SPECIALS_DIR = join(DNA_ROOT, "specials");
+const MOTHER_ROOT = join(SPECIALS_DIR, "mother");
+const PULSE_ROOT = join(SPECIALS_DIR, "pulse");
 const DNA_DIR = join(DNA_ROOT, "cells/base");
 const REGISTRY_DIR = join(homedir(), ".cells");
 const REGISTRY_PATH = join(REGISTRY_DIR, "cells.json");
@@ -253,6 +253,13 @@ type Cell = {
   // apply-pi-patches.sh. Mirrored here so harden-birth can verify the
   // birth pipeline wrote it correctly into the cell's settings.json.
   modelChain?: string[];
+  // True for cells born via `cells birth-special` (mother, pulse). These are
+  // pinned, baked from bespoke DNA in dna/specials/<name>/, and exempt from
+  // `cells kill --all-but` sweeps unless explicitly named.
+  special?: boolean;
+  // Mirrors welld's auto_sleep_seconds=null state. Source of truth is welld;
+  // this is a hint for `cells ls` / `cells doctor`.
+  pinned?: boolean;
 };
 type Registry = { cells: Cell[] };
 
@@ -873,6 +880,97 @@ async function runPiWithOutcome(
   });
 }
 
+// ───── talkAndAwaitOutcome: mother-as-cell birth path ─────
+//
+// Phase 2 replacement for runPiWithOutcome. Instead of spawning pi on
+// the Mac in MOTHER_ROOT, this:
+//   1. generates a short birthId
+//   2. `cells talk mother /<slashCommand> <birthId> <args...>` — fire and forget
+//   3. long-polls ~/.cells/birth-outcomes/<birthId>.json (written by mother's
+//      birth_outcome tool via proxy.cells.md/bridge/birth/outcome)
+//
+// Gated behind CELLS_USE_MOTHER_CELL=1 during the cutover. Phase 4
+// deletes runPiWithOutcome + this flag once the new path is verified live.
+
+const BIRTH_OUTCOMES_DIR_LOCAL = join(REGISTRY_DIR, "birth-outcomes");
+const BIRTH_LOCK_PATH = join(REGISTRY_DIR, "birth.lock");
+const TALK_OUTCOME_TIMEOUT_MS = 175_000;  // matches mother.lock envelope
+
+async function withBirthLock<T>(label: string, fn: () => Promise<T>): Promise<T> {
+  // One birth at a time — mirrors mother.lock's serialization invariant
+  // (project_mother_concurrency) without the proto-cell ceremony.
+  let attempts = 0;
+  while (existsSync(BIRTH_LOCK_PATH) && attempts++ < 1800) {
+    let holder: { pid?: number; label?: string; at?: number } = {};
+    try { holder = JSON.parse(readFileSync(BIRTH_LOCK_PATH, "utf-8")); } catch {}
+    // Stale lock detection: if the holder pid is gone or the lock is > 10 min old.
+    const ageMs = Date.now() - (holder.at ?? 0);
+    if (ageMs > 10 * 60 * 1000 || (holder.pid && !pidAlive(holder.pid))) {
+      try { unlinkSync(BIRTH_LOCK_PATH); } catch {}
+      break;
+    }
+    await new Promise(r => setTimeout(r, 100));
+  }
+  writeFileSync(BIRTH_LOCK_PATH, JSON.stringify({ pid: process.pid, label, at: Date.now() }));
+  try {
+    return await fn();
+  } finally {
+    try { unlinkSync(BIRTH_LOCK_PATH); } catch {}
+  }
+}
+
+function pidAlive(pid: number): boolean {
+  try { process.kill(pid, 0); return true; } catch { return false; }
+}
+
+async function talkAndAwaitOutcome(
+  slashCommand: string,
+  args: string[],
+  opts?: { progressName?: string },
+): Promise<{ exit: number; outcome: Outcome | null }> {
+  return withBirthLock(`${slashCommand} ${args[0] ?? ""}`.trim(), async () => {
+    const birthId = `b${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
+    const outcomeFile = join(BIRTH_OUTCOMES_DIR_LOCAL, `${birthId}.json`);
+    await mkdir(BIRTH_OUTCOMES_DIR_LOCAL, { recursive: true });
+    if (existsSync(outcomeFile)) await unlink(outcomeFile);
+
+    const message = `/${slashCommand} ${birthId} ${args.join(" ")}`.trim();
+    // Fire `cells talk mother <message>` in the background. Mother runs
+    // the ritual; her final tool call (birth_outcome) writes outcomeFile
+    // via /bridge/birth/outcome. We don't care about the talk exit code —
+    // outcome presence is the source of truth.
+    const proc = Bun.spawn(["bun", join(REPO_ROOT, "cli/cells.ts"), "talk", "mother", message], {
+      stdio: ["ignore", "ignore", "ignore"],
+    });
+
+    const deadline = Date.now() + TALK_OUTCOME_TIMEOUT_MS;
+    let chip = 0;
+    while (Date.now() < deadline) {
+      if (existsSync(outcomeFile)) break;
+      // Lightweight progress chip — mirrors runPiWithOutcome's UX.
+      if (opts?.progressName && process.stderr.isTTY) {
+        const dots = ".".repeat((chip++ % 4));
+        process.stderr.write(`\r${opts.progressName} ${dots}${" ".repeat(4 - dots.length)}`);
+      }
+      await new Promise(r => setTimeout(r, 500));
+    }
+    if (opts?.progressName && process.stderr.isTTY) process.stderr.write("\r\x1b[2K");
+
+    let outcome: Outcome | null = null;
+    if (existsSync(outcomeFile)) {
+      try {
+        outcome = JSON.parse(await readFile(outcomeFile, "utf-8"));
+      } catch {/* malformed */}
+      try { await unlink(outcomeFile); } catch {}
+    }
+
+    // Don't wait on proc — mother's talk session may still be flushing.
+    // Outcome presence is what we care about.
+    try { proc.kill(); } catch {}
+    return { exit: outcome ? 0 : 1, outcome };
+  });
+}
+
 // ───── direct (no Pi) ─────
 
 async function launchMotherTui(extraArgs: string[] = []) {
@@ -1333,6 +1431,40 @@ async function cmdDoctor() {
     console.log(`well shim:     ${red}unreachable${reset} (${dim}${String(e).slice(0, 80)}${reset})`);
     console.log(`  fix:         check /Users/pete/.local/bin/well is in PATH and executable`);
   }
+
+  // 7. Specials (mother, pulse) — if they've been baked as real cells,
+  // verify each is alive + pinned. Silent skip if no special is registered
+  // (still on the legacy on-Mac path).
+  const reg = await loadRegistry();
+  const specials = reg.cells.filter(c => c.special);
+  if (specials.length === 0) {
+    console.log(`\nspecials:      ${dim}none registered (legacy mother/pulse on Mac)${reset}`);
+  } else {
+    console.log("");
+    const base = process.env.WELL_API_URL ?? "http://127.0.0.1:7878";
+    const token = await wellsToken().catch(() => "");
+    for (const s of specials) {
+      const wellName = `cells-${s.name}`;
+      try {
+        const info = await fetch(`${base}/v1/wells/${encodeURIComponent(wellName)}`, {
+          headers: { Authorization: `Bearer ${token}` },
+          signal: AbortSignal.timeout(2000),
+        }).then(r => r.ok ? r.json() : null);
+        if (!info) {
+          console.log(`${s.name}:        ${red}well ${wellName} not found${reset}`);
+          continue;
+        }
+        const aliveOk = info.status === "running" || info.status === "alive_running";
+        const pinOk = info.auto_sleep_seconds === null;
+        const aliveTag = aliveOk ? `${green}${info.status}${reset}` : `${yellow}${info.status}${reset}`;
+        const pinTag = pinOk ? `${green}pinned${reset}` : `${red}not pinned (auto_sleep=${info.auto_sleep_seconds})${reset}`;
+        console.log(`${s.name}:        ${aliveTag} · ${pinTag}`);
+        if (!pinOk) console.log(`  fix:         cells pin ${s.name}`);
+      } catch (e) {
+        console.log(`${s.name}:        ${red}probe failed${reset} (${dim}${String(e).slice(0, 80)}${reset})`);
+      }
+    }
+  }
 }
 
 async function checkPiPatches(): Promise<{ ok: boolean; detail: string }> {
@@ -1694,13 +1826,20 @@ async function cmdCreate(name: string | undefined, opts: CreateOpts): Promise<vo
   }
 
   // ── 5. Hand off to mother — she reads docs/birthing-ritual.html ──
+  // Two code paths during the Phase 2/3 transition:
+  //   - default: legacy on-Mac mother via runPiWithOutcome (mother.lock).
+  //   - CELLS_USE_MOTHER_CELL=1: talk to cells-mother, poll bridge outcome.
+  // Phase 4 deletes the legacy branch once the new path is validated live.
   if (!process.stdout.isTTY) console.log(`birthing ${name}…`);
-  const { outcome } = await runPiWithOutcome(
-    "cell-create",
-    [name, eggWell, JSON.stringify(blob)],
-    wellsEnv(),
-    { progressName: name },
-  );
+  const useMotherCell = process.env.CELLS_USE_MOTHER_CELL === "1";
+  const { outcome } = useMotherCell
+    ? await talkAndAwaitOutcome("cell-create", [name, eggWell, JSON.stringify(blob)], { progressName: name })
+    : await runPiWithOutcome(
+        "cell-create",
+        [name, eggWell, JSON.stringify(blob)],
+        wellsEnv(),
+        { progressName: name },
+      );
   if (!outcome) {
     console.error(`birth failed: mother did not report an outcome — sweeping egg ${eggWell}`);
     await sweepEgg();
@@ -2293,6 +2432,184 @@ async function bakePoolMember(): Promise<string> {
   });
 
   return wellName;
+}
+
+// ─── Specials: mother + pulse ──────────────────────────────────────────────
+//
+// mother and pulse are *named* cells with bespoke DNA in dna/specials/<name>/.
+// They live in deterministic wells (`cells-mother`, `cells-pulse`) outside
+// the pool flow, and are pinned (auto_sleep_seconds=null) so they never
+// hibernate. Birth is hand-driven via `cells birth-special <name>` rather
+// than the generic pool consume path.
+
+type SpecialSpec = {
+  name: "mother" | "pulse";
+  wellName: string;
+  harness: "pi";
+  provider: "anthropic" | "openai-codex";
+  model: string;
+  thinking: string;
+};
+
+const SPECIALS: Record<"mother" | "pulse", SpecialSpec> = {
+  mother: {
+    name: "mother",
+    wellName: "cells-mother",
+    harness: "pi",
+    provider: "anthropic",
+    model: "claude-opus-4-7",
+    thinking: "high",
+  },
+  pulse: {
+    name: "pulse",
+    wellName: "cells-pulse",
+    harness: "pi",
+    provider: "openai-codex",
+    model: "gpt-5.5",
+    thinking: "low",
+  },
+};
+
+// Files in dna/cells/base/ that the base provision lays down at /root and
+// that the specials need to overlay/replace. We wipe these before pushing
+// the specials DNA so leftover base identity doesn't poison the cell.
+const SPECIAL_OVERLAY_WIPE = [
+  "IDENTITY.md", "SOUL.md", "AGENTS.md", "CELLS.md", "CONTACTS.md",
+  "HEARTBEAT.md", "MEMORY.md", "TOOLS.md", "CLAUDE.md",
+  ".pi/settings.json", ".pi/extensions", ".pi/skills", ".pi/prompts",
+];
+
+async function cmdBirthSpecial(rawArgs: string[]): Promise<void> {
+  const args = rawArgs.filter(a => !a.startsWith("--"));
+  const flags = new Set(rawArgs.filter(a => a.startsWith("--")));
+  const name = args[0] as "mother" | "pulse" | undefined;
+  if (!name || !(name in SPECIALS)) {
+    console.error("usage: cells birth-special <mother|pulse> [--rebuild]");
+    process.exit(2);
+  }
+  const spec = SPECIALS[name];
+  const rebuild = flags.has("--rebuild");
+
+  console.log(`birth-special ${spec.name} → ${spec.wellName}`);
+
+  // 1. Idempotency: refuse if registry already lists this cell unless --rebuild.
+  const reg = await loadRegistry();
+  const existing = reg.cells.find(c => c.name === spec.name);
+  if (existing) {
+    if (!rebuild) {
+      console.error(`${spec.name} already registered (born ${existing.created_at}). pass --rebuild to rebake.`);
+      process.exit(1);
+    }
+    console.log(`rebuild: destroying existing ${spec.wellName} and clearing registry…`);
+    await directWellDestroy(spec.wellName).catch(() => {});
+    reg.cells = reg.cells.filter(c => c.name !== spec.name);
+    await saveRegistry(reg);
+  }
+
+  // 2. Auth env for in-well pi (CELLS_PROXY_SECRET, etc.) — same shape as pool eggs.
+  const baseEnv = await collectCellLlmEnv();
+  if (!baseEnv.CELLS_PROXY_SECRET) {
+    throw new Error("CELLS_PROXY_SECRET missing from ~/.cells/secrets.json");
+  }
+  const env = { ...baseEnv, CELL_NAME: spec.name };
+
+  // 3. Create the well (named, not egg-<hex>).
+  console.log(`  creating well ${spec.wellName}…`);
+  await directWellCreate(spec.wellName, { fromImage: "ubuntu-base", env });
+  await setWellAuthPublic(spec.wellName);
+  await disableAutoSleep(spec.wellName);
+
+  // 4. Wait for firstboot identity injection.
+  try {
+    await waitForCloudInit(spec.wellName);
+  } catch (e) {
+    await directWellDestroy(spec.wellName);
+    throw new Error(`waitForCloudInit failed for ${spec.wellName}: ${e instanceof Error ? e.message : String(e)}`);
+  }
+
+  // 5. Base provisioning (pi, codex, /root runtime, profile.d shim). This
+  //    drops the generic cell-base agent files at /root — which we then
+  //    overlay with the special's bespoke DNA below.
+  try {
+    await provisionCellInWell(spec.wellName);
+  } catch (e) {
+    await directWellDestroy(spec.wellName);
+    throw new Error(`provision failed for ${spec.wellName}: ${e instanceof Error ? e.message : String(e)}`);
+  }
+
+  // 6. Overlay specials DNA. Wipe the base identity files first so leftover
+  //    base extensions / settings don't poison the special.
+  console.log(`  overlaying dna/specials/${spec.name}/ onto /root…`);
+  const wipeCmd = SPECIAL_OVERLAY_WIPE.map(p => `sudo rm -rf /root/${p}`).join(" && ");
+  const wipe = await wellExecCapture(spec.wellName, wipeCmd);
+  if (!wipe.ok) {
+    throw new Error(`overlay wipe failed: ${wipe.stderr.slice(0, 300)}`);
+  }
+  await pushLocalDirToWell(spec.wellName, join(SPECIALS_DIR, spec.name), "/root");
+  const chown = await wellExecCapture(spec.wellName, "sudo chown -R root:root /root");
+  if (!chown.ok) {
+    throw new Error(`chown after overlay failed: ${chown.stderr.slice(0, 300)}`);
+  }
+
+  // 7. Cell-specific kicker.
+  if (spec.name === "pulse") {
+    await installPulseTimer(spec.wellName);
+  }
+  // mother: nothing extra at Phase 1; mother-tools extension + ritual
+  // rewiring lands in Phase 2.
+
+  // 8. Pin always-on. (provisionCellInWell already called disableAutoSleep
+  //    via the bake flow; this is the same operation — kept explicit so the
+  //    pin step reads where you'd expect it.)
+  await setAutoSleep(spec.wellName, null);
+
+  // 9. Register.
+  reg.cells.push({
+    name: spec.name,
+    created_at: new Date().toISOString(),
+    status: "alive",
+    harness: spec.harness,
+    modelChain: [`${spec.provider}/${spec.model}:${spec.thinking}`],
+    special: true,
+    pinned: true,
+  });
+  await saveRegistry(reg);
+
+  console.log(`✓ ${spec.name} born in ${spec.wellName}, pinned (auto_sleep_seconds=null).`);
+  console.log(`  next: cells talk ${spec.name}`);
+}
+
+// Push the systemd units shipped in dna/specials/pulse/systemd/ into the
+// pulse well and enable the timer. The well is pinned (auto_sleep_seconds=null)
+// so the timer keeps firing forever. Idempotent — safe to re-run on --rebuild.
+async function installPulseTimer(wellName: string): Promise<void> {
+  console.log(`  installing systemd pulse.timer in ${wellName}…`);
+  const unitsDir = join(SPECIALS_DIR, "pulse", "systemd");
+  const timer = await readFile(join(unitsDir, "pulse.timer"), "utf-8");
+  const service = await readFile(join(unitsDir, "pulse.service"), "utf-8");
+  const wrapper = await readFile(join(unitsDir, "pulse-pi-wrapper"), "utf-8");
+
+  // System-wide units (not user units — pulse runs as root, same as the
+  // pi process the unit invokes).
+  const script = `set -euo pipefail
+sudo mkdir -p /var/cells/pulse/logs /var/cells/pulse/pi-agent
+sudo tee /etc/systemd/system/pulse.timer >/dev/null <<'__TIMER_EOF__'
+${timer}__TIMER_EOF__
+sudo tee /etc/systemd/system/pulse.service >/dev/null <<'__SERVICE_EOF__'
+${service}__SERVICE_EOF__
+sudo tee /usr/local/bin/pulse-pi-wrapper >/dev/null <<'__WRAPPER_EOF__'
+${wrapper}__WRAPPER_EOF__
+sudo chmod 0644 /etc/systemd/system/pulse.timer /etc/systemd/system/pulse.service
+sudo chmod 0755 /usr/local/bin/pulse-pi-wrapper
+sudo systemctl daemon-reload
+sudo systemctl enable --now pulse.timer
+sudo systemctl status --no-pager pulse.timer | head -5 || true`;
+
+  const r = await wellExecCapture(wellName, script);
+  if (!r.ok) {
+    throw new Error(`installPulseTimer failed: ${(r.stderr + r.stdout).slice(-400)}`);
+  }
+  console.log(`  ✓ pulse.timer enabled (60s tick)`);
 }
 
 // Ensure a (supposedly running) well actually has a DHCP-assigned IP.
@@ -3102,7 +3419,17 @@ async function cmdDestroy(args: string[]) {
   if (allBut) {
     const reg = await loadRegistry();
     const keep = new Set(names);
-    targets = reg.cells.map((c) => c.name).filter((n) => !keep.has(n));
+    // Specials (mother, pulse) are exempt from --all-but sweeps unless
+    // explicitly named. They're the substrate the other cells run on top
+    // of; nuking them by accident takes the fleet down.
+    targets = reg.cells
+      .filter((c) => !c.special || keep.has(c.name))
+      .map((c) => c.name)
+      .filter((n) => !keep.has(n));
+    const skippedSpecials = reg.cells.filter((c) => c.special && !keep.has(c.name)).map((c) => c.name);
+    if (skippedSpecials.length > 0) {
+      console.log(`(skipping specials: ${skippedSpecials.join(", ")} — name them explicitly to include)`);
+    }
     if (targets.length === 0) {
       console.log("nothing to destroy");
       return;
@@ -5230,7 +5557,7 @@ async function setupPulseVault(): Promise<void> {
   await mkdir(vault, { recursive: true });
 
   // Wipe regenerated surfaces; preserve nothing — pulse is fully reproducible
-  // from dna/proto/pulse/ + ~/.cells/pulse.json.
+  // from dna/specials/pulse/ + ~/.cells/pulse.json.
   for (const f of ["README.md", "AGENTS.md", "persona.md", ...ANATOMY_FILES]) {
     if (existsSync(join(vault, f))) await rm(join(vault, f));
   }
@@ -6311,6 +6638,7 @@ switch (sub) {
     await cmdCreate(name, opts);
     break;
   }
+  case "birth-special": await cmdBirthSpecial(rest); break;
   case "talk": {
     const targetName = needName(rest, "talk");
     await cmdTalk(targetName, rest.slice(1));
@@ -6352,6 +6680,9 @@ switch (sub) {
     console.log("usage:");
     console.log("  cells pi                    open the mother Pi TUI (alias: cells talk mother)");
     console.log("  cells bake [--name=cell-base] [--force]  bake the cell-base image (one-time, ~5min)");
+    console.log("  cells birth-special <mother|pulse> [--rebuild]");
+    console.log("                              bake one of the named specials (cells-mother / cells-pulse), pinned always-on.");
+    console.log("                              DNA template at dna/specials/<name>/. --rebuild tears down the existing well first.");
     console.log("  cells birth <name> [flags]  provision a new cell in a local well (alias: create)");
     console.log("                              flags: --harness=pi|claude-code|codex");
     console.log("                                     --model=opus|sonnet|haiku|gpt-5.5|gpt-5.5-pro|deepseek-v4-flash|deepseek-v4-pro");

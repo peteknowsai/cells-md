@@ -84,7 +84,7 @@ cells birth <name>
   → cmdCreate: resolve config → JSON blob → reconcilePool → claimGenericEgg
       → wakePoolMember (~0.55s for tier-2) → ensureWellHasIp → stripAnthropicKey (if claude-code/codex)
       → runPiWithOutcome("cell-create", [name, eggWell, blob])
-          → mother (pi -p, cwd dna/proto/mother) reads docs/birthing-ritual.html, follows it
+          → mother (pi -p, cwd dna/specials/mother) reads docs/birthing-ritual.html, follows it
   → on success: markPoolMemberLive, registry push, prewarmHostBridge, refillPoolToDepth, talk UX
 
 <name>.cells.md (the cell's public page)
@@ -141,7 +141,7 @@ Restart any of them after editing its `.ts`: `launchctl kickstart -k gui/$(id -u
 | `cli/lib/channels.ts` | Slack/email channel binding logic. |
 | `cli/lib/reconcile.ts` | Pool eviction planner — pure logic, no IO; testable kernel of `reconcilePool`. |
 | `dna/cells/base/` | The generic egg DNA — `AGENTS.md`/`CLAUDE.md` (harness entrypoints), `SOUL.md`/`CELLS.md`/`TOOLS.md` (identity), `.pi/` + `.claude/` + `.codex/` config (placeholder templates), `site/`, `scripts/`, `bin/publish-image`. |
-| `dna/proto/mother/` | Mother — `.pi/prompts/cell-create.md` + `cell-destroy.md`, `.pi/skills/birth/`, `state/memory/`. |
+| `dna/specials/mother/` | Mother — `.pi/prompts/cell-create.md` + `cell-destroy.md`, `.pi/skills/birth/`, `state/memory/`. |
 | `docs/birthing-ritual.html` | The ritual mother follows — pi steps `p1`–`p9`, claude-code branch `c1`–`c7`, codex branch `x1`–`x6`. |
 | `scripts/eval-birth.ts` | Targeted birth eval (one combo × N, asserts loudly). |
 | `scripts/harden-birth.ts` | Matrix-sweep birth eval (writes a run record). |

@@ -1,0 +1,10 @@
+#!/bin/bash
+# Wrapper for pulse.service — sources cells-env.sh so pi sees the auth
+# env vars it expects. Installed at /usr/local/bin/pulse-pi-wrapper by
+# cells.ts:installPulseTimer.
+set -euo pipefail
+# shellcheck disable=SC1091
+[ -f /etc/profile.d/cells-env.sh ] && . /etc/profile.d/cells-env.sh
+export HOME=/root
+cd /root
+exec /usr/local/bin/pi -p /pulse

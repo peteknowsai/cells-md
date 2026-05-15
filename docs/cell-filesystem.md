@@ -48,7 +48,7 @@ The login user is **`cell`**, not `well`. Wells's substrate keeps `well` for its
 - Bake script (`cli/cells.ts cmdBake`): pushes DNA to `/root/` directly via `pushLocalDirToWellAsCell`, creates user `cell` with `bakeCreateCellUser` (`useradd -d /root -m -s /bin/bash cell` + sudo group), chowns `/root` to `cell:cell`. Force-fsyncs (`sync && sync`) before save (W.20 finding) so wells's stop+save preserves writes.
 - `/etc/profile.d/cells-env.sh` (`bakeWriteProfileD`) replaces the old `~/.bashrc.d/` shims. System-wide, sourced by every login shell.
 - DNA template at `dna/cells/base/` is **flat** (not `identity/code/memory/` subdirs) — the on-disk `/root` layout matches.
-- Birth skills (`dna/proto/mother/.pi/skills/birth/SKILL.md`, `birth-egg/SKILL.md`) swept `~/agent` → `/root` and `~/.bashrc.d/*` → `source /etc/profile.d/cells-env.sh` in step 4b verify.
+- Birth skills (`dna/specials/mother/.pi/skills/birth/SKILL.md`, `birth-egg/SKILL.md`) swept `~/agent` → `/root` and `~/.bashrc.d/*` → `source /etc/profile.d/cells-env.sh` in step 4b verify.
 - CLI heredocs in `cli/cells.ts` swept (17 refs across tmux launch, dream tool, extension push/remove, pullMarkdown, post-install).
 
 **Still open from cells's side:**

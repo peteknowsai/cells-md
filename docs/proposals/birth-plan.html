@@ -86,7 +86,7 @@
         <td>Claim any warm generic egg; default model → <code>deepseek-v4-flash</code>; drop the dead <code>cell-base</code> fallback; hand <code>[name, egg, blob]</code> to mother.</td>
       </tr>
       <tr>
-        <td><code>dna/proto/mother/.pi/prompts/cell-create.md</code></td>
+        <td><code>dna/specials/mother/.pi/prompts/cell-create.md</code></td>
         <td>Parses the blob, delegates to the <code>birth</code> skill.</td>
         <td>Parses the blob, points mother at <code>docs/birthing-ritual.html</code>, passes the claimed egg's well name.</td>
       </tr>
@@ -96,7 +96,7 @@
         <td><strong>New.</strong> The dual-purpose ritual. Reassembled from <code>birth/SKILL.md</code> (the ordered steps, repointed to start-from-egg) + <code>health-check</code> (folded in as the final verification) + the channel/worker wiring currently in <code>wirePostBirth</code>.</td>
       </tr>
       <tr>
-        <td><code>dna/proto/mother/.pi/skills/birth/SKILL.md</code></td>
+        <td><code>dna/specials/mother/.pi/skills/birth/SKILL.md</code></td>
         <td>The ordered ritual — but step 1 forks <code>cell-base</code>.</td>
         <td>Retired. Content moves into <code>birthing-ritual.html</code>, repointed to start from a claimed egg.</td>
       </tr>
@@ -193,8 +193,8 @@
     <h4>Pointers</h4>
     <ul class="bare">
       <li><code>docs/birth-checklist.md</code> — the existing acceptance matrix (informs step 6's verification)</li>
-      <li><code>dna/proto/mother/.pi/skills/{birth,birth-egg,health-check}/SKILL.md</code> — source material for the ritual</li>
-      <li><code>dna/proto/mother/.pi/prompts/cell-create.md</code> — the JSON-blob entry point</li>
+      <li><code>dna/specials/mother/.pi/skills/{birth,birth-egg,health-check}/SKILL.md</code> — source material for the ritual</li>
+      <li><code>dna/specials/mother/.pi/prompts/cell-create.md</code> — the JSON-blob entry point</li>
       <li><code>cli/cells.ts</code> — <code>cmdCreate</code> (~1798), <code>bakePoolMember</code> (~2515), <code>runPiWithOutcome</code> (~797)</li>
     </ul>
   </div>

@@ -72,7 +72,7 @@ Open the just-written run record. For each failure, attempt a fix and log what y
 - **Code-level bug confidently localized in `cli/cells.ts` or `scripts/harden-birth.ts`**: edit the file, log the diff (file:line summary) into `state.openFixAttempts`. The next iteration confirms the fix.
 
 You are **not** permitted to:
-- Modify the birth skill (`dna/proto/mother/.pi/skills/birth/SKILL.md`) or destroy prompt — hardening exercises those, doesn't rewrite them.
+- Modify the birth skill (`dna/specials/mother/.pi/skills/birth/SKILL.md`) or destroy prompt — hardening exercises those, doesn't rewrite them.
 - Push to remote.
 - Touch unrelated files.
 - Commit to `main` (per Pete's git rules — feature branch only).

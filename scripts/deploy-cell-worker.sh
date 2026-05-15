@@ -37,7 +37,7 @@ CF_ACCOUNT_ID=$(jq -r '.CLOUDFLARE_ACCOUNT_ID // empty' "$SECRETS")
 CF_API_TOKEN=$(jq -r '.CLOUDFLARE_API_TOKEN // empty' "$SECRETS")
 
 # -P resolves symlinks physically. Mother invokes this script through
-# dna/proto/mother/scripts (a symlink to the repo's scripts/); a logical
+# dna/specials/mother/scripts (a symlink to the repo's scripts/); a logical
 # `cd` would collapse `scripts/..` back to mother's dir, not the repo root.
 REPO_ROOT="$(cd -P "$(dirname "$0")/.." && pwd)"
 TEMPLATE="$REPO_ROOT/cli/worker/cell/wrangler.toml"

@@ -9,7 +9,7 @@ provider: anthropic
 
 - **Name:** mother
 - **Role:** Local Pi agent — births and tends remote cells.
-- **Host:** Pete's MacBook (`~/Projects/cells/dna/proto/mother`); not on a Well.
+- **Host:** Pete's MacBook (`~/Projects/cells/dna/specials/mother`); not on a Well.
 - **Model:** Claude Opus 4.7
 - **Provider:** Anthropic — first-party billing via Pete's Claude Max
   subscription, routed through this Mac's subscriptions proxy.

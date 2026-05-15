@@ -58,7 +58,7 @@ import { fileURLToPath } from "node:url";
 
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = dirname(SCRIPT_DIR);
-const MOTHER_ROOT = join(REPO_ROOT, "proto", "mother");
+const MOTHER_ROOT = join(REPO_ROOT, "dna", "specials", "mother");
 
 const AUTH_PATH = join(homedir(), ".pi/agent/auth.json");
 const SECRETS_PATH = join(homedir(), ".cells/secrets.json");
@@ -678,10 +678,28 @@ async function handlePulseProxy(req: Request): Promise<Response> {
     if (!cell || !/^[a-z0-9-]+$/.test(cell)) return new Response("missing or bad cell", { status: 400 });
     if (typeof content !== "string") return new Response("bad content", { status: 400 });
 
-    await mkdir(PULSE_INBOX_DIR, { recursive: true });
+    // Two destinations during the Phase 3 transition:
+    //   - default: Mac path (~/.cells/pulse-inbox/) — legacy pulse-on-Mac.
+    //   - CELLS_USE_PULSE_CELL=1: bridge into cells-pulse's well at
+    //     /var/cells/pulse/inbox/. Phase 4 deletes the Mac branch.
+    const useCell = process.env.CELLS_USE_PULSE_CELL === "1";
     const tsMs = Date.now();
     const filename = `${cell}-${tsMs}.md`;
-    await writeFile(join(PULSE_INBOX_DIR, filename), content);
+
+    if (useCell) {
+      const r = await bridgeInboxPulse({ cell, content });
+      if (r.status >= 400) {
+        console.warn(`[${new Date().toISOString()}] pulse-cell inbox failed (${r.status}); falling back to Mac path`);
+        await mkdir(PULSE_INBOX_DIR, { recursive: true });
+        await writeFile(join(PULSE_INBOX_DIR, filename), content);
+      } else {
+        console.log(`[${new Date().toISOString()}] pulse-cell ${cell} heartbeat-changed (${content.length}B)`);
+        return new Response(null, { status: 204 });
+      }
+    } else {
+      await mkdir(PULSE_INBOX_DIR, { recursive: true });
+      await writeFile(join(PULSE_INBOX_DIR, filename), content);
+    }
 
     console.log(
       `[${new Date().toISOString()}] pulse ${cell} heartbeat-changed -> ${filename} (${content.length}B)`,
@@ -690,6 +708,194 @@ async function handlePulseProxy(req: Request): Promise<Response> {
   }
 
   return new Response("not found", { status: 404 });
+}
+
+// ──────────────────────────── bridge endpoints ────────────────────────────
+//
+// proxy.cells.md/bridge/* — the cells substrate's back-channel for cells
+// that need to reach the Mac (mother for birth ops, pulse for fire/inbox).
+// Same Bearer auth as the LLM proxies; routes do file/process work on the
+// Mac via the same primitives cli/cells.ts uses.
+//
+// Endpoints:
+//   POST /bridge/pool/claim     — claim a generic egg, return {wellName, tier, id}
+//   POST /bridge/pool/sweep     — destroy a half-born egg + trigger refill
+//   POST /bridge/registry/read  — return ~/.cells/cells.json
+//   POST /bridge/registry/write — replace ~/.cells/cells.json (full doc)
+//   POST /bridge/well/ssh       — exec a script in a well via `well exec`, return {ok, stdout, stderr}
+//   POST /bridge/birth/outcome  — receive {birthId, success, message} from mother
+//   POST /bridge/talk           — fire `cells talk <cell> <msg>` (used by pulse)
+//   POST /bridge/inbox/pulse    — push a HEARTBEAT.md payload into pulse-cell's well
+//
+// All routes Bearer-auth via CELLS_PROXY_SECRET. Birth outcomes are
+// correlated via short ids written to ~/.cells/birth-outcomes/<id>.json
+// so the cells CLI can long-poll for them.
+
+const POOL_PATH = join(homedir(), ".cells/pool.json");
+const POOL_LOCK_PATH = join(homedir(), ".cells/.pool.lock");
+const BIRTH_OUTCOMES_DIR = join(homedir(), ".cells/birth-outcomes");
+const V1_POOL_VARIANT_SIGNATURE = "v1-2026-05-13"; // mirror of cli/cells.ts
+
+async function withPoolLockProxy<T>(fn: () => Promise<T>): Promise<T> {
+  // Minimal lockfile shim. The full cli/cells.ts version waits + breaks
+  // stale locks; the proxy is single-process so contention is rare.
+  let attempts = 0;
+  while (existsSync(POOL_LOCK_PATH) && attempts++ < 50) {
+    await new Promise(r => setTimeout(r, 100));
+  }
+  await writeFile(POOL_LOCK_PATH, JSON.stringify({ pid: process.pid, at: Date.now() }));
+  try {
+    return await fn();
+  } finally {
+    try { await import("node:fs/promises").then(m => m.unlink(POOL_LOCK_PATH)); } catch {}
+  }
+}
+
+async function bridgePoolClaim(body: { cellName: string }): Promise<Response> {
+  if (!body.cellName || !/^[a-z0-9-]+$/.test(body.cellName)) {
+    return new Response("bad cellName", { status: 400 });
+  }
+  let chosen: { wellName: string; tier: number; id: string } | null = null;
+  await withPoolLockProxy(async () => {
+    if (!existsSync(POOL_PATH)) return;
+    const file = JSON.parse(await readFile(POOL_PATH, "utf-8"));
+    const warm = file.members.find((e: any) =>
+      e.state === "warm" && e.variant_signature === V1_POOL_VARIANT_SIGNATURE && (e.tier ?? 2) === 4
+    ) ?? file.members.find((e: any) =>
+      e.state === "warm" && e.variant_signature === V1_POOL_VARIANT_SIGNATURE
+    );
+    if (!warm) return;
+    warm.state = "claimed";
+    warm.claimed_at = new Date().toISOString();
+    warm.claimed_by = body.cellName;
+    chosen = { wellName: warm.well_name, tier: warm.tier ?? 2, id: warm.well_name.slice("egg-".length) };
+    await writeFile(POOL_PATH, JSON.stringify(file, null, 2));
+  });
+  if (!chosen) return Response.json({ error: "no warm egg available" }, { status: 503 });
+  return Response.json(chosen);
+}
+
+async function bridgeRegistryRead(): Promise<Response> {
+  if (!existsSync(CELLS_REGISTRY)) return Response.json({ cells: [] });
+  return Response.json(JSON.parse(await readFile(CELLS_REGISTRY, "utf-8")));
+}
+
+async function bridgeRegistryWrite(body: { cells: any[] }): Promise<Response> {
+  if (!body || !Array.isArray(body.cells)) {
+    return new Response("bad body: {cells: []}", { status: 400 });
+  }
+  await mkdir(dirname(CELLS_REGISTRY), { recursive: true });
+  await writeFile(CELLS_REGISTRY, JSON.stringify(body, null, 2));
+  return new Response(null, { status: 204 });
+}
+
+async function bridgeWellSsh(body: { wellName: string; script: string }): Promise<Response> {
+  if (!body.wellName || !/^[a-z0-9-]+$/.test(body.wellName)) {
+    return new Response("bad wellName", { status: 400 });
+  }
+  if (typeof body.script !== "string" || body.script.length === 0) {
+    return new Response("bad script", { status: 400 });
+  }
+  const proc = Bun.spawn(["well", "exec", "-s", body.wellName, "--", "bash", "-c", body.script], {
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  const [stdout, stderr] = await Promise.all([
+    new Response(proc.stdout).text(),
+    new Response(proc.stderr).text(),
+  ]);
+  const exit = await proc.exited;
+  return Response.json({ ok: exit === 0, exit, stdout, stderr });
+}
+
+async function bridgePoolSweep(body: { wellName: string }): Promise<Response> {
+  if (!body.wellName || !/^[a-z0-9-]+$/.test(body.wellName)) {
+    return new Response("bad wellName", { status: 400 });
+  }
+  // Destroy + drop from pool. Refill is a fire-and-forget; we don't wait.
+  Bun.spawn(["well", "destroy", body.wellName, "--force"], { stdio: ["ignore", "ignore", "ignore"] });
+  await withPoolLockProxy(async () => {
+    if (!existsSync(POOL_PATH)) return;
+    const file = JSON.parse(await readFile(POOL_PATH, "utf-8"));
+    file.members = file.members.filter((e: any) => e.well_name !== body.wellName);
+    await writeFile(POOL_PATH, JSON.stringify(file, null, 2));
+  });
+  Bun.spawn(["bun", join(REPO_ROOT, "cli/cells.ts"), "pool", "refill"], { stdio: ["ignore", "ignore", "ignore"] });
+  return new Response(null, { status: 204 });
+}
+
+async function bridgeBirthOutcome(body: { birthId: string; success: boolean; message: string }): Promise<Response> {
+  if (!body.birthId || !/^[a-z0-9-]+$/.test(body.birthId)) {
+    return new Response("bad birthId", { status: 400 });
+  }
+  await mkdir(BIRTH_OUTCOMES_DIR, { recursive: true });
+  await writeFile(
+    join(BIRTH_OUTCOMES_DIR, `${body.birthId}.json`),
+    JSON.stringify({ success: !!body.success, message: String(body.message ?? ""), at: new Date().toISOString() }),
+  );
+  return new Response(null, { status: 204 });
+}
+
+async function bridgeTalk(body: { cell: string; message: string }): Promise<Response> {
+  if (!body.cell || !/^[a-z0-9-]+$/.test(body.cell)) {
+    return new Response("bad cell", { status: 400 });
+  }
+  if (typeof body.message !== "string") return new Response("bad message", { status: 400 });
+  Bun.spawn(["bun", join(REPO_ROOT, "cli/cells.ts"), "talk", body.cell, body.message], {
+    stdio: ["ignore", "ignore", "ignore"],
+  });
+  return new Response(null, { status: 204 });
+}
+
+async function bridgeInboxPulse(body: { cell: string; content: string }): Promise<Response> {
+  if (!body.cell || !/^[a-z0-9-]+$/.test(body.cell)) return new Response("bad cell", { status: 400 });
+  if (typeof body.content !== "string") return new Response("bad content", { status: 400 });
+  const script = `set -euo pipefail
+sudo mkdir -p /var/cells/pulse/inbox
+TS=$(date +%s%N)
+F=/var/cells/pulse/inbox/${body.cell}-$TS.md
+sudo tee "$F" >/dev/null <<'__INBOX_EOF__'
+${body.content}
+__INBOX_EOF__
+echo "$F"`;
+  const proc = Bun.spawn(["well", "exec", "-s", "cells-pulse", "--", "bash", "-c", script], {
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  const exit = await proc.exited;
+  if (exit !== 0) return new Response("inbox write failed", { status: 502 });
+  return new Response(null, { status: 204 });
+}
+
+async function handleBridgeProxy(req: Request): Promise<Response> {
+  const auth = checkClientAuth(req);
+  if (!auth.ok) return new Response(`unauthorized: ${auth.reason}`, { status: 401 });
+  if (req.method !== "POST") return new Response("method", { status: 405 });
+  const url = new URL(req.url);
+  const path = url.pathname.replace(/^\/bridge/, "");
+
+  let body: any = null;
+  try {
+    body = await req.json();
+  } catch {
+    return new Response("bad json", { status: 400 });
+  }
+
+  try {
+    switch (path) {
+      case "/pool/claim":     return await bridgePoolClaim(body);
+      case "/pool/sweep":     return await bridgePoolSweep(body);
+      case "/registry/read":  return await bridgeRegistryRead();
+      case "/registry/write": return await bridgeRegistryWrite(body);
+      case "/well/ssh":       return await bridgeWellSsh(body);
+      case "/birth/outcome":  return await bridgeBirthOutcome(body);
+      case "/talk":           return await bridgeTalk(body);
+      case "/inbox/pulse":    return await bridgeInboxPulse(body);
+      default:                return new Response("bridge: not found", { status: 404 });
+    }
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    console.error(`[bridge] ${path} -> 500: ${msg}`);
+    return new Response(`bridge error: ${msg.slice(0, 300)}`, { status: 500 });
+  }
 }
 
 // ───────────────────── dashboard / cell page data ─────────────────────
@@ -865,6 +1071,9 @@ const server = Bun.serve({
       if (url.pathname.startsWith("/codex/")) {
         return handleCodexProxy(req);
       }
+      if (url.pathname.startsWith("/bridge/")) {
+        return handleBridgeProxy(req);
+      }
       return handleApiProxy(req);
     }
 
@@ -887,6 +1096,7 @@ console.log(`    proxy.cells.md/             → dashboard`);
 console.log(`    proxy.cells.md/v1/*         → Anthropic proxy (Bearer auth)`);
 console.log(`    proxy.cells.md/codex/*      → OpenAI Codex proxy (Bearer auth)`);
 console.log(`    proxy.cells.md/_proxy/health`);
+console.log(`    proxy.cells.md/bridge/*     → back-channel for in-well cells (Bearer auth)`);
 console.log(`    pulse.cells.md/heartbeat-changed → pulse inbox (Bearer auth)`);
 console.log(`    (slack.cells.md and <cell>.cells.md handled by Cloudflare Workers)`);
 console.log(`  upstreams: ${UPSTREAM}, ${CODEX_UPSTREAM}`);

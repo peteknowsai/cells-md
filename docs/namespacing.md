@@ -88,7 +88,7 @@ arg; it gets baked in as a constant.
 
 Configuring DNS + the cloudflared tunnel for a new domain is **manual
 in Phase A** — same process documented in
-`dna/proto/mother/state/memory/project_mother_proxy.md`. Bootstrap can print the commands you
+`dna/specials/mother/state/memory/project_mother_proxy.md`. Bootstrap can print the commands you
 need to run rather than execute them itself.
 
 ## Phasing

@@ -1,0 +1,22 @@
+[Unit]
+Description=Pulse — one pulse tick (drain inbox, fire due, render digest)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/root
+EnvironmentFile=/etc/environment
+Environment=PULSE_RUNTIME_DIR=/var/cells/pulse
+Environment=CELLS_BRIDGE_URL=https://proxy.cells.md/bridge
+Environment=PI_CODING_AGENT_DIR=/var/cells/pulse/pi-agent
+# OPENAI_CODEX_API_KEY is picked up from /etc/environment (CELLS_PROXY_SECRET
+# is re-exported under that name by /etc/profile.d/cells-env.sh; systemd doesn't
+# read profile.d, so we set it explicitly here too).
+ExecStartPre=/bin/mkdir -p /var/cells/pulse/pi-agent /var/cells/pulse/logs
+# Wrapper sources /etc/profile.d/cells-env.sh so pi sees OPENAI_CODEX_API_KEY
+# (systemd doesn't read profile.d). Installed by cells.ts:installPulseTimer.
+ExecStart=/usr/local/bin/pulse-pi-wrapper
+StandardOutput=append:/var/cells/pulse/logs/pulse.log
+StandardError=append:/var/cells/pulse/logs/pulse.err
+TimeoutStartSec=120s

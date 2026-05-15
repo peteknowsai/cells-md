@@ -82,7 +82,7 @@ back.
 
 ## State memory entries with v1 architecture claims
 
-Some `dna/proto/mother/state/memory/*.md` files describe v1 details
+Some `dna/specials/mother/state/memory/*.md` files describe v1 details
 ("slack-channel only, drainer+site"). Don't rewrite — they're
 historical record. But beware of treating them as current truth in
 future sessions.

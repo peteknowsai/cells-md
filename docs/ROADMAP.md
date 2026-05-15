@@ -18,9 +18,9 @@ anything inside it.
 **Includes:**
 
 - `cell` CLI: `pi`, `create`, `talk`, `list`, `sleep`, `wake`, `checkpoint`, `destroy`
-- Local mother Pi project at `dna/proto/mother/` (`SOUL.md` + sharded anatomy files + use-max extension + `package.json`) so it bills against Pro/Max via the first-party billing recipe
+- Local mother Pi project at `dna/specials/mother/` (`SOUL.md` + sharded anatomy files + use-max extension + `package.json`) so it bills against Pro/Max via the first-party billing recipe
 - `dna/cells/base/` — recipe-compliant cell-on-Well layout that birth pushes onto each Well
-- `dna/proto/mother/.pi/skills/birth/SKILL.md` — birth ritual the mother follows:
+- `dna/specials/mother/.pi/skills/birth/SKILL.md` — birth ritual the mother follows:
   - create the Well + configure egress (anthropic, bun.sh, npm, github)
   - install Bun on the Well
   - tar+push `dna/cells/base/` to `/root/root`, `sed` substitute `__NAME__`

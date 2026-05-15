@@ -10,7 +10,7 @@
  *   pulse-inbox/processed/  archive of drained inbox files
  *   pulse-cache/<cell>.json parsed schedule per cell ({items: [{id, cron, message}]})
  *
- * Vault-readable surfaces (under dna/proto/pulse/state/, mirrored by `cells sync pulse`):
+ * Vault-readable surfaces (under dna/specials/pulse/state/, mirrored by `cells sync pulse`):
  *
  *   heartbeats.md    table of every cell's schedule + last/next fire (rendered each pulse)
  *   log.md           LLM-written daily narrative (one entry per 24h, prepended)
@@ -34,18 +34,43 @@ import { homedir } from "node:os";
 // ---------- paths ----------
 
 const HOME = homedir();
+// On Mac (legacy): everything lives under ~/.cells/.
+// In a well (post-Phase-3): pulse owns /var/cells/pulse/. Set PULSE_RUNTIME_DIR
+// (the systemd unit does this) to switch. CELLS_DIR is kept for the registry
+// path; in-well, the registry comes via bridge/registry/read, not from disk.
 const CELLS_DIR = path.join(HOME, ".cells");
-const STATE_PATH = path.join(CELLS_DIR, "pulse.json");
-const INBOX_DIR = path.join(CELLS_DIR, "pulse-inbox");
+const PULSE_RUNTIME_DIR = process.env.PULSE_RUNTIME_DIR ?? CELLS_DIR;
+const STATE_PATH = path.join(PULSE_RUNTIME_DIR, "pulse.json");
+const INBOX_DIR = path.join(PULSE_RUNTIME_DIR, "pulse-inbox");
 const PROCESSED_DIR = path.join(INBOX_DIR, "processed");
-const CACHE_DIR = path.join(CELLS_DIR, "pulse-cache");
+const CACHE_DIR = path.join(PULSE_RUNTIME_DIR, "pulse-cache");
 const REGISTRY_PATH = path.join(CELLS_DIR, "cells.json");
 const VAULT_DIR = path.join(HOME, "Obsidian", "cells");
-const LOGS_DIR = path.join(CELLS_DIR, "logs");
+const LOGS_DIR = path.join(PULSE_RUNTIME_DIR, "logs");
 const PULSE_TRACE_LOG = path.join(LOGS_DIR, "pulse-trace.log");
 const FIRES_LOG = path.join(LOGS_DIR, "fires.log");
 
-// pulse-tools lives at dna/proto/pulse/.pi/extensions/pulse-tools/index.ts;
+// In-well, fire scheduled wakes via proxy.cells.md/bridge/talk. On Mac
+// (legacy), pulse spawns `cells talk` locally — same flag-detection model
+// as mother-tools (CELLS_BRIDGE_URL=https://proxy.cells.md/bridge in the
+// systemd unit's Environment=).
+const BRIDGE_URL = process.env.CELLS_BRIDGE_URL ?? null;
+async function fireViaBridge(cell: string, message: string): Promise<{ ok: boolean; exit: number; stdout: string; stderr: string }> {
+  const secret = process.env.CELLS_PROXY_SECRET ?? process.env.OPENAI_CODEX_API_KEY ?? "";
+  try {
+    const r = await fetch(`${BRIDGE_URL}/talk`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${secret}` },
+      body: JSON.stringify({ cell, message }),
+    });
+    if (!r.ok) return { ok: false, exit: r.status, stdout: "", stderr: await r.text() };
+    return { ok: true, exit: 0, stdout: "", stderr: "" };
+  } catch (e) {
+    return { ok: false, exit: 1, stdout: "", stderr: e instanceof Error ? e.message : String(e) };
+  }
+}
+
+// pulse-tools lives at dna/specials/pulse/.pi/extensions/pulse-tools/index.ts;
 // state/ is two dirs up.
 const PULSE_ROOT = path.resolve(__dirname, "..", "..", "..");
 const STATE_DIR = path.join(PULSE_ROOT, "state");
@@ -424,7 +449,9 @@ export default function (pi: any) {
           // Don't double-fire the same scheduled instant.
           if (last && new Date(last).getTime() === fireTime.getTime()) continue;
 
-          const r = await shellOut("cells", ["talk", cell, item.message]);
+          const r = BRIDGE_URL
+            ? await fireViaBridge(cell, item.message)
+            : await shellOut("cells", ["talk", cell, item.message]);
           const result: "ok" | "fail" = r.ok ? "ok" : "fail";
           state.lastFire[key] = fireTime.toISOString();
           state.log.push({
@@ -501,7 +528,7 @@ export default function (pi: any) {
     name: "write_log_entry",
     label: "Write daily log entry",
     description:
-      "Prepend a daily narrative entry to dna/proto/pulse/state/log.md. body should be a short paragraph (~3-5 sentences) describing what happened in the prior 24h. Markdown, no leading H2 (the tool adds `## <date>`). The date is LOCAL — pass the value daily_log_due returned.",
+      "Prepend a daily narrative entry to dna/specials/pulse/state/log.md. body should be a short paragraph (~3-5 sentences) describing what happened in the prior 24h. Markdown, no leading H2 (the tool adds `## <date>`). The date is LOCAL — pass the value daily_log_due returned.",
     parameters: Type.Object({
       date: Type.String({ description: "YYYY-MM-DD (local TZ — value from daily_log_due.today)." }),
       body: Type.String({ description: "Markdown paragraph; no headers." }),
@@ -525,7 +552,7 @@ export default function (pi: any) {
     name: "render_digest",
     label: "Render heartbeats digest",
     description:
-      "Write dna/proto/pulse/state/heartbeats.md — a markdown table of every cell's schedule, last-fire, next-fire. Pure compute over pulse-cache/ + state. Call at the end of each pulse.",
+      "Write dna/specials/pulse/state/heartbeats.md — a markdown table of every cell's schedule, last-fire, next-fire. Pure compute over pulse-cache/ + state. Call at the end of each pulse.",
     parameters: Type.Object({}),
     async execute() {
       ensureDirs();
