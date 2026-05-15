@@ -1106,6 +1106,11 @@ async function cmdShell(name: string) {
   // forgot to, so `cells shell <cell>` on hatched cells errored with
   // "well not found in registry". Resolve here too.
   const wellName = await wellNameForCell(name);
+  // Best-effort self-heal: push the latest /etc/profile.d/cells-env.sh
+  // before opening the shell so existing cells pick up PS1/banner
+  // niceness updates without a re-bake. Fast enough not to be felt;
+  // failures don't block the shell.
+  await refreshShellNiceness(wellName);
   // Spawn tmux directly under well exec --tty as root (sudo from the
   // ubuntu ssh user). Bypasses the login-shell auto-attach shim (which
   // would dump us into pi); inside tmux, the shim's `[ -z "$TMUX" ]`
@@ -6187,17 +6192,11 @@ ln -sf /root/bin/cells ~/.local/bin/cells`);
   }
 }
 
-async function bakeWriteProfileD(name: string): Promise<void> {
-  // System-wide env shim. Replaces the old per-user ~/.bashrc.d/ +
-  // ~/.profile dance. /etc/profile.d/*.sh is sourced automatically by
-  // every login shell (bash, sh, dash) via /etc/profile, so works for
-  // cell, well, and anyone else who logs in. Survives any /home rinse
-  // since it lives at /etc/. Image stays secret-free; CELLS_PROXY_SECRET
-  // is injected at birth time via `well create --env CELLS_PROXY_SECRET=…`,
-  // which welld writes to /etc/environment.
-  const r = await wellExecCapture(name, `set -euo pipefail
-sudo tee /etc/profile.d/cells-env.sh >/dev/null <<'EOF'
-# CELLS_PROXY_SECRET is set by /etc/environment at boot (well-firstboot).
+// Shared template body for /etc/profile.d/cells-env.sh. Single source
+// of truth used at bake time (bakeWriteProfileD) AND at shell time
+// (refreshShellNiceness, called from cmdShell for self-healing on
+// pre-existing cells). Keep both call sites pointing here.
+const CELLS_ENV_SH_BODY = `# CELLS_PROXY_SECRET is set by /etc/environment at boot (well-firstboot).
 # Re-export under the names pi-ai's auth dispatch + codex-proxy expect.
 if [ -n "\${CELLS_PROXY_SECRET:-}" ]; then
   export ANTHROPIC_OAUTH_TOKEN="\$CELLS_PROXY_SECRET"
@@ -6211,10 +6210,62 @@ fi
 # own login shells) and the absolute /home/well/.bun/bin (cell's login
 # shells, where \$HOME=/root — \$HOME/.bun is empty).
 export PATH="\$HOME/.bun/bin:/home/well/.bun/bin:/root/bin:\$PATH"
-EOF
+
+# Niceness for interactive tmux shells (i.e. cells shell <name>): a
+# violet prompt with the cell's name + a one-shot welcome banner per
+# pane. Skips one-off well_exec commands (no \$PS1, no \$TMUX) so
+# automation stays quiet. Cell name comes from /root/AGENTS.md's
+# first line, which is sed'd in at hatch (the substrate's hostname is
+# the well's egg-id and unfriendly).
+if [ -n "\${PS1:-}" ] && [ -n "\${TMUX:-}" ]; then
+  CELL_NAME=\$(sed -n '1s/^# //p' /root/AGENTS.md 2>/dev/null)
+  : "\${CELL_NAME:=\$(hostname)}"
+  export CELL_NAME
+  export PS1="\\[\\e[38;5;141m\\]\${CELL_NAME}\\[\\e[0m\\] \\w \\\$ "
+  _banner_marker="/tmp/.cells-banner-\${TMUX_PANE//[^A-Za-z0-9]/_}"
+  if [ ! -f "\$_banner_marker" ]; then
+    touch "\$_banner_marker" 2>/dev/null || true
+    echo
+    echo "🧬 \${CELL_NAME}"
+    echo "   /root              anatomy (AGENTS.md, SOUL.md, …)"
+    echo "   /root/state/memory persistent memory"
+    echo "   cells, well        fleet + substrate CLIs"
+    echo "   Ctrl-d             exit this shell"
+    echo
+  fi
+  unset _banner_marker
+fi
+`;
+
+async function bakeWriteProfileD(name: string): Promise<void> {
+  // System-wide env shim. Replaces the old per-user ~/.bashrc.d/ +
+  // ~/.profile dance. /etc/profile.d/*.sh is sourced automatically by
+  // every login shell (bash, sh, dash) via /etc/profile, so works for
+  // cell, well, and anyone else who logs in. Survives any /home rinse
+  // since it lives at /etc/. Image stays secret-free; CELLS_PROXY_SECRET
+  // is injected at birth time via `well create --env CELLS_PROXY_SECRET=…`,
+  // which welld writes to /etc/environment.
+  const r = await wellExecCapture(name, `set -euo pipefail
+sudo tee /etc/profile.d/cells-env.sh >/dev/null <<'EOF'
+${CELLS_ENV_SH_BODY}EOF
 sudo chmod 644 /etc/profile.d/cells-env.sh`);
   if (!r.ok) {
     throw new Error(`write /etc/profile.d/cells-env.sh failed: ${r.stderr.slice(0, 400)}`);
+  }
+}
+
+// Self-heal step for `cells shell`: push the latest cells-env.sh
+// before launching tmux, so existing cells pick up new niceness
+// (PS1, banner) without needing a re-bake. Quick best-effort — if
+// the write fails the shell still opens, just without the upgrade.
+async function refreshShellNiceness(wellName: string): Promise<void> {
+  try {
+    await wellExecCapture(wellName, `set -euo pipefail
+sudo tee /etc/profile.d/cells-env.sh >/dev/null <<'EOF'
+${CELLS_ENV_SH_BODY}EOF
+sudo chmod 644 /etc/profile.d/cells-env.sh`);
+  } catch (_) {
+    // best-effort — shell opens regardless
   }
 }
 
