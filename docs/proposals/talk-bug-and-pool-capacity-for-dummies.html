@@ -1,0 +1,711 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Two Loose Ends For Dummies</title>
+<style>
+  :root {
+    --yellow: #ffdd00;
+    --yellow-deep: #f5c400;
+    --ink: #1a1a1a;
+    --paper: #fffdf3;
+    --rule: #1a1a1a;
+    --tip: #2f8f3e;
+    --remember: #2b6cb0;
+    --warning: #d8401a;
+    --tech: #6b46c1;
+    --sidebar: #fff6cc;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
+  body {
+    background: var(--paper);
+    color: var(--ink);
+    font-family: Georgia, "Times New Roman", serif;
+    font-size: 18px;
+    line-height: 1.62;
+    -webkit-text-size-adjust: 100%;
+  }
+  .wrap { max-width: 760px; margin: 0 auto; padding: 0 22px 90px; }
+
+  /* ---- Cover block ---- */
+  .cover {
+    background: var(--yellow);
+    border-bottom: 8px solid var(--ink);
+    margin-bottom: 0;
+  }
+  .cover-inner {
+    max-width: 760px; margin: 0 auto; padding: 30px 22px 26px;
+    display: flex; gap: 20px; align-items: center;
+  }
+  .cover-text { flex: 1; }
+  .kicker {
+    font-family: "Arial Black", Arial, sans-serif;
+    text-transform: uppercase; letter-spacing: 1.5px;
+    font-size: 12px; font-weight: 900;
+    background: var(--ink); color: var(--yellow);
+    display: inline-block; padding: 4px 9px; margin-bottom: 10px;
+  }
+  .cover h1 {
+    font-family: "Arial Black", Arial, sans-serif;
+    font-weight: 900; line-height: 1.04;
+    font-size: 40px; margin: 0 0 6px;
+  }
+  .cover .sub {
+    font-family: Arial, sans-serif; font-style: italic;
+    font-size: 17px; margin: 0; font-weight: 700;
+  }
+  .cover .tag {
+    font-family: "Arial Black", Arial, sans-serif;
+    font-size: 12px; letter-spacing: 1px; text-transform: uppercase;
+    margin-top: 12px;
+  }
+  .dummies-man { width: 96px; flex: 0 0 96px; }
+  @media (max-width: 540px) {
+    .cover h1 { font-size: 30px; }
+    .dummies-man { width: 70px; flex-basis: 70px; }
+    body { font-size: 17px; }
+  }
+
+  .meta {
+    background: var(--ink); color: var(--yellow);
+    font-family: Arial, sans-serif; font-size: 12.5px;
+    letter-spacing: .3px;
+  }
+  .meta-inner { max-width: 760px; margin: 0 auto; padding: 8px 22px; }
+
+  /* ---- Headings ---- */
+  h2 {
+    font-family: "Arial Black", Arial, sans-serif; font-weight: 900;
+    font-size: 25px; line-height: 1.15;
+    margin: 46px 0 4px; padding-top: 16px;
+    border-top: 4px solid var(--ink);
+  }
+  h2 .pt { display:block; font-size: 12px; letter-spacing: 2px; color: #8a7300; }
+  h3 {
+    font-family: "Arial Black", Arial, sans-serif; font-weight: 900;
+    font-size: 19px; margin: 34px 0 6px;
+  }
+  h4 {
+    font-family: Arial, sans-serif; font-weight: 800;
+    font-size: 16px; margin: 22px 0 4px;
+  }
+  p { margin: 12px 0; }
+  a { color: #1a4f8a; }
+
+  /* ---- "In This Chapter" box ---- */
+  .itc {
+    background: var(--yellow); border: 3px solid var(--ink);
+    padding: 12px 16px 12px; margin: 14px 0 22px;
+  }
+  .itc .lbl {
+    font-family: "Arial Black", Arial, sans-serif; font-size: 12px;
+    text-transform: uppercase; letter-spacing: 1.5px; margin-bottom: 4px;
+  }
+  .itc ul { margin: 4px 0 0; padding-left: 22px; }
+  .itc li {
+    font-family: Arial, sans-serif; font-size: 14.5px;
+    line-height: 1.45; margin: 3px 0;
+  }
+
+  /* ---- Margin-icon callouts ---- */
+  .icon-note {
+    position: relative;
+    border-left: 5px solid var(--ink);
+    background: #fff;
+    margin: 18px 0 18px 0;
+    padding: 12px 14px 12px 60px;
+    min-height: 56px;
+  }
+  .icon-note .badge {
+    position: absolute; left: 10px; top: 12px;
+    width: 38px; height: 38px; border-radius: 50%;
+    border: 3px solid var(--ink);
+    display: flex; align-items: center; justify-content: center;
+    font-size: 20px; line-height: 1; background: #fff;
+  }
+  .icon-note .nlbl {
+    font-family: "Arial Black", Arial, sans-serif;
+    font-size: 11px; letter-spacing: 1.3px; text-transform: uppercase;
+    display: block; margin-bottom: 2px;
+  }
+  .icon-note p { margin: 2px 0; font-size: 16.5px; }
+  .icon-note.tip { border-left-color: var(--tip); }
+  .icon-note.tip .badge { border-color: var(--tip); background: #e9f6ea; }
+  .icon-note.tip .nlbl { color: var(--tip); }
+  .icon-note.remember { border-left-color: var(--remember); }
+  .icon-note.remember .badge { border-color: var(--remember); background: #e7f0f9; }
+  .icon-note.remember .nlbl { color: var(--remember); }
+  .icon-note.warning { border-left-color: var(--warning); }
+  .icon-note.warning .badge { border-color: var(--warning); background: #fdeae5; }
+  .icon-note.warning .nlbl { color: var(--warning); }
+  .icon-note.tech { border-left-color: var(--tech); }
+  .icon-note.tech .badge { border-color: var(--tech); background: #efe9f9; }
+  .icon-note.tech .nlbl { color: var(--tech); }
+
+  /* ---- Sidebar ---- */
+  .sidebar {
+    background: var(--sidebar);
+    border: 2px dashed var(--ink);
+    padding: 14px 18px; margin: 24px 0;
+  }
+  .sidebar .slbl {
+    font-family: "Arial Black", Arial, sans-serif; font-size: 12px;
+    text-transform: uppercase; letter-spacing: 1px; margin-bottom: 4px;
+  }
+  .sidebar p { font-size: 15.5px; line-height: 1.5; }
+
+  /* ---- Cheat sheet ---- */
+  .cheat {
+    border: 3px dashed var(--ink);
+    background: #fff;
+    padding: 18px 20px; margin: 26px 0 8px;
+  }
+  .cheat h2 {
+    border: 0; margin: 0 0 6px; padding: 0; font-size: 22px;
+  }
+  .cheat .csub {
+    font-family: Arial, sans-serif; font-style: italic;
+    font-size: 14px; margin: 0 0 12px;
+  }
+  .cheat dl { margin: 0; }
+  .cheat dt {
+    font-family: "Arial Black", Arial, sans-serif; font-size: 13.5px;
+    margin-top: 12px; text-transform: uppercase; letter-spacing: .5px;
+  }
+  .cheat dd { margin: 2px 0 0; font-size: 16px; }
+
+  /* ---- Steps ---- */
+  ol.steps { counter-reset: step; list-style: none; padding-left: 0; }
+  ol.steps > li {
+    position: relative; padding-left: 46px; margin: 16px 0;
+  }
+  ol.steps > li::before {
+    counter-increment: step; content: counter(step);
+    position: absolute; left: 0; top: -2px;
+    width: 32px; height: 32px; border-radius: 50%;
+    background: var(--yellow); border: 3px solid var(--ink);
+    font-family: "Arial Black", Arial, sans-serif; font-size: 16px;
+    display: flex; align-items: center; justify-content: center;
+  }
+  ol.steps > li b { font-family: Arial, sans-serif; }
+
+  /* ---- Misc ---- */
+  code {
+    font-family: "SF Mono", Menlo, Consolas, monospace;
+    font-size: 0.85em; background: #f0ecd8;
+    padding: 1px 5px; border-radius: 3px;
+  }
+  pre {
+    background: var(--ink); color: #f4f4f4;
+    padding: 14px 16px; overflow-x: auto;
+    font-family: "SF Mono", Menlo, Consolas, monospace;
+    font-size: 13px; line-height: 1.5;
+  }
+  table { border-collapse: collapse; width: 100%; margin: 18px 0; font-size: 15px; font-family: Arial, sans-serif; }
+  th, td { border: 2px solid var(--ink); padding: 7px 9px; text-align: left; vertical-align: top; }
+  th { background: var(--yellow); font-weight: 900; font-family: "Arial Black", Arial, sans-serif; font-size: 12.5px; text-transform: uppercase; letter-spacing: .5px; }
+  ul.plain { padding-left: 22px; }
+  ul.plain li { margin: 6px 0; }
+  .toc {
+    background: #fff; border: 3px solid var(--ink);
+    padding: 14px 20px; margin: 22px 0;
+    font-family: Arial, sans-serif; font-size: 14.5px;
+  }
+  .toc .lbl { font-family: "Arial Black", Arial, sans-serif; font-size: 12px; letter-spacing: 1.5px; text-transform: uppercase; margin-bottom: 6px; }
+  .toc ol { margin: 0; padding-left: 22px; }
+  .toc li { margin: 3px 0; }
+  .toc a { text-decoration: none; }
+  .endnote {
+    margin-top: 50px; border-top: 4px solid var(--ink);
+    padding-top: 14px; font-family: Arial, sans-serif; font-size: 13px; color: #555;
+  }
+  .tens {
+    background: var(--yellow); border: 3px solid var(--ink);
+    padding: 4px 20px 14px; margin: 18px 0;
+  }
+  .tens ol { padding-left: 24px; }
+  .tens li { margin: 9px 0; font-size: 16.5px; }
+  .tens li b { font-family: Arial, sans-serif; }
+</style>
+</head>
+<body>
+
+<header class="cover">
+  <div class="cover-inner">
+    <div class="cover-text">
+      <span class="kicker">A Cells Status Explainer</span>
+      <h1>Two Loose&nbsp;Ends For&nbsp;Dummies</h1>
+      <p class="sub">The claude-code talk bug and the pool capacity wall — what each one actually is</p>
+      <p class="tag">★ One's already dead &nbsp;★ One's real &nbsp;★ What to do about each</p>
+    </div>
+    <svg class="dummies-man" viewBox="0 0 100 130" aria-label="Dummies Man">
+      <path d="M50 6 L80 60 Q50 72 20 60 Z" fill="#fff" stroke="#1a1a1a" stroke-width="4" stroke-linejoin="round"/>
+      <circle cx="42" cy="48" r="4.2" fill="#1a1a1a"/>
+      <circle cx="60" cy="48" r="4.2" fill="#1a1a1a"/>
+      <path d="M51 52 Q54 58 49 60" fill="none" stroke="#1a1a1a" stroke-width="3" stroke-linecap="round"/>
+      <path d="M40 64 Q50 70 62 63" fill="none" stroke="#1a1a1a" stroke-width="3.4" stroke-linecap="round"/>
+      <path d="M50 6 Q57 1 60 8" fill="none" stroke="#1a1a1a" stroke-width="3.4" stroke-linecap="round"/>
+      <path d="M38 72 L62 72 L70 116 L30 116 Z" fill="#1a1a1a"/>
+      <path d="M44 72 L50 84 L56 72 Z" fill="#fff"/>
+      <path d="M38 76 L20 100 M62 76 L82 98" stroke="#1a1a1a" stroke-width="6" stroke-linecap="round"/>
+    </svg>
+  </div>
+</header>
+<div class="meta">
+  <div class="meta-inner">Status: explainer (not a proposal) · Author: Claude, worker · 2026-05-15 · Written after the birth-rework merge, to settle what's actually still open</div>
+</div>
+
+<div class="wrap">
+
+<!-- ============ CHEAT SHEET ============ -->
+<section class="cheat" id="cheat">
+  <h2>The Cheat Sheet</h2>
+  <p class="csub">Both loose ends on one tear-out card. Read this if you read nothing else.</p>
+  <dl>
+    <dt>The setup</dt>
+    <dd>When the birth rework merged, two things were still being called "open": the <strong>claude-code talk bug</strong> and the <strong>pool capacity wall</strong>. Then someone actually checked. One of them isn't open at all.</dd>
+    <dt>Loose end #1 — the talk bug — in one sentence</dt>
+    <dd>claude-code cells talk fine — verified twice, on an old cell and a fresh one. The "open bug" survives only in a stale commit message that can't be edited.</dd>
+    <dt>Loose end #2 — the capacity wall — in one sentence</dt>
+    <dd>The pool wants 10 warm eggs, but 10 warm <em>plus the live cells</em> is more VMs than the Mac's cores can run — so fresh bakes time out.</dd>
+    <dt>What #1 needs</dt>
+    <dd>Nothing in code. Stop trusting commit <code>1161505</code>'s message; <code>STATUS.md</code> and <code>BOARD.md</code> are already correct. Optionally one BOARD line so nobody re-opens it.</dd>
+    <dt>What #2 needs</dt>
+    <dd>A pool target the box can actually hold — a cells decision. Wells's admission-control proposal handles the boot stampede; it can't conjure cores. Two complementary halves.</dd>
+    <dt>Smallest next step</dt>
+    <dd><strong>#1:</strong> nothing — maybe a one-line note. <strong>#2:</strong> decide whether the pool target counts live cells, drops to a number that fits, or grows a cold tier.</dd>
+  </dl>
+</section>
+
+<div class="toc">
+  <div class="lbl">What's In This Book</div>
+  <ol>
+    <li><a href="#intro">Introduction</a> — about this explainer, foolish assumptions, the icons</li>
+    <li><a href="#part1">Part I:</a> The Talk Bug (The One That's Already Dead)</li>
+    <li><a href="#part2">Part II:</a> The Capacity Wall (The One That's Real)</li>
+    <li><a href="#part3">Part III:</a> The Part of Tens</li>
+    <li><a href="#close">Where to Go From Here</a></li>
+  </ol>
+</div>
+
+<!-- ============ INTRODUCTION ============ -->
+<h2 id="intro">Introduction</h2>
+
+<h3>About This Explainer</h3>
+<p>
+  The birth rework shipped — three harnesses, a generic pool, push-model web presence,
+  the lot. The wrap-up listed two things still "to do": fix the claude-code talk bug,
+  and resolve a pool capacity tension. This explainer is what each of those two things
+  <em>actually</em> is, written plain-language first with the deep detail clearly marked.
+</p>
+<p>
+  The short version, so you're not in suspense: one of the two was a ghost. The
+  claude-code talk bug had already been fixed; it only <em>looked</em> open because of
+  where people were reading. The capacity wall, on the other hand, is real, and it needs
+  one small decision.
+</p>
+
+<div class="icon-note remember">
+  <div class="badge">🧵</div>
+  <span class="nlbl">Remember</span>
+  <p>This is an <strong>explainer</strong>, not a proposal asking for approval. Loose end
+  #1 needs no decision at all. Loose end #2 needs one small one. Nothing here is a big
+  ask.</p>
+</div>
+
+<h3>Foolish Assumptions</h3>
+<p>This book assumes that you:</p>
+<ul class="plain">
+  <li>Know a <strong>cell</strong> is an agent that lives on its own little Linux VM —
+  and that the VM is called a <strong>well</strong>.</li>
+  <li>Know cells are born from a <strong>pool</strong> of warm, pre-baked "eggs" so a
+  birth is instant instead of a cold provision.</li>
+  <li>Know <strong>host-bridge</strong> is the daemon on Pete's Mac that drives a cell's
+  harness over SSH when you run <code>cells talk</code>.</li>
+  <li>Would rather hear "that thing you were worried about is actually fine" than carry
+  a phantom bug on the board forever.</li>
+</ul>
+
+<h3>Icons Used in This Book</h3>
+<p>Like every good Dummies book, this one talks to you from the margins:</p>
+
+<div class="icon-note tip">
+  <div class="badge">💡</div>
+  <span class="nlbl">Tip</span>
+  <p>A shortcut, a smart default, or the cheap thing worth doing.</p>
+</div>
+<div class="icon-note remember">
+  <div class="badge">🧵</div>
+  <span class="nlbl">Remember</span>
+  <p>A load-bearing idea. Forget it and you'll re-open something we already closed.</p>
+</div>
+<div class="icon-note warning">
+  <div class="badge">⚠️</div>
+  <span class="nlbl">Warning</span>
+  <p>A genuine foot-gun. Used sparingly. When you see it, slow down.</p>
+</div>
+<div class="icon-note tech">
+  <div class="badge">🤓</div>
+  <span class="nlbl">Technical Stuff</span>
+  <p>The deep end — function names, field names, CPU arithmetic. Safe to skip if you
+  only want the shape of the thing.</p>
+</div>
+
+<!-- ============ PART I ============ -->
+<h2 id="part1"><span class="pt">Part I</span>The Talk Bug (The One That's Already Dead)</h2>
+
+<h3>Chapter 1: What You Heard vs. What's True</h3>
+<div class="itc">
+  <div class="lbl">In This Chapter</div>
+  <ul>
+    <li>The claim: claude-code talk is the headline open gap</li>
+    <li>The test: two cells, one prompt each</li>
+    <li>The verdict: it works</li>
+  </ul>
+</div>
+<p>
+  The birth-rework wrap-up called the claude-code talk bug "the headline open gap" — the
+  top thing left to fix. So someone went and ran it.
+</p>
+<pre>$ cells talk claudia "Reply with exactly: pong"
+claudia&gt; pong
+
+$ cells birth vctalk --harness=claude-code ...   # a brand-new cell
+$ cells talk vctalk "Reply with exactly: fresh-ok"
+vctalk&gt; fresh-ok</pre>
+<p>
+  <code>claudia</code> is a claude-code cell that's been alive for hours.
+  <code>vctalk</code> was a claude-code cell born minutes earlier from the freshly
+  re-baked pool. Both answered cleanly, both exited 0. <strong>claude-code cells
+  talk.</strong> There is no open talk bug.
+</p>
+
+<div class="icon-note remember">
+  <div class="badge">🧵</div>
+  <span class="nlbl">Remember</span>
+  <p><code>STATUS.md</code> and <code>BOARD.md</code> already say claude-code talk is
+  verified working. They are <em>correct</em>. The document that's wrong is a commit
+  message — and a commit message, unlike a status file, can never be edited after the
+  fact. It just sits there being wrong forever.</p>
+</div>
+
+<h3>Chapter 2: The Chain of Bugs (And What Killed Each)</h3>
+<div class="itc">
+  <div class="lbl">In This Chapter</div>
+  <ul>
+    <li>The path a claude-code prompt actually travels</li>
+    <li>Three host-bridge bugs that lived on that path</li>
+    <li>Why "no output" was lying to everyone</li>
+  </ul>
+</div>
+<p>
+  There <em>was</em> a real bug — three of them, actually, in a row. They're worth
+  understanding, because the way the last one looked is the whole reason this loose end
+  got mistaken for unsolved.
+</p>
+<p>
+  When you run <code>cells talk</code> against a claude-code cell, the prompt travels:
+  talk CLI → <strong>host-bridge</strong> (on the Mac) → SSH into the cell → the
+  <code>claude</code> CLI in stream-json mode → the proxy → Claude Max → and all the way
+  back. host-bridge's <code>claudeCodeAdapter</code> is the translator in the middle: it
+  turns <code>claude</code>'s event stream into the vocabulary the talk CLI speaks. Three
+  bugs lived in that translator.
+</p>
+
+<table>
+  <tr><th>The bug</th><th>What it was</th><th>What killed it</th></tr>
+  <tr>
+    <td>The double <code>bash&nbsp;-lc</code> wrap</td>
+    <td><code>CellSession.start</code> wrapped the remote command in <code>bash -lc</code> — but SSH re-joins its arguments with spaces and the remote shell re-parses them, so the command collapsed into a no-op and <code>claude</code> never even launched.</td>
+    <td>host-bridge stopped double-wrapping; each adapter now owns its own <code>bash -lc</code> and SSH passes it through untouched.</td>
+  </tr>
+  <tr>
+    <td>The handshake deadlock</td>
+    <td><code>startHandshake</code> sat waiting for a "system/init" ready signal — but <code>claude --print</code> sends nothing until it gets input. host-bridge queued the prompt forever, waiting for a hello that only comes <em>after</em> the prompt.</td>
+    <td>commit <code>1161505</code> — <code>startHandshake</code> now marks the session ready immediately and lets the queued prompt flush.</td>
+  </tr>
+  <tr>
+    <td>The field-name mismatch</td>
+    <td><code>translateOutbound</code> emitted <code>claude</code>'s text under a key called <code>event</code>, but the talk CLI reads a key called <code>assistantMessageEvent</code>. The text was produced, handed over, and silently dropped on the floor.</td>
+    <td>a one-word fix in the codex-harness host-bridge rework: <code>event</code> → <code>assistantMessageEvent</code>.</td>
+  </tr>
+</table>
+
+<div class="icon-note tech">
+  <div class="badge">🤓</div>
+  <span class="nlbl">Technical Stuff</span>
+  <p>
+    The third bug is the subtle one. From the outside it looked like
+    "<code>claude --print --input-format stream-json</code> exits 0 with no output."
+    But <code>claude</code> was <em>not</em> silent — it was streaming text the whole
+    time. host-bridge was catching that text and filing it under a field name the talk
+    CLI doesn't read. "No output" never meant "claude produced nothing." It meant
+    "claude produced plenty, and we threw it away in translation."
+  </p>
+</div>
+
+<p>
+  That's why the bug looked unsolvable in the moment: it was diagnosed as a
+  <code>claude</code>-side mystery ("exits silent, root cause not isolated") when it was
+  actually a one-word typo in a host-bridge function two steps away. The fix wasn't
+  hard. It was just hard to <em>see</em> from where people were looking.
+</p>
+
+<h3>Chapter 3: Why It Still Looks Open</h3>
+<div class="itc">
+  <div class="lbl">In This Chapter</div>
+  <ul>
+    <li>The one document still saying "broken"</li>
+    <li>A commit message is a photograph, not a status board</li>
+  </ul>
+</div>
+<p>
+  So if the bug is dead, why was it still on the "to do" list? Because of exactly one
+  artifact: the commit message on <code>1161505</code>, titled
+  <em>"host-bridge: fix claude-code handshake deadlock; flag the talk bug."</em> Its body
+  says: <em>"talk still doesn't work… STATUS/BOARD now carry this honestly as the open
+  Phase 3 gap."</em>
+</p>
+<p>
+  At the instant that commit was written, every word of that was true. The deadlock was
+  fixed; the field-name bug was not yet found; talk did not work. Then the codex-harness
+  work reworked host-bridge, and somewhere in that rework the <code>event</code> →
+  <code>assistantMessageEvent</code> field name got corrected. Talk started working.
+  <code>STATUS.md</code> and <code>BOARD.md</code> were updated to match. The commit
+  message could not be — commit messages are frozen the moment they're written.
+</p>
+
+<div class="icon-note warning">
+  <div class="badge">⚠️</div>
+  <span class="nlbl">Warning</span>
+  <p>
+    A commit message is a photograph of one moment. It is the <em>least</em> reliable
+    place to learn whether something currently works, precisely because it's the one
+    record that can never be corrected. To know the truth: read the code, read the
+    status files, or just run the thing. This explainer exists because someone trusted
+    <code>1161505</code>'s message and repeated "the talk bug is the headline gap" three
+    times without once running <code>cells talk</code>.
+  </p>
+</div>
+
+<div class="icon-note tip">
+  <div class="badge">💡</div>
+  <span class="nlbl">Tip</span>
+  <p>
+    The one cheap thing worth doing: a single line in <code>BOARD.md</code> next to
+    <code>BR.3.5</code> — "the <code>1161505</code> commit message is stale; talk
+    verified working 2026-05-15 on <code>claudia</code> and a fresh birth." Costs
+    nothing, and it stops the next person from re-opening a closed bug.
+  </p>
+</div>
+
+<!-- ============ PART II ============ -->
+<h2 id="part2"><span class="pt">Part II</span>The Capacity Wall (The One That's Real)</h2>
+
+<h3>Chapter 4: What Walled the Re-Bake</h3>
+<div class="itc">
+  <div class="lbl">In This Chapter</div>
+  <ul>
+    <li>The pool target, and the CPU arithmetic behind it</li>
+    <li>Why the 9th bake timed out</li>
+    <li>The number that was set without looking at the box</li>
+  </ul>
+</div>
+<p>
+  The pool keeps a stash of warm, pre-baked eggs so births are instant. How many? A
+  constant: <code>V1_POOL_TARGET_DEPTH = 10</code> — keep ten warm eggs on hand.
+</p>
+<p>
+  On 2026-05-15 the pool got re-baked: drain the eight stale eggs, bake ten fresh ones.
+  It got eight. The ninth bake timed out. Here's the arithmetic:
+</p>
+<ul class="plain">
+  <li>Every well (VM) is configured with <strong>4 virtual CPUs</strong>.</li>
+  <li>The Mac running them has roughly <strong>10–12 physical cores</strong>.</li>
+  <li>After the drain there were 4 live cells. Eight successful bakes brought the box to
+  12 wells. The ninth create — the 13th well — was one VM too many.</li>
+  <li>Under that load a fresh VM boots slowly, <code>sshd</code> comes up late, and
+  wells's "is SSH ready yet?" gate fires before the guest is reachable.
+  <code>TimeoutError</code>.</li>
+</ul>
+
+<div class="icon-note remember">
+  <div class="badge">🧵</div>
+  <span class="nlbl">Remember</span>
+  <p>
+    This is a <strong>CPU</strong> story, not a RAM story — memory was fine the whole
+    time (~4.3&nbsp;GB across 13 VMs, the wells team measured it). Fourteen VMs ×
+    4&nbsp;vCPU on a ~12-core box is a 4–5× CPU oversubscription. Reason about cores, not
+    gigabytes.
+  </p>
+</div>
+
+<p>
+  Now the uncomfortable part. <code>V1_POOL_TARGET_DEPTH</code> is 10 — and that's ten
+  <em>warm</em> eggs, sitting on top of however many cells are <em>live</em>. Ten warm +
+  four live = fourteen wells. The box tops out around twelve or thirteen. <strong>The
+  target was set without the live cells in the equation.</strong> It was never going to
+  fit, and the re-bake is just the first time the fleet was big enough to prove it.
+</p>
+
+<h3>Chapter 5: Two Halves — Wells's and Cells's</h3>
+<div class="itc">
+  <div class="lbl">In This Chapter</div>
+  <ul>
+    <li>The boot stampede vs. the standing load — two different problems</li>
+    <li>Why both halves are needed, and who owns which</li>
+  </ul>
+</div>
+<p>
+  "The bake timed out" is actually hiding two distinct problems, and they belong to two
+  different teams.
+</p>
+
+<table>
+  <tr><th></th><th>The boot stampede — wells's half</th><th>The standing load — cells's half</th></tr>
+  <tr>
+    <td>What it is</td>
+    <td>Ten creates fired as fast as the event loop allows, all booting at once, every fresh VM fighting the others for cores.</td>
+    <td>Even paced one at a time, fourteen wells <em>at rest</em> is more than the box comfortably runs.</td>
+  </tr>
+  <tr>
+    <td>The fix</td>
+    <td>Wells's "Admission Control" proposal — a semaphore that paces boots: N at a time, the rest wait their turn instead of failing. See <code>wells-admission-control-for-dummies.html</code>.</td>
+    <td>Cells picks a pool target the box can physically hold — counting the live cells, not just the warm eggs.</td>
+  </tr>
+</table>
+
+<div class="icon-note remember">
+  <div class="badge">🧵</div>
+  <span class="nlbl">Remember</span>
+  <p>
+    The wells doc says this itself, in its Part of Tens: <em>"A genuinely undersized
+    host — admission control just makes the wait honest. It paces; it doesn't conjure
+    cores."</em> That sentence <strong>is</strong> the cells-side gap. Admission control
+    is necessary and not sufficient. It stops the stampede; it does not reduce how many
+    VMs end up running. Cells still has to not <em>ask</em> for more total VMs than fit.
+  </p>
+</div>
+
+<p>
+  The two halves <em>compose</em> — they don't compete. Wells decides <em>how fast</em>
+  the box can absorb boots. Cells decides <em>how many</em> wells to want in the first
+  place. Neither team's logic has to know about the other's.
+</p>
+
+<h3>Chapter 6: The Cells-Side Options</h3>
+<div class="itc">
+  <div class="lbl">In This Chapter</div>
+  <ul>
+    <li>Four ways to size the pool</li>
+    <li>Which one to ship first</li>
+  </ul>
+</div>
+<p>Four ways cells can stop asking for more wells than the box holds:</p>
+
+<ol class="steps">
+  <li>
+    <b>Lower the target.</b> Set <code>V1_POOL_TARGET_DEPTH = 6</code> instead of 10.
+    Crude, instant, one-line change. Six warm + four live = ten wells, comfortably under
+    the ceiling. The cost: a shallower pool, so a burst of births can drain it before
+    refill catches up.
+  </li>
+  <li>
+    <b>Make the target total-aware.</b> Target a <em>total</em> well count, not a warm
+    count: "keep total wells ≤ 12." Four live → bake eight warm; eight live → bake four
+    warm. The pool shrinks as the fleet grows — which is exactly right, because live
+    cells are the thing the warm pool exists to <em>become</em>.
+  </li>
+  <li>
+    <b>Add a cold tier.</b> A warm egg is RAM-resident and burns vCPU. A hibernated
+    ("cold") egg is a stopped VM — it costs almost nothing. A pool of mostly-cold plus a
+    few hot gives real depth without the standing CPU cost. The BOARD already flags this
+    as a V2 idea. The trade-off: waking a cold egg is slower than claiming a warm one.
+  </li>
+  <li>
+    <b>More cores.</b> A bigger Mac. The substrate vision is "plug-and-play Mac
+    Mini/Studio" — at some point the honest answer to "I want fifty cells" is hardware,
+    not arithmetic. But that's not today's fourteen-wells problem.
+  </li>
+</ol>
+
+<div class="icon-note tip">
+  <div class="badge">💡</div>
+  <span class="nlbl">Tip</span>
+  <p>
+    Ship option 1 or 2 first. Option 1 is a one-line constant; option 2 is a small
+    function change — either one kills the wall this week. Option 3 (cold tier) is the
+    right long-term shape but it's real work and deserves its own proposal. Option 4 is
+    real, but it's a purchase, not a patch.
+  </p>
+</div>
+
+<div class="icon-note warning">
+  <div class="badge">⚠️</div>
+  <span class="nlbl">Warning</span>
+  <p>
+    Do <em>not</em> "fix" this by raising wells's SSH-ready timeout. A longer gate just
+    means a saturated box takes even longer to admit it's in trouble — while the
+    half-booted VMs hold real resources the whole time. The gate isn't too short. The
+    box is too full. Fix the busy, not the patience.
+  </p>
+</div>
+
+<!-- ============ PART III ============ -->
+<h2 id="part3"><span class="pt">Part III</span>The Part of Tens</h2>
+
+<h3>Chapter 7: Ten Things to Take Away</h3>
+<div class="tens">
+  <ol>
+    <li><b>claude-code talk works.</b> Verified twice — an old cell and a fresh birth. It is not an open bug.</li>
+    <li><b>The only thing saying otherwise is commit <code>1161505</code>'s message</b> — and a commit message can't be edited, so it'll say that forever. Don't trust it.</li>
+    <li><b>"No output" can mean "output produced, then dropped in translation."</b> It did here — a one-word field-name typo, <code>event</code> vs <code>assistantMessageEvent</code>.</li>
+    <li><b><code>STATUS.md</code> and <code>BOARD.md</code> are the live truth</b> for claude-code talk. They're correct. Trust them over the commit log.</li>
+    <li><b>The capacity wall is real:</b> 10 warm eggs + however many live cells is more VMs than a ~12-core Mac runs.</li>
+    <li><b>It's a CPU problem, not a memory problem.</b> Reason about cores.</li>
+    <li><b>It has two halves:</b> wells paces the boots (admission control), cells sizes the pool. Both are needed.</li>
+    <li><b>Admission control doesn't conjure cores</b> — it makes the wait honest. The pool target is still cells's to get right.</li>
+    <li><b>The cheapest cells-side fix is one constant:</b> <code>V1_POOL_TARGET_DEPTH</code>. The <em>right</em> one is probably a total-aware target or a cold tier.</li>
+    <li><b>Don't raise the SSH timeout to paper over it.</b> Fix the busy, not the patience.</li>
+  </ol>
+</div>
+
+<!-- ============ CLOSE ============ -->
+<h2 id="close">Where to Go From Here</h2>
+<p>
+  Two loose ends went in. One comes out tied: there is nothing to build for the
+  claude-code talk bug, because there is no claude-code talk bug. The other needs one
+  small, well-shaped decision.
+</p>
+<ol class="steps">
+  <li><b>Loose end #1 — close it on paper.</b> Optionally add a line to <code>BOARD.md</code> marking <code>BR.3.5</code> confirmed-closed, so the stale commit message can't lure anyone back in. That's the entire to-do list for #1.</li>
+  <li><b>Loose end #2 — Pete picks a pool-sizing approach.</b> Lower the target, make it total-aware, grow a cold tier, or buy cores. Options 1 and 2 are this-week-sized.</li>
+  <li><b>Ship the small one</b> behind the normal branch-and-merge flow — it's a constant or a small function, with the existing pool tests.</li>
+  <li><b>If the cold tier is chosen,</b> it gets its own proposal — it's V2-shaped work, not a one-liner.</li>
+</ol>
+
+<div class="icon-note remember">
+  <div class="badge">🧵</div>
+  <span class="nlbl">Remember</span>
+  <p>
+    Loose end #2 is the cells-side companion to <code>wells-admission-control-for-dummies.html</code>.
+    Wells filed its half — pace the boots. This is the cells half — don't ask for more
+    wells than the box can hold. Read them together; they're one problem with a seam
+    down the middle.
+  </p>
+</div>
+
+<div class="endnote">
+  Two Loose Ends For Dummies · explainer, not a proposal ·
+  <code>docs/proposals/talk-bug-and-pool-capacity-for-dummies.html</code> ·
+  Written 2026-05-15 by Claude (worker) after the birth-rework merge ·
+  Related: <code>wells-admission-control-for-dummies.html</code> (the wells half of loose
+  end #2), commit <code>1161505</code> (the stale message behind loose end #1),
+  <code>STATUS.md</code> / <code>BOARD.md</code> (the live truth on #1).
+</div>
+
+</div>
+</body>
+</html>
