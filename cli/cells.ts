@@ -1101,6 +1101,11 @@ async function cmdShell(name: string) {
     return;
   }
   await requireCell(name);
+  // Pool-hatched cells live in a well whose name is `egg-<id>`, not the
+  // cell name. Every other command uses wellNameForCell() to map; shell
+  // forgot to, so `cells shell <cell>` on hatched cells errored with
+  // "well not found in registry". Resolve here too.
+  const wellName = await wellNameForCell(name);
   // Spawn tmux directly under well exec --tty as root (sudo from the
   // ubuntu ssh user). Bypasses the login-shell auto-attach shim (which
   // would dump us into pi); inside tmux, the shim's `[ -z "$TMUX" ]`
@@ -1116,7 +1121,7 @@ async function cmdShell(name: string) {
   // own default-terminal takes over once it's running.
   const proc = Bun.spawn(
     [
-      "well", "exec", "-s", name, "--tty", "--",
+      "well", "exec", "-s", wellName, "--tty", "--",
       "sudo", "-H", "bash", "-c",
       `export TERM=xterm-256color; exec tmux new-session -A -s shell -c /root bash -l`,
     ],
