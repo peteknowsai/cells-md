@@ -846,30 +846,65 @@ async function handleTalk(req: Request, name: string): Promise<Response> {
   if (wake && cellWellName) {
     try {
       const tok = (await readFile(join(homedir(), ".wells", "token"), "utf8")).trim();
+      // Helper: poll welld for ip + tcpReachable on port 22. Returns true
+      // when both land within budgetMs. Welld may report an ip cached from
+      // the last running session even when the well is currently wedged
+      // (alive_running with no network), so the TCP probe is the real
+      // signal.
+      const waitForSshReachable = async (budgetMs: number): Promise<boolean> => {
+        const deadline = Date.now() + budgetMs;
+        while (Date.now() < deadline) {
+          try {
+            const r = await fetch(`${WELL_API}/v1/wells/${encodeURIComponent(cellWellName)}`, {
+              headers: { Authorization: `Bearer ${tok}` },
+              signal: AbortSignal.timeout(2_000),
+            });
+            if (r.ok) {
+              const d = await r.json() as any;
+              if (d?.ip && (await tcpReachable(d.ip, 22, 1_500))) return true;
+            }
+          } catch { /* transient — keep polling */ }
+          await new Promise((r) => setTimeout(r, 250));
+        }
+        return false;
+      };
+
+      // Phase 1: /wake (transitions hibernating → alive_running).
       await fetch(`${WELL_API}/v1/wells/${encodeURIComponent(cellWellName)}/wake`, {
         method: "POST",
         headers: { Authorization: `Bearer ${tok}` },
         signal: AbortSignal.timeout(20_000),
       }).catch(() => {});
-      // Poll for IP + SSH-port reachability. welld reports an IP as soon
-      // as it has one cached, but the well may be wedged ("alive_running"
-      // with no actual network — a wells-team-known state). host-bridge's
-      // SSH attempt fails fast on a wedged well ("Host is down") and the
-      // talk turns into an SSH-retry slog. We probe TCP 22 directly so
-      // we only proceed when SSH is truly reachable. Budget 15s.
-      const pollDeadline = Date.now() + 15_000;
-      while (Date.now() < pollDeadline) {
+
+      // Phase 2: wait for the well to be SSH-reachable. Budget 15s.
+      let reachable = await waitForSshReachable(15_000);
+
+      // Phase 3 (Pete's "never wedged" rule): if /wake didn't get us a
+      // reachable SSH within 15s, the well is wedged (alive_running with
+      // no network). Cycle it via /stop + /start — this is the same
+      // recovery the 30s wedge-recovery tick fires, but on-demand for the
+      // active press so the user doesn't have to wait minutes for welld's
+      // banner-read probe to confirm. Best-effort: if stop/start fails,
+      // we fall through to the WS attempt anyway and let host-bridge
+      // surface a clean error.
+      if (!reachable) {
+        console.log(`[talk:${name}] wake didn't land sshable — cycling well ${cellWellName}`);
         try {
-          const r = await fetch(`${WELL_API}/v1/wells/${encodeURIComponent(cellWellName)}`, {
+          await fetch(`${WELL_API}/v1/wells/${encodeURIComponent(cellWellName)}/stop`, {
+            method: "POST",
             headers: { Authorization: `Bearer ${tok}` },
-            signal: AbortSignal.timeout(2_000),
+            signal: AbortSignal.timeout(15_000),
           });
-          if (r.ok) {
-            const d = await r.json() as any;
-            if (d?.ip && (await tcpReachable(d.ip, 22, 1_500))) break;
-          }
-        } catch { /* transient — keep polling */ }
-        await new Promise((r) => setTimeout(r, 250));
+          await fetch(`${WELL_API}/v1/wells/${encodeURIComponent(cellWellName)}/start`, {
+            method: "POST",
+            headers: { Authorization: `Bearer ${tok}` },
+            signal: AbortSignal.timeout(30_000),
+          });
+          reachable = await waitForSshReachable(15_000);
+          console.log(`[talk:${name}] post-cycle reachable=${reachable}`);
+        } catch (e: any) {
+          console.error(`[talk:${name}] cycle failed: ${e?.message ?? e}`);
+        }
       }
     } catch { /* token unreadable — skip */ }
   }
@@ -928,6 +963,14 @@ async function handleTalk(req: Request, name: string): Promise<Response> {
       } else if (event.type === "agent_error" || event.type === "error") {
         clearTimeout(timeout);
         finish(Response.json({ error: event.message ?? "agent error", elapsed_ms: Date.now() - t0 }, { status: 502 }));
+        try { ws.close(); } catch {}
+      } else if (event.type === "bridge_closed") {
+        // host-bridge couldn't keep its ssh+harness alive — usually because
+        // the cell's sshd dropped the connection (cell wedged, network
+        // borked, or the harness crashed). Short-circuit instead of sitting
+        // on the 45s talk timeout — caller has the diagnosis verbatim.
+        clearTimeout(timeout);
+        finish(Response.json({ error: `bridge closed: ${event.reason ?? "unknown"}`, elapsed_ms: Date.now() - t0 }, { status: 502 }));
         try { ws.close(); } catch {}
       }
     });
