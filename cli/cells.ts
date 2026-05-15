@@ -6211,6 +6211,33 @@ fi
 # shells, where \$HOME=/root — \$HOME/.bun is empty).
 export PATH="\$HOME/.bun/bin:/home/well/.bun/bin:/root/bin:\$PATH"
 
+# Standard terminal-editing toolkit (apt-installed at bake: micro, fzf,
+# ripgrep, batcat). FZF gitignore-aware via ripgrep, preview via bat.
+# The two helpers below — \`mf\` (pick one + open in micro) and \`mft\`
+# (browse mode: descend folders, open files, .. to go up) — are the
+# "scroll through files with live preview" UX. Designed to be obvious
+# from the keyboard, no vim ninja required.
+export FZF_DEFAULT_COMMAND='rg --files --hidden --glob "!.git"'
+export FZF_DEFAULT_OPTS='--height 80% --reverse --border --preview "batcat --style=numbers --color=always --line-range=:300 {} 2>/dev/null || ls -la {}" --preview-window=right:60%'
+
+alias mf='f=\$(fzf) && [ -n "\$f" ] && micro "\$f"'
+
+mft() {
+  local cur="\$PWD"
+  while true; do
+    local pick
+    pick=\$( { echo ".."; ls -A1 "\$cur"; } | fzf --prompt="\$cur > " ) || return
+    if [ "\$pick" = ".." ]; then
+      cur=\$(dirname "\$cur")
+    elif [ -d "\$cur/\$pick" ]; then
+      cur="\$cur/\$pick"
+    else
+      micro "\$cur/\$pick"
+      return
+    fi
+  done
+}
+
 # Niceness for interactive tmux shells (i.e. cells shell <name>): a
 # violet prompt with the cell's name + a one-shot welcome banner per
 # pane. Skips one-off well_exec commands (no \$PS1, no \$TMUX) so
@@ -6230,6 +6257,7 @@ if [ -n "\${PS1:-}" ] && [ -n "\${TMUX:-}" ]; then
     echo "   /root              anatomy (AGENTS.md, SOUL.md, …)"
     echo "   /root/state/memory persistent memory"
     echo "   cells, well        fleet + substrate CLIs"
+    echo "   mf, mft            fuzzy-pick / browse files with live preview"
     echo "   Ctrl-d             exit this shell"
     echo
   fi
@@ -6260,10 +6288,14 @@ sudo chmod 644 /etc/profile.d/cells-env.sh`);
 // the write fails the shell still opens, just without the upgrade.
 async function refreshShellNiceness(wellName: string): Promise<void> {
   try {
+    // Symlink batcat → bat so the user can also type `bat` directly
+    // (Ubuntu renames it batcat due to a binary-name collision with
+    // the unrelated "bacula console" package). Idempotent.
     await wellExecCapture(wellName, `set -euo pipefail
 sudo tee /etc/profile.d/cells-env.sh >/dev/null <<'EOF'
 ${CELLS_ENV_SH_BODY}EOF
-sudo chmod 644 /etc/profile.d/cells-env.sh`);
+sudo chmod 644 /etc/profile.d/cells-env.sh
+[ -e /usr/local/bin/bat ] || sudo ln -sf /usr/bin/batcat /usr/local/bin/bat 2>/dev/null || true`);
   } catch (_) {
     // best-effort — shell opens regardless
   }
