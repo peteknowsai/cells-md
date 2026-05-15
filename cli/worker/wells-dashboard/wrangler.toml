@@ -1,0 +1,17 @@
+name = "wells-dashboard"
+main = "index.ts"
+compatibility_date = "2026-01-01"
+
+# Live-ingress front for Pete's wells dashboard cell. Two Custom Domains,
+# both proxy to the same cloudflared tunnel (cloudflared's ingress rules
+# fan out by Host header). Bearer + cookie-auth gate enforced here.
+#
+# Deploy: scripts/deploy-wells-dashboard.sh
+
+[[routes]]
+pattern = "wells.cells.md"
+custom_domain = true
+
+[[routes]]
+pattern = "wells-convex.cells.md"
+custom_domain = true

@@ -2819,11 +2819,11 @@ async function deleteCellWorker(name: string): Promise<void> {
     // WELL_HOST doesn't matter for delete, but the placeholder must be
     // substituted or wrangler chokes on the unrendered TOML.
     const rendered = tpl.replaceAll("{{CELL}}", name).replaceAll("{{WELL_HOST}}", "ignored.wells.app");
-    const renderedPath = join(REPO_ROOT, "cli/worker/root", `.wrangler.${name}.toml`);
+    const renderedPath = join(REPO_ROOT, "cli/worker/cell", `.wrangler.${name}.toml`);
     await Bun.write(renderedPath, rendered);
     try {
       const proc = Bun.spawn(["bunx", "wrangler", "delete", "--config", renderedPath], {
-        cwd: join(REPO_ROOT, "cli/worker/root"),
+        cwd: join(REPO_ROOT, "cli/worker/cell"),
         stdin: new TextEncoder().encode("y\n"), // confirm prompt
         stdout: "pipe",
         stderr: "pipe",

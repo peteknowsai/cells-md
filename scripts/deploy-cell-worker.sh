@@ -68,7 +68,7 @@ trap 'rm -f "$RENDERED" "$LOG"' EXIT
 sed -e "s/{{CELL}}/${NAME}/g" -e "s/{{WELL_HOST}}/${WELL_HOST}/g" \
     -e "s/{{CF_ACCOUNT_ID}}/${CF_ACCOUNT_ID}/g" "$TEMPLATE" > "$RENDERED"
 
-cd "$REPO_ROOT/cli/worker/root"
+cd "$REPO_ROOT/cli/worker/cell"
 
 # Run wrangler quietly. On failure, dump captured output so the user
 # has something to debug with; on success, stay silent — the caller
