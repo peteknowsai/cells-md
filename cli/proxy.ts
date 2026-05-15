@@ -866,6 +866,108 @@ echo "$F"`;
   return new Response(null, { status: 204 });
 }
 
+// ──────────────────────── mother.cells.md activity ────────────────────────
+//
+// Mother's public face. Reads ~/.cells/birth-log/*.json (written by the
+// cells CLI's talkAndAwaitOutcome) and renders a minimalist table: each
+// birth, duration, success/failure, the message on issue. Style matches
+// the proxy.cells.md dashboard.
+
+const BIRTH_LOG_DIR_PROXY = join(homedir(), ".cells/birth-log");
+
+type BirthLogEntry = {
+  birthId: string;
+  name?: string;
+  harness?: string;
+  model?: string;
+  started_at?: string;
+  ended_at?: string;
+  elapsed_ms?: number;
+  success?: boolean;
+  message?: string;
+};
+
+function readBirthLog(limit = 50): BirthLogEntry[] {
+  if (!existsSync(BIRTH_LOG_DIR_PROXY)) return [];
+  const entries: BirthLogEntry[] = [];
+  for (const f of require("node:fs").readdirSync(BIRTH_LOG_DIR_PROXY)) {
+    if (!f.endsWith(".json")) continue;
+    try {
+      const body = readFileSync(join(BIRTH_LOG_DIR_PROXY, f), "utf-8");
+      entries.push(JSON.parse(body));
+    } catch {/* skip malformed */}
+  }
+  entries.sort((a, b) => (b.started_at ?? "").localeCompare(a.started_at ?? ""));
+  return entries.slice(0, limit);
+}
+
+function formatElapsed(ms?: number): string {
+  if (ms == null) return "—";
+  if (ms < 1000) return `${ms}ms`;
+  const s = ms / 1000;
+  if (s < 60) return `${s.toFixed(1)}s`;
+  const m = Math.floor(s / 60);
+  const r = Math.round(s % 60);
+  return `${m}m ${r}s`;
+}
+
+function escapeHtml(s: string): string {
+  return s.replace(/[&<>"']/g, ch =>
+    ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[ch]!);
+}
+
+async function handleMotherProxy(req: Request): Promise<Response> {
+  const url = new URL(req.url);
+  if (req.method !== "GET" || (url.pathname !== "/" && url.pathname !== "")) {
+    return new Response("not found", { status: 404 });
+  }
+  const log = readBirthLog(50);
+  const total = log.length;
+  const successCount = log.filter(e => e.success).length;
+  const failCount = log.filter(e => e.success === false && e.ended_at).length;
+  const inFlight = log.filter(e => !e.ended_at).length;
+
+  const rows = log.length === 0
+    ? `<tr><td colspan="5"><em>no births recorded yet</em></td></tr>`
+    : log.map(e => {
+        const status = !e.ended_at
+          ? `<span class="pill">in flight</span>`
+          : e.success
+            ? `<span class="pill" style="background:#0a01">ok</span>`
+            : `<span class="pill" style="background:#a001">FAIL</span>`;
+        const when = e.started_at ? formatBorn(e.started_at) : "—";
+        const dur = formatElapsed(e.elapsed_ms);
+        const meta = [e.harness, e.model].filter(Boolean).join(" · ");
+        const note = e.message && !e.success ? `<br><code>${escapeHtml(e.message)}</code>` : "";
+        return `<tr>
+          <td><code>${escapeHtml(e.name ?? e.birthId)}</code></td>
+          <td>${status}${note}</td>
+          <td>${dur}</td>
+          <td>${when}</td>
+          <td><span style="color:#888;font-size:0.85em">${escapeHtml(meta)}</span></td>
+        </tr>`;
+      }).join("\n");
+
+  const body = `
+    <h1>mother</h1>
+    <p class="sub">she births and tends the family · activity · last 50</p>
+    <p>
+      <span class="pill">${total} total</span>
+      <span class="pill" style="background:#0a01">${successCount} ok</span>
+      <span class="pill" style="background:#a001">${failCount} failed</span>
+      ${inFlight > 0 ? `<span class="pill">${inFlight} in flight</span>` : ""}
+    </p>
+    <table>
+      <thead><tr>
+        <th>Cell</th><th>Outcome</th><th>Duration</th><th>Started</th><th>Harness · Model</th>
+      </tr></thead>
+      <tbody>${rows}</tbody>
+    </table>
+    <p class="sub">Data: <code>~/.cells/birth-log/</code> on Pete's Mac.</p>
+  `;
+  return htmlPage("mother · cells", body);
+}
+
 const MAC_EXEC_LOG = join(homedir(), ".cells/logs/mac_exec.log");
 
 // Mac-side script execution for mother-in-a-well. The ritual uses local
@@ -1119,6 +1221,13 @@ const server = Bun.serve({
     // pulse.cells.md → pulse's inbox (POST /heartbeat-changed) + status page
     if (host.startsWith("pulse.cells.md")) {
       return handlePulseProxy(req);
+    }
+
+    // mother.cells.md → mother's activity page (births, durations, issues).
+    // Served by this proxy until cells-mother gets a per-cell Cloudflare
+    // Worker; the dashboard reads ~/.cells/birth-log/*.json directly.
+    if (host.startsWith("mother.cells.md")) {
+      return handleMotherProxy(req);
     }
 
     // slack.cells.md → handled by Cloudflare Worker (cells-front-slack).

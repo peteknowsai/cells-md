@@ -923,6 +923,12 @@ function pidAlive(pid: number): boolean {
   try { process.kill(pid, 0); return true; } catch { return false; }
 }
 
+// Birth-log surface that mother.cells.md reads — one JSON file per birth,
+// written at start with {birthId, name, harness, model, started_at}, updated
+// on outcome with {ended_at, elapsed_ms, success, message}. Files survive;
+// the activity page sorts by started_at desc and shows the last N.
+const BIRTH_LOG_DIR = join(REGISTRY_DIR, "birth-log");
+
 async function talkAndAwaitOutcome(
   slashCommand: string,
   args: string[],
@@ -934,9 +940,31 @@ async function talkAndAwaitOutcome(
     await mkdir(BIRTH_OUTCOMES_DIR_LOCAL, { recursive: true });
     if (existsSync(outcomeFile)) await unlink(outcomeFile);
 
+    // Capture start-of-birth record for mother.cells.md. Best-effort: a
+    // failure here doesn't break the birth.
+    const startedAt = Date.now();
+    const startedAtIso = new Date(startedAt).toISOString();
+    let meta: { name?: string; harness?: string; model?: string } = {};
+    if (slashCommand === "cell-create") {
+      const [name, , blobJson] = args;
+      meta.name = name;
+      try {
+        const blob = JSON.parse(blobJson ?? "{}");
+        meta.harness = blob.harness;
+        meta.model = blob.model;
+      } catch {/* leave meta partial */}
+    }
+    const logFile = join(BIRTH_LOG_DIR, `${birthId}.json`);
+    try {
+      await mkdir(BIRTH_LOG_DIR, { recursive: true });
+      await writeFile(logFile, JSON.stringify({
+        birthId, started_at: startedAtIso, ...meta,
+      }, null, 2));
+    } catch {/* log surface is best-effort */}
+
     const message = `/${slashCommand} ${birthId} ${args.join(" ")}`.trim();
     // Fire `cells talk mother <message>` in the background. Mother runs
-    // the ritual; her final tool call (birth_outcome) writes outcomeFile
+    // the ritual; her final tool call (report_outcome) writes outcomeFile
     // via /bridge/birth/outcome. We don't care about the talk exit code —
     // outcome presence is the source of truth.
     const proc = Bun.spawn(["bun", join(REPO_ROOT, "cli/cells.ts"), "talk", "mother", message], {
@@ -963,6 +991,21 @@ async function talkAndAwaitOutcome(
       } catch {/* malformed */}
       try { await unlink(outcomeFile); } catch {}
     }
+
+    // Update birth-log with end record (whether outcome came or timed out).
+    try {
+      const endedAt = Date.now();
+      const record = {
+        birthId,
+        ...meta,
+        started_at: startedAtIso,
+        ended_at: new Date(endedAt).toISOString(),
+        elapsed_ms: endedAt - startedAt,
+        success: outcome?.success ?? false,
+        message: outcome?.message ?? "no outcome (timeout or mother crash)",
+      };
+      await writeFile(logFile, JSON.stringify(record, null, 2));
+    } catch {/* best-effort */}
 
     // Don't wait on proc — mother's talk session may still be flushing.
     // Outcome presence is what we care about.
