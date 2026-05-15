@@ -203,15 +203,18 @@ async function buildState(): Promise<StatePayload> {
   const poolEntries = poolRaw.members ?? poolRaw.eggs ?? [];
   const regFile = await readJSON<{ cells: any[] }>(join(homedir(), ".cells", "cells.json"), { cells: [] });
   const token = await wellsToken();
-  const [welldHealth, welldWells, hbHealth, firstTokenIdx] = await Promise.all([
+  // /dashboard/data has wedge (wells team 2026-05-15); /v1/wells does not.
+  // The shapes overlap for everything we read (name, status, ip), so use
+  // dashboard/data uniformly.
+  const [welldHealth, welldDash, hbHealth, firstTokenIdx] = await Promise.all([
     fetchJSON(`${WELL_API}/healthz`, { Authorization: `Bearer ${token}` }),
-    fetchJSON(`${WELL_API}/v1/wells`, { Authorization: `Bearer ${token}` }),
+    fetchJSON(`${WELL_API}/dashboard/data`, { Authorization: `Bearer ${token}` }),
     fetchJSON(`${HOST_BRIDGE_API}/healthz`, {}, 800),
     loadFirstTokenIndex(),
   ]);
 
   const wellByName = new Map<string, any>();
-  for (const w of welldWells?.wells ?? []) wellByName.set(w.name, w);
+  for (const w of welldDash?.wells ?? []) wellByName.set(w.name, w);
 
   // Eggs
   const poolMembers: PoolMemberSnapshot[] = poolEntries.map((e: any) => {
@@ -1015,13 +1018,14 @@ async function wedgeRecoveryTick(): Promise<void> {
 
   let wells: any[];
   try {
-    const r = await fetch(`${WELL_API}/v1/wells`, {
+    // /dashboard/data carries the wedge field; /v1/wells does not.
+    const r = await fetch(`${WELL_API}/dashboard/data`, {
       headers: { Authorization: `Bearer ${tok}` },
       signal: AbortSignal.timeout(5_000),
     });
     if (!r.ok) return;
     const data = await r.json() as any;
-    wells = Array.isArray(data) ? data : (data?.wells ?? []);
+    wells = data?.wells ?? [];
   } catch { return; }
 
   for (const w of wells) {
