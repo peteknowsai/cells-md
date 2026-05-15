@@ -36,7 +36,7 @@ Goal: `cells birth` → ~3s fixed animation → talk prompt → LLM-streamed res
 **🎯 V1 STAMPED 2026-05-13 (worker, /goal-driven). 10/10 ✓.** Re-verified on the wells-stable-2026-05-13 substrate (W.73 SSH-ready resurrect + W.74 per-VM XPC kill + W.77 diagnostic, W.76 reverted). Cells code originally: `V1_HOT_POOL_TARGET = V1_POOL_TARGET_DEPTH = 10` (pure-hot v1). **Updated 2026-05-15: `V1_HOT_POOL_TARGET = 0` — pure-asleep pool, every egg hibernated (0 RAM, 0 CPU). Wake measured at 0.55s, invisible against birth ritual. See `docs/proposals/cells-pool-asleep.html`.** `bakeV1Egg` continues to seal every pool egg so user-side `cells sleep` always works.
 
 - [x] **V1.1** ✓ Animation + talk prompt drop-in clean. 4-stage Ink animation now dynamic-tempo (1.5-6s) ending on captureGreeting first-byte. (2026-05-12)
-- [x] **V1.2** ✓ Cell speaks first via LLM. host-bridge `cd /cell` fix held; harness-leak gone. (2026-05-12)
+- [x] **V1.2** ✓ Cell speaks first via LLM. host-bridge `cd /root` fix held; harness-leak gone. (2026-05-12)
 - [x] **V1.3** ✓ **First-token p50 = 2.5s** (10 trials, range 2469-2969ms) — was 7.3s. Win came from `captureGreeting` + dynamic-tempo animation: animation ends the instant pi streams its first byte and the buffered greeting drops in. `docs/perf/birth-to-greeting.md` updated. (2026-05-12 23:00Z, commit e112a2c+)
 - [x] **V1.4** ✓ Second birth hits warm path AND pool refill no longer ceilinged — W.72 (static-IP allocator) shipped, vmnet 4-DHCP wall gone. Burst-refill verified in V1.10.
 - [x] **V1.5** ✓ Sleep + auto-wake + sibling-survive. Sleep 0.6s. Sibling cell answered talk within 1.6s while another was hibernated (W.74 per-VM XPC kill held — no sibling clipping). Auto-wake from hibernate via `cells talk` = 1.9s first cycle, 1.8s second cycle. Verified on fresh bakes via both cells flow and raw wells API (egg-754152, egg-4b366a both 200/200 hibernate+restore). Earlier first-wake "permission denied" went away after wells's W.77 deploy + bounce sequence; root cause filed to wells. (2026-05-13 06:18Z)
@@ -158,11 +158,11 @@ The old Phase 1 variant matrix (P1.4–P1.16) and most of Phase 1b CLI walk are 
 
 ### Cells follow-ups (worker-discovered)
 
-- [ ] **C.1** Legacy-cell compat for `cells tui`/`shell`/`dream`/`refresh-extensions` — wrapped in `sudo -u cell`, works for /cell cells but breaks for pre-migration cells (`smoke-8`, `smoke-6`). Pete's plan is kill-and-rebirth, no in-place migration. Stays as known gap until legacy cells are killed.
+- [x] **C.1** ~~Legacy-cell compat for `cells tui`/`shell`/`dream`/`refresh-extensions` — wrapped in `sudo -u cell`~~. **Closed 2026-05-15 by the root migration**: cell user retired, agent runs as root inside the VM, all wrappers go straight to root. The kill-and-rebirth plan was executed (full fleet drain + rebake on the new model).
 
 ### Wells follow-ups (surface to team)
 
-- [ ] **W.28** **needs-wells**: `ServiceDefinition` schema (wells/lib/schemas.ts) doesn't expose a `user` field; `composeUnit` hardcodes `User=ubuntu`. Cells works around in `register-site-service.sh` via `sudo -u cell bash -c '...'`. A native `user: "cell"` field would obviate the wrap. Surfaced 2026-05-10. Low priority — workaround is stable.
+- [x] **W.28** ~~`ServiceDefinition` schema doesn't expose a `user` field; `composeUnit` hardcodes `User=ubuntu`. Cells works around via `sudo -u cell bash -c '...'`.~~ **Closed by the root migration (2026-05-15)** — the agent now runs as root, so the workaround is `sudo bash -c '...'` (no `-u`); ubuntu→root is universal NOPASSWD. No wells-side schema change needed.
 
 ---
 
@@ -175,6 +175,6 @@ The old Phase 1 variant matrix (P1.4–P1.16) and most of Phase 1b CLI walk are 
 - [x] **W.24** Wells shipped welld plist template fix (PATH adds `/usr/sbin`). (closed 2026-05-10 02:57 MT)
 - [x] **W.25** Wells shipped per-entry tolerance in `GET /v1/wells/images`. (closed 2026-05-10 02:57 MT)
 - [x] **P2.5** Birth progress chip — `runPiWithOutcome` takes `{ progressName }`, tails birth-timings, renders chip on stderr. Untested live but logic verified. Will be superseded by V1.STEP3's Ink animation. (worker, 2026-05-10 02:48 MT)
-- [x] **P1.2a** Migrated cells DNA + harness state to `/cell/` with user `cell`. Bake produces cell-base; verify-fork passes; full /cell tree confirmed (DNA, .pi, bin, site, scripts, .tmux.conf), /etc/profile.d/cells-env.sh wired. (worker, 2026-05-10 02:14 MT)
+- [x] **P1.2a** Migrated cells DNA + harness state to `/root/` with user `cell`. Bake produces cell-base; verify-fork passes; full /root tree confirmed (DNA, .pi, bin, site, scripts, .tmux.conf), /etc/profile.d/cells-env.sh wired. (worker, 2026-05-10 02:14 MT)
 - [x] **P1.2** Bake §2 acceptance gate. Passes via P1.2a verify. (worker, 2026-05-10 02:14 MT)
 - [x] **P1.1** Pre-flight 7 checks. Mother answered. Substrate healthy. (worker, 2026-05-09 23:00 MT)

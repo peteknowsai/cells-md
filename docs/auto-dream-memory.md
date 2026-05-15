@@ -85,7 +85,7 @@ Two viable shapes; pick one.
 
 Either way: the dream **must not be in the main conversation loop**.
 Fork it. Swain runs it as a scheduled cron job; the roadmap calls for a
-forked Pi subagent restricted to `~/cell/memory/`. Same idea — give it
+forked Pi subagent restricted to `~/root/memory/`. Same idea — give it
 a narrow tool surface and let it return when done.
 
 ## Guardrails

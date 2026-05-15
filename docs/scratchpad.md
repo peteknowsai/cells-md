@@ -37,7 +37,7 @@ similar to confirm the new path actually picks up new extension code.
 
 Cells born before v2 had session files at
 `~/.pi/agent/sessions/--home-sprite-agent--/<timestamp>.jsonl`. New
-v2 cells are pinned to `~/.pi/agent/sessions/cell-<name>/main.jsonl`.
+v2 cells are pinned to `~/.pi/agent/sessions/root-<name>/main.jsonl`.
 The cutover for adam/bob/pete dropped their pre-v2 conversation
 history.
 
@@ -45,8 +45,8 @@ If recovery is wanted, a one-time copy:
 ```sh
 well exec -s <cell> -- bash -lc \
   'latest=$(ls -t ~/.pi/agent/sessions/--home-sprite-agent--/*.jsonl | head -1); \
-   mkdir -p ~/.pi/agent/sessions/cell-<name>; \
-   cp "$latest" ~/.pi/agent/sessions/cell-<name>/main.jsonl'
+   mkdir -p ~/.pi/agent/sessions/root-<name>; \
+   cp "$latest" ~/.pi/agent/sessions/root-<name>/main.jsonl'
 ```
 
 Low priority — cells already have memory + identity files; chat

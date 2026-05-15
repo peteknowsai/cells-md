@@ -21,7 +21,7 @@ pi remove npm:<package-name>           # uninstall
 pi update                              # update everything
 ```
 
-`-l` makes it project-local (lives in `/cell/.pi/npm/`). Drop
+`-l` makes it project-local (lives in `/root/.pi/npm/`). Drop
 the flag for global install.
 
 After installing, **restart yourself** so Pi loads the new extension:
@@ -136,7 +136,7 @@ When this skill says "the Pi docs," there are three places to go, in order
 of speed:
 
 1. **Local docs (preferred — no network).** Bundled with every cell at
-   `/cell/node_modules/@mariozechner/pi-coding-agent/docs/`.
+   `/root/node_modules/@mariozechner/pi-coding-agent/docs/`.
    Read with the `read` tool. Topics worth knowing:
    - `extensions.md` — hooks, `registerTool`, `registerProvider`, full API surface
    - `skills.md` — skill format, frontmatter, discovery rules

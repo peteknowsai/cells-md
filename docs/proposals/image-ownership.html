@@ -214,7 +214,7 @@
 
 <div class="callout principle">
   <p><strong>Substrate (wells)</strong> is anything generic that makes a VM <em>useful</em>: OS, networking, identity injection, lifecycle (start/stop/wake), SSH access. Wells doesn't know what a cell is.</p>
-  <p><strong>Tenant (cells)</strong> is everything that turns a generic substrate into <em>a cell specifically</em>: pi, the agent runtime, DNA (SOUL/CELLS/TOOLS), <code>/cell</code> filesystem, cell user, anything pi needs to run.</p>
+  <p><strong>Tenant (cells)</strong> is everything that turns a generic substrate into <em>a cell specifically</em>: pi, the agent runtime, DNA (SOUL/CELLS/TOOLS), <code>/root</code> filesystem, cell user, anything pi needs to run.</p>
   <p style="margin-bottom: 0;"><strong>If a piece is only meaningful in cells's universe, it belongs in cells.</strong> If it'd be useful for any tenant (not just cells), it belongs in substrate.</p>
 </div>
 
@@ -293,7 +293,7 @@
       <td>This <em>is</em> the cell. Maximum cells-specific. Never substrate.</td>
     </tr>
     <tr>
-      <td><code>/cell</code> directory + agent home</td>
+      <td><code>/root</code> directory + agent home</td>
       <td><span class="pill pill-cells">cells (in cell-base)</span></td>
       <td><span class="pill pill-cells">cells (per-egg)</span></td>
       <td>Named for cells, structured for pi. Pure cells.</td>
@@ -360,7 +360,7 @@
 <ul>
   <li><strong>pi binary, pi extensions</strong> — agent runtime, defines what a cell is</li>
   <li><strong>DNA files</strong> (SOUL/CELLS/TOOLS/etc.) — the cell's personality, pure cells</li>
-  <li><strong><code>/cell</code> + <code>cell</code> user + sudoers</strong> — cells-shaped filesystem layout</li>
+  <li><strong><code>/root</code> + <code>cell</code> user + sudoers</strong> — cells-shaped filesystem layout</li>
   <li><strong><code>cells-env.sh</code></strong> — cells's env shim</li>
 </ul>
 

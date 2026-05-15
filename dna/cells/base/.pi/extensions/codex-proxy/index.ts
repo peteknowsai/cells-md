@@ -27,7 +27,7 @@ import { readFileSync } from "node:fs";
 // the cell.
 function cellName(): string {
   try {
-    return JSON.parse(readFileSync("/cell/package.json", "utf8")).name || "unknown";
+    return JSON.parse(readFileSync("/root/package.json", "utf8")).name || "unknown";
   } catch {
     return "unknown";
   }

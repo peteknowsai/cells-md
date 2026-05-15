@@ -30,8 +30,8 @@ import { fileURLToPath } from "node:url";
 /**
  * Where the wiki lives:
  *   - Legacy well (HOME=/home/well, $HOME/agent exists): $HOME/agent/state/wiki/
- *   - New /cell layout (HOME=/cell, no $HOME/agent): cwd/state/wiki/
- *     (cwd=/cell when pi runs on a cell)
+ *   - New /root layout (HOME=/root, no $HOME/agent): cwd/state/wiki/
+ *     (cwd=/root when pi runs on a cell)
  *   - Local dev / mother: cwd/state/wiki/
  *   - Override via env var CELL_WIKI_DIR.
  */

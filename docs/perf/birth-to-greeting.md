@@ -59,7 +59,7 @@ Open: instrument `first_token_ms` directly (either non-TTY auto-seed path or pty
 
 ## V1.3 measured — 2026-05-12 17:14Z (host-bridge architecture)
 
-Substrate: `wells-stable-2026-05-12` post-W.70. cell-base from commit `2a908c8` (host-bridge `cd /cell` fix landed).
+Substrate: `wells-stable-2026-05-12` post-W.70. cell-base from commit `2a908c8` (host-bridge `cd /root` fix landed).
 
 Method: 10 trials of `bun run cells birth` under a pty wrapper (`/tmp/v13-first-token.py`). First-token = time from spawn to first byte after the `cell-XXXXXX>` prompt label. Pool refilled to depth 6 before run; refill failures during the run (vmnet 4-concurrent DHCP ceiling) meant trials 7–10 hit cold-fork.
 

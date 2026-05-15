@@ -32,9 +32,9 @@ That's a graceful cell. The user knows what's happening, can make a choice.
 
 ## The file
 
-**Path**: `/cell/.pi/in-flight.json`. (Pre-migration cells on `~/agent/.pi/` are scheduled for kill-and-rebirth, not in-place migration — see `docs/cell-filesystem.md`.)
+**Path**: `/root/.pi/in-flight.json`. (Pre-migration cells on `~/agent/.pi/` are scheduled for kill-and-rebirth, not in-place migration — see `docs/cell-filesystem.md`.)
 
-**Owner**: `cell:cell` (the cell user that pi runs as).
+**Owner**: `root:root` (the agent runs as root inside the VM).
 
 **Lifecycle**: written by hatch immediately after identity sed, read on every pi turn (via the system prompt extension below), updated by background install workers, deleted when all installs settle.
 
@@ -51,7 +51,7 @@ That's a graceful cell. The user knows what's happening, can make a choice.
       "state": "installing",
       "started_at": "2026-05-10T01:23:48Z",
       "eta_seconds": 12,
-      "log_path": "/cell/.pi/in-flight-logs/wiki.log"
+      "log_path": "/root/.pi/in-flight-logs/wiki.log"
     }
   ],
   "packages": [
@@ -60,7 +60,7 @@ That's a graceful cell. The user knows what's happening, can make a choice.
       "state": "installing",
       "started_at": "2026-05-10T01:23:46Z",
       "eta_seconds": 35,
-      "log_path": "/cell/.pi/in-flight-logs/pi-web-access.log"
+      "log_path": "/root/.pi/in-flight-logs/pi-web-access.log"
     }
   ]
 }
@@ -77,7 +77,7 @@ When all rows clear (or the only rows are `failed`), the file's `extensions` and
 
 ## How the agent reads it
 
-A built-in pi extension `in-flight-watch` (always-on, like heartbeat-watch) checks `/cell/.pi/in-flight.json` once per turn and injects a system-message addendum if non-empty:
+A built-in pi extension `in-flight-watch` (always-on, like heartbeat-watch) checks `/root/.pi/in-flight.json` once per turn and injects a system-message addendum if non-empty:
 
 ```
 [in-flight] You are still being provisioned. Currently installing:
@@ -87,7 +87,7 @@ A built-in pi extension `in-flight-watch` (always-on, like heartbeat-watch) chec
 
 Failed installs:
   - mentality extension: install errored 12 seconds ago, see
-    /cell/.pi/in-flight-logs/mentality.log. Tool calls into mentality
+    /root/.pi/in-flight-logs/mentality.log. Tool calls into mentality
     will return an error.
 
 When the user requests something blocked by an in-flight capability:
@@ -102,7 +102,7 @@ The extension is conservative: it only adds the addendum when the file exists an
 
 Hatch's async tail (per `docs/eggs-spec.md`) spawns one background worker per missing capability. Each worker:
 
-1. Reads the file under `flock` on `/cell/.pi/in-flight.json.lock`. Adds its row with `state: installing`, `started_at: now`, `eta_seconds: <best estimate>`.
+1. Reads the file under `flock` on `/root/.pi/in-flight.json.lock`. Adds its row with `state: installing`, `started_at: now`, `eta_seconds: <best estimate>`.
 2. Releases lock. Runs the actual install (`pi install <pkg>` or `cp -r <ext>` + jq edit `.pi/settings.json`).
 3. On completion, re-acquires lock. Removes its row. If file is now empty, deletes the file.
 4. On failure, sets state to `failed`, populates `error`, leaves the row (so the agent can surface).
@@ -111,14 +111,14 @@ ETAs come from a hard-coded table per capability (initially) — `pi-web-access 
 
 ## Concurrency
 
-Multiple workers writing concurrently. `flock(/cell/.pi/in-flight.json.lock, LOCK_EX)` for every R/M/W cycle. Workers hold the lock for the read+modify+write only — never during the actual install (would serialize installs that should run in parallel).
+Multiple workers writing concurrently. `flock(/root/.pi/in-flight.json.lock, LOCK_EX)` for every R/M/W cycle. Workers hold the lock for the read+modify+write only — never during the actual install (would serialize installs that should run in parallel).
 
 The agent's read is also under `flock`, but `LOCK_SH` (shared) — multiple turns can read concurrently, blocked only when a worker is writing.
 
 ## Failure modes
 
 - **Worker crashes mid-install.** File row stays in `installing` state forever. Hatch supervisor (in cells.ts) registers a 5-minute timeout per worker; on timeout, sets state to `failed` with `error: install timed out`.
-- **Pi crashes between turns.** Site service auto-restarts pi. Pi reads `/cell/.pi/settings.json` and `in-flight-watch` re-injects the addendum on next turn. No special handling needed.
+- **Pi crashes between turns.** Site service auto-restarts pi. Pi reads `/root/.pi/settings.json` and `in-flight-watch` re-injects the addendum on next turn. No special handling needed.
 - **File becomes corrupt** (concurrent writer killed mid-write, partial JSON). The watcher extension treats parse-fail as "no in-flight state" — degrades to silent. Worker writes are atomic via temp+rename; corrupt file shouldn't normally happen.
 
 ## Acceptance for P4.1
@@ -182,7 +182,7 @@ State at t=35s (all done): **file deleted**.
     { "name": "mentality", "state": "failed",
       "started_at": "2026-05-10T01:23:48Z",
       "error": "npm install errored: ENOENT @mariozechner/mentality",
-      "log_path": "/cell/.pi/in-flight-logs/mentality.log" }
+      "log_path": "/root/.pi/in-flight-logs/mentality.log" }
   ],
   "packages": []
 }

@@ -17,7 +17,7 @@ cells you tend).
 
 The user's interface is the `cells` CLI. Trivial commands (`cells talk`,
 `cells list`, `cells sync`) bypass you entirely. Stateful commands (`cells
-birth`, `cells kill`, `cells checkpoint`) reach you as `/cell-*` slash
+birth`, `cells kill`, `cells checkpoint`) reach you as `/root-*` slash
 messages in print mode — you read the relevant skill and execute.
 
 `cells sync` mirrors every cell's anatomy (markdown files at the agent

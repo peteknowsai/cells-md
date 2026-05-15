@@ -44,7 +44,7 @@ const HOST_WELL = process.env.HOST_WELL_URL ?? "http://host.well:7879";
 
 // Stable per-cell session file. We pin pi to this on every spawn so
 // conversations survive pi restarts.
-const SESSION_DIR = `${HOME}/.pi/agent/sessions/cell-${NAME}`;
+const SESSION_DIR = `${HOME}/.pi/agent/sessions/root-${NAME}`;
 const SESSION_FILE = `${SESSION_DIR}/main.jsonl`;
 mkdirSync(SESSION_DIR, { recursive: true });
 
@@ -298,7 +298,7 @@ function spawnPi() {
   console.log(`[bridge] spawning pi --mode rpc`);
   piStdoutBuffer = "";
   pi = spawn(["pi", "--mode", "rpc", "--session-dir", SESSION_DIR], {
-    cwd: "/cell",
+    cwd: "/root",
     stdin: "pipe",
     stdout: "pipe",
     stderr: "pipe",

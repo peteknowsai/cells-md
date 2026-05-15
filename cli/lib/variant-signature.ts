@@ -1,4 +1,4 @@
-// Variant signature — canonical string identity for a pool-member/cell config.
+// Variant signature — canonical string identity for a pool-member/root config.
 //
 // Format: v1:model=<m>,thinking=<t>,extensions=<a>|<b>,packages=<p>,channels=<c>
 //   - field order is fixed (model, thinking, extensions, packages, channels)

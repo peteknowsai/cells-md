@@ -290,18 +290,18 @@ export async function updateCellStatusChannels(cell: string): Promise<void> {
   // Use jq on the cell to merge into status.json, preserving harness and
   // tolerating a missing file (start from {harness:"pi"} as a safe default).
   const channelsJson = JSON.stringify(names);
-  // status.json lives under /cell/.pi (cell:cell 0755) so writes need
-  // the cell user. wrap in sudo -u cell.
+  // status.json lives under /root/.pi (root:root post-bake, agent runs
+  // as root); plain sudo lifts the well user to root.
   const remote = `
 set -e
-F=/cell/.pi/status.json
+F=/root/.pi/status.json
 mkdir -p "$(dirname "$F")"
 [ -f "$F" ] || echo '{"harness":"pi","channels":[]}' > "$F"
 tmp=$(mktemp)
 jq --argjson ch '${channelsJson.replace(/'/g, "'\\''")}' '.channels = $ch' "$F" > "$tmp" && mv "$tmp" "$F"
 `.trim();
   try {
-    const proc = Bun.spawn(["well", "exec", "-s", cell, "--", "sudo", "-u", "cell", "bash", "-c", remote], {
+    const proc = Bun.spawn(["well", "exec", "-s", cell, "--", "sudo", "bash", "-c", remote], {
       stdout: "pipe",
       stderr: "pipe",
     });

@@ -313,7 +313,7 @@ async function runCells(args: string[]): Promise<CmdResult> {
 async function verifyChainOnWell(wellName: string, expected: string[]): Promise<boolean | null> {
   try {
     const proc = Bun.spawn(
-      ["well", "exec", "-s", wellName, "--", "cat", "/cell/.pi/settings.json"],
+      ["well", "exec", "-s", wellName, "--", "cat", "/root/.pi/settings.json"],
       { stdout: "pipe", stderr: "pipe" },
     );
     const [stdout, , exitCode] = await Promise.all([

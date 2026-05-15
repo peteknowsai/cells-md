@@ -54,7 +54,7 @@
     <thead><tr><th>On every egg</th><th>State</th></tr></thead>
     <tbody>
       <tr><td>Toolchain — <code>bun</code>, <code>node</code>, <code>pi</code> (latest), terminal toolkit</td><td>Installed, on PATH</td></tr>
-      <tr><td>The DNA at <code>/cell</code> — identity files, <code>.pi/</code>, <code>site/</code>, <code>scripts/</code>, <code>bin/</code></td><td>Present, with <code>__NAME__</code> / <code>__MODEL__</code> / <code>__PROVIDER__</code> / <code>__THINKING__</code> / <code>__MODEL_CHAIN__</code> placeholders intact</td></tr>
+      <tr><td>The DNA at <code>/root</code> — identity files, <code>.pi/</code>, <code>site/</code>, <code>scripts/</code>, <code>bin/</code></td><td>Present, with <code>__NAME__</code> / <code>__MODEL__</code> / <code>__PROVIDER__</code> / <code>__THINKING__</code> / <code>__MODEL_CHAIN__</code> placeholders intact</td></tr>
       <tr><td>All in-tree extensions — <code>memory</code>, <code>mentality</code>, <code>wiki</code>, <code>dream</code></td><td>On disk under <code>.pi/extensions/</code>, none registered</td></tr>
       <tr><td>All optional packages — <code>pi-web-access</code>, …</td><td>Installed under <code>.pi/npm/</code>, none enabled</td></tr>
       <tr><td>Proxy patches — pi-ai routed through <code>proxy.cells.md</code>, codex stub</td><td>Applied</td></tr>
@@ -75,44 +75,44 @@
   <p>The cell learns its name. Substitute <code>__NAME__</code> across the DNA, and the color chip into the tmux config.</p>
   <pre><code># on the egg
 sed -i 's/__NAME__/&lt;name&gt;/g' \
-  /cell/AGENTS.md /cell/SOUL.md /cell/IDENTITY.md \
-  /cell/CELLS.md /cell/CONTACTS.md /cell/HEARTBEAT.md /cell/package.json
+  /root/AGENTS.md /root/SOUL.md /root/IDENTITY.md \
+  /root/CELLS.md /root/CONTACTS.md /root/HEARTBEAT.md /root/package.json
 
 # on the Mac: compute the cell's color, then substitute on the egg
 read CBG CFG &lt; &lt;(bash scripts/cell-color.sh &lt;name&gt;)
-sed -i "s|__CELL_BG__|$CBG|g; s|__CELL_FG__|$CFG|g; s|__NAME__|&lt;name&gt;|g" /cell/.tmux.conf</code></pre>
+sed -i "s|__CELL_BG__|$CBG|g; s|__CELL_FG__|$CFG|g; s|__NAME__|&lt;name&gt;|g" /root/.tmux.conf</code></pre>
 
   <h3>2 · Apply model config</h3>
   <p>The cell's brain is configured from the blob's <code>model</code>, <code>provider</code>, <code>thinking</code>, and <code>chain</code>.</p>
   <pre><code># on the egg — model config lives in settings.json only; the identity
 # files (SOUL.md, IDENTITY.md) are model-agnostic, leave them alone
-sed -i 's/__MODEL__/&lt;model&gt;/g'        /cell/.pi/settings.json
-sed -i 's/__PROVIDER__/&lt;provider&gt;/g'  /cell/.pi/settings.json
-sed -i 's/__THINKING__/&lt;thinking&gt;/g'  /cell/.pi/settings.json
+sed -i 's/__MODEL__/&lt;model&gt;/g'        /root/.pi/settings.json
+sed -i 's/__PROVIDER__/&lt;provider&gt;/g'  /root/.pi/settings.json
+sed -i 's/__THINKING__/&lt;thinking&gt;/g'  /root/.pi/settings.json
 # chain: the DNA placeholder is a quoted string ("__MODEL_CHAIN__") so the
 # file stays valid JSON — sed swaps the quoted token for a bare JSON array.
 # Use | as the delimiter (chain entries contain /).
-sed -i 's|"__MODEL_CHAIN__"|&lt;chain-json&gt;|g' /cell/.pi/settings.json
+sed -i 's|"__MODEL_CHAIN__"|&lt;chain-json&gt;|g' /root/.pi/settings.json
 
 # validate — pi crash-loops on a malformed settings.json
-jq . /cell/.pi/settings.json &gt; /dev/null</code></pre>
+jq . /root/.pi/settings.json &gt; /dev/null</code></pre>
   <p>If the blob's <code>provider</code> is <code>anthropic</code> — a <code>pi</code> cell on an Anthropic model — the cell must reach <code>api.anthropic.com</code> directly with its <code>ANTHROPIC_API_KEY</code>, <em>not</em> through the subscriptions proxy (pi-via-Max is fingerprint-blocked; the paid key is clean). Drop the routing flag and re-run the pi patches so the Anthropic baseUrl is restored to direct:</p>
   <pre><code># on the egg — ONLY when the blob's provider is "anthropic"
-touch /cell/.anthropic-direct
-sudo bash /cell/scripts/apply-pi-patches.sh</code></pre>
+touch /root/.anthropic-direct
+sudo bash /root/scripts/apply-pi-patches.sh</code></pre>
 
   <h3>3 · Write the status file</h3>
   <p>The tmux bar reads this. Channels start empty — step 6 fills them.</p>
   <pre><code># on the egg
-mkdir -p /cell/.pi
-echo '{"harness":"&lt;harness&gt;","channels":[]}' &gt; /cell/.pi/status.json</code></pre>
+mkdir -p /root/.pi
+echo '{"harness":"&lt;harness&gt;","channels":[]}' &gt; /root/.pi/status.json</code></pre>
 
   <h3>4 · Switch on extensions</h3>
   <p>All four in-tree extensions are already on disk. Register only the ones in the blob's <code>extensions</code> — the rest stay on disk, switched off. <strong>Do not delete the unused ones.</strong> If <code>extensions</code> is empty, skip this step.</p>
   <pre><code># on the egg, for each &lt;ext&gt; in the blob's extensions array
 jq --arg p ".pi/extensions/&lt;ext&gt;/index.ts" \
   'if (.extensions | index($p)) then . else .extensions += [$p] end' \
-  /cell/.pi/settings.json &gt; /tmp/s.json &amp;&amp; mv /tmp/s.json /cell/.pi/settings.json</code></pre>
+  /root/.pi/settings.json &gt; /tmp/s.json &amp;&amp; mv /tmp/s.json /root/.pi/settings.json</code></pre>
 
   <h3>5 · Register the site service</h3>
   <p>The cell's public face at <code>&lt;name&gt;.cells.md</code> is served by the cell itself, and the same server exposes the <code>/agent</code> bridge. Register the service, then flip the well URL public so external requests reach it.</p>
@@ -128,7 +128,7 @@ bash scripts/deploy-cell-worker.sh &lt;name&gt; &lt;egg-well-name&gt;
 # then, for each entry in the blob's channels array:
 bun scripts/bind-channel.ts &lt;name&gt; slack    # if channels includes "slack"
 bun scripts/bind-channel.ts &lt;name&gt; email    # if channels includes "email"</code></pre>
-  <p><code>bind-channel.ts</code> creates the Slack channel (and invites the owner), writes the channel&rarr;cell binding, mirrors it to the Cloudflare KV the front-door workers read, and updates <code>/cell/.pi/status.json</code>'s channels array — all idempotent. If <code>channels</code> is empty, only the worker deploy runs.</p>
+  <p><code>bind-channel.ts</code> creates the Slack channel (and invites the owner), writes the channel&rarr;cell binding, mirrors it to the Cloudflare KV the front-door workers read, and updates <code>/root/.pi/status.json</code>'s channels array — all idempotent. If <code>channels</code> is empty, only the worker deploy runs.</p>
 
   <h3>7 · Checkpoint</h3>
   <p>Take a clean restore point of the fully-configured cell before declaring it born.</p>
@@ -141,7 +141,7 @@ bun scripts/bind-channel.ts &lt;name&gt; email    # if channels includes "email"
     <tbody>
       <tr><td>Identity imprinted</td><td><code>grep -c __NAME__</code> across the DNA returns <code>0</code> everywhere</td><td><span class="badge bad">critical</span></td></tr>
       <tr><td>Env present</td><td><code>/etc/environment</code> has <code>CELLS_PROXY_SECRET</code>; env shim present</td><td><span class="badge bad">critical</span></td></tr>
-      <tr><td>Pi answers</td><td><code>cd /cell &amp;&amp; source /etc/profile.d/cells-env.sh &amp;&amp; pi --print "say ok"</code> exits 0 within 30s</td><td><span class="badge bad">critical</span></td></tr>
+      <tr><td>Pi answers</td><td><code>cd /root &amp;&amp; source /etc/profile.d/cells-env.sh &amp;&amp; pi --print "say ok"</code> exits 0 within 30s</td><td><span class="badge bad">critical</span></td></tr>
       <tr><td>Site serves</td><td><code>curl localhost:8080/</code> on the egg returns <code>200</code></td><td><span class="badge bad">critical</span></td></tr>
       <tr><td>Worker live</td><td><code>&lt;name&gt;.cells.md/debug</code> responds</td><td><span class="badge warn">degradation</span></td></tr>
       <tr><td>Extensions</td><td><code>settings.json</code> lists exactly the requested extensions plus the always-on set</td><td><span class="badge warn">degradation</span></td></tr>
@@ -165,27 +165,27 @@ bun scripts/bind-channel.ts &lt;name&gt; email    # if channels includes "email"
   <p>Same as the pi branch, plus <code>CLAUDE.md</code> — the entrypoint the <code>claude</code> CLI auto-loads from the cwd.</p>
   <pre><code># on the egg
 sed -i 's/__NAME__/&lt;name&gt;/g' \
-  /cell/CLAUDE.md /cell/AGENTS.md /cell/SOUL.md /cell/IDENTITY.md \
-  /cell/CELLS.md /cell/CONTACTS.md /cell/HEARTBEAT.md /cell/package.json
+  /root/CLAUDE.md /root/AGENTS.md /root/SOUL.md /root/IDENTITY.md \
+  /root/CELLS.md /root/CONTACTS.md /root/HEARTBEAT.md /root/package.json
 
 # on the Mac: compute the cell's color, then substitute on the egg
 read CBG CFG &lt; &lt;(bash scripts/cell-color.sh &lt;name&gt;)
-sed -i "s|__CELL_BG__|$CBG|g; s|__CELL_FG__|$CFG|g; s|__NAME__|&lt;name&gt;|g" /cell/.tmux.conf</code></pre>
+sed -i "s|__CELL_BG__|$CBG|g; s|__CELL_FG__|$CFG|g; s|__NAME__|&lt;name&gt;|g" /root/.tmux.conf</code></pre>
 
   <h3>c2 · Apply model config</h3>
   <p>The Anthropic model + thinking level go into <code>.claude/settings.json</code> (<code>model</code> and <code>effortLevel</code>), and the cell's <code>__NAME__</code> goes into its <code>ANTHROPIC_CUSTOM_HEADERS</code> entry — that's the <code>x-cell-name</code> header the proxy logs to attribute this cell's requests. That same file's <code>env</code> block already carries <code>ANTHROPIC_BASE_URL</code> → <code>proxy.cells.md</code>; <code>ANTHROPIC_AUTH_TOKEN</code> → <code>CELLS_PROXY_SECRET</code> comes from the egg's env shim. claude-code sends genuine Claude Code traffic to the proxy, which swaps in the Max OAuth token.</p>
   <pre><code># on the egg
-sed -i 's/__MODEL__/&lt;model&gt;/g'      /cell/.claude/settings.json
-sed -i 's/__THINKING__/&lt;thinking&gt;/g' /cell/.claude/settings.json
-sed -i 's/__NAME__/&lt;name&gt;/g'        /cell/.claude/settings.json
+sed -i 's/__MODEL__/&lt;model&gt;/g'      /root/.claude/settings.json
+sed -i 's/__THINKING__/&lt;thinking&gt;/g' /root/.claude/settings.json
+sed -i 's/__NAME__/&lt;name&gt;/g'        /root/.claude/settings.json
 
 # validate — a malformed settings.json breaks the claude CLI
-jq . /cell/.claude/settings.json &gt; /dev/null</code></pre>
+jq . /root/.claude/settings.json &gt; /dev/null</code></pre>
 
   <h3>c3 · Write the status file</h3>
   <pre><code># on the egg
-mkdir -p /cell/.pi
-echo '{"harness":"claude-code","channels":[]}' &gt; /cell/.pi/status.json</code></pre>
+mkdir -p /root/.pi
+echo '{"harness":"claude-code","channels":[]}' &gt; /root/.pi/status.json</code></pre>
 
   <h3>c4 · Register the site service + cloud edge</h3>
   <p>Same as the pi branch's steps 5–6, minus channel binding — a claude-code cell has no cells-side channels.</p>
@@ -204,7 +204,7 @@ bash scripts/deploy-cell-worker.sh &lt;name&gt; &lt;egg-well-name&gt;</code></pr
     <tbody>
       <tr><td>Identity imprinted</td><td><code>grep -c __NAME__</code> across the DNA (incl. <code>CLAUDE.md</code> and <code>.claude/settings.json</code>) returns <code>0</code> everywhere</td><td><span class="badge bad">critical</span></td></tr>
       <tr><td>Env present</td><td><code>/etc/environment</code> has <code>CELLS_PROXY_SECRET</code>; the env shim exports <code>ANTHROPIC_AUTH_TOKEN</code>; <code>.claude/settings.json</code>'s <code>env</code> block has <code>ANTHROPIC_BASE_URL</code></td><td><span class="badge bad">critical</span></td></tr>
-      <tr><td>claude answers</td><td><code>cd /cell &amp;&amp; source /etc/profile.d/cells-env.sh &amp;&amp; claude --print "say ok"</code> exits 0 within 60s</td><td><span class="badge bad">critical</span></td></tr>
+      <tr><td>claude answers</td><td><code>cd /root &amp;&amp; source /etc/profile.d/cells-env.sh &amp;&amp; claude --print "say ok"</code> exits 0 within 60s</td><td><span class="badge bad">critical</span></td></tr>
       <tr><td>Site serves</td><td><code>curl localhost:8080/</code> on the egg returns <code>200</code></td><td><span class="badge bad">critical</span></td></tr>
       <tr><td>Worker live</td><td><code>&lt;name&gt;.cells.md/debug</code> responds</td><td><span class="badge warn">degradation</span></td></tr>
     </tbody>
@@ -220,27 +220,27 @@ bash scripts/deploy-cell-worker.sh &lt;name&gt; &lt;egg-well-name&gt;</code></pr
   <p>Same as the claude-code branch — substitute <code>__NAME__</code> across the DNA and the tmux color.</p>
   <pre><code># on the egg
 sed -i 's/__NAME__/&lt;name&gt;/g' \
-  /cell/AGENTS.md /cell/CLAUDE.md /cell/SOUL.md /cell/IDENTITY.md \
-  /cell/CELLS.md /cell/CONTACTS.md /cell/HEARTBEAT.md /cell/package.json
+  /root/AGENTS.md /root/CLAUDE.md /root/SOUL.md /root/IDENTITY.md \
+  /root/CELLS.md /root/CONTACTS.md /root/HEARTBEAT.md /root/package.json
 
 # on the Mac: compute the cell's color, then substitute on the egg
 read CBG CFG &lt; &lt;(bash scripts/cell-color.sh &lt;name&gt;)
-sed -i "s|__CELL_BG__|$CBG|g; s|__CELL_FG__|$CFG|g; s|__NAME__|&lt;name&gt;|g" /cell/.tmux.conf</code></pre>
+sed -i "s|__CELL_BG__|$CBG|g; s|__CELL_FG__|$CFG|g; s|__NAME__|&lt;name&gt;|g" /root/.tmux.conf</code></pre>
 
   <h3>x2 · Apply model config</h3>
   <p>The OpenAI model + reasoning effort go into <code>.codex/config.toml</code> (<code>model</code> and <code>model_reasoning_effort</code>), and the cell's <code>__NAME__</code> goes into the provider's <code>http_headers</code> — the <code>x-cell-name</code> header the proxy logs to attribute this cell's requests. That file's <code>[model_providers.cells]</code> block already points the codex CLI at <code>proxy.cells.md/codex</code> with <code>env_key = "OPENAI_CODEX_API_KEY"</code> — the egg's env shim exports that to <code>CELLS_PROXY_SECRET</code>, and the proxy swaps it for the real ChatGPT-subscription token. A codex cell runs on the subscription, never the metered API.</p>
   <pre><code># on the egg
-sed -i 's/__MODEL__/&lt;model&gt;/g'      /cell/.codex/config.toml
-sed -i 's/__THINKING__/&lt;thinking&gt;/g' /cell/.codex/config.toml
-sed -i 's/__NAME__/&lt;name&gt;/g'        /cell/.codex/config.toml
+sed -i 's/__MODEL__/&lt;model&gt;/g'      /root/.codex/config.toml
+sed -i 's/__THINKING__/&lt;thinking&gt;/g' /root/.codex/config.toml
+sed -i 's/__NAME__/&lt;name&gt;/g'        /root/.codex/config.toml
 
 # validate — no placeholder may survive (a no-op sed = a broken cell)
-! grep -q '__' /cell/.codex/config.toml</code></pre>
+! grep -q '__' /root/.codex/config.toml</code></pre>
 
   <h3>x3 · Write the status file</h3>
   <pre><code># on the egg
-mkdir -p /cell/.pi
-echo '{"harness":"codex","channels":[]}' &gt; /cell/.pi/status.json</code></pre>
+mkdir -p /root/.pi
+echo '{"harness":"codex","channels":[]}' &gt; /root/.pi/status.json</code></pre>
 
   <h3>x4 · Register the site service + cloud edge</h3>
   <p>Same as the claude-code branch's <code>c4</code> — no channel binding.</p>
@@ -260,7 +260,7 @@ bash scripts/deploy-cell-worker.sh &lt;name&gt; &lt;egg-well-name&gt;</code></pr
       <tr><td>Identity imprinted</td><td><code>grep -c __NAME__</code> across the DNA returns <code>0</code> everywhere</td><td><span class="badge bad">critical</span></td></tr>
       <tr><td>Config substituted</td><td><code>.codex/config.toml</code> has no surviving <code>__…__</code> placeholder</td><td><span class="badge bad">critical</span></td></tr>
       <tr><td>Env present</td><td><code>/etc/environment</code> has <code>CELLS_PROXY_SECRET</code>; the env shim exports <code>OPENAI_CODEX_API_KEY</code></td><td><span class="badge bad">critical</span></td></tr>
-      <tr><td>codex answers</td><td><code>cd /cell &amp;&amp; source /etc/profile.d/cells-env.sh &amp;&amp; codex exec --skip-git-repo-check --dangerously-bypass-approvals-and-sandbox "say ok" &lt;/dev/null</code> exits 0 within 120s</td><td><span class="badge bad">critical</span></td></tr>
+      <tr><td>codex answers</td><td><code>cd /root &amp;&amp; source /etc/profile.d/cells-env.sh &amp;&amp; codex exec --skip-git-repo-check --dangerously-bypass-approvals-and-sandbox "say ok" &lt;/dev/null</code> exits 0 within 120s</td><td><span class="badge bad">critical</span></td></tr>
       <tr><td>Site serves</td><td><code>curl localhost:8080/</code> on the egg returns <code>200</code></td><td><span class="badge bad">critical</span></td></tr>
       <tr><td>Worker live</td><td><code>&lt;name&gt;.cells.md/debug</code> responds</td><td><span class="badge warn">degradation</span></td></tr>
     </tbody>

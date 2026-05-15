@@ -285,7 +285,7 @@ async function hasBornCheckpoint(wellName: string, cellName: string): Promise<bo
 // "couldn't check", not a failure.
 async function verifySettingsOnWell(wellName: string): Promise<boolean | null> {
   const r = await runCmd(
-    ["well", "exec", "-s", wellName, "--", "cat", "/cell/.pi/settings.json"],
+    ["well", "exec", "-s", wellName, "--", "cat", "/root/.pi/settings.json"],
     { timeoutMs: 30_000 },
   );
   if (r.exitCode !== 0) return null;

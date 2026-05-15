@@ -25,5 +25,5 @@ env_key = "OPENAI_CODEX_API_KEY"
 http_headers = { "x-cell-name" = "__NAME__" }
 
 # The cell owns its own VM — its working directory is trusted.
-[projects."/cell"]
+[projects."/root"]
 trust_level = "trusted"

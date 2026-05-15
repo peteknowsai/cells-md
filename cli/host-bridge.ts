@@ -158,12 +158,16 @@ interface HarnessAdapter {
 const piAdapter: HarnessAdapter = {
   mode: "persistent",
   buildRemoteCmd(sessionDir) {
-    // SSH as ubuntu, sudo to cell. bash -lc so /etc/profile.d/cells-env.sh
-    // fires (PATH + CELL_NAME + LLM keys). cd /cell so use-max composes the
+    // SSH as ubuntu, sudo to root. bash -lc so /etc/profile.d/cells-env.sh
+    // fires (PATH + CELL_NAME + LLM keys). cd /root so use-max composes the
     // cell's system prompt from ctx.cwd — without it the cell speaks as Pi.
+    // HOME=/root so pi finds /root/.pi/. As of the root-cell migration
+    // (2026-05-15), the agent runs as root inside the VM — the VM is the
+    // sandbox, so the cell vs root user distinction was theatrical and
+    // blocked claude/codex/pi auto-updaters (root-owned npm globals).
     return (
-      `sudo -u cell mkdir -p ${sessionDir} 2>/dev/null; ` +
-      `exec sudo -u cell -H bash -lc 'cd /cell && exec pi --mode rpc --session-dir ${sessionDir}'`
+      `sudo mkdir -p ${sessionDir} 2>/dev/null; ` +
+      `exec sudo bash -lc 'export HOME=/root; cd /root && exec pi --mode rpc --session-dir ${sessionDir}'`
     );
   },
   startHandshake(sess, sessionDir) {
@@ -205,15 +209,18 @@ const piAdapter: HarnessAdapter = {
 const claudeCodeAdapter: HarnessAdapter = {
   mode: "persistent",
   buildRemoteCmd() {
-    // claude reads model + effortLevel from /cell/.claude/settings.json and
+    // claude reads model + effortLevel from /root/.claude/settings.json and
     // the proxy env (ANTHROPIC_BASE_URL/AUTH_TOKEN) from the env shim that
     // bash -lc sources. --print with stream-json in/out makes it a
     // persistent multi-turn process driven over stdin/stdout — the same
     // shape host-bridge gives pi. bypassPermissions: a cell runs headless
     // on its own VM, there's no human at the tty to answer prompts, and the
-    // VM is the isolation boundary.
+    // VM is the isolation boundary. HOME=/root so claude finds /root/.claude/.
+    // IS_SANDBOX=1 satisfies claude's root+bypassPermissions guard ("cannot
+    // be used with root/sudo privileges for security reasons" — designed for
+    // shared boxes; the VM is exactly the case where it's safe).
     return (
-      `exec sudo -u cell -H bash -lc 'cd /cell && exec claude --print ` +
+      `exec sudo bash -lc 'export HOME=/root IS_SANDBOX=1; cd /root && exec claude --print ` +
       `--input-format stream-json --output-format stream-json --verbose ` +
       `--include-partial-messages --permission-mode bypassPermissions'`
     );
@@ -277,8 +284,8 @@ const codexAdapter: HarnessAdapter = {
   // spawns a fresh ssh+codex (CellSession.runTurn); multi-turn rides on
   // `codex exec resume <thread_id>`, the id captured from thread.started.
   // bash -lc sources /etc/profile.d/cells-env.sh (OPENAI_CODEX_API_KEY +
-  // PATH); sudo -u cell -H sets HOME=/cell so CODEX_HOME → /cell/.codex/.
-  // --json: JSONL events on stdout. --skip-git-repo-check: /cell isn't a
+  // PATH); HOME=/root so CODEX_HOME → /root/.codex/.
+  // --json: JSONL events on stdout. --skip-git-repo-check: /root isn't a
   // git repo. --dangerously-bypass-approvals-and-sandbox: the cell's VM is
   // the isolation boundary (same rationale as claude-code's bypassPermissions).
   // The prompt rides as bash's $1 (a positional arg — one layer of shell
@@ -290,7 +297,7 @@ const codexAdapter: HarnessAdapter = {
     const run = sess.codexThreadId
       ? `exec codex exec resume ${sess.codexThreadId} ${flags} "$1" </dev/null`
       : `exec codex exec ${flags} "$1" </dev/null`;
-    return `exec sudo -u cell -H bash -lc 'cd /cell && ${run}' codex-turn ${promptArg}`;
+    return `exec sudo bash -lc 'export HOME=/root; cd /root && ${run}' codex-turn ${promptArg}`;
   },
   translateOutbound(sess, line) {
     let evt: any;
@@ -430,7 +437,7 @@ class CellSession {
       return;
     }
     // cellName already includes the "cell-" prefix; don't double it.
-    const sessionDir = `/cell/.pi/agent/sessions/${this.cellName}`;
+    const sessionDir = `/root/.pi/agent/sessions/${this.cellName}`;
     // The remote command is harness-specific (pi --mode rpc vs the claude
     // CLI in stream-json mode) — the adapter builds it. We SSH as `ubuntu`
     // (lume's default; it has the substrate ssh key) and the adapter's

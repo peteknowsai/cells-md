@@ -73,7 +73,7 @@ GET https://&lt;name&gt;.cells.md/
 
   <p>The DO snapshot caps each file at ~96&nbsp;KB (Durable Object storage limit). That's fine for HTML/CSS/JS — not for a generated image. cody proved the gap on day one: its agent wrote a 1.8&nbsp;MB cat PNG into <code>site/public/</code>, and the snapshot skipped it.</p>
 
-  <p>So cells don't put image files in <code>site/public/</code> at all. They run <code>publish-image &lt;file&gt;</code> — baked into every cell's PATH at <code>/cell/bin/publish-image</code>, works identically across pi, claude-code, and codex (it's a shell script). It relays the image through the Worker's <code>/image/upload</code> route to Cloudflare Images and prints a delivery URL the agent references in its HTML.</p>
+  <p>So cells don't put image files in <code>site/public/</code> at all. They run <code>publish-image &lt;file&gt;</code> — baked into every cell's PATH at <code>/root/bin/publish-image</code>, works identically across pi, claude-code, and codex (it's a shell script). It relays the image through the Worker's <code>/image/upload</code> route to Cloudflare Images and prints a delivery URL the agent references in its HTML.</p>
 
   <pre><code>$ publish-image diagram.png
 https://imagedelivery.net/&lt;hash&gt;/&lt;id&gt;/public</code></pre>

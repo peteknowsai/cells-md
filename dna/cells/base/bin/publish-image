@@ -26,10 +26,10 @@ if [ -z "${CELLS_PROXY_SECRET:-}" ] && [ -f /etc/profile.d/cells-env.sh ]; then
 fi
 [ -n "${CELLS_PROXY_SECRET:-}" ] || { echo "publish-image: CELLS_PROXY_SECRET not set" >&2; exit 1; }
 
-# This cell's name — imprinted into /cell/package.json at birth. NOT
+# This cell's name — imprinted into /root/package.json at birth. NOT
 # `hostname`: a pool-born cell keeps its generic egg-XXXXXX well hostname.
-NAME=$(jq -r '.name // empty' /cell/package.json 2>/dev/null || true)
-[ -n "$NAME" ] || { echo "publish-image: can't read cell name from /cell/package.json" >&2; exit 1; }
+NAME=$(jq -r '.name // empty' /root/package.json 2>/dev/null || true)
+[ -n "$NAME" ] || { echo "publish-image: can't read cell name from /root/package.json" >&2; exit 1; }
 
 MIME=$(file --mime-type -b "$FILE" 2>/dev/null || echo "application/octet-stream")
 BASENAME=$(basename "$FILE")

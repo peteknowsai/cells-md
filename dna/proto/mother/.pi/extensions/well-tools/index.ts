@@ -136,12 +136,12 @@ export default function (pi: any) {
     name: "well_exec",
     label: "Run on well",
     description:
-      "Run a bash command on a well. Default user is `cell` (HOME=/cell, in sudo group — owns /cell, /cell/.pi, /cell/AGENTS.md, etc.); pass `user: \"well\"` only for substrate-level operations on /etc/* outside cells's tree, /var/log inspection, or apt-style root work that doesn't fit a one-line `sudo` prefix. With the default, `~` resolves to `/cell` so identity-bake-in seds (`sed -i 's/__NAME__/<NAME>/g' /cell/AGENTS.md`), per-cell .pi writes (`cat > /cell/.pi/status.json`), and pi-time writes all work. Returns stdout and stderr. Default timeout is 10 minutes — pass `timeoutSeconds` for steps that should fail faster (e.g. package installs that often hang on registry stalls).",
+      "Run a bash command on a well. Default user is `cell` (HOME=/root, in sudo group — owns /root, /root/.pi, /root/AGENTS.md, etc.); pass `user: \"well\"` only for substrate-level operations on /etc/* outside cells's tree, /var/log inspection, or apt-style root work that doesn't fit a one-line `sudo` prefix. With the default, `~` resolves to `/root` so identity-bake-in seds (`sed -i 's/__NAME__/<NAME>/g' /root/AGENTS.md`), per-cell .pi writes (`cat > /root/.pi/status.json`), and pi-time writes all work. Returns stdout and stderr. Default timeout is 10 minutes — pass `timeoutSeconds` for steps that should fail faster (e.g. package installs that often hang on registry stalls).",
     parameters: Type.Object({
       name: Type.String({ description: "well name." }),
       command: Type.String({ description: "Bash command to run on the well." }),
       user: Type.Optional(Type.Union([Type.Literal("cell"), Type.Literal("well")], {
-        description: "User to run the command as. Default 'cell' — the cell's owner, HOME=/cell, in sudo group. Use 'well' only for substrate-level operations that explicitly need the wells base user.",
+        description: "User to run the command as. Default 'cell' — sudoes to root so the command has full filesystem access to /root (the agent runs as root inside the VM). Use 'well' only for substrate-level operations that explicitly need the wells base user.",
       })),
       timeoutSeconds: Type.Optional(Type.Integer({
         minimum: 1,
@@ -151,17 +151,19 @@ export default function (pi: any) {
     }),
     async execute(_id: string, params: { name: string; command: string; user?: "cell" | "well"; timeoutSeconds?: number }, signal: AbortSignal) {
       if (signal.aborted) throw new Error("aborted");
-      // wells's `well exec` defaults to ssh user `well`. To run as `cell`,
-      // wrap with `sudo -u cell bash -c '<command>'` — `well` is in sudoers
-      // (NOPASSWD per the wells base image), so the sudo step doesn't prompt.
-      // Cells's ops target /cell which is cell:cell 0755; reads work as
-      // either user, but writes need cell (owner) or root (via sudo). Going
-      // through cell is the cleaner default — files end up cell-owned, no
-      // ad-hoc chowns to remember.
+      // wells's `well exec` defaults to ssh user `well`. user="cell" lifts
+      // to root via sudo (the cell user is unused since the root-cell
+      // migration; the agent runs as root). `well` is in NOPASSWD sudoers
+      // per the wells base, so the sudo step doesn't prompt. /root is
+      // root:root post-bake.
       const user = params.user ?? "cell";
+      // user="cell" = agent's effective context: root with HOME=/root so
+      // tools that key off HOME (codex via CODEX_HOME, claude via .claude)
+      // find their cell-scoped config. user="well" = raw substrate user, no
+      // sudo, no HOME tweak — for substrate-level operations.
       const args = user === "well"
         ? ["exec", "-s", params.name, "--", "bash", "-c", params.command]
-        : ["exec", "-s", params.name, "--", "sudo", "-u", user, "bash", "-c", params.command];
+        : ["exec", "-s", params.name, "--", "sudo", "bash", "-c", `export HOME=/root; ${params.command}`];
       const r = await runWell(
         args,
         params.timeoutSeconds ? { timeoutMs: params.timeoutSeconds * 1000 } : undefined,
@@ -174,11 +176,11 @@ export default function (pi: any) {
     name: "well_push",
     label: "Push directory to well",
     description:
-      "Push a local directory's contents to a path on the well via tar pipe. Pushes land owned by user `cell` (cell:cell) — destination dir is `mkdir -p`'d as root then `chown cell:cell`'d, tar extracts as `sudo -u cell` so all extracted files inherit cell ownership. Use absolute remote paths like `/cell` (the cell's HOME). For shipping the agent DNA at bake or egg-bake time.",
+      "Push a local directory's contents to a path on the well via tar pipe. Pushes land root-owned — destination dir is `mkdir -p`'d as root, tar extracts as root. /root is root:root and the agent runs as root, so this matches the rest of the cell's filesystem. Use absolute remote paths like `/root` (the cell's HOME). For shipping the agent DNA at bake or egg-bake time.",
     parameters: Type.Object({
       name: Type.String({ description: "well name." }),
       localPath: Type.String({ description: "Absolute local path to the directory whose contents will be pushed." }),
-      remotePath: Type.String({ description: "Path on the well where contents will land (e.g. `/cell`). Created if missing, chowned to cell:cell." }),
+      remotePath: Type.String({ description: "Path on the well where contents will land (e.g. `/root`). Created if missing; lands root-owned (the agent runs as root inside the VM)." }),
     }),
     async execute(
       _id: string,
@@ -189,11 +191,9 @@ export default function (pi: any) {
       const tar = spawn("tar", ["czf", "-", "-C", params.localPath, "."], {
         stdio: ["ignore", "pipe", "pipe"],
       });
-      // Mirror cells.ts pushLocalDirToWellAsCell: mkdir as root → chown
-      // remotePath to cell:cell → sudo -u cell tar xzf so files end up
-      // cell-owned. Avoids a post-push `chown -R` round-trip and keeps
-      // ownership consistent if the LLM pipes a partial tree.
-      const remoteCmd = `sudo mkdir -p ${params.remotePath} && sudo chown cell:cell ${params.remotePath} && sudo -u cell bash -c 'cd ${params.remotePath} && tar xzf -'`;
+      // Mirror cells.ts pushLocalDirToWell: mkdir as root → tar xzf as root.
+      // /root is root:root post-bake; landing root-owned matches.
+      const remoteCmd = `sudo mkdir -p ${params.remotePath} && sudo bash -c 'cd ${params.remotePath} && tar xzf -'`;
       const r = await runCommand(
         SPRITE_CLI,
         ["exec", "-s", params.name, "--", "bash", "-c", remoteCmd],
@@ -203,7 +203,7 @@ export default function (pi: any) {
         content: [
           {
             type: "text",
-            text: fmt(`well_push ${params.localPath} → ${params.name}:${params.remotePath} (as cell)`, r),
+            text: fmt(`well_push ${params.localPath} → ${params.name}:${params.remotePath}`, r),
           },
         ],
       };

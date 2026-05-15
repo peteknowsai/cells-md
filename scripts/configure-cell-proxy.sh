@@ -1,19 +1,19 @@
 #!/usr/bin/env bash
-# DEPRECATED for new /cell cells. Retained for legacy /home/well/agent retrofit.
+# DEPRECATED for new /root cells. Retained for legacy /home/well/agent retrofit.
 #
 # Old (legacy /home/well/agent) flow this script implements:
 #   - Drops three ~/.bashrc.d/* files with the shared secret.
 #   - Runs cell-side apply-pi-patches.sh.
 #
-# New (/cell) flow this script SKIPS:
+# New (/root) flow this script SKIPS:
 #   - Secret lives in /etc/environment (set by `well create --env=...`).
 #   - /etc/profile.d/cells-env.sh re-exports under pi-ai's expected names.
 #   - pi-ai patches bake into cell-base; bun-install postinstall re-applies.
-#   - Re-running this script on a /cell cell creates orphan ~/.bashrc.d/ files
-#     under the WELL user's home, which the cell user (HOME=/cell) ignores —
-#     a no-op-but-confusing outcome. Don't run it on /cell cells.
+#   - Re-running this script on a /root cell creates orphan ~/.bashrc.d/ files
+#     under the WELL user's home, which the cell user (HOME=/root) ignores —
+#     a no-op-but-confusing outcome. Don't run it on /root cells.
 #
-# For secret rotation on a /cell cell:
+# For secret rotation on a /root cell:
 #   well exec -s <name> -- sudo tee /etc/environment <<<"CELLS_PROXY_SECRET=<new>"
 #   well exec -s <name> -- sudo systemctl restart well-firstboot.service  # if needed
 #

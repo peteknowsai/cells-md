@@ -1,0 +1,153 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Root cell — agent runs as root, HOME=/root</title>
+<link rel="stylesheet" href="../_assets/doc.css">
+</head>
+<body>
+<div class="page">
+
+  <div class="doc-header">
+    <div class="crumb">cells <span class="sep">/</span> proposals <span class="sep">/</span> root cell migration</div>
+    <div>2026-05-15</div>
+  </div>
+
+  <h1>Root cell — agent runs as root, HOME=/root</h1>
+  <p class="subtitle">Why we retired the <code>cell</code> Unix user, what changed, and how it fixes the EACCES class of bugs forever.</p>
+
+  <div class="callout">
+    <div class="label">Status — 2026-05-15 · shipped on <code>main</code></div>
+    <p><strong>Inside every cell, the agent now runs as <code>root</code> with <code>HOME=/root</code>.</strong> The previous <code>cell</code> Unix user (uid 1001 with NOPASSWD sudo) is retired — wells's ubuntu-base still ships it, but cells doesn't use it. DNA lives at <code>/root</code> (not <code>/cell</code>); claude/pi/codex are root-owned global npm installs that the agent (also root) can update freely. Verified end-to-end: pi cell birth + talk green; codex/claude cell birth + talk green (TODO once wells's lume wake bug is fixed — see followups).</p>
+  </div>
+
+  <div class="toc">
+    <h4>Contents</h4>
+    <ol>
+      <li><a href="#trigger">The trigger — claude couldn't auto-update</a></li>
+      <li><a href="#choice">The choice — root, not user-local npm</a></li>
+      <li><a href="#what-changed">What changed</a></li>
+      <li><a href="#layout">The new filesystem layout</a></li>
+      <li><a href="#wrappers">The wrapper pattern — sudo to root, HOME=/root</a></li>
+      <li><a href="#vestigial">What's vestigial now</a></li>
+      <li><a href="#followups">Followups</a></li>
+    </ol>
+  </div>
+
+  <h2 id="trigger">The trigger — claude couldn't auto-update</h2>
+
+  <p>From inside a claude-code cell, <code>claude</code>'s self-updater diagnosed:</p>
+
+  <pre><code>Root cause: claude is a root-owned global npm install, but the cell
+runs as the non-root cell user — the auto-updater has nowhere it can
+write.
+
+- Running version 2.1.139, latest is 2.1.142 (3 releases behind).
+- /usr/bin/claude → /usr/lib/node_modules/@anthropic-ai/claude-code/
+  — all root:root, not writable by cell (uid 1001).</code></pre>
+
+  <p>Same shape applies to pi and codex — all three harnesses install via <code>sudo npm install -g</code> at bake time, all root-owned, all unwritable by uid 1001. The auto-updater hits EACCES and self-disables. Cells fall behind quietly; nothing surfaces until you try to update from inside.</p>
+
+  <h2 id="choice">The choice — root, not user-local npm</h2>
+
+  <p>Two paths to fix this:</p>
+
+  <table>
+    <thead><tr><th></th><th>A. Run the agent as root</th><th>B. Keep cell, install globals user-local</th></tr></thead>
+    <tbody>
+      <tr><td>Change scope</td><td>Single user-flip in host-bridge + DNA</td><td>npm prefix + PATH + chown across every install</td></tr>
+      <tr><td>Auto-update</td><td>Just works (root owns /usr/lib)</td><td>Just works (cell owns /cell/.npm-global)</td></tr>
+      <tr><td>Apt installs</td><td>No sudo prefix needed</td><td>Still needs sudo</td></tr>
+      <tr><td>Mental model</td><td>One user. The VM is the sandbox.</td><td>Two users with parallel install paths</td></tr>
+      <tr><td>npm root warnings</td><td>Yes (advisory; designed for shared boxes)</td><td>No</td></tr>
+    </tbody>
+  </table>
+
+  <p><strong>A wins.</strong> The argument for the <code>cell</code> Unix user was security isolation, but the cell user already had NOPASSWD sudo — the isolation was theatrical. The actual isolation boundary is the VM. With root inside:</p>
+  <ul>
+    <li>The EACCES class of bugs disappears entirely</li>
+    <li>One user, one mental model, no sudo ceremony in scripts</li>
+    <li>Tools that warn about running as root were designed for multi-tenant Linux servers — a single-purpose VM owned by an agent is exactly the case where the warning doesn't apply</li>
+  </ul>
+
+  <h2 id="what-changed">What changed</h2>
+
+  <p>54 files swept; behavior changes in 5 places:</p>
+
+  <ul>
+    <li><strong>host-bridge.ts</strong> — all three harness adapters (pi, claude-code, codex) build their remote command as <code>exec sudo bash -lc 'export HOME=/root; cd /root && exec &lt;harness&gt;'</code>. Was <code>sudo -u cell -H bash -lc ...</code>.</li>
+    <li><strong>cells.ts <code>provisionCellInWell</code></strong> — DNA push lands at <code>/root</code> via <code>pushLocalDirToWell</code>; bun install + pi install + codex install all run via <code>sudo bash -lc</code> (no <code>-u cell</code>). Final <code>chown -R root:root /root</code> normalizes ownership (the host-side tar push leaks the Mac's uid 501 onto archive entries; root-only ownership keeps <code>ls</code> honest).</li>
+    <li><strong>cells.ts <code>wellExecCapture</code></strong> + <strong>mother's <code>well-tools</code> well_exec</strong> — the <code>user="cell"</code> branch now sudoes to root with <code>HOME=/root</code> set inline. The label <code>"cell"</code> means "the agent's effective context" rather than literally "Unix user named cell."</li>
+    <li><strong>register-site-service.sh</strong> — the systemd-equivalent service that runs <code>/root/site/server.ts</code> wraps as <code>sudo bash -c 'export HOME=/root; ... exec bun ...'</code>.</li>
+    <li><strong>DNA + scripts + docs</strong> — every <code>/cell/...</code> path was renamed to <code>/root/...</code>. The ritual at <code>docs/birthing-ritual.html</code> writes identity files under <code>/root</code>; pi extensions resolve <code>$HOME/...</code> which is now <code>/root/...</code>.</li>
+  </ul>
+
+  <h2 id="layout">The new filesystem layout</h2>
+
+  <pre><code>/root/                   ← HOME for the agent (uid 0). SSH+sudo lands here.
+├── .pi/                  ← pi harness state (settings.json, extensions/, status.json)
+├── .claude/              ← claude-code harness state (settings.json)
+├── .codex/               ← codex harness config (config.toml)
+├── .tmux.conf            ← per-cell terminal chip (filled at birth)
+├── .ssh/                 ← (unused in cells; substrate has its own)
+├── AGENTS.md SOUL.md IDENTITY.md CELLS.md CONTACTS.md HEARTBEAT.md MEMORY.md TOOLS.md
+├── bin/                  ← /root/bin on PATH; publish-image, cells (CLI shim), cell-status.sh
+├── package.json bun.lock node_modules/
+├── scripts/              ← apply-pi-patches.sh, cell-color.sh, register-site-service.sh
+├── site/                 ← /root/site/server.ts — the bun web server for &lt;name&gt;.cells.md
+└── state/                ← memory/, mentality.md, etc. — extension-managed</code></pre>
+
+  <p>Owned <code>root:root</code> end-to-end. The agent runs as root and writes anywhere it likes; the VM is the sandbox.</p>
+
+  <h2 id="wrappers">The wrapper pattern — sudo to root, HOME=/root</h2>
+
+  <p>Wells's ubuntu-base SSHs in as user <code>ubuntu</code> (with NOPASSWD sudo). Every cells-side invocation that needs to act as the agent does:</p>
+
+  <pre><code>sudo bash -lc 'export HOME=/root; cd /root && exec &lt;cmd&gt;'</code></pre>
+
+  <p>or for non-bash spawns:</p>
+
+  <pre><code>well exec --user=cell …    # cells.ts wellExecCapture's user="cell" branch
+   ↓ becomes ↓
+ssh ubuntu@&lt;ip&gt; -- sudo bash -lc 'export HOME=/root; &lt;cmd&gt;'</code></pre>
+
+  <p>Three things this gets us:</p>
+  <ol>
+    <li><strong>Root inside the VM</strong> — full filesystem access, no EACCES, npm globals auto-update.</li>
+    <li><strong>HOME=/root explicit</strong> — codex's <code>CODEX_HOME</code>, claude's <code>~/.claude</code>, pi's cwd-relative <code>.pi/</code> all resolve to <code>/root/...</code>.</li>
+    <li><strong><code>bash -lc</code></strong> — sources <code>/etc/profile.d/cells-env.sh</code> (PATH includes <code>/root/bin</code> + bun; <code>CELLS_PROXY_SECRET</code> re-exported as the names pi/claude/codex expect).</li>
+  </ol>
+
+  <h2 id="vestigial">What's vestigial now</h2>
+
+  <ul>
+    <li><strong>Wells's <code>cell</code> Unix user</strong> — uid 1001 with NOPASSWD sudo, ships in ubuntu-base. Cells never invokes anything as <code>cell</code> anymore. The user sits in <code>/etc/passwd</code> doing nothing. Future ubuntu-base could drop it.</li>
+    <li><strong><code>/cell</code> directory</strong> — wells's ubuntu-base creates it as cell's home. Cells writes nothing there anymore. Empty except for the default shell dotfiles ubuntu put there at user-create.</li>
+    <li><strong><code>scripts/configure-cell-proxy.sh</code></strong> — the legacy /home/well/agent retrofit script. Marked deprecated in its own header. No-op for /root cells.</li>
+    <li><strong>Mother's <code>well_exec</code> <code>user</code> param</strong> — the <code>"cell"</code> value is preserved for back-compat but functionally means "sudo to root with HOME=/root." A future cleanup could drop the param entirely.</li>
+  </ul>
+
+  <h2 id="followups">Followups</h2>
+
+  <ul>
+    <li><strong>Wells-side cleanup</strong> — drop the <code>cell</code> user + <code>/cell</code> dir from ubuntu-base when convenient. Not blocking.</li>
+    <li><strong>Mother-thinking experiment</strong> — Pete asked whether mother could run on <code>gpt-5.5:medium</code> or <code>:low</code> instead of <code>:high</code> to speed up births. The first attempt was confounded by a parallel-mother deadlock (two concurrent <code>bun cells.ts birth</code> processes trip the ~175s mother-concurrency timeout — see [[feedback_parallel_mother_failure_mode]]). Re-run cleanly: zero in-flight births, single foreground birth at medium, time it. If green, repeat for consistency, then try low.</li>
+    <li><strong>codex + claude-code verification births</strong> — pi cell birth verified end-to-end on /root (106.8s, talked back). Codex + claude births are blocked behind a transient wells/lume <code>permission denied</code> bug on <code>/wake</code>; resume once welld is bounced.</li>
+  </ul>
+
+  <div class="pointers">
+    <h4>Pointers</h4>
+    <ul class="bare">
+      <li><code>cli/host-bridge.ts</code> — three harness adapters with the new sudo+HOME wrap</li>
+      <li><code>cli/cells.ts</code> — <code>provisionCellInWell</code> (bake), <code>wellExecCapture</code> (user="cell" branch), <code>cmdShell</code> + <code>cmdTui</code> (interactive root), <code>pushLocalDirToWell</code> (DNA push, was <code>...AsCell</code>)</li>
+      <li><code>dna/proto/mother/.pi/extensions/well-tools/index.ts</code> — well_exec/well_push wrappers for mother's birth ritual</li>
+      <li><code>scripts/register-site-service.sh</code> — site service runs as root</li>
+      <li><code>docs/cell-filesystem.md</code> — has a 2026-05-15 status update at the top reflecting this migration</li>
+      <li><code>BOARD.md</code> — <strong>C.1</strong> closed (legacy-cell compat) and <strong>W.28</strong> closed (services-API user param) by the migration</li>
+    </ul>
+  </div>
+
+</div>
+</body>
+</html>

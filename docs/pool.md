@@ -10,7 +10,7 @@ Operator-facing: `cells pool <subcommand>` to manage stock. (`cells egg` is a de
 
 ## Architecture (one screen)
 
-- A **pool member** is a well with the full cells toolchain (bun, node, gh, DNA, /cell), a baked identity (CELL_NAME, hostname, machine-id, ssh host keys via well-firstboot), and a hibernate-legal disk-only steady state (via wells's `/seal`).
+- A **pool member** is a well with the full cells toolchain (bun, node, gh, DNA, /root), a baked identity (CELL_NAME, hostname, machine-id, ssh host keys via well-firstboot), and a hibernate-legal disk-only steady state (via wells's `/seal`).
 - Two tiers:
   - **Tier 4 (hot)** — running, ready to claim instantly. Aim for `V1_HOT_POOL_TARGET = 10`.
   - **Tier 2 (cold)** — hibernated. ~2s wake on claim. Storage cost; minimal CPU. (V1 pool is pure-hot; cold tier is implementation-ready but not used.)
@@ -75,7 +75,7 @@ Reconcile evicts a member if welld doesn't know about its well anymore (W.68-cla
 1. `POST /v1/wells` with `from_image: ubuntu-base`, `env: { CELL_NAME }` — fast create, returns when SSH-ready with cidata.
 2. `setWellAuthPublic` + `disableAutoSleep` — configure auth + watchdog.
 3. `waitForCloudInit` — wait for `/etc/.well-ready` + populated `/home/well/.ssh/authorized_keys`. Bails early on non-transient errors ("Module not found", "Permission denied (publickey)", etc.) instead of grinding the 5-min retry.
-4. `provisionCellInWell` — DNA push, bun/node/gh install, /cell layout, pi patches.
+4. `provisionCellInWell` — DNA push, bun/node/gh install, /root layout, pi patches.
 5. **`sealWell`** — calls wells's `POST /v1/wells/{name}/seal`. Halts the guest (sysrq), restarts without cidata, flips `runtime.hibernate_ready=true`. Without this, hibernate refuses. ~7s.
 6. If Tier 2: `POST /v1/wells/{name}/hibernate` — accepted because seal flipped the flag.
 7. Atomic append to `pool.json`.

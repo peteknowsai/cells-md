@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Register the `site` service on a cell so the cell's web server (/cell/site/)
+# Register the `site` service on a cell so the cell's web server (/root/site/)
 # auto-starts on VM boot. Mother proxies <name>.cells.md to this server's
 # port 8080 inside the well.
 #
@@ -30,24 +30,21 @@ else
 fi
 
 # Wells's services API hardcodes the systemd unit's User=ubuntu (see
-# wells/lib/services.ts). To get pi running as the cell user (which
-# owns /cell, mode 0755 — ubuntu can read but not write), wrap the
-# service body in `sudo -u cell bash -c '...'`. ubuntu has NOPASSWD
-# sudo via cloud-init default, so the sudo step is silent. The cell
-# user inherits HOME=/cell from the sudo, so $HOME-relative paths
-# resolve correctly inside the wrapped script.
+# wells/lib/services.ts). The agent runs as root inside the VM (since
+# the root-cell migration, 2026-05-15) so we sudo to root for filesystem
+# access; ubuntu has NOPASSWD sudo per the wells base. HOME=/root so the
+# server resolves DNA relative paths the same way the agent does.
 #
-# Inner (cell-user) script:
-#   1. cd into /cell/site (server.ts lives there).
+# Inner (root) script:
+#   1. cd into /root/site (server.ts lives there).
 #   2. Source /etc/profile.d/cells-env.sh (env shim re-exports secret).
-#   3. Prepend /home/well/.bun/bin to PATH (bun installed there at bake;
-#      cell user's $HOME/.bun is empty).
-#   4. Export CELL_NAME + PORT for server.ts.
+#   3. Prepend /home/well/.bun/bin to PATH (bun installed there at bake).
+#   4. Export HOME, CELL_NAME, PORT.
 #   5. exec bun in foreground; if it crashes systemd restarts it.
-INNER='cd /cell/site && . /etc/profile.d/cells-env.sh; export PATH="/home/well/.bun/bin:$PATH"; export CELL_NAME='"'$NAME'"'; export PORT=8080; exec bun run server.ts'
-SCRIPT="sudo -u cell bash -c $(printf '%q' "$INNER")"
+INNER='cd /root/site && . /etc/profile.d/cells-env.sh; export HOME=/root PATH="/home/well/.bun/bin:$PATH"; export CELL_NAME='"'$NAME'"'; export PORT=8080; exec bun run server.ts'
+SCRIPT="sudo bash -c $(printf '%q' "$INNER")"
 
-PAYLOAD=$(jq -n --arg s "$SCRIPT" '{cmd:"bash",args:["-lc",$s],workdir:"/cell"}')
+PAYLOAD=$(jq -n --arg s "$SCRIPT" '{cmd:"bash",args:["-lc",$s],workdir:"/root"}')
 
 # Delete first — the wells API treats PUT as create-only and silently
 # no-ops on an existing service, leaving stale config in place.

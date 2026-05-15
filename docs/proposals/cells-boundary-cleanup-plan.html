@@ -248,7 +248,7 @@
   <h3>TL;DR</h3>
   <ul>
     <li>We agree with all three slices and with the answers to Q1–Q5 below.</li>
-    <li><strong>Image-layer boundary:</strong> wells owns the Ubuntu base image. Cells owns every layer baked on top (DNA, <code>/cell</code> user, pi, claude-code/codex, host-bridge agent, variant-specific packages).</li>
+    <li><strong>Image-layer boundary:</strong> wells owns the Ubuntu base image. Cells owns every layer baked on top (DNA, <code>/root</code> user, pi, claude-code/codex, host-bridge agent, variant-specific packages).</li>
     <li>Slice 1 (wells drops the lease publisher) — no cells work; ship whenever.</li>
     <li>Slice 2 (pool moves to cells) is <strong>consolidation, not creation</strong>. We already have <code>~/.cells/eggs.json</code> + <code>cells egg refill</code> + launchd cron. The work is merging wells's <code>~/.wells/pool/</code> concept into our existing egg pool, absorbing <code>identityReset.ts</code>, and formalising reachability recovery.</li>
     <li>Slice 3 (wells simplifies <code>createWell</code>) — small cells-side regression pass, no code change.</li>
@@ -385,7 +385,7 @@
     <tr>
       <td><code>cell-base</code> (cells's pre-bake)</td>
       <td class="col-cells">cells <span class="tag tag-cells">agent</span></td>
-      <td><code>ubuntu-base</code> + DNA (<code>/cell</code> filesystem) + <code>cell</code> user + pi + claude-code + codex + bun + host-bridge agent + <code>/etc/profile.d/cells-env.sh</code></td>
+      <td><code>ubuntu-base</code> + DNA (<code>/root</code> filesystem) + <code>cell</code> user + pi + claude-code + codex + bun + host-bridge agent + <code>/etc/profile.d/cells-env.sh</code></td>
       <td><code>cells bake cell-base</code> · saved via wells's image store · R2-pushed by wells substrate</td>
     </tr>
     <tr>
@@ -414,7 +414,7 @@
 
 <div class="callout q-answer">
   <strong>Q2 — Identity reset</strong>
-  <p>Moves to cells. The whole flow is cells-shaped — hostname, machine-id, DNA refresh, host-bridge wiring, <code>/cell</code> user re-keying. Keeping <code>identityReset.ts</code> in wells means piping cells-shaped config through wells's REST surface, which re-creates the same kind of leak the proposal is trying to close. Our <code>cmdBake</code> already does identity-style work over SSH (<code>bakeCreateCellUser</code>, <code>bakeWriteProfileD</code>); extending it to cover post-wake rotation is cheaper than the round-trip.</p>
+  <p>Moves to cells. The whole flow is cells-shaped — hostname, machine-id, DNA refresh, host-bridge wiring, <code>/root</code> user re-keying. Keeping <code>identityReset.ts</code> in wells means piping cells-shaped config through wells's REST surface, which re-creates the same kind of leak the proposal is trying to close. Our <code>cmdBake</code> already does identity-style work over SSH (<code>bakeCreateCellUser</code>, <code>bakeWriteProfileD</code>); extending it to cover post-wake rotation is cheaper than the round-trip.</p>
 </div>
 
 <div class="callout q-answer">

@@ -48,7 +48,7 @@ patched_fallback=0
 
 # 1. Anthropic baseUrl. Default: swap api.anthropic.com → proxy.cells.md so
 # the cell reaches Anthropic via Pete's subscriptions proxy (Claude Max sub,
-# home-IP egress). Exception: if /cell/.anthropic-direct exists, this cell
+# home-IP egress). Exception: if /root/.anthropic-direct exists, this cell
 # runs Anthropic models on a direct ANTHROPIC_API_KEY — restore the pristine
 # api.anthropic.com baseUrl so pi-ai talks to Anthropic directly, no proxy
 # hop (pi-via-Max is fingerprint-blocked; a paid key is clean). The birthing
@@ -56,7 +56,7 @@ patched_fallback=0
 # pristine pre-patch file, so restoring from it is the clean revert.
 # Bidirectionally idempotent — safe on every bun install.
 ANTHROPIC_DIRECT=0
-[ -f /cell/.anthropic-direct ] && ANTHROPIC_DIRECT=1
+[ -f /root/.anthropic-direct ] && ANTHROPIC_DIRECT=1
 for F in $(find "${SEARCH_ROOTS[@]}" -name models.generated.js 2>/dev/null); do
   if [ "$ANTHROPIC_DIRECT" = "1" ]; then
     # direct mode: ensure api.anthropic.com — restore from the pristine .bak

@@ -147,7 +147,7 @@ async function cmdTalk(name: string, message: string) {
     // Env (PATH, secrets) comes from /etc/profile.d/cells-env.sh sourced
     // automatically by /etc/profile for any login shell, including
     // non-interactive `bash -lc`.
-    `tmux has-session -t agent 2>/dev/null || tmux new-session -d -s agent -c /cell pi`,
+    `tmux has-session -t agent 2>/dev/null || tmux new-session -d -s agent -c /root pi`,
     `sleep 1`,
     `tmux send-keys -t agent '${escaped}' Enter`,
     `sleep 8`,

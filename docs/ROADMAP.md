@@ -23,7 +23,7 @@ anything inside it.
 - `dna/proto/mother/.pi/skills/birth/SKILL.md` — birth ritual the mother follows:
   - create the Well + configure egress (anthropic, bun.sh, npm, github)
   - install Bun on the Well
-  - tar+push `dna/cells/base/` to `/root/cell`, `sed` substitute `__NAME__`
+  - tar+push `dna/cells/base/` to `/root/root`, `sed` substitute `__NAME__`
   - run `bun install` on the Well
   - inject shared keys (`CELLS_PROXY_SECRET`, `EXA_API_KEY`, `WELL_TOKEN`) from `~/.cells/secrets.json` and patch pi-ai's model registry to route through `proxy.cells.md`
   - register the `site` well service (it serves `<cell>.cells.md` and
@@ -50,10 +50,10 @@ is the same cell.
 
 The cell gains short-term episodic memory.
 
-- `~/cell/memory/MEMORY.md` — index of topic files, kept under 200 lines
-- `~/cell/memory/<topic>.md` — individual notes the cell writes during life
+- `~/root/memory/MEMORY.md` — index of topic files, kept under 200 lines
+- `~/root/memory/<topic>.md` — individual notes the cell writes during life
 - `rituals/dream.md` — consolidation pass running as a forked Pi subagent,
-  restricted to `~/cell/memory/` (read/write only there). Triggered on
+  restricted to `~/root/memory/` (read/write only there). Triggered on
   Well wake, not on a polling loop.
 - Base `AGENTS.md` updated to teach the cell to journal during conversation
 
@@ -119,7 +119,7 @@ Structured records + semantic search.
 
 Offsite cold backup of the cell's body.
 
-- Nightly ritual: tarball `~/cell/` and push to Cloudflare R2
+- Nightly ritual: tarball `~/root/` and push to Cloudflare R2
 - Versioned bucket — R2 handles history
 - Restore ritual for resurrecting the cell onto a fresh well if needed
 

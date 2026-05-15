@@ -193,7 +193,7 @@ The critical path is short on purpose. Everything that *can* be deferred to afte
 - `cli/cells.ts cmdBirth()` — birth flow
 - `proto/mother/.pi/skills/birth/SKILL.md` — mother's birth ritual
 - `scripts/slack-app-apply.sh` — slack manifest application
-- ~~`scripts/configure-cell-proxy.sh`~~ — deprecated for /cell cells; pi-ai patches bake into `cell-base`, the proxy secret routes via `well_create --env=...` → `/etc/environment` → `/etc/profile.d/cells-env.sh`. Retained for legacy `/home/well/agent` retrofit only.
+- ~~`scripts/configure-cell-proxy.sh`~~ — deprecated for /root cells; pi-ai patches bake into `cell-base`, the proxy secret routes via `well_create --env=...` → `/etc/environment` → `/etc/profile.d/cells-env.sh`. Retained for legacy `/home/well/agent` retrofit only.
 - `scripts/register-site-service.sh` — site service registration on a well
 - `scripts/deploy-cell-worker.sh` — Cloudflare Worker deploy
 

@@ -1028,24 +1028,24 @@ async function cmdTui(name: string, extra: string[] = []) {
   const quote = (a: string) => `'${a.replace(/'/g, "'\\''")}'`;
   const reset = extra.length > 0 ? "tmux kill-session -t tui 2>/dev/null; " : "";
   // The agent invocation is the only harness-specific piece — everything
-  // around it (tmux, TERM, well exec --tty, sudo -u cell) is identical.
+  // around it (tmux, TERM, well exec --tty, sudo to root, HOME=/root) is identical.
   let mkdir = "";
   let agentInvocation: string;
   if (harness === "claude-code") {
     // claude-code's own TUI: bare `claude` (no --print). It keys session
-    // history off cwd under ~/.claude/projects/, so `cd /cell` isolates
+    // history off cwd under ~/.claude/projects/, so `cd /root` isolates
     // this cell's TUI history naturally — no --session-dir needed. extra
     // args pass straight through as claude's own flags (e.g. --continue).
     agentInvocation = extra.length ? `claude ${extra.map(quote).join(" ")}` : "claude";
   } else if (harness === "codex") {
     // codex's own TUI: bare `codex` (no subcommand → the interactive CLI).
-    // CODEX_HOME keys off HOME=/cell → /cell/.codex/, so session history is
+    // CODEX_HOME keys off HOME=/root → /root/.codex/, so session history is
     // isolated per cell. extra args pass through as codex's own flags.
     agentInvocation = extra.length ? `codex ${extra.map(quote).join(" ")}` : "codex";
   } else {
     // pi's TUI. --session-dir keeps the TUI conversation isolated from the
     // bridge's main.jsonl; pass `-c` to continue the latest, `-r` to pick.
-    const sessionDir = `~/.pi/agent/sessions/cell-${name}/tui`;
+    const sessionDir = `~/.pi/agent/sessions/root-${name}/tui`;
     mkdir = `mkdir -p ${sessionDir} && `;
     agentInvocation = `pi ${["--session-dir", sessionDir, ...extra].map(quote).join(" ")}`;
   }
@@ -1063,15 +1063,16 @@ async function cmdTui(name: string, extra: string[] = []) {
   // once it's running, so the override only affects the outer shell.
   const remote =
     `export TERM=xterm-256color; ` +
-    `${mkdir}cd /cell && ${reset}` +
-    `exec tmux new-session -A -s tui -c /cell "${agentInvocation}"${tmuxOpts}`;
-  // Run as cell user so the agent's session, memory, and tmux conf land
-  // under /cell (HOME=/cell). well user is in NOPASSWD sudoers so the
-  // wrap is silent.
+    `${mkdir}cd /root && ${reset}` +
+    `exec tmux new-session -A -s tui -c /root "${agentInvocation}"${tmuxOpts}`;
+  // Sudo to root so the agent's session/memory/tmux conf can write
+  // anywhere under /root. HOME=/root is set inline so HOME-relative paths
+  // resolve there regardless of the sudo'd user's home. well is in
+  // NOPASSWD sudoers so the wrap is silent.
   const proc = Bun.spawn(
     [
       "well", "exec", "-s", wellName, "--tty", "--",
-      "sudo", "-u", "cell", "bash", "-lc", remote,
+      "sudo", "bash", "-lc", `export HOME=/root; ${remote}`,
     ],
     { stdin: "inherit", stdout: "inherit", stderr: "inherit" },
   );
@@ -1100,16 +1101,15 @@ async function cmdShell(name: string) {
     return;
   }
   await requireCell(name);
-  // Spawn tmux directly under well exec --tty as the cell user.
-  // Bypasses the login-shell auto-attach shim (which would dump us
-  // into pi); inside tmux, the shim's `[ -z "$TMUX" ]` guard is false,
-  // so it no-ops on subsequent shell invocations.
+  // Spawn tmux directly under well exec --tty as root (sudo from the
+  // ubuntu ssh user). Bypasses the login-shell auto-attach shim (which
+  // would dump us into pi); inside tmux, the shim's `[ -z "$TMUX" ]`
+  // guard is false, so it no-ops on subsequent shell invocations.
   // -A on new-session: attach if "shell" exists, create if not.
   // bash -l inside tmux sources /etc/profile → /etc/profile.d/cells-env.sh
   // (PATH, secrets re-export). Ctrl+D exits bash, ends the tmux session,
   // drops us back to the Mac.
-  // Wrap in sudo -u cell so the shell lands as the cell user with
-  // HOME=/cell — mirrors what `cells tui` does for the agent's session.
+  // sudo -H sets HOME=/root (root's actual home — the agent's home).
   // Wrap in bash -c to override TERM. Pete's terminal exports things
   // like xterm-ghostty that well VMs don't ship terminfo for; tmux
   // refuses to start with "missing or unsuitable terminal". tmux's
@@ -1117,8 +1117,8 @@ async function cmdShell(name: string) {
   const proc = Bun.spawn(
     [
       "well", "exec", "-s", name, "--tty", "--",
-      "sudo", "-u", "cell", "bash", "-c",
-      `export TERM=xterm-256color; exec tmux new-session -A -s shell -c /cell bash -l`,
+      "sudo", "-H", "bash", "-c",
+      `export TERM=xterm-256color; exec tmux new-session -A -s shell -c /root bash -l`,
     ],
     { stdin: "inherit", stdout: "inherit", stderr: "inherit" },
   );
@@ -1874,20 +1874,21 @@ async function sealWell(wellName: string): Promise<void> {
 }
 
 // Register the `site` systemd service on a cell via welld's services API.
-// Triggers /cell/site/server.ts (bun web server) to start at boot. Mirrors
+// Triggers /root/site/server.ts (bun web server) to start at boot. Mirrors
 // scripts/register-site-service.sh in TS so the v1 fast-path doesn't shell
-// out. Wraps the bun launch in `sudo -u cell bash -c '...'` because wells's
-// services API hardcodes User=ubuntu (W.28) and /cell is cell-owned.
+// out. Wells's services API hardcodes User=ubuntu (W.28) and ubuntu has
+// NOPASSWD sudo per the wells base; sudoing to root makes the service run
+// with full filesystem access. HOME=/root so server.ts sees its DNA.
 async function registerSiteService(wellName: string, cellName: string): Promise<void> {
   const inner =
-    `cd /cell/site && . /etc/profile.d/cells-env.sh; ` +
-    `export PATH="/home/well/.bun/bin:$PATH"; ` +
+    `cd /root/site && . /etc/profile.d/cells-env.sh; ` +
+    `export HOME=/root PATH="/home/well/.bun/bin:$PATH"; ` +
     `export CELL_NAME='${cellName}'; export PORT=8080; ` +
     `exec bun run server.ts`;
-  // Escape single quotes for the outer `sudo -u cell bash -c '...'` wrap.
+  // Escape single quotes for the outer `sudo bash -c '...'` wrap.
   const quotedInner = `'${inner.replace(/'/g, `'\\''`)}'`;
-  const script = `sudo -u cell bash -c ${quotedInner}`;
-  const payload = { cmd: "bash", args: ["-lc", script], workdir: "/cell" };
+  const script = `sudo bash -c ${quotedInner}`;
+  const payload = { cmd: "bash", args: ["-lc", script], workdir: "/root" };
 
   const token = await wellsToken();
   const base = process.env.WELL_API_URL ?? "http://127.0.0.1:7878";
@@ -1933,7 +1934,7 @@ function generatePoolWellName(): string {
 // entry into pool.json with state=warm on success. Returns the well-name
 // or throws. Caller is responsible for the egg-lock dance (use
 // withPoolLock around the bake invocation when refilling).
-// Read all LLM provider keys from ~/.cells/secrets.json so every egg/cell
+// Read all LLM provider keys from ~/.cells/secrets.json so every egg/root
 // has every supported model available out of the box. Pi-ai natively reads
 // these env vars for direct-API providers; CELLS_PROXY_SECRET is used by
 // the codex-proxy extension for subscription-routed providers (codex,
@@ -2012,43 +2013,47 @@ async function countColdPoolMembers(): Promise<number> {
 //
 // As of wells-stable-2026-05-12h, ubuntu-base ships with:
 //   - bun pre-installed at /usr/local/bin/bun
-//   - cell user + /cell home + `cell ALL=(ALL) NOPASSWD: ALL` sudoers
-//   - `ubuntu ALL=(cell) NOPASSWD: ALL` sudoers (host-bridge delegation)
-//   - /cell/.ssh/authorized_keys mirrored from /home/well/.ssh
+//   - cell user + /cell home + cell sudoers (vestigial, unused since the
+//     root migration — agent runs as root, HOME=/root, DNA at /root)
+//   - ubuntu user with NOPASSWD sudo (host-bridge sshes as ubuntu, sudoes
+//     to root)
+//   - /home/well/.ssh wells-managed key
 // So cells-side provisioning is purely cells-shaped layers.
 //
 // Steps:
-//   1. Push dna/cells/base → /cell (DNA)
+//   1. Push dna/cells/base → /root (DNA)
 //   2. Write per-cell tmux config template
-//   3. bun install /cell deps (--ignore-scripts so postinstall doesn't run
+//   3. bun install /root deps (--ignore-scripts so postinstall doesn't run
 //      before pi is installed and patchable)
 //   4. npm install pi-coding-agent globally + pre-load pi-web-access ext
 //   5. sudo apply-pi-patches.sh (anthropic baseUrl, codex, adaptive)
 //   6. /etc/profile.d/cells-env.sh
-//   7. chmod +x /cell/bin/cells
+//   7. chmod +x /root/bin/cells
 //   8. sync filesystem
 async function provisionCellInWell(wellName: string): Promise<void> {
-  // 1. DNA push (ubuntu-base already has cell user + /cell + sudoers)
-  await pushLocalDirToWellAsCell(wellName, DNA_DIR, "/cell");
+  // 1. DNA push (ubuntu-base already has /root — the cell user it ships
+  //    is left unused; the agent now runs as root, so /root is chowned
+  //    root:root in step 8 below for ownership consistency).
+  await pushLocalDirToWell(wellName, DNA_DIR, "/root");
   // 3. tmux conf template
   const tmuxConf = await readFile(join(REPO_ROOT, "scripts/cell-tmux.conf"), "utf-8");
   const writeTmux = await wellExecCapture(
     wellName,
-    `sudo tee /cell/.tmux.conf >/dev/null <<'__TMUX_EOF__'\n${tmuxConf}\n__TMUX_EOF__\nsudo chown cell:cell /cell/.tmux.conf`,
+    `sudo tee /root/.tmux.conf >/dev/null <<'__TMUX_EOF__'\n${tmuxConf}\n__TMUX_EOF__`,
   );
   if (!writeTmux.ok) {
     throw new Error(`write tmux conf failed: ${writeTmux.stderr.slice(0, 200)}`);
   }
-  // 4. bun install /cell deps. --ignore-scripts so the postinstall hook
+  // 4. bun install /root deps. --ignore-scripts so the postinstall hook
   //    (apply-pi-patches.sh, which writes into /usr/lib/node_modules) doesn't
-  //    fire as the cell user — patches run separately with sudo in step 6.
-  //    Bun is pre-installed in ubuntu-base since wells-stable-2026-05-12f
-  //    (at /usr/local/bin/bun on the system PATH for every user).
+  //    fire before patches are applied in step 6. Bun is pre-installed in
+  //    ubuntu-base since wells-stable-2026-05-12f (at /usr/local/bin/bun
+  //    on the system PATH for every user).
   const bunInstall = await wellExecCapture(
     wellName,
     `set -euo pipefail
 sudo chmod 0755 /home/well
-sudo -u cell bash -lc 'cd /cell && bun install --frozen-lockfile --ignore-scripts'
+sudo bash -lc 'cd /root && bun install --frozen-lockfile --ignore-scripts'
 echo "bun: $(bun --version 2>&1 | head -1 || echo MISSING)"`,
   );
   if (!bunInstall.ok) {
@@ -2056,11 +2061,14 @@ echo "bun: $(bun --version 2>&1 | head -1 || echo MISSING)"`,
   }
   // 5. Install pi globally (root-owned at /usr/lib/node_modules), then
   //    pre-load the default pi extension so birth's step 3e is a no-op.
+  //    All as root — the agent runs as root so its npm globals also live
+  //    root-owned, which means pi/claude/codex auto-updaters can write
+  //    /usr/lib/node_modules cleanly later.
   const piInstall = await wellExecCapture(
     wellName,
     `set -euo pipefail
 sudo npm install -g @mariozechner/pi-coding-agent
-sudo -u cell bash -lc 'cd /cell && pi install -l npm:pi-web-access'
+sudo bash -lc 'export HOME=/root; cd /root && pi install -l npm:pi-web-access'
 echo "pi: $(pi --version 2>&1 | head -1 || echo MISSING)"`,
   );
   if (!piInstall.ok) {
@@ -2081,19 +2089,28 @@ echo "codex: $(codex --version 2>&1 | head -1 || echo MISSING)"`,
     throw new Error(`codex install failed: ${(codexInstall.stderr + codexInstall.stdout).slice(-600)}`);
   }
   // 6. Apply pi patches with sudo (writes into /usr/lib/node_modules).
-  const patch = await wellExecCapture(wellName, `sudo bash /cell/scripts/apply-pi-patches.sh`);
+  const patch = await wellExecCapture(wellName, `sudo bash /root/scripts/apply-pi-patches.sh`);
   if (!patch.ok) {
     throw new Error(`apply-pi-patches failed: ${(patch.stderr + patch.stdout).slice(-600)}`);
   }
   // 7. /etc/profile.d shim
   await bakeWriteProfileD(wellName);
-  // 8. chmod /cell/bin/cells
-  const chmod = await wellExecCapture(wellName, `sudo chmod +x /cell/bin/cells`);
+  // 8. chmod /root/bin/cells
+  const chmod = await wellExecCapture(wellName, `sudo chmod +x /root/bin/cells`);
   if (!chmod.ok) {
-    throw new Error(`chmod /cell/bin/cells failed: ${chmod.stderr.slice(0, 200)}`);
+    throw new Error(`chmod /root/bin/cells failed: ${chmod.stderr.slice(0, 200)}`);
+  }
+  // 8b. Normalize ownership. /root is root:root by default, but the DNA
+  //     tar push preserves the host Mac's uid/gid (e.g. 501:staff) on
+  //     archive entries, and bun/pi/codex installs land mixed too. The
+  //     agent runs as root and can read anything regardless, but a
+  //     chown -R keeps `ls` honest. Cheap.
+  const chownAll = await wellExecCapture(wellName, `sudo chown -R root:root /root`);
+  if (!chownAll.ok) {
+    throw new Error(`chown -R root:root /root failed: ${chownAll.stderr.slice(0, 200)}`);
   }
   // 9. sync — empirically needed so hibernate's stop+save doesn't lose
-  // /cell content / sudoers / pi-patched node_modules (ext4 commit=30
+  // /root content / sudoers / pi-patched node_modules (ext4 commit=30
   // can lag behind the disk-detach).
   const sync = await wellExecCapture(wellName, `sudo sync && sudo sync`);
   if (!sync.ok) {
@@ -2119,10 +2136,11 @@ async function bakePoolMember(): Promise<string> {
   const tier: 2 | 4 = hotCount < V1_HOT_POOL_TARGET ? 4 : 2;
 
   // From ubuntu-base (the wells-team-owned substrate) — NOT cell-base.
-  // The cells-shaped layers (pi, DNA, /cell, cells-env.sh, pi binary +
+  // The cells-shaped layers (pi, DNA at /root, cells-env.sh, pi binary +
   // patches) get applied via provisionCellInWell over SSH right after
-  // firstboot. The cell user, /cell home, sudoers, and ssh keys come
-  // pre-baked from ubuntu-base (wells-stable-2026-05-12h).
+  // firstboot. ubuntu user (NOPASSWD sudo) + /home/well/.ssh come
+  // pre-baked from ubuntu-base (wells-stable-2026-05-12h); the agent
+  // sudoes from ubuntu to root.
   // Post-Piece-3 (2026-05-13): we no longer pass hibernate_ready at
   // create time (Pi3 deleted that path). Instead, sealWell() is called
   // after provisionCellInWell to flip the well to a hibernate-legal
@@ -2801,11 +2819,11 @@ async function deleteCellWorker(name: string): Promise<void> {
     // WELL_HOST doesn't matter for delete, but the placeholder must be
     // substituted or wrangler chokes on the unrendered TOML.
     const rendered = tpl.replaceAll("{{CELL}}", name).replaceAll("{{WELL_HOST}}", "ignored.wells.app");
-    const renderedPath = join(REPO_ROOT, "cli/worker/cell", `.wrangler.${name}.toml`);
+    const renderedPath = join(REPO_ROOT, "cli/worker/root", `.wrangler.${name}.toml`);
     await Bun.write(renderedPath, rendered);
     try {
       const proc = Bun.spawn(["bunx", "wrangler", "delete", "--config", renderedPath], {
-        cwd: join(REPO_ROOT, "cli/worker/cell"),
+        cwd: join(REPO_ROOT, "cli/worker/root"),
         stdin: new TextEncoder().encode("y\n"), // confirm prompt
         stdout: "pipe",
         stderr: "pipe",
@@ -3742,19 +3760,17 @@ async function mirrorPromptToSlack(cellName: string, text: string, secret: strin
 
 async function dreamOne(name: string): Promise<boolean> {
   console.log(`→ dreaming ${name}`);
-  // Run pi as the cell user so memory ext writes (/cell/state/memory/)
-  // succeed and dream's session lands under /cell/.pi/ — mirrors how
-  // pi is invoked elsewhere in the codebase post-/cell migration.
+  // Run pi as root with HOME=/root so memory ext writes (/root/state/memory/)
+  // succeed and dream's session lands under /root/.pi/ — same context the
+  // host-bridge gives the agent for talk.
   const proc = Bun.spawn(
     [
       "well",      "exec",
       "-s",
       name,
       "--",
-      "sudo", "-u", "cell",
-      "bash",
-      "-lc",
-      'cd /cell && pi -p "Run the dream tool to consolidate your memory."',
+      "sudo", "bash", "-lc",
+      'export HOME=/root; cd /root && pi -p "Run the dream tool to consolidate your memory."',
     ],
     {
       stdin: "ignore",
@@ -4272,17 +4288,16 @@ async function refreshExtensionOnCell(cellName: string, extName: string): Promis
   }
 
   // Push the extension dir via tar pipe.
-  const remoteExtDir = `/cell/.pi/extensions/${extName}`;
+  const remoteExtDir = `/root/.pi/extensions/${extName}`;
   const tar = Bun.spawn(["tar", "czf", "-", "-C", join(DNA_DIR, ".pi", "extensions"), extName], {
     stdin: "ignore",
     stdout: "pipe",
     stderr: "pipe",
   });
-  // /cell is cell:cell 0755 — well user can read but not write. Wrap the
-  // tar receive in `sudo -u cell` so files land cell-owned (well is in
-  // NOPASSWD sudoers per the wells base; the sudo is silent). Stdin from
-  // the host tar pipe flows through ssh → bash → sudo → cell's tar xzf.
-  const remoteCmd = `sudo -u cell bash -c 'mkdir -p /cell/.pi/extensions && rm -rf ${remoteExtDir} && cd /cell/.pi/extensions && tar xzf -'`;
+  // /root is root:root post-bake; well user has NOPASSWD sudo per the
+  // wells base, so a plain sudo lifts to root and tar lands root-owned —
+  // matching the rest of /root.
+  const remoteCmd = `sudo bash -c 'mkdir -p /root/.pi/extensions && rm -rf ${remoteExtDir} && cd /root/.pi/extensions && tar xzf -'`;
   const recv = Bun.spawn(["well", "exec", "-s", cellName, "--", "bash", "-c", remoteCmd], {
     stdin: tar.stdout,
     stdout: "pipe",
@@ -4300,7 +4315,7 @@ async function refreshExtensionOnCell(cellName: string, extName: string): Promis
   const entry = `.pi/extensions/${extName}/index.ts`;
   const updateScript = `
 set -e
-cd /cell
+cd /root
 node -e '
   const fs = require("fs");
   const p = ".pi/settings.json";
@@ -4333,7 +4348,7 @@ async function removeExtensionOnCell(cellName: string, extName: string): Promise
   const entry = `.pi/extensions/${extName}/index.ts`;
   const script = `
 set -e
-cd /cell
+cd /root
 node -e '
   const fs = require("fs");
   const p = ".pi/settings.json";
@@ -4341,7 +4356,7 @@ node -e '
   s.extensions = (s.extensions || []).filter(x => x !== "${entry}");
   fs.writeFileSync(p, JSON.stringify(s, null, 2) + "\\n");
 '
-rm -rf /cell/.pi/extensions/${extName}
+rm -rf /root/.pi/extensions/${extName}
 echo removed
 `.trim();
   const r = await wellExecCapture(cellName, script, { user: "cell" });
@@ -4707,15 +4722,16 @@ async function wellExecCapture(
   // signature so a single flaky connection doesn't fail the whole bake.
   //
   // user: defaults to "well" (substrate user, matches `well exec`'s default).
-  // Pass user="cell" for /cell writes — wraps script in `sudo -u cell bash -c ...`
-  // since /cell is cell:cell 0755 and well user can read but not write.
-  // The well user is in NOPASSWD sudoers per the wells base, so the sudo
-  // step is silent. Reads of /cell can stay user="well" — mode 0755 allows it.
+  // Pass user="cell" for the agent's effective context: root with HOME=/root
+  // so tools that key off HOME (codex via CODEX_HOME, claude via .claude)
+  // find their cell-scoped config. The well user is in NOPASSWD sudoers per
+  // the wells base, so the sudo step is silent. Reads of /root can stay
+  // user="well" — /root is mode 0755.
   const KEX_RESET = /kex_exchange_identification|Connection reset by peer/i;
   const user = opts?.user ?? "well";
   const args =
     user === "cell"
-      ? ["well", "exec", "-s", name, "--", "sudo", "-u", "cell", "bash", "-lc", script]
+      ? ["well", "exec", "-s", name, "--", "sudo", "bash", "-lc", `export HOME=/root; ${script}`]
       : ["well", "exec", "-s", name, "--", "bash", "-lc", script];
   for (let attempt = 0; attempt < 2; attempt++) {
     const proc = Bun.spawn(args, {
@@ -4747,7 +4763,7 @@ async function pullMarkdown(nameOrCell: string, vaultPath: string): Promise<{ pe
   // observability), plus state/ and the .pi/ markdown trees, plus
   // .pi/settings.json so Pete can browse harness config directly in
   // Obsidian. tar emits two streams (md + json) joined by a single find.
-  const findScript = `cd /cell && { find AGENTS.md CLAUDE.md SOUL.md IDENTITY.md TOOLS.md CELLS.md CONTACTS.md MEMORY.md HEARTBEAT.md state/memory state/wiki .pi/skills .pi/prompts \\( -name '*.md' -o -name 'SKILL.md' \\) -type f 2>/dev/null; [ -f .pi/settings.json ] && echo .pi/settings.json; } | tar czf - -T -`;
+  const findScript = `cd /root && { find AGENTS.md CLAUDE.md SOUL.md IDENTITY.md TOOLS.md CELLS.md CONTACTS.md MEMORY.md HEARTBEAT.md state/memory state/wiki .pi/skills .pi/prompts \\( -name '*.md' -o -name 'SKILL.md' \\) -type f 2>/dev/null; [ -f .pi/settings.json ] && echo .pi/settings.json; } | tar czf - -T -`;
   // Post-extract we collapse state/memory -> memory and state/wiki -> wiki so
   // the vault stays flat. Pete reads it in Obsidian; one fewer level to click.
   const send = Bun.spawn(["well", "exec", "-s", name, "--", "bash", "-lc", findScript], {
@@ -4822,7 +4838,7 @@ async function pullExtensionDocs(nameOrCell: string, vaultPath: string): Promise
   // Accept cell name OR well name; resolve internally for hatched cells.
   const name = await wellNameForCell(nameOrCell);
   // List extensions, then cat each index.ts.
-  const list = await wellExecCapture(name, "ls -1 /cell/.pi/extensions/ 2>/dev/null");
+  const list = await wellExecCapture(name, "ls -1 /root/.pi/extensions/ 2>/dev/null");
   if (!list.ok) return [];
   const exts = list.stdout.split("\n").map((s) => s.trim()).filter(Boolean);
   // Mirror the cell layout: synthesized doc lands as .pi/extensions/<name>.md
@@ -4831,7 +4847,7 @@ async function pullExtensionDocs(nameOrCell: string, vaultPath: string): Promise
   await mkdir(extDir, { recursive: true });
   const results: Array<{ name: string; meta: ExtensionMeta }> = [];
   for (const ext of exts) {
-    const cat = await wellExecCapture(name, `cat /cell/.pi/extensions/${ext}/index.ts 2>/dev/null`);
+    const cat = await wellExecCapture(name, `cat /root/.pi/extensions/${ext}/index.ts 2>/dev/null`);
     if (!cat.ok || !cat.stdout) continue;
     const meta = parseExtensionTs(cat.stdout);
     await writeFile(join(extDir, `${ext}.md`), renderExtensionMd(ext, meta));
@@ -5769,25 +5785,25 @@ async function cmdBake(opts: BakeOpts) {
     await waitForCloudInit(sourceName);
 
     // 2b. (Removed) — as of wells-stable-2026-05-12h ubuntu-base ships the
-    //     cell user, /cell home, cell sudoers, ubuntu→cell delegation, and
-    //     /cell/.ssh/authorized_keys. Cells-side useradd is no-op now.
+    //     cell user, /root home, cell sudoers, ubuntu→cell delegation, and
+    //     /root/.ssh/authorized_keys. Cells-side useradd is no-op now.
 
     // 3. Push DNA — cells-specific package.json, .pi/, scripts/, site/, etc.
-    console.log(`→ push DNA → /cell`);
-    await pushLocalDirToWellAsCell(sourceName, DNA_DIR, "/cell");
+    console.log(`→ push DNA → /root`);
+    await pushLocalDirToWell(sourceName, DNA_DIR, "/root");
 
     // 3b. Write the per-cell tmux config template (placeholders for cell
     //     name + bg/fg color get filled in at birth time, step 3b of the
     //     mother skill). The template lives in the cells repo so we don't
     //     ship it via DNA — DNA is the agent's data, this is its terminal.
-    console.log(`→ write /cell/.tmux.conf template`);
+    console.log(`→ write /root/.tmux.conf template`);
     const tmuxConf = await readFile(join(REPO_ROOT, "scripts/cell-tmux.conf"), "utf-8");
-    // Write as root via tee, then chown to cell. Avoids quoting hell —
-    // tmux conf contains single quotes (in comments and bind-key strings)
-    // that fight `sudo -u cell bash -c '...'` wrapping.
+    // Write as root via tee. Avoids quoting hell — tmux conf contains
+    // single quotes (in comments and bind-key strings) that would fight
+    // any `bash -c '...'` wrapping.
     const writeTmux = await wellExecCapture(
       sourceName,
-      `sudo tee /cell/.tmux.conf >/dev/null <<'__TMUX_EOF__'\n${tmuxConf}\n__TMUX_EOF__\nsudo chown cell:cell /cell/.tmux.conf`,
+      `sudo tee /root/.tmux.conf >/dev/null <<'__TMUX_EOF__'\n${tmuxConf}\n__TMUX_EOF__`,
     );
     if (!writeTmux.ok) {
       throw new Error(`write tmux conf failed: ${writeTmux.stderr.slice(0, 200)}`);
@@ -5828,7 +5844,7 @@ echo "bun: $(/home/well/.bun/bin/bun --version 2>&1 | head -1 || echo MISSING)"`
     console.log(`→ apply pi patches`);
     const patch = await wellExecCapture(
       sourceName,
-      `sudo bash /cell/scripts/apply-pi-patches.sh`,
+      `sudo bash /root/scripts/apply-pi-patches.sh`,
     );
     if (!patch.ok) {
       throw new Error(`apply-pi-patches failed: ${patch.stderr.slice(0, 400) || patch.stdout.slice(0, 400)}`);
@@ -5842,11 +5858,11 @@ echo "bun: $(/home/well/.bun/bin/bun --version 2>&1 | head -1 || echo MISSING)"`
     console.log(`→ write /etc/profile.d/cells-env.sh`);
     await bakeWriteProfileD(sourceName);
 
-    // 7. Make /cell/bin/cells executable. /cell/bin is on the cell user's
-    //    PATH via /etc/profile.d/cells-env.sh, so no symlink needed.
+    // 7. Make /root/bin/cells executable. /root/bin is on root's PATH
+    //    via /etc/profile.d/cells-env.sh, so no symlink needed.
     const linkRes = await wellExecCapture(
       sourceName,
-      `sudo chmod +x /cell/bin/cells`,
+      `sudo chmod +x /root/bin/cells`,
     );
     if (!linkRes.ok) {
       throw new Error(`cells bin chmod failed: ${linkRes.stderr.slice(0, 200) || linkRes.stdout.slice(0, 200)}`);
@@ -5860,7 +5876,7 @@ echo "bun: $(/home/well/.bun/bin/bun --version 2>&1 | head -1 || echo MISSING)"`
     // 7b. Force fs journal commit before save. Empirically (2026-05-10)
     //     wells's server-side `stop+save` can hard-kill the guest before
     //     ext4's commit=30 timer fires, dropping unsync'd writes. /etc/passwd
-    //     survives (PAM fsyncs) but our /cell tree, /etc/profile.d shim,
+    //     survives (PAM fsyncs) but our /root tree, /etc/profile.d shim,
     //     and pi-patch sed-edits do not. Explicit `sync` here flushes.
     console.log(`→ sync filesystem before save`);
     const syncRes = await wellExecCapture(sourceName, `sudo sync && sudo sync`);
@@ -6077,23 +6093,23 @@ async function pushLocalDirToWell(name: string, localPath: string, remotePath: s
   }
 }
 
-// Push a local dir to a well, untarring as user `cell` so files land
-// owned by cell:cell at a /cell-rooted path. Used by the bake to lay
-// down DNA at /cell — `well exec` connects as user `well`, so we pipe
-// through `sudo -u cell` for the untar.
-async function pushLocalDirToWellAsCell(name: string, localPath: string, remotePath: string): Promise<void> {
+// Push a local dir to a well, untarring as root so files land root-owned
+// at a /root-rooted path. Used by the bake to lay down DNA at /root —
+// `well exec` connects as user `well`, so we sudo to root for the untar.
+// /root is root:root by default, so no chown ceremony is needed afterward.
+async function pushLocalDirToWell(name: string, localPath: string, remotePath: string): Promise<void> {
   const tar = Bun.spawn(["tar", "czf", "-", "-C", localPath, "."], {
     stdio: ["ignore", "pipe", "pipe"],
   });
   const proc = Bun.spawn(
     ["well", "exec", "-s", name, "--", "bash", "-c",
-      `sudo mkdir -p ${remotePath} && sudo chown cell:cell ${remotePath} && sudo -u cell bash -c 'cd ${remotePath} && tar xzf -'`],
+      `sudo mkdir -p ${remotePath} && sudo bash -c 'cd ${remotePath} && tar xzf -'`],
     { stdin: tar.stdout, stdout: "pipe", stderr: "pipe" },
   );
   const code = await proc.exited;
   if (code !== 0) {
     const err = await new Response(proc.stderr).text();
-    throw new Error(`push ${localPath} → ${name}:${remotePath} (as cell) failed: ${err.slice(0, 300)}`);
+    throw new Error(`push ${localPath} → ${name}:${remotePath} failed: ${err.slice(0, 300)}`);
   }
 }
 
@@ -6109,15 +6125,15 @@ async function bakeRunBunInstall(name: string): Promise<void> {
   // the default cell — no per-cell npm install round-trip needed.
   const r = await wellExecCapture(name, `set -euo pipefail
 export PATH="$HOME/.bun/bin:/usr/local/bin:$PATH"
-cd /cell
+cd /root
 bun install --frozen-lockfile
 sudo npm install -g @mariozechner/pi-coding-agent@latest
 # Sanity-check: pi must be runnable from a non-interactive shell.
 which pi >/dev/null && pi --version
 # Pre-load common pi extension into the image (default-checked in the CLI).
 pi install -l npm:pi-web-access
-chmod +x /cell/bin/cells
-ln -sf /cell/bin/cells ~/.local/bin/cells`);
+chmod +x /root/bin/cells
+ln -sf /root/bin/cells ~/.local/bin/cells`);
   if (!r.ok) {
     throw new Error(`bun install failed: ${r.stderr.slice(0, 400) || r.stdout.slice(0, 400)}`);
   }
@@ -6141,12 +6157,12 @@ if [ -n "\${CELLS_PROXY_SECRET:-}" ]; then
   export OPENAI_CODEX_API_KEY="\$CELLS_PROXY_SECRET"
   unset ANTHROPIC_API_KEY
 fi
-# /cell/bin on PATH for the cells CLI. Bun was installed for the well
+# /root/bin on PATH for the cells CLI. Bun was installed for the well
 # user at bake time (~/.bun for well = /home/well/.bun); /home/well is
 # mode 0755 so cell can execute. Include both \$HOME/.bun/bin (well's
 # own login shells) and the absolute /home/well/.bun/bin (cell's login
-# shells, where \$HOME=/cell — \$HOME/.bun is empty).
-export PATH="\$HOME/.bun/bin:/home/well/.bun/bin:/cell/bin:\$PATH"
+# shells, where \$HOME=/root — \$HOME/.bun is empty).
+export PATH="\$HOME/.bun/bin:/home/well/.bun/bin:/root/bin:\$PATH"
 EOF
 sudo chmod 644 /etc/profile.d/cells-env.sh`);
   if (!r.ok) {

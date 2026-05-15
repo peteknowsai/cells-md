@@ -31,8 +31,8 @@ import { fileURLToPath } from "node:url";
  * Where memory lives depends on context:
  *   - Legacy well layout (HOME=/home/well, agent at $HOME/agent):
  *     $HOME/agent/state/memory.
- *   - New /cell layout (HOME=/cell, no $HOME/agent subdir): cwd-relative,
- *     which lands at /cell/state/memory since pi runs with cwd=/cell.
+ *   - New /root layout (HOME=/root, no $HOME/agent subdir): cwd-relative,
+ *     which lands at /root/state/memory since pi runs with cwd=/root.
  *   - Local dev / mother (cells repo): cwd/state/memory.
  *   - Override via env var CELL_MEMORY_DIR.
  *

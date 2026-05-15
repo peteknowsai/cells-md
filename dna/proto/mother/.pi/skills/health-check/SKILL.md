@@ -20,7 +20,7 @@ Single `well_exec` call, capture everything:
 ```bash
 echo "== HOSTNAME =="; hostname
 echo "== UPTIME =="; uptime
-echo "== DISK =="; df -h /cell | tail -1
+echo "== DISK =="; df -h /root | tail -1
 echo "== NETWORK =="; curl -sS --max-time 5 -o /dev/null -w "%{http_code}\n" https://api.anthropic.com/ 2>&1 || echo "egress fail"
 echo "== EXA =="; curl -sS --max-time 5 -o /dev/null -w "%{http_code}\n" https://api.exa.ai/ 2>&1 || echo "exa fail"
 ```
@@ -39,26 +39,26 @@ echo "== TMUX =="; tmux ls 2>&1
 echo "== PI PROC =="; pgrep -af pi | grep -v grep || echo "no pi running"
 echo "== BUN =="; ~/.bun/bin/bun --version 2>&1
 echo "== PI BIN =="; ls -la ~/.bun/bin/pi 2>&1
-echo "== CELL DIR =="; ls /cell/ 2>&1
-echo "== NODE_MODULES =="; test -d /cell/node_modules && echo ok || echo MISSING
-echo "== EXTENSIONS =="; ls /cell/.pi/extensions/ 2>&1
-echo "== PI-WEB-ACCESS =="; test -d /cell/.pi/npm/node_modules/pi-web-access && echo ok || echo MISSING
+echo "== CELL DIR =="; ls /root/ 2>&1
+echo "== NODE_MODULES =="; test -d /root/node_modules && echo ok || echo MISSING
+echo "== EXTENSIONS =="; ls /root/.pi/extensions/ 2>&1
+echo "== PI-WEB-ACCESS =="; test -d /root/.pi/npm/node_modules/pi-web-access && echo ok || echo MISSING
 echo "== WELL CLI =="; which well 2>&1
 echo "== ENV SHIM =="; ls -la /etc/profile.d/cells-env.sh 2>&1
 echo "== PROXY TOKEN =="; grep -E '^CELLS_PROXY_SECRET=' /etc/environment 2>/dev/null | awk -F= '{print substr($2,1,12)"...("length($2)" chars)"}' || echo "MISSING"
-echo "== MODEL URL =="; grep -o 'https://[a-z.]*\.anthropic\.com\|https://proxy\.cells\.md' /cell/node_modules/@mariozechner/pi-ai/dist/models.generated.js 2>/dev/null | sort -u | head -3
-echo "== SHELL SHIM (bashrc) =="; grep -c "tmux new-session" /cell/.bashrc 2>/dev/null
-echo "== SHELL SHIM (zshrc) =="; grep -c "tmux new-session" /cell/.zshrc 2>/dev/null
-echo "== MEMORY INDEX =="; head -3 /cell/state/memory/MEMORY.md 2>&1
+echo "== MODEL URL =="; grep -o 'https://[a-z.]*\.anthropic\.com\|https://proxy\.cells\.md' /root/node_modules/@mariozechner/pi-ai/dist/models.generated.js 2>/dev/null | sort -u | head -3
+echo "== SHELL SHIM (bashrc) =="; grep -c "tmux new-session" /root/.bashrc 2>/dev/null
+echo "== SHELL SHIM (zshrc) =="; grep -c "tmux new-session" /root/.zshrc 2>/dev/null
+echo "== MEMORY INDEX =="; head -3 /root/state/memory/MEMORY.md 2>&1
 ```
 
 Pass criteria:
-- `agent` tmux session is listed (start it if not — use `tmux new-session -d -s agent 'bash -lc "source /etc/profile.d/cells-env.sh && cd /cell && exec pi"'`)
+- `agent` tmux session is listed (start it if not — use `tmux new-session -d -s agent 'bash -lc "source /etc/profile.d/cells-env.sh && cd /root && exec pi"'`)
 - bun version prints, pi binary exists
-- `/cell/node_modules` exists; `identity`, `memory`, `self-tools` in `/cell/.pi/extensions/`; `pi-web-access` present at `/cell/.pi/npm/node_modules/pi-web-access`
+- `/root/node_modules` exists; `identity`, `memory`, `self-tools` in `/root/.pi/extensions/`; `pi-web-access` present at `/root/.pi/npm/node_modules/pi-web-access`
 - `well` CLI installed
 - `/etc/profile.d/cells-env.sh` exists; `/etc/environment` contains a `CELLS_PROXY_SECRET` of expected length (~64 chars). Cells route through `https://proxy.cells.md`; they don't hold real Anthropic credentials.
-- Model URL is `https://proxy.cells.md` (NOT `https://api.anthropic.com`) — if it's the latter, run `bash /cell/scripts/apply-pi-patches.sh` from the cell or re-bake `cell-base` from the mother.
+- Model URL is `https://proxy.cells.md` (NOT `https://api.anthropic.com`) — if it's the latter, run `bash /root/scripts/apply-pi-patches.sh` from the cell or re-bake `cell-base` from the mother.
 - Both shims have at least one match for `tmux new-session` (or no zsh installed — that's fine, just check bashrc)
 - `MEMORY.md` exists
 
@@ -85,7 +85,7 @@ Pass criteria:
 Verify the memory write actually hit disk + clean up with one `well_exec`:
 
 ```bash
-cat /cell/state/memory/reference_health_probe.md && rm /cell/state/memory/reference_health_probe.md && echo cleaned
+cat /root/state/memory/reference_health_probe.md && rm /root/state/memory/reference_health_probe.md && echo cleaned
 ```
 
 File should contain `ok` and `cleaned` should print.

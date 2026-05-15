@@ -28,8 +28,8 @@ import { fileURLToPath } from "node:url";
 /**
  * Where mentality lives:
  *   - Legacy well (HOME=/home/well, $HOME/agent exists): $HOME/agent/state/mentality.md
- *   - New /cell layout (HOME=/cell, no $HOME/agent): cwd/state/mentality.md
- *     (cwd=/cell when pi runs on a cell)
+ *   - New /root layout (HOME=/root, no $HOME/agent): cwd/state/mentality.md
+ *     (cwd=/root when pi runs on a cell)
  *   - Local dev / mother: cwd/state/mentality.md
  *   - Override via env var CELL_MENTALITY_FILE.
  */

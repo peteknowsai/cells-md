@@ -73,7 +73,7 @@ Pool RAM cost: ~0 (every asleep egg released its host VZ XPC process). vCPU cost
 cells talk <name>
   → host-bridge :7880          (ws://127.0.0.1:7880/agent?cell=<name>, Bearer CELLS_PROXY_SECRET)
       → resolveCellTarget: cells.json hatched_from → pool.json well_name → welld for IP
-      → ssh ubuntu@<ip> → sudo -u cell → HarnessAdapter spawns the harness
+      → ssh ubuntu@<ip> → sudo to root (HOME=/root) → HarnessAdapter spawns the harness
           piAdapter         → pi --mode rpc        (JSON-RPC over stdio, persistent)
           claudeCodeAdapter → claude --print       (stream-json over stdio, persistent)
           codexAdapter      → codex exec --json    (per-turn — one process per prompt,

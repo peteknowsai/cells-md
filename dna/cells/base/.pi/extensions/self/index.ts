@@ -14,7 +14,7 @@
 import { Type } from "@sinclair/typebox";
 import { spawn } from "node:child_process";
 
-const AGENT_DIR = "/cell";
+const AGENT_DIR = "/root";
 
 type ShellResult = { ok: boolean; exit: number; stdout: string; stderr: string };
 

@@ -39,8 +39,8 @@ Birth claims a generic egg from the pool and never installs anything — so the 
 - [ ] `well exec -s <egg> -- bash -c 'grep -c CELLS_PROXY_SECRET /etc/environment'` ≥ 1
 - [ ] `well exec -s <egg> -- bash -c 'test -f /etc/profile.d/cells-env.sh && echo OK'` prints `OK`
 - [ ] `well exec -s <egg> -- bash -c 'which pi && which claude'` shows both harnesses present
-- [ ] `well exec -s <egg> -- bash -c 'ls /cell/'` shows the DNA root (AGENTS.md, CLAUDE.md, SOUL.md, IDENTITY.md, .pi/, .claude/, site/, scripts/, package.json, bin/)
-- [ ] `well exec -s <egg> -- bash -c 'grep -l "__[A-Z_]*__" /cell/.pi/settings.json /cell/.claude/settings.json /cell/package.json'` — placeholders **intact** on a warm egg (birth substitutes them)
+- [ ] `well exec -s <egg> -- bash -c 'ls /root/'` shows the DNA root (AGENTS.md, CLAUDE.md, SOUL.md, IDENTITY.md, .pi/, .claude/, site/, scripts/, package.json, bin/)
+- [ ] `well exec -s <egg> -- bash -c 'grep -l "__[A-Z_]*__" /root/.pi/settings.json /root/.claude/settings.json /root/package.json'` — placeholders **intact** on a warm egg (birth substitutes them)
 - [ ] `well exec -s <egg> -- bash -c 'grep -c CELL_NAME /etc/environment'` returns `0` — no baked identity (the egg is generic)
 
 If any fail, the bake is incomplete — `cells pool drain -y && cells pool refill` and re-verify.
@@ -69,14 +69,14 @@ Run for each cell birthed in §3. The cell's well is the egg's `well_name` (reso
 
 - [ ] `cells list | grep <name>` shows status `alive`
 - [ ] `well checkpoint list -s <egg-well>` includes a `born-<name>` checkpoint (ritual step 7 / c5)
-- [ ] No surviving placeholders: `well exec -s <egg-well> -- bash -c 'grep -rl "__[A-Z_]*__" /cell/*.md /cell/.pi/settings.json /cell/.claude/settings.json /cell/package.json'` returns nothing
-- [ ] For a `pi` cell: `well exec -s <egg-well> -- bash -c 'cat /cell/.pi/settings.json'` — `defaultProvider`/`defaultModel`/`defaultThinkingLevel` agree with `modelChain[0]`
-- [ ] For a `claude-code` cell: `well exec -s <egg-well> -- bash -c 'cat /cell/.claude/settings.json'` — `model` + `effortLevel` substituted, `env.ANTHROPIC_BASE_URL` present
-- [ ] `well exec -s <egg-well> -- bash -c 'cat /cell/.pi/status.json | jq -r .harness'` matches the requested harness
+- [ ] No surviving placeholders: `well exec -s <egg-well> -- bash -c 'grep -rl "__[A-Z_]*__" /root/*.md /root/.pi/settings.json /root/.claude/settings.json /root/package.json'` returns nothing
+- [ ] For a `pi` cell: `well exec -s <egg-well> -- bash -c 'cat /root/.pi/settings.json'` — `defaultProvider`/`defaultModel`/`defaultThinkingLevel` agree with `modelChain[0]`
+- [ ] For a `claude-code` cell: `well exec -s <egg-well> -- bash -c 'cat /root/.claude/settings.json'` — `model` + `effortLevel` substituted, `env.ANTHROPIC_BASE_URL` present
+- [ ] `well exec -s <egg-well> -- bash -c 'cat /root/.pi/status.json | jq -r .harness'` matches the requested harness
 - [ ] Site service: `well exec -s <egg-well> -- bash -c 'curl -s -o /dev/null -w "%{http_code}" http://localhost:8080/'` returns `200`
 - [ ] **Talk smoke**: `bun cli/cells.ts talk <name> "reply with just the word ok"` shows `<name>> ok` (connects via the local bridge)
 - [ ] If `--channels=slack`: Slack channel `#cells-<name>` exists and the binding shows in `cells channel list`
-- [ ] If `--extensions=...`: `well exec -s <egg-well> -- bash -c 'jq .extensions /cell/.pi/settings.json'` lists exactly the requested extensions plus the always-on baseline
+- [ ] If `--extensions=...`: `well exec -s <egg-well> -- bash -c 'jq .extensions /root/.pi/settings.json'` lists exactly the requested extensions plus the always-on baseline
 
 ## 5. Lifecycle
 
