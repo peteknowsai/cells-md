@@ -2,8 +2,10 @@
 /**
  * cells-dashboard — local Bun.serve daemon that surfaces cells fleet state.
  *
- * Eventually accessed at dashboard.cells.md via cloudflared-tunnel
- * (com.pete.cells-tunnel infra). Today 127.0.0.1-bound, no auth.
+ * Public route (no auth): dashboard.cells.md via cloudflared-tunnel
+ * (com.pete.cells-tunnel infra). Also accessible from cells VMs over
+ * vmnet at http://192.168.64.1:7881 (bound on 0.0.0.0 so the narrator
+ * cell can reach /api/state + /api/talk without going through CF).
  *
  * Reads:
  *   ~/.cells/cells.json  (cell registry)
@@ -12,18 +14,32 @@
  *   host-bridge :7880 /healthz (open sessions)
  *
  * Serves:
- *   GET /            HTML dashboard (auto-refreshes via JS)
- *   GET /api/state   JSON snapshot
- *   GET /healthz     daemon liveness
+ *   GET  /                  HTML dashboard (auto-refreshes via JS)
+ *   GET  /api/state         JSON snapshot — public
+ *   GET  /healthz           daemon liveness — public
+ *   POST /api/talk/<name>   single-shot roll-call to a cell — bearer-gated.
+ *                           Body: {prompt, wake?}. Returns {answer, elapsed_ms}.
+ *                           Used by cells-narrator on each Refresh press.
  */
 
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { readFile } from "node:fs/promises";
+import { readFileSync } from "node:fs";
 
 const PORT = Number(process.env.CELLS_DASHBOARD_PORT ?? 7881);
 const WELL_API = process.env.WELL_API_URL ?? "http://127.0.0.1:7878";
 const HOST_BRIDGE_API = `http://127.0.0.1:${process.env.HOST_BRIDGE_PORT ?? 7880}`;
+const HOST_BRIDGE_WS = `ws://127.0.0.1:${process.env.HOST_BRIDGE_PORT ?? 7880}/agent`;
+const TALK_TIMEOUT_MS = Number(process.env.CELLS_DASHBOARD_TALK_TIMEOUT_MS ?? 20_000);
+
+function readSecretSync(name: string): string | null {
+  try {
+    const obj = JSON.parse(readFileSync(join(homedir(), ".cells", "secrets.json"), "utf8"));
+    return typeof obj[name] === "string" ? obj[name] : null;
+  } catch { return null; }
+}
+const CELLS_PROXY_SECRET = readSecretSync("CELLS_PROXY_SECRET");
 
 // ── Types ─────────────────────────────────────────────────────────────────
 
@@ -732,9 +748,137 @@ const HTML = `<!DOCTYPE html>
 
 // ── HTTP server ───────────────────────────────────────────────────────────
 
+// ── single-shot roll-call (used by cells-narrator) ────────────────────────
+//
+// POST /api/talk/<name>  Bearer ${CELLS_PROXY_SECRET}
+//   body: { prompt: string, wake?: boolean }
+//   200:  { answer: string, elapsed_ms: number }
+//   401:  { error: "auth" }
+//   404:  { error: "no cell" }
+//   504:  { error: "timeout" }
+//
+// Connects to host-bridge's WebSocket as a regular talk client, sends one
+// prompt, accumulates `text_delta` deltas, and returns them at `agent_end`.
+// host-bridge owns the cell's pi --mode rpc subprocess and reuses sessions
+// across calls — so the second roll-call to a given cell within the idle
+// window is fast.
+async function handleTalk(req: Request, name: string): Promise<Response> {
+  // Auth.
+  if (!CELLS_PROXY_SECRET) {
+    return Response.json({ error: "server missing CELLS_PROXY_SECRET" }, { status: 500 });
+  }
+  const auth = req.headers.get("authorization") ?? "";
+  if (auth !== `Bearer ${CELLS_PROXY_SECRET}`) {
+    return Response.json({ error: "auth" }, { status: 401 });
+  }
+
+  // Parse body.
+  let prompt = "";
+  let wake = false;
+  try {
+    const body = await req.json() as { prompt?: string; wake?: boolean };
+    prompt = (body.prompt ?? "").trim();
+    wake = !!body.wake;
+  } catch {
+    return Response.json({ error: "bad json" }, { status: 400 });
+  }
+  if (!prompt) return Response.json({ error: "empty prompt" }, { status: 400 });
+
+  // Verify the cell exists.
+  try {
+    const reg = JSON.parse(await readFile(join(homedir(), ".cells", "cells.json"), "utf8"));
+    const found = (reg?.cells ?? []).some((c: any) => c.name === name);
+    if (!found) return Response.json({ error: "no cell" }, { status: 404 });
+  } catch (e) {
+    return Response.json({ error: "registry unreadable" }, { status: 500 });
+  }
+
+  // (wake=true is a hint to host-bridge that the cell may be hibernated;
+  // host-bridge / well already handle wake-on-talk via auto-wake. We don't
+  // need to do anything special here — but we wait a hair longer on the
+  // first message if wake was requested.)
+
+  const t0 = Date.now();
+
+  // Connect to host-bridge's WS as a talk client. Same bearer auth that
+  // `cells talk` uses; same protocol.
+  return new Promise<Response>((res) => {
+    let answer = "";
+    let resolved = false;
+    const finish = (response: Response) => { if (!resolved) { resolved = true; res(response); } };
+
+    const wsUrl = `${HOST_BRIDGE_WS}?cell=${encodeURIComponent(name)}`;
+    let ws: WebSocket;
+    try {
+      // Bun.WebSocket and standard WebSocket: pass headers via protocols arg
+      // isn't supported, so we use `Bun.fetch`-style by setting Sec-WebSocket-Protocol.
+      // host-bridge accepts the Authorization header directly though — using a
+      // standard WebSocket with `headers` works in Bun's runtime.
+      ws = new WebSocket(wsUrl, {
+        // @ts-ignore — Bun-specific extension
+        headers: { authorization: `Bearer ${CELLS_PROXY_SECRET}` },
+      } as any);
+    } catch (e: any) {
+      return finish(Response.json({ error: `ws ctor failed: ${e?.message ?? e}` }, { status: 502 }));
+    }
+
+    const timeout = setTimeout(() => {
+      try { ws.close(); } catch {}
+      finish(Response.json({ error: "timeout", answer, elapsed_ms: Date.now() - t0 }, { status: 504 }));
+    }, TALK_TIMEOUT_MS + (wake ? 5_000 : 0));
+
+    ws.addEventListener("open", () => {
+      ws.send(JSON.stringify({ type: "prompt", message: prompt, streamingBehavior: "steer" }));
+    });
+
+    ws.addEventListener("message", (e: any) => {
+      let event: any;
+      try { event = JSON.parse(typeof e.data === "string" ? e.data : String(e.data)); }
+      catch { return; }
+
+      if (event.type === "message_update") {
+        const ev = event.assistantMessageEvent;
+        if (ev?.type === "text_delta" && typeof ev.delta === "string") {
+          answer += ev.delta;
+        }
+      } else if (event.type === "agent_end") {
+        // Order matters: finish() before ws.close() because Bun's WebSocket
+        // fires the close handler *synchronously* from ws.close(), which
+        // would race finish() and finish_late with "closed early".
+        clearTimeout(timeout);
+        finish(Response.json({ answer: answer.trim(), elapsed_ms: Date.now() - t0 }));
+        try { ws.close(); } catch {}
+      } else if (event.type === "agent_error" || event.type === "error") {
+        clearTimeout(timeout);
+        finish(Response.json({ error: event.message ?? "agent error", elapsed_ms: Date.now() - t0 }, { status: 502 }));
+        try { ws.close(); } catch {}
+      }
+    });
+
+    ws.addEventListener("error", (e: any) => {
+      clearTimeout(timeout);
+      finish(Response.json({ error: `ws error: ${String(e?.message ?? e).slice(0, 200)}`, elapsed_ms: Date.now() - t0 }, { status: 502 }));
+    });
+
+    ws.addEventListener("close", () => {
+      // If neither agent_end nor agent_error fired, close means the channel
+      // dropped mid-stream. Return what we accumulated.
+      clearTimeout(timeout);
+      if (!resolved) {
+        finish(answer
+          ? Response.json({ answer: answer.trim(), elapsed_ms: Date.now() - t0, note: "closed early" })
+          : Response.json({ error: "closed before answer", elapsed_ms: Date.now() - t0 }, { status: 502 }));
+      }
+    });
+  });
+}
+
 const server = Bun.serve({
   port: PORT,
-  hostname: "127.0.0.1",
+  // 0.0.0.0 so the narrator cell can hit us at http://192.168.64.1:7881
+  // (the vmnet gateway from inside any cell VM). cloudflared still works —
+  // its 127.0.0.1 origin path lands here too.
+  hostname: "0.0.0.0",
   async fetch(req) {
     const url = new URL(req.url);
     if (url.pathname === "/healthz") {
@@ -742,6 +886,12 @@ const server = Bun.serve({
     }
     if (url.pathname === "/api/state") {
       return Response.json(await buildState());
+    }
+    // POST /api/talk/<name>
+    if (req.method === "POST" && url.pathname.startsWith("/api/talk/")) {
+      const name = decodeURIComponent(url.pathname.slice("/api/talk/".length));
+      if (!name) return Response.json({ error: "missing cell name" }, { status: 400 });
+      return await handleTalk(req, name);
     }
     if (url.pathname === "/" || url.pathname === "/dashboard") {
       return new Response(HTML, {
@@ -752,7 +902,8 @@ const server = Bun.serve({
   },
 });
 
-console.log(`cells-dashboard listening on http://127.0.0.1:${server.port}/`);
-console.log(`  GET  /              dashboard HTML`);
-console.log(`  GET  /api/state     JSON snapshot`);
-console.log(`  GET  /healthz       daemon liveness`);
+console.log(`cells-dashboard listening on http://0.0.0.0:${server.port}/`);
+console.log(`  GET  /                 dashboard HTML`);
+console.log(`  GET  /api/state        JSON snapshot`);
+console.log(`  POST /api/talk/<name>  single-shot roll-call (bearer-gated)`);
+console.log(`  GET  /healthz          daemon liveness`);
