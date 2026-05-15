@@ -1,8 +1,8 @@
 # Cells — Current Status
 
-**Updated:** 2026-05-14 — birth rework (multi-harness, generic pool, eval loop)
-**Phase:** ✅ **Birth rework shipped + codex harness added.** All 4 birth-rework phases done; the codex harness landed as a follow-on. All three harnesses (pi + claude-code + codex) birth, talk, and tui green.
-**Health:** 🟢 welld + host-bridge healthy. Pool refills clean. Smoke eval green 3/3.
+**Updated:** 2026-05-15 — pool flipped to pure-asleep + wells admission control landed
+**Phase:** ✅ **Birth rework + codex harness shipped. Pool pure-asleep (`V1_HOT_POOL_TARGET = 0`) — every pool egg hibernated, ~0 RAM/CPU. Cold-consume verified end-to-end on a 94.7s birth.**
+**Health:** 🟢 welld 1.0.0 with admission control. host-bridge healthy. Pool RAM ~0, vCPU ~0 (was ~10 GB + 40 vCPU). Smoke eval green 3/3.
 
 ## TL;DR
 
@@ -21,7 +21,7 @@ V1 shipped the magical generic cell flow, then the wells/cells substrate boundar
 
 The pool is a **cells concept**, full stop. Wells doesn't know it exists.
 
-**Storage:** `~/.cells/pool.json` (renamed from `eggs.json` 2026-05-13). PoolMember entries with `state ∈ {warm, claimed, live, culling}` and `tier ∈ {2, 4}`. Lock file `~/.cells/.pool.lock`.
+**Storage:** `~/.cells/pool.json` (renamed from `eggs.json` 2026-05-13). PoolMember entries with `state ∈ {warm, claimed, live, culling}` and `tier ∈ {2, 4}`. Lock file `~/.cells/.pool.lock`. Tier 4 = "awake" (running VM); tier 2 = "asleep" (hibernated, 0 RAM/CPU). **V1 pool is now pure-asleep (`V1_HOT_POOL_TARGET = 0`, 2026-05-15)** — every warm egg is tier 2; the awake path stays in code for V2 latency-sensitive variants.
 
 **Bake flow** (`bakePoolMember`):
 1. `POST /v1/wells` (ubuntu-base, no `hibernate_ready` field — Pi3 deleted it)

@@ -1,0 +1,128 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Pool — pure-asleep</title>
+<link rel="stylesheet" href="../_assets/doc.css">
+</head>
+<body>
+<div class="page">
+
+  <div class="doc-header">
+    <div class="crumb">cells <span class="sep">/</span> proposals <span class="sep">/</span> pool — pure-asleep</div>
+    <div>2026-05-15</div>
+  </div>
+
+  <h1>Pool — pure-asleep</h1>
+  <p class="subtitle">Why the egg pool stops running running VMs. The capacity wall, the half-second wake, the one-line change.</p>
+
+  <div class="callout">
+    <div class="label">Status — 2026-05-15 · shipped on <code>feature/pool-asleep</code></div>
+    <p><strong>The V1 egg pool is now pure-asleep — every pool egg is a hibernated VM, ~0 RAM, ~0 CPU.</strong> <code>V1_HOT_POOL_TARGET</code> flipped from 10 → 0. End-to-end verified: a real <code>cells birth</code> consumed an asleep egg through the until-now-untested cold-claim path, woke it in 0.55 s, mother ran the full ritual on the now-running VM. Birth wall-time 94.7 s (cold-consume) — within the measured envelope for any birth. Pool RAM held by 12 warm eggs: was ~10 GB awake, now 0.</p>
+  </div>
+
+  <div class="toc">
+    <h4>Contents</h4>
+    <ol>
+      <li><a href="#wall">The wall — pool VMs eating the host</a></li>
+      <li><a href="#measurements">The half-second wake — measured, not guessed</a></li>
+      <li><a href="#change">The change — one constant, flipped</a></li>
+      <li><a href="#paired">Paired with wells admission control</a></li>
+      <li><a href="#refill">Refill on consume — already there</a></li>
+      <li><a href="#followups">Stale wording, V2 readiness, what's next</a></li>
+    </ol>
+  </div>
+
+  <h2 id="wall">The wall — pool VMs eating the host</h2>
+
+  <p>V1 shipped with a "pure-hot" pool: <code>V1_HOT_POOL_TARGET = V1_POOL_TARGET_DEPTH = 10</code>. Every pool egg was a running VM — 4 vCPU, ~1 GB RAM, always-on. Add four live cells and we were at 14 wells × 4 vCPU = 56 vCPU on a ~18-core box. The SSH-ready gate at boot timed out on every fresh well in a burst because the host had no cycles to give. The capacity ceiling for V1 was load-bearing pool members, not load-bearing live cells.</p>
+
+  <p>Pure-hot was a deliberate hedge, not a feature. A long comment at <code>cli/cells.ts:1969</code> spelled out the reason: the pre-Pi3 hibernate path was scary — "kills lume and clips every sibling VM." So V1 kept zero hibernated members and ate the RAM/CPU bill in exchange for never running the dangerous wake-from-hibernate path.</p>
+
+  <p>Three things changed that:</p>
+  <ul>
+    <li><strong>/seal landed</strong> (Pi3 / Piece-3). Sealed wells hibernate cleanly, deterministically. The bake path produces hibernate-legal eggs by construction.</li>
+    <li><strong>welld 1.0.0 admission control.</strong> <code>WELL_MAX_CONCURRENT_BOOTS</code> paces /start, /wake, and /create — a boot burst can't oversubscribe the host. <code>/healthz.boot_gate</code> is observable.</li>
+    <li><strong>resident_bytes on /dashboard.</strong> Per-well RSS, so we can see what hibernate actually frees.</li>
+  </ul>
+
+  <p>With that substrate in place, hot was paranoia. The question was whether the wake was as expensive as the comment claimed.</p>
+
+  <h2 id="measurements">The half-second wake — measured, not guessed</h2>
+
+  <p>One sealed pool egg (egg-0974c8), three back-to-back hibernate/wake cycles:</p>
+
+  <table>
+    <thead><tr><th></th><th>cycle 1</th><th>cycle 2</th><th>cycle 3</th></tr></thead>
+    <tbody>
+      <tr><td><code>/hibernate</code> API call</td><td>0.60 s</td><td>0.58 s</td><td>0.60 s</td></tr>
+      <tr><td>asleep <code>resident_bytes</code></td><td><code>null</code></td><td><code>null</code></td><td><code>null</code></td></tr>
+      <tr><td><code>/wake</code> API call</td><td>0.49 s</td><td>0.48 s</td><td>0.48 s</td></tr>
+      <tr><td>API return → SSH-accept</td><td>0.07 s</td><td>0.07 s</td><td>0.07 s</td></tr>
+      <tr><td>total wake → SSH-ready</td><td><strong>0.56 s</strong></td><td><strong>0.55 s</strong></td><td><strong>0.55 s</strong></td></tr>
+    </tbody>
+  </table>
+
+  <p>The <code>~2-3 s</code> wake comment that justified pure-hot was wildly conservative. Real wake is half a second, and <code>resident_bytes: null</code> while asleep confirmed wells fully releases the per-VM host process on <code>/hibernate</code> — the VZ XPC child is gone, not just paused. Asleep is genuinely free.</p>
+
+  <p>Against a birth ritual that runs tens of seconds (mother executing the HTML birthing-ritual end-to-end), a half-second wake is invisible. The case for keeping any hot buffer collapsed.</p>
+
+  <h2 id="change">The change — one constant, flipped</h2>
+
+  <p>The whole code change:</p>
+
+  <pre><code>// cli/cells.ts
+- const V1_HOT_POOL_TARGET = 10;
++ const V1_HOT_POOL_TARGET = 0;</code></pre>
+
+  <p>Plus a comment rewrite at the same site documenting the new model and the measurements behind it. That's it. The cold-tier code paths all existed already — they'd been dormant since V1 cut over to pure-hot.</p>
+
+  <ul>
+    <li><strong>Bake path</strong> (<code>bakePoolMember</code>): the tier decision <code>const tier = hotCount &lt; V1_HOT_POOL_TARGET ? 4 : 2</code> now always picks tier 2. New eggs are sealed, then hibernated. Verified: <code>egg-d60afc</code> baked at the new constant came up <code>status=stopped, resident_bytes=null</code> immediately.</li>
+    <li><strong>Claim path</strong> (<code>claimGenericEgg</code>): already prefers tier-4 then falls through to "any warm." With no tier-4 in the pool, every claim returns a tier-2.</li>
+    <li><strong>Consume path</strong> (<code>cmdBirth</code> at line 1647): <code>wakePoolMember(eggWell, claim.tier)</code> → <code>/wake</code> → SSH-ready in 0.55 s → mother runs the ritual on a now-running VM.</li>
+    <li><strong>Refill path</strong> (<code>refillPoolToDepth</code>): Pass 1 (cold→hot promote) is a no-op when hot target is 0; Pass 2 bakes new tier-2 eggs serially.</li>
+    <li><strong>Reconcile</strong> (<code>planReconcileEvictions</code>): the eviction rule only fires on <code>tier === 4 &amp;&amp; state === "warm" &amp;&amp; status !== "running"</code>. Tier-2 stopped is exactly what wells reports for a hibernated egg — kept, never evicted.</li>
+  </ul>
+
+  <p>Existing pool members were converted in-place: hibernate each of the five awake eggs, flip its tier in <code>pool.json</code> from 4 → 2. No destroy/rebake. Took about 4 seconds total.</p>
+
+  <h2 id="paired">Paired with wells admission control</h2>
+
+  <p>The capacity story is two halves — wells's <code>WELL_MAX_CONCURRENT_BOOTS</code> (the admission gate) and cells's <code>V1_HOT_POOL_TARGET = 0</code> (no pool RAM/CPU). One paces what the box <em>can</em> boot in a burst; the other stops the pool from consuming what the box <em>has</em>.</p>
+
+  <p>Before: 14 wells × 4 vCPU = 56 vCPU. boot_gate auto-collapsed to limit 1 under that pressure.</p>
+  <p>After: 4 live cells × 4 vCPU = 16 vCPU on 18 cores. boot_gate relaxed to limit 3 the moment the pool went asleep. Plenty of headroom for actual cells.</p>
+
+  <h2 id="refill">Refill on consume — already there</h2>
+
+  <p>Pool eggs are replaced two ways, both already in the code:</p>
+  <ul>
+    <li><strong>Reactive</strong> — every successful birth ends with a fire-and-forget <code>refillPoolToDepth()</code> call (<code>cli/cells.ts:1711</code>). Birth returns instantly; the replacement bake runs in the background. One consume, one bake.</li>
+    <li><strong>Scheduled</strong> — <code>cells schedule-pool-refill</code> installs a launchd plist that ticks <code>cells pool refill</code> every 10 minutes. Catches drift if reactive ever fails.</li>
+  </ul>
+
+  <p>Steady state: pool always trending back to depth 10. A burst of N births triggers N serial bakes (each ~30 s, paced by the admission gate). With asleep eggs costing only disk, depth is now a knob about <em>burst size</em>, not host RAM.</p>
+
+  <h2 id="followups">Stale wording, V2 readiness, what's next</h2>
+
+  <p>The <code>cli/cells.ts</code> comments around <code>refillPoolToDepth</code> still describe the two-pass algorithm in hot/cold terms. They're kept — they correctly document what the code does when <code>V1_HOT_POOL_TARGET</code> is non-zero, which is exactly what V2's variant pool will need (per-variant hot targets for latency-sensitive variants).</p>
+
+  <p>BOARD.md retains the historical "V1_HOT_POOL_TARGET raised from 3 → 10" entry as a changelog item; the active-state line is updated to reflect target=0.</p>
+
+  <div class="pointers">
+    <h4>Pointers</h4>
+    <ul class="bare">
+      <li><code>cli/cells.ts:1973</code> — <code>V1_HOT_POOL_TARGET = 0</code> + the new comment block</li>
+      <li><code>cli/cells.ts:2110</code> — tier decision in <code>bakePoolMember</code> (always picks tier 2 now)</li>
+      <li><code>cli/cells.ts:1647</code> — the cold-consume glue: <code>wakePoolMember(eggWell, claim.tier)</code></li>
+      <li><code>cli/cells.ts:1711</code> — reactive refill on birth success</li>
+      <li><code>cli/lib/reconcile.ts</code> — only evicts tier-4 stopped, not tier-2</li>
+      <li>wells: <code>WELL_MAX_CONCURRENT_BOOTS</code> + <code>/healthz.boot_gate</code> — the paired piece</li>
+    </ul>
+  </div>
+
+</div>
+</body>
+</html>

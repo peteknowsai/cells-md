@@ -33,7 +33,7 @@ Goal: `cells birth` → ~3s fixed animation → talk prompt → LLM-streamed res
 
 #### Acceptance
 
-**🎯 V1 STAMPED 2026-05-13 (worker, /goal-driven). 10/10 ✓.** Re-verified on the wells-stable-2026-05-13 substrate (W.73 SSH-ready resurrect + W.74 per-VM XPC kill + W.77 diagnostic, W.76 reverted). Cells code: `V1_HOT_POOL_TARGET = V1_POOL_TARGET_DEPTH = 10` (pure-hot v1) and `bakeV1Egg` passes `hibernate_ready: true` for all pool bakes so user-side `cells sleep` always works.
+**🎯 V1 STAMPED 2026-05-13 (worker, /goal-driven). 10/10 ✓.** Re-verified on the wells-stable-2026-05-13 substrate (W.73 SSH-ready resurrect + W.74 per-VM XPC kill + W.77 diagnostic, W.76 reverted). Cells code originally: `V1_HOT_POOL_TARGET = V1_POOL_TARGET_DEPTH = 10` (pure-hot v1). **Updated 2026-05-15: `V1_HOT_POOL_TARGET = 0` — pure-asleep pool, every egg hibernated (0 RAM, 0 CPU). Wake measured at 0.55s, invisible against birth ritual. See `docs/proposals/cells-pool-asleep.html`.** `bakeV1Egg` continues to seal every pool egg so user-side `cells sleep` always works.
 
 - [x] **V1.1** ✓ Animation + talk prompt drop-in clean. 4-stage Ink animation now dynamic-tempo (1.5-6s) ending on captureGreeting first-byte. (2026-05-12)
 - [x] **V1.2** ✓ Cell speaks first via LLM. host-bridge `cd /cell` fix held; harness-leak gone. (2026-05-12)
@@ -54,7 +54,7 @@ Goal: `cells birth` → ~3s fixed animation → talk prompt → LLM-streamed res
 
 ##### Notes for V2
 
-- Pure-hot pool depth = 10 will need to become a per-variant target + mix strategy when picker-driven variants enter the pool (harness × model × extensions cross-product).
+- Pool depth = 10 will need to become a per-variant target + mix strategy when picker-driven variants enter the pool (harness × model × extensions cross-product). V2 likely re-enables hot for latency-sensitive variants; the hot/promote code paths are kept dormant under `V1_HOT_POOL_TARGET = 0` rather than ripped out.
 - The "fire-and-forget refill needs a long-lived CLI" pattern surfaced by V1.10 is a v2 design point — likely needs a host-side refill daemon or wells-side topup so scripted bursts don't underrun.
 
 #### Critical blocker (RESOLVED 2026-05-11)

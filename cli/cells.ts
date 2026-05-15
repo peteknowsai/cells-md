@@ -1955,22 +1955,31 @@ async function collectCellLlmEnv(): Promise<Record<string, string>> {
   return env;
 }
 
-// Hot pool target: keep N members running-resident (never hibernated) for
-// instant burst-births. Costs ~1GB RAM per hot egg always-on; the trade-off
-// is zero wake latency for the first N births. Eggs beyond this count fall
-// back to cold (hibernated, pi-not-yet-started) — wake takes ~2-3s.
+// "Awake" pool target — how many pool members are kept running-resident
+// (RAM/CPU/process all live) instead of hibernated. With V1's pure-hot
+// pool we kept this at POOL_TARGET_DEPTH so every egg was awake; the
+// trade was zero wake latency at the cost of ~1GB RAM + 4 vCPU per egg.
 //
-// Schema note: pool.json still carries `tier: 2 | 4` for backwards compat.
-// tier 4 == hot, tier 2 == cold. New code uses hot/cold; we map at the edges.
-// V1 ships with a single variant (pi + deepseek-v4-flash), so the pool is
-// pure-hot: HOT_TARGET = POOL_TARGET_DEPTH (see below) keeps all pool members
-// running-resident. No cold pool members means the cold→hot promote path in
-// refillPoolToDepth Pass 1 never fires, which keeps wells' wake-from-
-// hibernate path (which kills lume and clips every sibling VM) out of the
-// auto-refill blast radius. When V2 adds variant pool members (harness × model ×
-// extensions), this single number becomes a per-variant target and a mix
-// strategy lives next to it.
-const V1_HOT_POOL_TARGET = 10;
+// Measured 2026-05-15 on the v1 substrate (welld 1.0.0, admission control
+// live, sealed+hibernated eggs): /hibernate completes in 0.60s, /wake
+// returns SSH-ready in 0.55s. The old "wake takes ~2-3s" comment that
+// motivated a hot buffer was wildly conservative — half-second wake is
+// invisible against a multi-second birth ritual. The "kills lume / clips
+// every sibling VM" hazard cited for the hot-only pool is also gone: it
+// described pre-Pi3 hibernate, before /seal made the state legal and
+// wells's boot-admission gate (WELL_MAX_CONCURRENT_BOOTS) paced wakes.
+//
+// So V1 now ships pure-asleep: target = 0. Every pool egg is hibernated;
+// claim falls through to a tier-2 egg, the birth flow /wake's it (~0.5s),
+// mother runs the ritual on the already-SSH-ready VM. The hot bake path
+// and cold→hot promote in refillPoolToDepth Pass 1 are kept dormant
+// (HOT_TARGET=0 makes both no-ops) so V2's variant pool can re-enable
+// hot for latency-sensitive variants without re-introducing the code.
+//
+// Schema note: pool.json still carries `tier: 2 | 4`. tier 4 = awake
+// (legacy "hot"), tier 2 = asleep (legacy "cold"). The names in surface
+// docs are awake/asleep; the schema is frozen.
+const V1_HOT_POOL_TARGET = 0;
 
 // Count hot (running) members currently in the pool. Used to decide whether
 // the next bake should produce a running egg or a hibernated one, and
