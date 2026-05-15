@@ -1184,6 +1184,28 @@ async function cmdWake(name: string) {
   await $`well start -s ${wellName}`;
 }
 
+// `cells pin <name>` — mark the cell never-auto-hibernate. Use for cells
+// whose surface must stay live (dashboard narrator, cron-like cells, any
+// cell doing silent in-guest work welld's activity probe can't see). The
+// underlying knob is welld's auto_sleep_seconds=null override.
+//
+// `cells unpin <name>` — restore welld-default sleep (60s idle → hibernate).
+// `cells wake` (above) is separate — it's a one-shot wake-up regardless of
+// pin state. Pinning prevents future sleeps; waking ends an existing sleep.
+async function cmdPin(name: string) {
+  await requireCell(name);
+  const wellName = await wellNameForCell(name);
+  await setAutoSleep(wellName, null);
+  console.log(`✓ ${name} pinned (auto-sleep disabled)`);
+}
+
+async function cmdUnpin(name: string) {
+  await requireCell(name);
+  const wellName = await wellNameForCell(name);
+  await setAutoSleep(wellName, DEFAULT_AUTO_SLEEP_SECONDS);
+  console.log(`✓ ${name} unpinned (auto-sleep ${DEFAULT_AUTO_SLEEP_SECONDS}s)`);
+}
+
 // First-line diagnostic for "auth feels broken." See docs/oauth-refresh.md.
 async function cmdDoctor() {
   const dim = "\x1b[2m";
@@ -1693,6 +1715,17 @@ async function cmdCreate(name: string | undefined, opts: CreateOpts): Promise<vo
   });
   await saveRegistry(reg);
 
+  // Undo the bake-time auto-sleep pin. The egg sat in the pool with
+  // auto_sleep_seconds=null (race protection during bake/provisioning);
+  // now that the cell is registered, restore welld-default sleep so the
+  // cell hibernates after idle. Pinned-awake is opt-in via `cells pin`.
+  // Best-effort — failure here just means the cell stays pinned (which
+  // is the safer side of the bake mitigation, and `cells unpin` is
+  // available as a backstop).
+  await resetAutoSleepToDefault(eggWell).catch((e) =>
+    console.warn(`! resetAutoSleepToDefault '${eggWell}' failed: ${e instanceof Error ? e.message : String(e)}`),
+  );
+
   // Kick host-bridge to spawn ssh+pi now so the first talk connects warm.
   void prewarmHostBridge(name);
 
@@ -1821,14 +1854,22 @@ async function setWellAuthPublic(wellName: string): Promise<void> {
   }
 }
 
-// Disable wells's auto-hibernate watchdog on a single well. v1 cells stay
-// alive_running until explicit `cells sleep` or `cells stop`. Without this,
-// the watchdog can race with welld's services API SSH writes: applyToGuest
-// uses `sudo tee` (which truncates) to write the unit file; if hibernation
-// kicks in mid-script, the file ends up 0 bytes and the unit looks `masked`.
-// Filed with wells team — they may also want to fix the lastTouched-on-wake
-// reset semantics.
-async function disableAutoSleep(wellName: string): Promise<void> {
+// PATCH a well's auto-sleep override.
+//   value=null   → never auto-hibernate ("pinned awake"). Used during bake
+//                  (race protection: the watchdog can sleep a well mid-
+//                  provision; applyToGuest's `sudo tee` truncates and
+//                  hibernate mid-script leaves zero-byte unit files) and
+//                  for cells the operator explicitly pins.
+//   value=number → per-well override of welld's default (60s). Used at
+//                  hatch time to undo the bake-time pin — the wake-
+//                  regression that motivated the original blanket null
+//                  (see wells/NEEDS_PETE.md, 2026-04-late) was fixed; the
+//                  mitigation was supposed to be dropped. Setting 60
+//                  matches welld's current default; if welld bumps the
+//                  default we accept this override pins us to the old
+//                  value (acceptable footgun, noted in JOURNAL).
+const DEFAULT_AUTO_SLEEP_SECONDS = 60;
+async function setAutoSleep(wellName: string, value: number | null): Promise<void> {
   const base = process.env.WELL_API_URL ?? "http://127.0.0.1:7878";
   const r = await fetch(`${base}/v1/wells/${encodeURIComponent(wellName)}`, {
     method: "PATCH",
@@ -1836,15 +1877,17 @@ async function disableAutoSleep(wellName: string): Promise<void> {
       Authorization: `Bearer ${await wellsToken()}`,
       "Content-Type": "application/json",
     },
-    body: JSON.stringify({ auto_sleep_seconds: null }),
+    body: JSON.stringify({ auto_sleep_seconds: value }),
   });
   if (!r.ok) {
-    // Non-fatal — birth still works, just with the race window open.
     console.warn(
-      `! disableAutoSleep '${wellName}' failed: ${r.status} ${(await r.text()).slice(0, 200)}`,
+      `! setAutoSleep '${wellName}' (${value === null ? "null/pin" : value + "s"}) failed: ${r.status} ${(await r.text()).slice(0, 200)}`,
     );
   }
 }
+// Back-compat aliases — call sites read more cleanly.
+async function disableAutoSleep(wellName: string): Promise<void> { return setAutoSleep(wellName, null); }
+async function resetAutoSleepToDefault(wellName: string): Promise<void> { return setAutoSleep(wellName, DEFAULT_AUTO_SLEEP_SECONDS); }
 
 // Take a freshly-provisioned well to a hibernate-legal disk-only steady
 // state. Post-Piece-3 (2026-05-13), wells's createWell no longer does the
@@ -6189,6 +6232,8 @@ switch (sub) {
   case "sleep":      await cmdSleep(needName(rest, "sleep")); break;
   case "stop":       await cmdStop(needName(rest, "stop")); break;
   case "wake":       await cmdWake(needName(rest, "wake")); break;
+  case "pin":        await cmdPin(needName(rest, "pin")); break;
+  case "unpin":      await cmdUnpin(needName(rest, "unpin")); break;
   case "checkpoint": await cmdCheckpoint(needName(rest, "checkpoint")); break;
   case "kill":
   case "destroy":    await cmdDestroy(rest); break;

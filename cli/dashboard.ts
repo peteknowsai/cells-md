@@ -784,21 +784,43 @@ async function handleTalk(req: Request, name: string): Promise<Response> {
   }
   if (!prompt) return Response.json({ error: "empty prompt" }, { status: 400 });
 
-  // Verify the cell exists.
+  // Verify the cell exists; resolve its well name for the wake hop below.
+  let cellWellName: string | null = null;
   try {
     const reg = JSON.parse(await readFile(join(homedir(), ".cells", "cells.json"), "utf8"));
-    const found = (reg?.cells ?? []).some((c: any) => c.name === name);
+    const found = (reg?.cells ?? []).find((c: any) => c.name === name);
     if (!found) return Response.json({ error: "no cell" }, { status: 404 });
+    // Hatched cells: well name == egg-<hatched_from>. Non-hatched (rare in V1):
+    // well name == cell name.
+    cellWellName = found.hatched_from ? `egg-${found.hatched_from}` : name;
   } catch (e) {
     return Response.json({ error: "registry unreadable" }, { status: 500 });
   }
 
-  // (wake=true is a hint to host-bridge that the cell may be hibernated;
-  // host-bridge / well already handle wake-on-talk via auto-wake. We don't
-  // need to do anything special here — but we wait a hair longer on the
-  // first message if wake was requested.)
-
   const t0 = Date.now();
+
+  // Wake-on-talk. host-bridge SSHs straight to the cell IP — it does NOT
+  // route through welld's vhost-dispatch, so welld's auto-wake-on-touch
+  // never fires. If the cell is hibernated, SSH would just time out with
+  // `Host is down`. Touch welld first to wake the well; idempotent
+  // (already-running wells return 200 in a few ms). Best-effort: failure
+  // here just means the SSH-then-fail behavior kicks in, which is the
+  // pre-fix status quo.
+  if (wake && cellWellName) {
+    try {
+      const tok = (await readFile(join(homedir(), ".wells", "token"), "utf8")).trim();
+      // welld's /wake is synchronous — it returns when the well is back to
+      // alive_running (sshd accepting connections). Cold-wake from a real
+      // hibernated state can take 5-15s; budget 20s so we don't drop the
+      // window. Best-effort failure: we still try SSH, which will surface
+      // the real error.
+      await fetch(`${WELL_API}/v1/wells/${encodeURIComponent(cellWellName)}/wake`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${tok}` },
+        signal: AbortSignal.timeout(20_000),
+      }).catch(() => {});
+    } catch { /* token unreadable — skip */ }
+  }
 
   // Connect to host-bridge's WS as a talk client. Same bearer auth that
   // `cells talk` uses; same protocol.
@@ -822,10 +844,13 @@ async function handleTalk(req: Request, name: string): Promise<Response> {
       return finish(Response.json({ error: `ws ctor failed: ${e?.message ?? e}` }, { status: 502 }));
     }
 
+    // Cold-waking a pi cell from hibernation is the slow path: /wake (1-3s)
+    // → SSH (up to 10s for a freshly-woken sshd) → pi handshake (1-2s) →
+    // model turn (2-10s). Budget generously when wake was requested.
     const timeout = setTimeout(() => {
       try { ws.close(); } catch {}
       finish(Response.json({ error: "timeout", answer, elapsed_ms: Date.now() - t0 }, { status: 504 }));
-    }, TALK_TIMEOUT_MS + (wake ? 5_000 : 0));
+    }, TALK_TIMEOUT_MS + (wake ? 25_000 : 0));
 
     ws.addEventListener("open", () => {
       ws.send(JSON.stringify({ type: "prompt", message: prompt, streamingBehavior: "steer" }));
