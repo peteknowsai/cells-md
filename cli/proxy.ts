@@ -55,6 +55,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { verifyClerkSession, gateHtml } from "./shared/clerk-gate";
 
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = dirname(SCRIPT_DIR);
@@ -79,6 +80,32 @@ function readSecret(): string {
   process.exit(1);
 }
 const SHARED_SECRET = readSecret();
+
+// Clerk keys for gating HTML responses on mother.cells.md / pulse.cells.md
+// (the bespoke pages the proxy serves directly — every other *.cells.md
+// goes through its own Cloudflare Worker). Both are optional: if either
+// is missing, the proxy serves pages exactly as it did pre-Clerk.
+function readClerkKeys(): { publishableKey?: string; jwtKey?: string } {
+  try {
+    if (!existsSync(SECRETS_PATH)) return {};
+    const s = JSON.parse(readFileSync(SECRETS_PATH, "utf-8"));
+    return {
+      publishableKey: typeof s.CLERK_PUBLISHABLE_KEY === "string" ? s.CLERK_PUBLISHABLE_KEY : undefined,
+      jwtKey:         typeof s.CLERK_JWT_KEY         === "string" ? s.CLERK_JWT_KEY         : undefined,
+    };
+  } catch { return {}; }
+}
+const CLERK_KEYS = readClerkKeys();
+
+// Wrap an HTML Response with the same Clerk gating the per-cell Workers
+// apply: verify the __session cookie, strip [data-private] for anon
+// visitors, inject the widget snippet. Non-HTML responses pass through.
+// Use on any proxy handler that serves a *.cells.md HTML page (mother,
+// pulse, future specials).
+async function gateProxyHtml(req: Request, response: Response): Promise<Response> {
+  const signedIn = await verifyClerkSession(req, CLERK_KEYS.jwtKey);
+  return gateHtml(response, { signedIn, publishableKey: CLERK_KEYS.publishableKey });
+}
 
 
 type AnthropicAuth = { type: "oauth"; refresh: string; access: string; expires: number };
@@ -653,13 +680,22 @@ async function handlePulseProxy(req: Request): Promise<Response> {
   const url = new URL(req.url);
 
   if (req.method === "GET" && (url.pathname === "/" || url.pathname === "")) {
-    return htmlPage(
-      "pulse · cells",
-      `<h1>pulse</h1>
-       <p class="sub">timekeeper · reads HEARTBEAT.md, fires scheduled wake-ups</p>
-       <p>This is the inbox endpoint pulse listens to. Cells POST schedule
-       changes here; pulse drains them on its next tick. See
-       <a href="https://proxy.cells.md/">the proxy</a> for the fleet dashboard.</p>`,
+    return gateProxyHtml(
+      req,
+      htmlPage(
+        "pulse · cells",
+        `<h1>pulse</h1>
+         <p class="sub">timekeeper · reads HEARTBEAT.md, fires scheduled wake-ups</p>
+         <p>This is the inbox endpoint pulse listens to. Cells POST schedule
+         changes here; pulse drains them on its next tick. See
+         <a href="https://proxy.cells.md/">the proxy</a> for the fleet dashboard.</p>
+         <div data-private style="margin-top:2em;padding:1em;border:1px dashed #444;border-radius:6px">
+           <p class="sub">🔓 You're signed in.</p>
+           <p>This block is wrapped in <code>&lt;div data-private&gt;</code> —
+              anonymous visitors never see it. The same gating as the
+              per-cell sites, served straight from the Mac proxy.</p>
+         </div>`,
+      ),
     );
   }
 
@@ -964,8 +1000,15 @@ async function handleMotherProxy(req: Request): Promise<Response> {
       <tbody>${rows}</tbody>
     </table>
     <p class="sub">Data: <code>~/.cells/birth-log/</code> on Pete's Mac.</p>
+    <div data-private style="margin-top:2em;padding:1em;border:1px dashed #444;border-radius:6px">
+      <p class="sub">🔓 You're signed in.</p>
+      <p>This block is wrapped in <code>&lt;div data-private&gt;</code> —
+         anonymous visitors never see it. Same gating as the per-cell
+         <code>&lt;name&gt;.cells.md</code> sites; just served straight
+         from the proxy instead of a per-cell Worker.</p>
+    </div>
   `;
-  return htmlPage("mother · cells", body);
+  return gateProxyHtml(req, htmlPage("mother · cells", body));
 }
 
 const MAC_EXEC_LOG = join(homedir(), ".cells/logs/mac_exec.log");

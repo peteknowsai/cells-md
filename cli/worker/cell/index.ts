@@ -29,7 +29,7 @@
  * No slack_post tool needed.
  */
 
-import { jwtVerify, importSPKI } from "jose";
+import { verifyClerkSession } from "../../shared/clerk-gate";
 
 export { CellAgent } from "./cell-agent";
 
@@ -54,45 +54,6 @@ export interface Env {
   // path and the site behaves exactly as it did pre-Clerk.
   CLERK_PUBLISHABLE_KEY?: string;
   CLERK_JWT_KEY?: string;
-}
-
-// Cached parsed public key — survives across requests within the same
-// isolate so we don't re-parse the PEM on every hit.
-let clerkKey: Promise<CryptoKey> | null = null;
-function getClerkKey(pem: string): Promise<CryptoKey> {
-  if (!clerkKey) clerkKey = importSPKI(pem, "RS256") as Promise<CryptoKey>;
-  return clerkKey;
-}
-
-// Read the Clerk session cookie. Clerk names it `__session` on the
-// satellite/apex domain; nothing fancy in parsing — just split on `;`.
-function getSessionCookie(req: Request): string | null {
-  const cookie = req.headers.get("cookie");
-  if (!cookie) return null;
-  for (const part of cookie.split(";")) {
-    const eq = part.indexOf("=");
-    if (eq < 0) continue;
-    const k = part.slice(0, eq).trim();
-    if (k === "__session") return part.slice(eq + 1).trim();
-  }
-  return null;
-}
-
-// Verify the Clerk session JWT. Returns true iff a `__session` cookie is
-// present, signed by CLERK_JWT_KEY, and within its expiry. Any failure
-// (no key, no cookie, bad sig, expired) falls back to anonymous — we
-// never throw on the auth check, the site must keep serving.
-async function verifyClerkSession(req: Request, env: Env): Promise<boolean> {
-  if (!env.CLERK_JWT_KEY) return false;
-  const token = getSessionCookie(req);
-  if (!token) return false;
-  try {
-    const key = await getClerkKey(env.CLERK_JWT_KEY);
-    await jwtVerify(token, key, { algorithms: ["RS256"] });
-    return true;
-  } catch {
-    return false;
-  }
 }
 
 function doStub(env: Env): DurableObjectStub {
@@ -202,7 +163,7 @@ export default {
     if (req.method !== "GET" && req.method !== "HEAD") {
       return new Response("method not allowed", { status: 405 });
     }
-    const signedIn = await verifyClerkSession(req, env);
+    const signedIn = await verifyClerkSession(req, env.CLERK_JWT_KEY);
     return doStub(env).fetch("https://do/site-serve", {
       headers: {
         "x-site-path": path,

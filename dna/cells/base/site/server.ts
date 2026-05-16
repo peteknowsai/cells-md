@@ -99,6 +99,47 @@ function defaultHome(): string {
     <p class="sub">🔓 You're signed in.</p>
     <p>This block is wrapped in <code>&lt;div data-private&gt;</code> —
        anonymous visitors never see it.</p>
+    <p><a href="/private">→ View private content</a></p>
+  </div>
+</body>
+</html>`;
+}
+
+// The private companion to defaultHome(). Anonymous visitors hitting
+// /private get a near-empty body — every element here is inside a
+// [data-private] wrapper, so the Worker's HTMLRewriter strips them all
+// at the edge. Signed-in visitors see the full page. This is the
+// "private site" the agent (and human) can extend by editing public/
+// or writing additional [data-private]-wrapped HTML.
+function defaultPrivate(): string {
+  return `<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<title>${NAME} · private</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E%F0%9F%94%92%3C/text%3E%3C/svg%3E">
+<style>
+  body { font: 16px/1.5 ui-sans-serif, system-ui, sans-serif;
+         max-width: 640px; margin: 4em auto; padding: 0 1em;
+         color: #ddd; background: #111; }
+  h1 { font-size: 2em; margin: 0 0 0.2em; }
+  .sub { color: #888; }
+  code { background: #8881; padding: 0.1em 0.4em; border-radius: 3px; }
+  a { color: inherit; }
+</style>
+<body>
+  <div data-private>
+    <h1>🔒 ${NAME} · private</h1>
+    <p class="sub">A signed-in-only view.</p>
+    <p>You're seeing this because you're signed in. To an anonymous
+       visitor this page renders as an empty body — every element here
+       sits inside <code>&lt;div data-private&gt;</code>, which the
+       edge Worker strips before the response leaves Cloudflare.</p>
+    <p>The agent edits this page (and the public home) over time —
+       wrap any block in <code>&lt;div data-private&gt;</code> and it's
+       gated. Treat it like an editorial convention, not a security
+       feature: the gating is the bit-stripping, not access control on
+       the agent itself.</p>
+    <p><a href="/">← back to public home</a></p>
   </div>
 </body>
 </html>`;
@@ -440,11 +481,21 @@ async function publishSite(): Promise<boolean> {
     const files: Record<string, { ct: string; data: string }> = {};
     if (existsSync(PUBLIC_DIR)) collectSiteFiles(PUBLIC_DIR, PUBLIC_DIR, files);
     // Nothing in public/ yet — seed /index.html from defaultHome() so
-    // <name>.cells.md is live from birth, not a 404.
+    // <name>.cells.md is live from birth, not a 404. Seed /private.html
+    // too so the public/private split has a working demo from day zero.
     if (!files["/index.html"]) {
       files["/index.html"] = {
         ct: "text/html; charset=utf-8",
         data: Buffer.from(defaultHome()).toString("base64"),
+      };
+    }
+    // Publish as /private/index.html so the directory-index fallback in
+    // the Worker's DO (serveSite: extensionless path → look up
+    // `<path>/index.html`) resolves `/private` cleanly.
+    if (!files["/private/index.html"]) {
+      files["/private/index.html"] = {
+        ct: "text/html; charset=utf-8",
+        data: Buffer.from(defaultPrivate()).toString("base64"),
       };
     }
     const res = await fetch(SITE_PUBLISH_URL, {
@@ -529,6 +580,11 @@ const server = Bun.serve({
 
     if (url.pathname === "/" || url.pathname === "") {
       return new Response(defaultHome(), {
+        headers: { "content-type": "text/html; charset=utf-8" },
+      });
+    }
+    if (url.pathname === "/private" || url.pathname === "/private.html") {
+      return new Response(defaultPrivate(), {
         headers: { "content-type": "text/html; charset=utf-8" },
       });
     }
