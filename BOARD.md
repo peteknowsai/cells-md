@@ -118,6 +118,21 @@ The OpenAI `codex` CLI as a harness, on Pete's ChatGPT subscription (not the met
 
 ---
 
+### Channels Phase 2 — Host-bridge collapse + live mirror
+
+Phase 1 shipped 2026-05-16: Slack/email/TUI on every harness (commit `f229d57`), one main thread per cell, TUI side branches stay local, `cells talk` is scratch. Spec: `docs/proposals/channels-on-every-harness-for-dummies.html` Part VII.
+
+Phase 1 has a one-way mirror gap: Slack message → TUI sees it on open (because both processes read the same session file), but TUI message → Slack doesn't post (the supervisor only relays its own harness's output, never reads back the shared file). Pete surfaced this 2026-05-16 testing codex-cell.
+
+- [ ] **CH2.1** Collapse `host-bridge` into a WS proxy. Today host-bridge SSHes into the well and spawns its own pi/claude/codex process for every `cells talk`. After collapse: host-bridge becomes a thin auth + WS proxy that forwards Mac-side talk traffic to `wss://<name>.cells.md/agent` (the cell's site server). Removes the parallel-harness problem at the root.
+- [ ] **CH2.2** TUI as WS client. `cells tui` likewise opens a WS to the cell's site server instead of SSH+harness. Render the supervisor's broadcast stream (the same events the cell Worker DO already consumes).
+- [ ] **CH2.3** Scratch routing for `cells talk`. New query param `?session=scratch` on `/agent`; supervisor opens a separate scratch harness/session per scratch attach so `cells talk` doesn't poke the main thread. (Today's `talk-<name>` path on pi + the `claude-talk-session` / `codex-talk-thread` caches retire.)
+- [ ] **CH2.4** Live mirror — falls out for free. With one process driving main, every attached client (DO, TUI) sees the same broadcast stream. Pete types in TUI → supervisor's harness processes it → broadcasts text_delta → DO posts to Slack. Symmetric.
+- [ ] **CH2.5** Verify welld query-string survival. Open question from the design doc: does `?session=scratch` survive cloudflared → cells proxy → welld → guest hop? Mac-local talk works regardless; only public-WS routing is at risk.
+- [ ] **CH2.6** Retire harness-spawning from host-bridge. Delete `CellSession.start`/`runTurn` SSH-and-spawn path; keep only the WS proxy. Cell session dir caches (`talk-<name>`, `*-talk-session/*-talk-thread`) become dead code.
+
+---
+
 ### Phase v2 — Personality + identity layers (next)
 
 When the user wants a specific kind of cell (Chief of Staff, Researcher, etc.), layer personality + per-instance identity on top of the generic cell. Streams in during turn 1, takes effect from turn 2.
