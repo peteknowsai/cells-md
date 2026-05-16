@@ -750,9 +750,16 @@ const server = Bun.serve({
         // Signal busy at prompt-receive time — uniform across harnesses. pi
         // also emits agent_start through passthrough (no-op duplicate); claude
         // and codex don't have an analogue, so this is their only busy signal.
+        // Also synthesize agent_start for non-pi so the cell Worker DO opens
+        // a turn (DO gates message_update accumulation on currentTurn, which
+        // is only created by agent_start). Without this, claude/codex text
+        // streams in but the DO drops every event silently.
         if (cmd?.type === "prompt") {
           cancelPendingSleep();
           void signalLifecycle("busy");
+          if (HARNESS !== "pi") {
+            broadcastToClients(JSON.stringify({ type: "agent_start" }));
+          }
         }
 
         // Buffer prompts that arrive before the harness is fully ready (pi
