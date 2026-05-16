@@ -235,7 +235,11 @@ async function buildState(): Promise<StatePayload> {
 
   // Cells
   const cells: CellSnapshot[] = (regFile.cells ?? []).map((c: any) => {
-    const wellName = c.hatched_from ? `egg-${c.hatched_from}` : c.name;
+    // Specials (mother, pulse) live in deterministic wells (cells-<name>) —
+    // no hatched_from. Pool cells use egg-<hex>. Cold-fork legacy = cell name.
+    const wellName = c.special
+      ? `cells-${c.name}`
+      : (c.hatched_from ? `egg-${c.hatched_from}` : c.name);
     const well = wellByName.get(wellName);
     const head = (c.modelChain?.[0] ?? "").toString();
     const [providerModel, thinking] = head.split(":");
@@ -822,9 +826,11 @@ async function handleTalk(req: Request, name: string): Promise<Response> {
     const reg = JSON.parse(await readFile(join(homedir(), ".cells", "cells.json"), "utf8"));
     const found = (reg?.cells ?? []).find((c: any) => c.name === name);
     if (!found) return Response.json({ error: "no cell" }, { status: 404 });
-    // Hatched cells: well name == egg-<hatched_from>. Non-hatched (rare in V1):
-    // well name == cell name.
-    cellWellName = found.hatched_from ? `egg-${found.hatched_from}` : name;
+    // Specials live in cells-<name>; hatched cells in egg-<hatched_from>;
+    // legacy non-hatched (rare in V1) use the cell name as the well name.
+    cellWellName = found.special
+      ? `cells-${name}`
+      : (found.hatched_from ? `egg-${found.hatched_from}` : name);
   } catch (e) {
     return Response.json({ error: "registry unreadable" }, { status: 500 });
   }
