@@ -851,9 +851,9 @@ async function bridgeInboxPulse(body: { cell: string; content: string }): Promis
   if (!body.cell || !/^[a-z0-9-]+$/.test(body.cell)) return new Response("bad cell", { status: 400 });
   if (typeof body.content !== "string") return new Response("bad content", { status: 400 });
   const script = `set -euo pipefail
-sudo mkdir -p /var/cells/pulse/inbox
+sudo mkdir -p /var/cells/pulse/pulse-inbox
 TS=$(date +%s%N)
-F=/var/cells/pulse/inbox/${body.cell}-$TS.md
+F=/var/cells/pulse/pulse-inbox/${body.cell}-$TS.md
 sudo tee "$F" >/dev/null <<'__INBOX_EOF__'
 ${body.content}
 __INBOX_EOF__
