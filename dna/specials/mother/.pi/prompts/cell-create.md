@@ -3,10 +3,14 @@ name: cell-create
 description: Provision a new cell from a claimed generic egg (delegates to the birth skill).
 ---
 
-You are birthing a new cell. You have been handed four things:
+You are birthing a new cell. **Get to work immediately — no environment recon,
+no tool probing, no "let me check what I have."** Your tools work as advertised.
+The egg is real and running. Trust the setup and execute the ritual.
 
-- **`$1`** — the **birthId** (correlation id). You MUST pass this verbatim to
-  `report_outcome` at the end so the cells CLI knows which birth completed.
+You have been handed four things:
+
+- **`$1`** — the **birthId** (correlation id). Pass it verbatim to
+  `report_outcome` at the end. The cells CLI is long-polling for this.
 - **`$2`** — the cell's name.
 - **`$3`** — the well name of a claimed generic egg from the pool, already
   running and waiting. This is your starting material; you do not create it.
@@ -14,20 +18,24 @@ You are birthing a new cell. You have been handed four things:
   (`harness`, `model`, `provider`, `thinking`, `extensions`, `packages`,
   `channels`, `chain`).
 
-Invoke the **`birth`** skill, handing it those four values. The birth skill
-points at `docs/birthing-ritual.html` — the authoritative, ordered procedure
-for turning a generic egg into a configured, live cell. Follow it top to
-bottom; substitute every value from the config blob exactly as the ritual
-directs. Do not improvise the order. Birth is not a race — it is done when the
-cell is *proven* working by the ritual's end-test, and not before.
+**Start by reading `docs/birthing-ritual.html`** (use the `read` tool with that
+relative path — your cwd is /root, which is where the file lives). Then run
+the ritual top to bottom. Don't read it twice; don't ask Pete questions;
+don't verify the egg exists by probing — just *use* it.
 
-**Tool note** (you live in a well now, not on the Mac):
-- Where the ritual says `well_exec` — use the `well_exec` tool. (Same name; it
-  reaches the egg via the Mac's bridge.)
-- Where the ritual says `bash …` (a Mac-side script like `bash scripts/cell-color.sh`),
-  use `mac_exec({script: "bash scripts/cell-color.sh <name>"})`.
-- The final step is `report_outcome({birthId: "$1", success: true|false, message: "…"})`.
-  birthId MUST be `$1` exactly.
+**Tool mapping** (the ritual uses three tools, all already wired):
+- `well_exec({wellName: "<egg>", script: "..."})` — runs on the egg. Note
+  the SSH user is `well`, NOT root, so prefix file writes to `/root/*`
+  with `sudo`. Example: `sudo sed -i 's/__NAME__/<name>/g' /root/AGENTS.md`.
+- `mac_exec({script: "bash scripts/cell-color.sh <name>"})` — wherever the
+  ritual says `bash …` (Mac-side script). cwd is the cells repo.
+- `report_outcome({birthId: "$1", success: true|false, message: "…"})` —
+  fire exactly once at the end. birthId MUST be `$1` verbatim.
+
+The ritual's "end-test" (step 8) tells you what to check before declaring
+success. If any *critical* check fails, call `report_outcome` with
+`success: false` and a one-line message naming the failing step. The CLI
+will sweep the egg on a failed outcome — that's fine, fresh egg next time.
 
 **After the birth ritual reports success** — and only on success — append one
 line to `state/memory/project_cells_activity.md` via `mac_exec`:
