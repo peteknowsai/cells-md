@@ -1,6 +1,7 @@
 {
   "extensions": [
     ".pi/extensions/use-max/index.ts",
+    ".pi/extensions/codex-proxy/index.ts",
     ".pi/extensions/memory/index.ts",
     ".pi/extensions/well-tools/index.ts",
     ".pi/extensions/mother-tools/index.ts",
@@ -12,17 +13,24 @@
     "npm:pi-web-access"
   ],
   "enabledModels": [
-    "claude-opus-4-7",
-    "claude-sonnet-4-6",
-    "claude-haiku-4-5",
-    "openai-codex/gpt-5.5:low",
-    "deepseek-v4-flash",
-    "deepseek-v4-pro"
+    "openai-codex/gpt-5.5",
+    "openai/gpt-5.5-pro",
+    "deepseek/deepseek-v4-pro",
+    "deepseek/deepseek-v4-flash",
+    "anthropic/claude-opus-4-7",
+    "anthropic/claude-sonnet-4-6",
+    "anthropic/claude-haiku-4-5"
   ],
   "defaultProvider": "openai-codex",
   "defaultModel": "gpt-5.5",
-  "modelChain": ["openai-codex/gpt-5.5:low", "anthropic/claude-opus-4-7:adaptive", "deepseek/deepseek-v4-pro:high"],
+  "defaultThinkingLevel": "high",
+  "modelChain": ["openai-codex/gpt-5.5:high", "anthropic/claude-opus-4-7:high", "deepseek/deepseek-v4-pro:high"],
   "warnings": {
     "anthropicExtraUsage": false
+  },
+  "retry": {
+    "provider": {
+      "timeoutMs": 60000
+    }
   }
 }
