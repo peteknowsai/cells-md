@@ -84,7 +84,11 @@ async function resolveCellTarget(cellName: string): Promise<CellTarget | null> {
     const reg = JSON.parse(readFileSync(join(homedir(), ".cells", "cells.json"), "utf8"));
     const cell = reg?.cells?.find((c: any) => c.name === cellName);
     if (typeof cell?.harness === "string") harness = cell.harness;
-    if (cell?.hatched_from) {
+    // Specials (mother, pulse) live in deterministic wells (cells-<name>) —
+    // no hatched_from, so resolve directly.
+    if (cell?.special) {
+      wellName = `cells-${cellName}`;
+    } else if (cell?.hatched_from) {
       // Prefer pool.json; fall back to legacy eggs.json (one-shot until cells.ts migrates).
       let poolRaw: any = null;
       try { poolRaw = JSON.parse(readFileSync(join(homedir(), ".cells", "pool.json"), "utf8")); }

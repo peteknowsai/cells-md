@@ -1113,11 +1113,17 @@ async function cmdList() {
 
 async function cmdTalk(name: string, args: string[]) {
   if (name === "mother") {
-    // Mother accepts any pi flags through (e.g. `-c`, `-r`, `--session=<id>`,
-    // even `-p "msg"` for a one-shot). We don't try to interpret them; pi
-    // handles its own argv.
-    await launchMotherTui(args);
-    return;
+    // Two routes during cutover:
+    //  - cells-mother registered → talk to her like any cell (host-bridge → SSH → pi).
+    //  - otherwise → legacy on-Mac pi TUI (mother accepts pi flags through).
+    // The registry check makes this self-healing: once cells-mother is
+    // baked, the special-case dissolves automatically.
+    const reg = await loadRegistry();
+    const motherIsCell = reg.cells.some(c => c.name === "mother" && c.special);
+    if (!motherIsCell) {
+      await launchMotherTui(args);
+      return;
+    }
   }
   await requireCell(name);
 
@@ -2588,7 +2594,23 @@ async function cmdBirthSpecial(rawArgs: string[]): Promise<void> {
   if (!wipe.ok) {
     throw new Error(`overlay wipe failed: ${wipe.stderr.slice(0, 300)}`);
   }
-  await pushLocalDirToWell(spec.wellName, join(SPECIALS_DIR, spec.name), "/root");
+  // Specials DNA contains symlinks (mother/docs → ../../../docs,
+  // mother/scripts → ../../../scripts) so deref at archive time with -h.
+  // Also pass --overwrite so files overlay base DNA cleanly.
+  const overlaySrc = join(SPECIALS_DIR, spec.name);
+  const overlayTar = Bun.spawn(["tar", "czhf", "-", "-C", overlaySrc, "."], {
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  const overlayExtract = Bun.spawn(
+    ["well", "exec", "-s", spec.wellName, "--", "bash", "-c",
+      "sudo bash -c 'cd /root && tar xzf - --overwrite'"],
+    { stdin: overlayTar.stdout, stdout: "pipe", stderr: "pipe" },
+  );
+  const overlayCode = await overlayExtract.exited;
+  if (overlayCode !== 0) {
+    const err = await new Response(overlayExtract.stderr).text();
+    throw new Error(`overlay push failed: ${err.slice(0, 400)}`);
+  }
   const chown = await wellExecCapture(spec.wellName, "sudo chown -R root:root /root");
   if (!chown.ok) {
     throw new Error(`chown after overlay failed: ${chown.stderr.slice(0, 300)}`);
@@ -5793,7 +5815,11 @@ async function cmdSync(name?: string) {
 async function wellNameForCell(name: string): Promise<string> {
   const reg = await loadRegistry();
   const cell = reg.cells.find((c) => c.name === name);
-  if (!cell || !cell.hatched_from) return name;
+  if (!cell) return name;
+  // Specials live in deterministic wells (cells-<name>) — they're hand-baked,
+  // not pool-born, so they have no hatched_from.
+  if (cell.special) return `cells-${name}`;
+  if (!cell.hatched_from) return name;
   const pool = await loadPool();
   const member = pool.members.find((e) => e.id === cell.hatched_from);
   return member?.well_name ?? name; // fall back if the pool entry is gone
