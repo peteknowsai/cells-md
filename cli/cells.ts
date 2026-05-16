@@ -2508,8 +2508,11 @@ const SPECIALS: Record<"mother" | "pulse", SpecialSpec> = {
     name: "mother",
     wellName: "cells-mother",
     harness: "pi",
-    provider: "anthropic",
-    model: "claude-opus-4-7",
+    // Codex by default (Pete's ChatGPT subscription — flat cost); opus
+    // sits below in modelChain for fallback. The DNA settings.json holds
+    // the actual chain; this provider/model are recorded in the registry.
+    provider: "openai-codex",
+    model: "gpt-5.5",
     thinking: "high",
   },
   pulse: {
@@ -2650,6 +2653,27 @@ ls .pi/extensions/`;
     }
     console.log(`  stripped well-tools + mother-status (settings + on-disk)`);
   }
+
+  // 7b. Substitute __NAME__ placeholders + tmux color chip. The pool
+  //     ritual does this in steps 1-2; specials skip the ritual so we
+  //     run an equivalent here. Without this, codex-proxy + similar
+  //     extensions read `__NAME__` from package.json and the proxy logs
+  //     calls as "unknown" or "__NAME__" instead of the cell name.
+  const cellColor = await wellExecCapture(spec.wellName,
+    `bash /root/scripts/cell-color.sh ${spec.name} 2>&1 || echo "#888888 #ffffff"`).catch(() => null);
+  const [bg = "#888888", fg = "#ffffff"] = (cellColor?.stdout ?? "").trim().split(/\s+/);
+  const subScript = `set -euo pipefail
+cd /root
+for f in AGENTS.md SOUL.md IDENTITY.md CELLS.md CONTACTS.md HEARTBEAT.md package.json .tmux.conf; do
+  [ -f "$f" ] && sudo sed -i "s/__NAME__/${spec.name}/g" "$f" || true
+done
+[ -f .tmux.conf ] && sudo sed -i "s|__CELL_BG__|${bg}|g; s|__CELL_FG__|${fg}|g" .tmux.conf || true
+echo "name-subst: $(grep -lc __NAME__ AGENTS.md SOUL.md package.json .tmux.conf 2>/dev/null | wc -l) files still with __NAME__ (want 0)"`;
+  const sub = await wellExecCapture(spec.wellName, subScript);
+  if (!sub.ok) {
+    throw new Error(`name substitution failed: ${sub.stderr.slice(0, 300)}`);
+  }
+  console.log(`  substituted __NAME__ → ${spec.name} + tmux color (${bg}/${fg})`);
 
   // 8. Pin always-on. (provisionCellInWell already called disableAutoSleep
   //    via the bake flow; this is the same operation — kept explicit so the
@@ -6773,6 +6797,7 @@ switch (sub) {
   case "pool":               await cmdPool(rest); break;
   case "egg":                await cmdPool(rest); break;  // deprecated alias
   case "bake":               await cmdBake(parseBakeArgs(rest)); break;
+  case "menubar":            await cmdMenubar(rest); break;
   default:
     console.log("usage:");
     console.log("  cells pi                    open the mother Pi TUI (alias: cells talk mother)");
