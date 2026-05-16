@@ -2621,24 +2621,31 @@ async function cmdBirthSpecial(rawArgs: string[]): Promise<void> {
     await installPulseTimer(spec.wellName);
   }
   if (spec.name === "mother") {
-    // Strip in-well-incompatible extensions from settings.json:
+    // Strip in-well-incompatible extensions:
     //  - well-tools shells out to the Mac's `well` CLI; doesn't exist in-well.
     //    Its tools (well_exec, report_outcome) are re-registered by mother-tools
     //    against the bridge, so the ritual works unchanged.
     //  - mother-status reads ~/.cells/cells.json directly; in-well that file
     //    doesn't exist (the registry comes via /bridge/registry/read instead).
+    // Pi auto-loads everything under .pi/extensions/, so removing them from
+    // settings.json isn't enough — delete the dirs too. Also pre-create
+    // /root/.pi/settings.json.lock dir owned by root (pi needs to mkdir
+    // siblings of settings.json; ubuntu user can't write to /root).
     const stripScript = `set -euo pipefail
 cd /root
+sudo rm -rf .pi/extensions/well-tools .pi/extensions/mother-status
 jq '.extensions |= map(select(. != ".pi/extensions/well-tools/index.ts" and . != ".pi/extensions/mother-status/index.ts"))' \
   .pi/settings.json > /tmp/s.json && sudo mv /tmp/s.json .pi/settings.json
-sudo chown root:root .pi/settings.json
+sudo chown -R root:root /root/.pi
 echo "extensions after strip:"
-jq -r '.extensions[]' .pi/settings.json`;
+jq -r '.extensions[]' .pi/settings.json
+echo "on disk:"
+ls .pi/extensions/`;
     const strip = await wellExecCapture(spec.wellName, stripScript);
     if (!strip.ok) {
       throw new Error(`mother settings.json strip failed: ${strip.stderr.slice(0, 300)}`);
     }
-    console.log(`  stripped well-tools + mother-status from in-well settings.json`);
+    console.log(`  stripped well-tools + mother-status (settings + on-disk)`);
   }
 
   // 8. Pin always-on. (provisionCellInWell already called disableAutoSleep
