@@ -76,10 +76,36 @@ fi
     echo "# ===claude settings ==="
     echo "sudo sed -i \"s/__MODEL__/$MODEL/g; s/__THINKING__/$THINKING/g; s/__NAME__/$NAME/g\" /root/.claude/settings.json"
     echo "jq . /root/.claude/settings.json > /dev/null"
+    # Birth-time session capture: warm up claude twice (main + talk) and
+    # cache the session ids. Runtime supervisor always --resumes; no
+    # capture branch in the hot path. ~5-8s per warm-up.
+    echo "# ===claude session capture ==="
+    echo "sudo mkdir -p /root/.cell"
+    echo "MAIN_ID=\$(sudo bash -lc 'export HOME=/root IS_SANDBOX=1; cd /root && claude --print ping --output-format stream-json --verbose --permission-mode bypassPermissions 2>/dev/null' | jq -rs 'map(select(.type==\"system\" and .subtype==\"init\")) | .[0].session_id // \"\"')"
+    echo "[ -n \"\$MAIN_ID\" ] || { echo 'claude-main-session capture FAILED'; exit 1; }"
+    echo "echo \"\$MAIN_ID\" | sudo tee /root/.cell/claude-main-session > /dev/null"
+    echo "echo \"  claude main: \$MAIN_ID\""
+    echo "TALK_ID=\$(sudo bash -lc 'export HOME=/root IS_SANDBOX=1; cd /root && claude --print ping --output-format stream-json --verbose --permission-mode bypassPermissions 2>/dev/null' | jq -rs 'map(select(.type==\"system\" and .subtype==\"init\")) | .[0].session_id // \"\"')"
+    echo "[ -n \"\$TALK_ID\" ] || { echo 'claude-talk-session capture FAILED'; exit 1; }"
+    echo "echo \"\$TALK_ID\" | sudo tee /root/.cell/claude-talk-session > /dev/null"
+    echo "echo \"  claude talk: \$TALK_ID\""
   elif [ "$HARNESS" = "codex" ]; then
     echo "# ===codex settings ==="
     echo "sudo sed -i \"s/__MODEL__/$MODEL/g; s/__THINKING__/$THINKING/g; s/__NAME__/$NAME/g\" /root/.codex/config.toml"
     echo "! grep -q __ /root/.codex/config.toml"
+    # Birth-time thread capture: warm up codex twice (main + talk). codex's
+    # thread id rides the first thread.started event. ~10-15s per warm-up
+    # (codex is slower than claude — its per-turn model warms cold each call).
+    echo "# ===codex thread capture ==="
+    echo "sudo mkdir -p /root/.cell"
+    echo "MAIN_TID=\$(sudo bash -lc 'export HOME=/root; cd /root && codex exec ping --json --skip-git-repo-check --dangerously-bypass-approvals-and-sandbox 2>/dev/null' < /dev/null | jq -rs 'map(select(.type==\"thread.started\")) | .[0].thread_id // \"\"')"
+    echo "[ -n \"\$MAIN_TID\" ] || { echo 'codex-main-thread capture FAILED'; exit 1; }"
+    echo "echo \"\$MAIN_TID\" | sudo tee /root/.cell/codex-main-thread > /dev/null"
+    echo "echo \"  codex main: \$MAIN_TID\""
+    echo "TALK_TID=\$(sudo bash -lc 'export HOME=/root; cd /root && codex exec ping --json --skip-git-repo-check --dangerously-bypass-approvals-and-sandbox 2>/dev/null' < /dev/null | jq -rs 'map(select(.type==\"thread.started\")) | .[0].thread_id // \"\"')"
+    echo "[ -n \"\$TALK_TID\" ] || { echo 'codex-talk-thread capture FAILED'; exit 1; }"
+    echo "echo \"\$TALK_TID\" | sudo tee /root/.cell/codex-talk-thread > /dev/null"
+    echo "echo \"  codex talk: \$TALK_TID\""
   fi
 
   echo "# ===status ==="

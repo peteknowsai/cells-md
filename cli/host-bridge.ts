@@ -23,6 +23,7 @@ import { spawn, type Subprocess } from "bun";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { existsSync, readFileSync, mkdirSync, openSync, writeSync } from "node:fs";
+import { getAdapter, type HarnessAdapter, type AdapterHost } from "../dna/cells/base/lib/harness-adapters";
 
 const PORT = Number(process.env.HOST_BRIDGE_PORT ?? 7880);
 const WELL_API = process.env.WELL_API_URL ?? "http://127.0.0.1:7878";
@@ -120,236 +121,6 @@ async function resolveCellTarget(cellName: string): Promise<CellTarget | null> {
   return { cellName, wellName, ip: info.ip, sshKeyPath, harness };
 }
 
-// --- harness adapters ----------------------------------------------------
-//
-// Three harnesses share one CellSession. Two are "persistent" — one
-// long-lived process driven over stdio: `pi` (the full agent, JSON-RPC)
-// and `claude-code` (the `claude` CLI, stream-json). The third, `codex`,
-// is "per-turn" — `codex exec` is one-shot, so each prompt spawns a fresh
-// process and multi-turn rides on `codex exec resume <thread_id>`. The
-// adapter owns what differs — the remote command(s), the ready handshake,
-// and the protocol translation. The talk CLI only ever speaks pi's event
-// vocabulary; every adapter translates into it, so the CLI renders all
-// three harnesses identically and never knows the difference.
-
-interface HarnessAdapter {
-  // "persistent": one long-lived ssh+harness process driven over stdin
-  // (pi, claude-code). "per-turn": a fresh ssh+harness process per prompt
-  // (codex — `codex exec` is one-shot, resumed by thread id).
-  mode: "persistent" | "per-turn";
-  // persistent only: the remote command, passed as ssh's single command
-  // arg (ssh runs it through the remote login shell — do NOT wrap it).
-  buildRemoteCmd?(sessionDir: string): string;
-  // persistent only: called once ~250ms after spawn. pi pins its session
-  // file with a switch_session RPC; claude-code sends nothing (it emits
-  // system/init unprompted). Uses sess.writeLine() / sess.awaitingSwitchAck.
-  startHandshake?(sess: CellSession, sessionDir: string): void;
-  // both: inspect one harness stdout line. `ready` flags the harness's
-  // "I'm up" signal (pi: the switch_session ack; claude-code: system/init;
-  // per-turn: unused). `lines` are the WS frames to broadcast — pi passes
-  // its line through unchanged; claude-code and codex emit zero or more
-  // translated pi-shaped events.
-  translateOutbound(sess: CellSession, line: string): { lines: string[]; ready: boolean };
-  // persistent only: translate one inbound client command (pi-RPC-shaped,
-  // e.g. {type:"prompt",message}) into the line to write on the process's
-  // stdin. Return null to drop the command.
-  translateInbound?(cmd: any): string | null;
-  // per-turn only: the remote command for one prompt. Resumes
-  // sess.codexThreadId when set; the prompt arrives as argv, stdin closed.
-  buildTurnCmd?(sess: CellSession, prompt: string): string;
-}
-
-const piAdapter: HarnessAdapter = {
-  mode: "persistent",
-  buildRemoteCmd(sessionDir) {
-    // SSH as ubuntu, sudo to root. bash -lc so /etc/profile.d/cells-env.sh
-    // fires (PATH + CELL_NAME + LLM keys). cd /root so use-max composes the
-    // cell's system prompt from ctx.cwd — without it the cell speaks as Pi.
-    // HOME=/root so pi finds /root/.pi/. As of the root-cell migration
-    // (2026-05-15), the agent runs as root inside the VM — the VM is the
-    // sandbox, so the cell vs root user distinction was theatrical and
-    // blocked claude/codex/pi auto-updaters (root-owned npm globals).
-    return (
-      `sudo mkdir -p ${sessionDir} 2>/dev/null; ` +
-      `exec sudo bash -lc 'export HOME=/root; cd /root && exec pi --mode rpc --session-dir ${sessionDir}'`
-    );
-  },
-  startHandshake(sess, sessionDir) {
-    // Pin pi to the cell's main session file; piReady flips when the
-    // matching response acks (see translateOutbound).
-    const switchId = `bridge-init-${Date.now()}`;
-    sess.awaitingSwitchAck = switchId;
-    setTimeout(() => {
-      const line = JSON.stringify({ id: switchId, type: "switch_session", sessionPath: `${sessionDir}/main.jsonl` });
-      if (!sess.writeLine(line)) sess.err(`could not send initial switch_session`);
-      else sess.log(`pinned pi to ${sessionDir}/main.jsonl (awaiting ack)`);
-    }, 250);
-  },
-  translateOutbound(sess, line) {
-    // pi's RPC stream is already the talk CLI's vocabulary — pass through.
-    // Sniff only for the switch_session ack that flips piReady.
-    let ready = false;
-    try {
-      const evt = JSON.parse(line);
-      if (
-        evt?.type === "response" &&
-        evt?.command === "switch_session" &&
-        sess.awaitingSwitchAck !== null &&
-        evt?.id === sess.awaitingSwitchAck
-      ) {
-        sess.log(`switch_session acked`);
-        sess.awaitingSwitchAck = null;
-        ready = true;
-      }
-    } catch { /* not JSON — still broadcast the line */ }
-    return { lines: [line], ready };
-  },
-  translateInbound(cmd) {
-    // The talk CLI already speaks pi RPC — forward verbatim.
-    return JSON.stringify(cmd);
-  },
-};
-
-const claudeCodeAdapter: HarnessAdapter = {
-  mode: "persistent",
-  buildRemoteCmd() {
-    // claude reads model + effortLevel from /root/.claude/settings.json and
-    // the proxy env (ANTHROPIC_BASE_URL/AUTH_TOKEN) from the env shim that
-    // bash -lc sources. --print with stream-json in/out makes it a
-    // persistent multi-turn process driven over stdin/stdout — the same
-    // shape host-bridge gives pi. bypassPermissions: a cell runs headless
-    // on its own VM, there's no human at the tty to answer prompts, and the
-    // VM is the isolation boundary. HOME=/root so claude finds /root/.claude/.
-    // IS_SANDBOX=1 satisfies claude's root+bypassPermissions guard ("cannot
-    // be used with root/sudo privileges for security reasons" — designed for
-    // shared boxes; the VM is exactly the case where it's safe).
-    return (
-      `exec sudo bash -lc 'export HOME=/root IS_SANDBOX=1; cd /root && exec claude --print ` +
-      `--input-format stream-json --output-format stream-json --verbose ` +
-      `--include-partial-messages --permission-mode bypassPermissions'`
-    );
-  },
-  startHandshake(sess) {
-    // claude --print has no pre-input "ready" signal — it does nothing until
-    // it receives a user message on stdin. Waiting for system/init before
-    // sending the prompt deadlocks (claude needs input to emit anything).
-    // Mark the session ready immediately so the queued prompt flushes.
-    sess.onPiSetupAcked();
-  },
-  translateOutbound(_sess, line) {
-    let evt: any;
-    try { evt = JSON.parse(line); }
-    catch { return { lines: [], ready: false }; }
-
-    // system/init → claude is up and listening on stdin.
-    if (evt?.type === "system" && evt?.subtype === "init") {
-      return { lines: [], ready: true };
-    }
-    // assistant message → translate each content block into the pi-shaped
-    // events the talk CLI renders.
-    if (evt?.type === "assistant" && Array.isArray(evt?.message?.content)) {
-      const out: string[] = [];
-      for (const block of evt.message.content) {
-        if (block?.type === "text" && typeof block.text === "string") {
-          out.push(JSON.stringify({ type: "message_update", assistantMessageEvent: { type: "text_delta", delta: block.text } }));
-        } else if (block?.type === "thinking") {
-          out.push(JSON.stringify({ type: "message_update", assistantMessageEvent: { type: "thinking_start" } }));
-          out.push(JSON.stringify({ type: "message_update", assistantMessageEvent: { type: "thinking_end" } }));
-        }
-      }
-      return { lines: out, ready: false };
-    }
-    // result → the turn finished (or errored).
-    if (evt?.type === "result") {
-      if (evt?.is_error || evt?.subtype !== "success") {
-        const error = String(evt?.result ?? evt?.subtype ?? "claude error").slice(0, 300);
-        return { lines: [JSON.stringify({ type: "response", success: false, error })], ready: false };
-      }
-      return { lines: [JSON.stringify({ type: "agent_end" })], ready: false };
-    }
-    // user-message replays, rate-limit events, partial-message envelopes —
-    // nothing the talk CLI needs to render.
-    return { lines: [], ready: false };
-  },
-  translateInbound(cmd) {
-    // The talk CLI sends {type:"prompt",message,streamingBehavior}; claude's
-    // stream-json input wants a user-message envelope. abort/ping and any
-    // other pi-only commands have no claude equivalent — drop them.
-    if (cmd?.type === "prompt" && typeof cmd.message === "string") {
-      return JSON.stringify({ type: "user", message: { role: "user", content: cmd.message } });
-    }
-    return null;
-  },
-};
-
-const codexAdapter: HarnessAdapter = {
-  mode: "per-turn",
-  // codex has no persistent process — `codex exec` is one-shot. Each prompt
-  // spawns a fresh ssh+codex (CellSession.runTurn); multi-turn rides on
-  // `codex exec resume <thread_id>`, the id captured from thread.started.
-  // bash -lc sources /etc/profile.d/cells-env.sh (OPENAI_CODEX_API_KEY +
-  // PATH); HOME=/root so CODEX_HOME → /root/.codex/.
-  // --json: JSONL events on stdout. --skip-git-repo-check: /root isn't a
-  // git repo. --dangerously-bypass-approvals-and-sandbox: the cell's VM is
-  // the isolation boundary (same rationale as claude-code's bypassPermissions).
-  // The prompt rides as bash's $1 (a positional arg — one layer of shell
-  // quoting, no nested-quote hell); stdin is closed so codex doesn't block
-  // reading it.
-  buildTurnCmd(sess, prompt) {
-    const promptArg = `'${prompt.replace(/'/g, "'\\''")}'`;
-    const flags = "--json --skip-git-repo-check --dangerously-bypass-approvals-and-sandbox";
-    const run = sess.codexThreadId
-      ? `exec codex exec resume ${sess.codexThreadId} ${flags} "$1" </dev/null`
-      : `exec codex exec ${flags} "$1" </dev/null`;
-    return `exec sudo bash -lc 'export HOME=/root; cd /root && ${run}' codex-turn ${promptArg}`;
-  },
-  translateOutbound(sess, line) {
-    let evt: any;
-    try { evt = JSON.parse(line); }
-    catch { return { lines: [], ready: false }; }
-
-    // thread.started → capture the thread id; the next turn resumes it.
-    if (evt?.type === "thread.started" && typeof evt?.thread_id === "string") {
-      sess.codexThreadId = evt.thread_id;
-      return { lines: [], ready: false };
-    }
-    // item.completed / agent_message → the response. codex emits the whole
-    // message at once (not token-streamed) — one text_delta with all of it.
-    if (
-      evt?.type === "item.completed" &&
-      evt?.item?.type === "agent_message" &&
-      typeof evt?.item?.text === "string"
-    ) {
-      return {
-        lines: [JSON.stringify({ type: "message_update", assistantMessageEvent: { type: "text_delta", delta: evt.item.text } })],
-        ready: false,
-      };
-    }
-    // turn.completed → the turn finished cleanly.
-    if (evt?.type === "turn.completed") {
-      return { lines: [JSON.stringify({ type: "agent_end" })], ready: false };
-    }
-    // turn.failed → the turn errored out (terminal).
-    if (evt?.type === "turn.failed") {
-      const error = String(evt?.error?.message ?? "codex error").slice(0, 300);
-      return { lines: [JSON.stringify({ type: "response", success: false, error })], ready: false };
-    }
-    // error events are transient — codex retries internally, and a real
-    // failure still arrives as turn.failed. Log, don't surface. turn.started,
-    // reasoning/command items, and usage carry nothing the talk CLI renders.
-    if (evt?.type === "error") {
-      sess.log(`codex transient: ${String(evt?.message ?? "").slice(0, 160)}`);
-    }
-    return { lines: [], ready: false };
-  },
-};
-
-function getAdapter(harness: string): HarnessAdapter {
-  if (harness === "claude-code") return claudeCodeAdapter;
-  if (harness === "codex") return codexAdapter;
-  return piAdapter;
-}
-
 // Read a subprocess stream line-by-line, invoking `onLine` per complete
 // line. Used by CellSession.runTurn for the transient per-turn process; the
 // persistent path has its own buffered pump (pumpStdout / pumpStderr).
@@ -440,8 +211,12 @@ class CellSession {
       this.broadcastJSON({ type: "bridge_ready" });
       return;
     }
-    // cellName already includes the "cell-" prefix; don't double it.
-    const sessionDir = `/root/.pi/agent/sessions/${this.cellName}`;
+    // pi talk uses a clearly-named scratch dir — separate from the main
+    // session (root-<name>) that site/server.ts drives for Slack/email.
+    // claude-code / codex ignore sessionDir (their resume id comes from a
+    // birth-time cache file the adapter reads at the cell — see their
+    // buildRemoteCmd / buildTurnCmd in harness-adapters.ts).
+    const sessionDir = `/root/.pi/agent/sessions/talk-${this.cellName}`;
     // The remote command is harness-specific (pi --mode rpc vs the claude
     // CLI in stream-json mode) — the adapter builds it. We SSH as `ubuntu`
     // (lume's default; it has the substrate ssh key) and the adapter's

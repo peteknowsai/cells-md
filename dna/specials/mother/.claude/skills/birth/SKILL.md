@@ -42,8 +42,11 @@ well exec -s "<EGG_WELL>" -- bash -lc "cd /root && source /etc/profile.d/cells-e
 # claude-code cells
 well exec -s "<EGG_WELL>" -- bash -lc "cd /root && source /etc/profile.d/cells-env.sh && timeout 60 claude --print 'say ok' && echo CLAUDE-OK"
 
-# codex cells
-well exec -s "<EGG_WELL>" -- bash -lc "cd /root && source /etc/profile.d/cells-env.sh && timeout 120 codex exec --skip-git-repo-check --dangerously-bypass-approvals-and-sandbox 'say ok' < /dev/null && echo CODEX-OK"
+# codex cells — sudo + HOME=/root so codex reads /root/.codex/config.toml
+# (the proxy-routing config that swaps OPENAI_CODEX_API_KEY for the real
+# ChatGPT token). Without sudo, codex runs as `well` user with HOME=/home/well,
+# misses the cells-routed config, and hits OpenAI's API direct → 401.
+well exec -s "<EGG_WELL>" -- bash -lc "sudo bash -lc 'export HOME=/root; cd /root && source /etc/profile.d/cells-env.sh && timeout 120 codex exec --skip-git-repo-check --dangerously-bypass-approvals-and-sandbox \"say ok\" < /dev/null' && echo CODEX-OK"
 ```
 
 Output must end with `PI-OK` / `CLAUDE-OK` / `CODEX-OK`. If not, the

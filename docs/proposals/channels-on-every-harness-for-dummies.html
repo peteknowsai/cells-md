@@ -1,0 +1,1012 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Channels on Every Harness For Dummies</title>
+<style>
+  :root {
+    --yellow: #ffdd00;
+    --yellow-deep: #f5c400;
+    --ink: #1a1a1a;
+    --paper: #fffdf3;
+    --rule: #1a1a1a;
+    --tip: #2f8f3e;
+    --remember: #2b6cb0;
+    --warning: #d8401a;
+    --tech: #6b46c1;
+    --sidebar: #fff6cc;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
+  body {
+    background: var(--paper);
+    color: var(--ink);
+    font-family: Georgia, "Times New Roman", serif;
+    font-size: 18px;
+    line-height: 1.62;
+    -webkit-text-size-adjust: 100%;
+  }
+  .wrap { max-width: 760px; margin: 0 auto; padding: 0 22px 90px; }
+
+  /* Cover */
+  .cover { background: var(--yellow); border-bottom: 8px solid var(--ink); }
+  .cover-inner { max-width: 760px; margin: 0 auto; padding: 30px 22px 26px; display: flex; gap: 20px; align-items: center; }
+  .cover-text { flex: 1; }
+  .kicker { font-family: "Arial Black", Arial, sans-serif; text-transform: uppercase; letter-spacing: 1.5px; font-size: 12px; font-weight: 900; background: var(--ink); color: var(--yellow); display: inline-block; padding: 4px 9px; margin-bottom: 10px; }
+  .cover h1 { font-family: "Arial Black", Arial, sans-serif; font-weight: 900; line-height: 1.04; font-size: 40px; margin: 0 0 6px; }
+  .cover .sub { font-family: Arial, sans-serif; font-style: italic; font-size: 17px; margin: 0; font-weight: 700; }
+  .cover .tag { font-family: "Arial Black", Arial, sans-serif; font-size: 12px; letter-spacing: 1px; text-transform: uppercase; margin-top: 12px; }
+  .dummies-man { width: 96px; flex: 0 0 96px; }
+  @media (max-width: 540px) {
+    .cover h1 { font-size: 30px; }
+    .dummies-man { width: 70px; flex-basis: 70px; }
+    body { font-size: 17px; }
+  }
+
+  .meta { background: var(--ink); color: var(--yellow); font-family: Arial, sans-serif; font-size: 12.5px; letter-spacing: .3px; }
+  .meta-inner { max-width: 760px; margin: 0 auto; padding: 8px 22px; }
+  .meta code { background: transparent; color: var(--yellow); padding: 0; }
+
+  h2 { font-family: "Arial Black", Arial, sans-serif; font-weight: 900; font-size: 25px; line-height: 1.15; margin: 46px 0 4px; padding-top: 16px; border-top: 4px solid var(--ink); }
+  h2 .pt { display: block; font-size: 12px; letter-spacing: 2px; color: #8a7300; }
+  h3 { font-family: "Arial Black", Arial, sans-serif; font-weight: 900; font-size: 19px; margin: 34px 0 6px; }
+  h4 { font-family: Arial, sans-serif; font-weight: 800; font-size: 16px; margin: 22px 0 4px; }
+  p { margin: 12px 0; }
+  a { color: #1a4f8a; }
+
+  .itc { background: var(--yellow); border: 3px solid var(--ink); padding: 12px 16px; margin: 14px 0 22px; }
+  .itc .lbl { font-family: "Arial Black", Arial, sans-serif; font-size: 12px; text-transform: uppercase; letter-spacing: 1.5px; margin-bottom: 4px; }
+  .itc ul { margin: 4px 0 0; padding-left: 22px; }
+  .itc li { font-family: Arial, sans-serif; font-size: 14.5px; line-height: 1.45; margin: 3px 0; }
+
+  .icon-note { position: relative; border-left: 5px solid var(--ink); background: #fff; margin: 18px 0; padding: 12px 14px 12px 60px; min-height: 56px; }
+  .icon-note .badge { position: absolute; left: 10px; top: 12px; width: 38px; height: 38px; border-radius: 50%; border: 3px solid var(--ink); display: flex; align-items: center; justify-content: center; font-size: 20px; background: #fff; }
+  .icon-note .nlbl { font-family: "Arial Black", Arial, sans-serif; font-size: 11px; letter-spacing: 1.3px; text-transform: uppercase; display: block; margin-bottom: 2px; }
+  .icon-note p { margin: 2px 0; font-size: 16.5px; }
+  .icon-note.tip { border-left-color: var(--tip); }
+  .icon-note.tip .badge { border-color: var(--tip); background: #e9f6ea; }
+  .icon-note.tip .nlbl { color: var(--tip); }
+  .icon-note.remember { border-left-color: var(--remember); }
+  .icon-note.remember .badge { border-color: var(--remember); background: #e7f0f9; }
+  .icon-note.remember .nlbl { color: var(--remember); }
+  .icon-note.warning { border-left-color: var(--warning); }
+  .icon-note.warning .badge { border-color: var(--warning); background: #fdeae5; }
+  .icon-note.warning .nlbl { color: var(--warning); }
+  .icon-note.tech { border-left-color: var(--tech); }
+  .icon-note.tech .badge { border-color: var(--tech); background: #efe9f9; }
+  .icon-note.tech .nlbl { color: var(--tech); }
+
+  .sidebar { background: var(--sidebar); border: 2px dashed var(--ink); padding: 14px 18px; margin: 24px 0; }
+  .sidebar .slbl { font-family: "Arial Black", Arial, sans-serif; font-size: 12px; text-transform: uppercase; letter-spacing: 1px; margin-bottom: 4px; }
+  .sidebar p { font-size: 15.5px; line-height: 1.5; }
+
+  .cheat { border: 3px dashed var(--ink); background: #fff; padding: 18px 20px; margin: 26px 0 8px; }
+  .cheat h2 { border: 0; margin: 0 0 6px; padding: 0; font-size: 22px; }
+  .cheat .csub { font-family: Arial, sans-serif; font-style: italic; font-size: 14px; margin: 0 0 12px; }
+  .cheat dl { margin: 0; }
+  .cheat dt { font-family: "Arial Black", Arial, sans-serif; font-size: 13.5px; margin-top: 12px; text-transform: uppercase; letter-spacing: .5px; }
+  .cheat dd { margin: 2px 0 0; font-size: 16px; }
+
+  ol.steps { counter-reset: step; list-style: none; padding-left: 0; }
+  ol.steps > li { position: relative; padding-left: 46px; margin: 16px 0; }
+  ol.steps > li::before { counter-increment: step; content: counter(step); position: absolute; left: 0; top: -2px; width: 32px; height: 32px; border-radius: 50%; background: var(--yellow); border: 3px solid var(--ink); font-family: "Arial Black", Arial, sans-serif; font-size: 16px; display: flex; align-items: center; justify-content: center; }
+  ol.steps > li b { font-family: Arial, sans-serif; }
+
+  code { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: 0.85em; background: #f0ecd8; padding: 1px 5px; border-radius: 3px; }
+  pre { background: var(--ink); color: #f4f4f4; padding: 14px 16px; overflow-x: auto; font-family: "SF Mono", Menlo, Consolas, monospace; font-size: 13px; line-height: 1.5; }
+  table { border-collapse: collapse; width: 100%; margin: 18px 0; font-size: 15px; font-family: Arial, sans-serif; }
+  th, td { border: 2px solid var(--ink); padding: 7px 9px; text-align: left; vertical-align: top; }
+  th { background: var(--yellow); font-weight: 900; font-family: "Arial Black", Arial, sans-serif; font-size: 12.5px; text-transform: uppercase; letter-spacing: .5px; }
+  ul.plain { padding-left: 22px; }
+  ul.plain li { margin: 6px 0; }
+  .toc { background: #fff; border: 3px solid var(--ink); padding: 14px 20px; margin: 22px 0; font-family: Arial, sans-serif; font-size: 14.5px; }
+  .toc .lbl { font-family: "Arial Black", Arial, sans-serif; font-size: 12px; letter-spacing: 1.5px; text-transform: uppercase; margin-bottom: 6px; }
+  .toc ol { margin: 0; padding-left: 22px; }
+  .toc li { margin: 3px 0; }
+  .toc a { text-decoration: none; }
+  .endnote { margin-top: 50px; border-top: 4px solid var(--ink); padding-top: 14px; font-family: Arial, sans-serif; font-size: 13px; color: #555; }
+  .tens { background: var(--yellow); border: 3px solid var(--ink); padding: 4px 20px 14px; margin: 18px 0; }
+  .tens ol { padding-left: 24px; }
+  .tens li { margin: 9px 0; font-size: 16.5px; }
+  .tens li b { font-family: Arial, sans-serif; }
+</style>
+</head>
+<body>
+
+<header class="cover">
+  <div class="cover-inner">
+    <div class="cover-text">
+      <span class="kicker">A Cells Fleet Proposal</span>
+      <h1>Channels on Every Harness For&nbsp;Dummies</h1>
+      <p class="sub">Slack and email for pi, claude-code, and codex cells — and one "main thread" per cell that follows you between Slack and TUI</p>
+      <p class="tag">★ One cell, one mind &nbsp;★ Side conversations stay local &nbsp;★ Quick talk is still scratch</p>
+    </div>
+    <svg class="dummies-man" viewBox="0 0 100 130" aria-label="Dummies Man">
+      <path d="M50 6 L80 60 Q50 72 20 60 Z" fill="#fff" stroke="#1a1a1a" stroke-width="4" stroke-linejoin="round"/>
+      <circle cx="42" cy="48" r="4.2" fill="#1a1a1a"/>
+      <circle cx="60" cy="48" r="4.2" fill="#1a1a1a"/>
+      <path d="M51 52 Q54 58 49 60" fill="none" stroke="#1a1a1a" stroke-width="3" stroke-linecap="round"/>
+      <path d="M40 64 Q50 70 62 63" fill="none" stroke="#1a1a1a" stroke-width="3.4" stroke-linecap="round"/>
+      <path d="M50 6 Q57 1 60 8" fill="none" stroke="#1a1a1a" stroke-width="3.4" stroke-linecap="round"/>
+      <path d="M38 72 L62 72 L70 116 L30 116 Z" fill="#1a1a1a"/>
+      <path d="M44 72 L50 84 L56 72 Z" fill="#fff"/>
+      <path d="M38 76 L20 100 M62 76 L82 98" stroke="#1a1a1a" stroke-width="6" stroke-linecap="round"/>
+    </svg>
+  </div>
+</header>
+<div class="meta">
+  <div class="meta-inner">Status: PROPOSED (v2 · 2026-05-16) · Folded in simplifications from the design review: adapter in DNA, birth-time id capture, no path renames · Phase 2 "collapse host-bridge into WS proxy" added · Builds on commit <code>65b315b</code></div>
+</div>
+
+<div class="wrap">
+
+<!-- ============ CHEAT SHEET ============ -->
+<section class="cheat" id="cheat">
+  <h2>The Cheat Sheet</h2>
+  <p class="csub">Tear-out card. If you read nothing else in this book, read this.</p>
+  <dl>
+    <dt>What it does, in one sentence</dt>
+    <dd>Makes Slack and email work on claude-code and codex cells the same way they already work on pi — and unifies what you say in Slack with what you see in the TUI into a single "main thread" per cell.</dd>
+
+    <dt>The two changes, in one breath</dt>
+    <dd><strong>(1)</strong> The cell's WebSocket bridge becomes harness-aware so claude-code and codex can both receive Slack inbound and reply. <strong>(2)</strong> Slack and TUI converge on one shared session ("main") per cell. <code>cells talk</code> stays its own scratch session.</dd>
+
+    <dt>The mental rule</dt>
+    <dd><strong>One cell, one mind.</strong> Slack is the cell's public face — it always drives <em>main</em>. TUI defaults to main; if you explicitly branch (resume a different session), that side conversation stays local and never leaks to Slack.</dd>
+
+    <dt>The cleanup happening along the way</dt>
+    <dd>The harness-adapter pattern (pi / claude-code / codex remote commands + protocol translation) lives only in <code>cli/host-bridge.ts</code> today. We extract it to <code>dna/cells/base/lib/harness-adapters.ts</code> — DNA is its natural home since it's cell logic; the Mac-side host-bridge imports from there. No bake-time copy step needed.</dd>
+
+    <dt>Files touched</dt>
+    <dd><code>dna/cells/base/lib/harness-adapters.ts</code> (new), <code>cli/host-bridge.ts</code> (refactor to import), <code>dna/cells/base/site/server.ts</code> (adapter-driven supervisor), <code>cli/cells.ts</code> (TUI session path), <code>scripts/bake-egg.sh</code> (capture main session/thread id at birth). Pool refilled to bake in the new DNA.</dd>
+
+    <dt>What it does <em>not</em> touch</dt>
+    <dd>The cell Worker DO (<code>cli/worker/cell/</code>), Slack Worker, Email Worker, <code>scripts/bind-cell-channels.sh</code>, <code>scripts/deploy-cell-worker.sh</code>. All already harness-agnostic.</dd>
+
+    <dt>Verify</dt>
+    <dd>Send "hi" to <code>#cells-claude-cell</code>, get a reply. Same for <code>#cells-codex-cell</code>. Then open <code>cells tui claude-cell</code> and see the Slack exchange in the scrollback.</dd>
+  </dl>
+</section>
+
+<!-- ============ TOC ============ -->
+<div class="toc">
+  <div class="lbl">Table of Contents</div>
+  <ol>
+    <li><a href="#intro">Introduction</a></li>
+    <li><a href="#part1">Part I — The Gap, And The Mental Model</a></li>
+    <li><a href="#part2">Part II — The Unified Design</a></li>
+    <li><a href="#part3">Part III — Per-Harness Plumbing</a></li>
+    <li><a href="#part4">Part IV — The Code Changes</a></li>
+    <li><a href="#part5">Part V — Rollout, Testing, Verification</a></li>
+    <li><a href="#part6">Part VI — The Part of Tens</a></li>
+    <li><a href="#part7">Part VII — Phase 2: One Harness Per Cell (Future)</a></li>
+    <li><a href="#close">Where to Go From Here</a></li>
+  </ol>
+</div>
+
+<!-- ============ INTRO ============ -->
+<h2 id="intro">Introduction</h2>
+
+<h3>About This Book</h3>
+<p>
+  Today, only pi cells respond to Slack. If you birth a cell with the claude-code or
+  codex harness and tick the Slack channel during the picker, the channel is bound,
+  the worker is deployed, the DM lands in Cloudflare — and then nothing. The cell
+  sits there silent. This book explains why, what changes, and what the world looks
+  like once it's fixed.
+</p>
+<p>
+  It also explains a small but load-bearing design choice that comes along with the
+  fix: <strong>one cell has one mind</strong>. Whether you reach the cell via Slack,
+  email, or by opening its TUI, you're in the same conversation by default. Branch
+  to a side conversation in TUI and that stays local — your Slack channel doesn't
+  see it. Quick scratch chats via <code>cells talk</code> stay separate from main
+  on purpose.
+</p>
+
+<h3>Foolish Assumptions</h3>
+<p>This book assumes you already know:</p>
+<ul class="plain">
+  <li>What a cell is, and that each one has exactly one harness — pi <em>or</em> claude-code <em>or</em> codex, picked at birth.</li>
+  <li>That the Slack→cell bridge was fixed on 2026-05-16 (commit <code>65b315b</code>) — the cells proxy now forwards <code>egg-*.cells.md</code> traffic to welld so the cell's Worker DO can reach the well's <code>/agent</code> WebSocket.</li>
+  <li>That host-bridge already drives <code>cells talk</code> for all three harnesses today, using a clean adapter pattern (<code>cli/host-bridge.ts:162-345</code>).</li>
+  <li>That the cell Worker (DO) and the Slack/Email Workers are already harness-agnostic — they speak pi's RPC vocabulary as a wire format and don't care which harness is on the other end.</li>
+</ul>
+
+<h3>Icons Used in This Book</h3>
+<div class="icon-note tip">
+  <div class="badge">💡</div>
+  <span class="nlbl">Tip</span>
+  <p>A shortcut or a sensible default.</p>
+</div>
+<div class="icon-note remember">
+  <div class="badge">🧵</div>
+  <span class="nlbl">Remember</span>
+  <p>A load-bearing idea. If you forget it the design stops making sense.</p>
+</div>
+<div class="icon-note warning">
+  <div class="badge">⚠️</div>
+  <span class="nlbl">Warning</span>
+  <p>A real foot-gun. Used sparingly.</p>
+</div>
+<div class="icon-note tech">
+  <div class="badge">🤓</div>
+  <span class="nlbl">Technical Stuff</span>
+  <p>File paths, JSONL schemas, adapter contracts. Skip if you only want the shape.</p>
+</div>
+
+<h3>How This Book Is Organized</h3>
+<p>
+  <strong>Part&nbsp;I</strong> shows where today's wiring is hardcoded to pi and how
+  the "main thread" idea answers your TUI-branching question. <strong>Part&nbsp;II</strong>
+  draws the unified design as a matrix of entry-points × what gets shared.
+  <strong>Part&nbsp;III</strong> walks through each harness — pi, claude-code, codex —
+  and explains how the session pinning works for each. <strong>Part&nbsp;IV</strong>
+  is the code: which files change, what the new adapter module looks like, and how
+  the in-cell supervisor becomes adapter-driven. <strong>Part&nbsp;V</strong> is the
+  rollout: phase order, what to test on existing cells, when to refill the pool,
+  what eval rows to add. <strong>Part&nbsp;VI</strong>, as tradition demands, is
+  <em>The Part of Tens</em>.
+</p>
+
+<!-- ============ PART I ============ -->
+<h2 id="part1"><span class="pt">Part I</span>The Gap, And The Mental Model</h2>
+
+<h3>Chapter 1: What Works Today, What Doesn't</h3>
+
+<div class="itc">
+  <div class="lbl">In This Chapter</div>
+  <ul>
+    <li>The Slack chain end-to-end</li>
+    <li>The one spot where it's hardcoded to pi</li>
+    <li>Why <code>cells talk</code> already works for every harness</li>
+  </ul>
+</div>
+
+<p>The Slack chain for a pi cell, after the 2026-05-16 fix:</p>
+
+<pre>
+Slack → Slack Worker → KV lookup → cell Worker (DO)
+                                     ↓
+                          wss://&lt;wellname&gt;.cells.md/agent
+                                     ↓
+                          cloudflared → cells proxy → welld
+                                     ↓
+                          guest VM :8080  ← dna/cells/base/site/server.ts
+                                     ↓
+                          spawns `pi --mode rpc`
+                                     ↓
+                          response flows back through the same WS
+</pre>
+
+<p>
+  Three of those hops are already harness-agnostic by design:
+</p>
+<ul class="plain">
+  <li><strong>Slack Worker</strong> and <strong>Email Worker</strong> speak the pi-RPC dialect as a wire format. They don't know what's on the other end.</li>
+  <li><strong>The cell Worker DO</strong> (<code>cli/worker/cell/cell-agent.ts</code>) frames an inbound Slack/email event as <code>{type:"prompt", message}</code> and forwards it. Again — no harness awareness.</li>
+  <li><strong>welld and the cells proxy</strong> are transport. They don't read the payload.</li>
+</ul>
+
+<p>The one spot that's hardcoded to pi is inside the cell:</p>
+
+<pre>
+// dna/cells/base/site/server.ts:354
+pi = spawn(["pi", "--mode", "rpc", "--session-dir", SESSION_DIR], ...);
+</pre>
+
+<div class="icon-note tech">
+  <div class="badge">🤓</div>
+  <span class="nlbl">Technical Stuff</span>
+  <p>The site server has its own pi supervisor with switch_session acking, lifecycle signaling to <code>host.well:7879</code>, and idle-grace shutdown. None of it is adapter-aware. claude-code and codex don't have a parallel implementation here, so a Slack message arrives at the cell, the WS frame is delivered to <code>/agent</code> on the site server, and there's nobody home to dispatch it.</p>
+</div>
+
+<p>
+  Meanwhile, <code>cells talk</code> handles all three harnesses today because <em>host-bridge</em>
+  (<code>cli/host-bridge.ts</code>) already implements the adapter pattern. The protocol
+  translation is solved code — that's why <code>cells talk claude-cell</code> works.
+</p>
+
+<div class="icon-note remember">
+  <div class="badge">🧵</div>
+  <span class="nlbl">Remember</span>
+  <p>The problem isn't "we don't know how to drive claude or codex from the cells stack." We do — it's working in host-bridge. The problem is the same logic isn't in the cell. Two implementations, only one finished.</p>
+</div>
+
+<h3>Chapter 2: The Three Conversation Stores (Today)</h3>
+
+<p>Before the fix, here's what the on-disk session layout looks like for a single pi cell named <code>bob1</code> — taken from a live <code>ls</code> on the well:</p>
+
+<pre>
+/root/.pi/agent/sessions/
+├── bob1/              ← used by `cells talk` (via host-bridge)
+└── root-bob1/         ← used by Slack/email (via site/server.ts main.jsonl)
+    └── tui/           ← used by `cells tui`
+</pre>
+
+<p>
+  Three parallel histories. The <code>--session-dir</code> path is deliberately different for
+  each entry-point, with a code comment in <code>cli/cells.ts:1289</code> explaining the
+  intent — "<em>keeps the TUI conversation isolated from the bridge's main.jsonl</em>."
+  It was a conscious choice. We're going to undo it.
+</p>
+
+<h3>Chapter 3: The Question That Cracked It Open</h3>
+
+<p>
+  You asked: <em>"if the TUI is unified with Slack, but the TUI can resume different
+  conversations, how does that show up in Slack? Clearly I don't want every conversation
+  showing up in Slack."</em>
+</p>
+
+<p>The answer that makes the rest of the design fall out:</p>
+
+<div class="icon-note remember">
+  <div class="badge">🧵</div>
+  <span class="nlbl">Remember</span>
+  <p><strong>One cell, one mind.</strong> Each cell has a single <em>main</em> thread.
+  Slack always drives main. TUI defaults to main but can branch into side conversations
+  that stay local. <code>cells talk</code> is its own scratch session, isolated on purpose.</p>
+</div>
+
+<p>That single rule answers every "what about X" question:</p>
+<ul class="plain">
+  <li>What about resuming an old conversation in TUI? <strong>Side, local — Slack doesn't see it.</strong></li>
+  <li>What if I poke the cell with <code>cells talk</code> while a Slack conversation is in flight? <strong>Talk is scratch — main is untouched.</strong></li>
+  <li>What about emails? <strong>Email is the same as Slack — drives main.</strong></li>
+  <li>What's "the cell's public mind"? <strong>Main. That's what reads CONTACTS.md, that's what readers of <code>cells-narrator</code> see in the timeline.</strong></li>
+</ul>
+
+<!-- ============ PART II ============ -->
+<h2 id="part2"><span class="pt">Part II</span>The Unified Design</h2>
+
+<h3>Chapter 4: The Entry-Points Matrix</h3>
+
+<div class="itc">
+  <div class="lbl">In This Chapter</div>
+  <ul>
+    <li>The four entry-points and what each drives</li>
+    <li>Side-conversation behavior in TUI</li>
+    <li>Why <code>cells talk</code> stays separate</li>
+  </ul>
+</div>
+
+<table>
+  <thead>
+    <tr>
+      <th>Entry-point</th>
+      <th>Session driven</th>
+      <th>Shows up in Slack channel?</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>Slack inbound</td>
+      <td><strong>main</strong></td>
+      <td>(it IS Slack)</td>
+    </tr>
+    <tr>
+      <td>Email inbound</td>
+      <td><strong>main</strong></td>
+      <td>yes — same shared thread</td>
+    </tr>
+    <tr>
+      <td><code>cells tui</code> (no args)</td>
+      <td><strong>main</strong></td>
+      <td>yes — same thread; TUI mirror</td>
+    </tr>
+    <tr>
+      <td><code>cells tui &lt;name&gt; -r &lt;other&gt;</code> or pi-side "new session"</td>
+      <td>side thread</td>
+      <td><strong>no</strong> — stays local</td>
+    </tr>
+    <tr>
+      <td><code>cells talk</code></td>
+      <td>scratch (its own dir)</td>
+      <td>no — isolated</td>
+    </tr>
+  </tbody>
+</table>
+
+<h3>Chapter 5: What "Side Conversations Stay Local" Means</h3>
+
+<p>
+  On pi, sessions are files inside a <code>--session-dir</code>. Today's path layout
+  has <code>main.jsonl</code> as the canonical thread; the same directory can hold any
+  number of side files (you can create them in TUI with pi's session picker).
+</p>
+
+<p>The new rule is simple: <strong>Slack writes only to <code>main.jsonl</code></strong>. Other files in the dir coexist, accessible via TUI but invisible to Slack.</p>
+
+<div class="icon-note tip">
+  <div class="badge">💡</div>
+  <span class="nlbl">Tip</span>
+  <p>If you want a private side conversation about something you don't want broadcast in the cell's Slack channel — open TUI, hit <code>pi -r</code> (or use claude/codex's session-picker equivalent), and start a fresh side. The cell remembers it; Slack never sees it.</p>
+</div>
+
+<h3>Chapter 6: Why <code>cells talk</code> Stays Its Own Scratch</h3>
+
+<p>
+  You called it out yourself — <code>cells talk</code> goes through host-bridge over
+  RPC for a reason. It's the path you use for quick checks, smoke tests, "is bob1
+  awake," debugging. If every quick <code>cells talk</code> poked main, your Slack
+  channel would fill with noise within a day.
+</p>
+
+<p>
+  So talk stays where it is, on its own session dir (e.g. <code>/root/.pi/agent/sessions/&lt;name&gt;-talk/</code>).
+  Lightweight, isolated, exactly today's behavior — just renamed for clarity.
+</p>
+
+<div class="icon-note remember">
+  <div class="badge">🧵</div>
+  <span class="nlbl">Remember</span>
+  <p>Three rings, not two. <strong>Main</strong> = the cell's public mind (Slack + email + TUI default). <strong>Side</strong> = TUI-only branches, never broadcast. <strong>Scratch</strong> = <code>cells talk</code>'s quick-check sandbox.</p>
+</div>
+
+<!-- ============ PART III ============ -->
+<h2 id="part3"><span class="pt">Part III</span>Per-Harness Plumbing</h2>
+
+<p>Each harness has its own session model. The "main thread" abstraction lands on each one slightly differently — but the user-facing rule is the same.</p>
+
+<h3>Chapter 7: pi</h3>
+
+<p>
+  Pi's session storage is the simplest. <code>--session-dir &lt;dir&gt;</code> points at a
+  directory; <code>main.jsonl</code> is the canonical conversation; other files in the
+  dir are sidings. Every pi process that points at the same dir reads + appends to
+  the same files.
+</p>
+
+<pre>
+/root/.pi/agent/sessions/root-&lt;name&gt;/   ← keep today's canonical path
+├── main.jsonl          ← THE main thread (Slack, email, TUI default)
+├── 2026-05-14-debug.jsonl   ← a side, created in TUI
+└── ...
+
+/root/.pi/agent/sessions/talk-&lt;name&gt;/   ← clearly-named scratch path
+└── main.jsonl          ← `cells talk`'s sandbox
+</pre>
+
+<p><strong>Changes:</strong></p>
+<ul class="plain">
+  <li><strong>site/server.ts</strong>: <em>no change</em> — already pinned to <code>root-&lt;name&gt;/main.jsonl</code>.</li>
+  <li><strong>cells tui</strong> (cmdTui): point at the same dir (<code>root-&lt;name&gt;/</code>) without the <code>tui</code> subdir. Default opens <code>main.jsonl</code>; <code>pi -r</code> shows everything else.</li>
+  <li><strong>cells talk</strong> (host-bridge): rename to <code>talk-&lt;name&gt;/</code> so its scratch nature is obvious.</li>
+</ul>
+
+<div class="icon-note tip">
+  <div class="badge">💡</div>
+  <span class="nlbl">Tip</span>
+  <p>Keeping <code>root-&lt;name&gt;</code> as canonical is the simplest path: existing pi cells (bob1, pi-cell, mother, pulse) keep their entire conversation history. The only path that changes is the TUI's subdir, which is fresh state.</p>
+</div>
+
+<div class="icon-note warning">
+  <div class="badge">⚠️</div>
+  <span class="nlbl">Warning</span>
+  <p>Two pi processes (Slack and TUI) appending to <code>main.jsonl</code> at the same time: JSONL appends are line-atomic so the file stays valid, but each process's in-memory turn view diverges from the other until its next restart re-reads the file. In practice you only see this if you're typing in TUI right as a Slack message lands — rare, and self-healing on the next process restart. Acceptable trade.</p>
+</div>
+
+<h3>Chapter 8: claude-code</h3>
+
+<p>
+  claude-code stores sessions in <code>~/.claude/projects/&lt;cwd-encoded&gt;/&lt;session-id&gt;.jsonl</code>.
+  Every <code>claude</code> invocation either starts a new session (auto-generated id)
+  or resumes one (<code>--resume &lt;id&gt;</code> or <code>--continue</code> for the latest).
+</p>
+
+<p>The trick: capture a stable per-cell session id <strong>at birth</strong>, persist it, and have every entry-point resume it from then on.</p>
+
+<pre>
+/root/.cell/claude-main-session   ← session id, captured at birth time
+/root/.cell/claude-talk-session   ← scratch session id, ditto
+</pre>
+
+<p>Three entry-points, all simple:</p>
+<ul class="plain">
+  <li><strong>site/server.ts</strong> (Slack/email): on every startup, <code>--resume $(cat /root/.cell/claude-main-session)</code>. No capture branch. No first-run special case.</li>
+  <li><strong>cells tui</strong>: <code>cd /root</code> + <code>claude --resume $(cat /root/.cell/claude-main-session)</code>. User-side <code>pi</code>-equivalent session-picker (claude's own resume UI) opens any other session = side.</li>
+  <li><strong>cells talk</strong>: <code>--resume $(cat /root/.cell/claude-talk-session)</code>. Scratch id captured at birth via the same warm-up.</li>
+</ul>
+
+<div class="icon-note tech">
+  <div class="badge">🤓</div>
+  <span class="nlbl">Technical Stuff</span>
+  <p><strong>Birth-time capture:</strong> claude's session ids are UUIDs claude picks itself — there's no flag to assert one up front. <code>scripts/bake-egg.sh</code> already runs the end-test on the egg; we extend it: send one <code>"init"</code> prompt to <code>claude --print --output-format stream-json</code>, sniff the <code>session_id</code> from the first <code>system/init</code> event, write it to <code>/root/.cell/claude-main-session</code>. Same warm-up creates the talk scratch id. After this, every entry-point's supervisor is a one-liner that always resumes — no capture-vs-fresh branching in the runtime.</p>
+</div>
+
+<h3>Chapter 9: codex</h3>
+
+<p>
+  Codex's per-turn model means every prompt spawns a fresh <code>codex exec</code>. The
+  multi-turn binding is <code>--resume &lt;thread_id&gt;</code>, and the thread id rides on
+  the first <code>thread.started</code> event of the very first turn.
+</p>
+
+<pre>
+/root/.cell/codex-main-thread    ← thread id, captured at birth time
+/root/.cell/codex-talk-thread    ← scratch thread id, ditto
+</pre>
+
+<ul class="plain">
+  <li><strong>site/server.ts</strong>: every prompt → <code>codex exec resume $(cat /root/.cell/codex-main-thread) …</code>. Always-resume; no capture branch.</li>
+  <li><strong>cells tui</strong>: codex interactive (<code>codex</code> with no subcommand) — its own session model; defaults to a fresh interactive session. The "TUI sees Slack" promise is weaker here unless codex grows a "load thread X into interactive" flag. We'll document this limit; codex is the harness where TUI ↔ Slack mirror is least clean. Side branches are also less of a concept here.</li>
+  <li><strong>cells talk</strong>: <code>codex exec resume $(cat /root/.cell/codex-talk-thread) …</code> — host-bridge already does the per-cell thread-id pattern in memory; we move it to a known on-disk cache.</li>
+</ul>
+
+<div class="icon-note tech">
+  <div class="badge">🤓</div>
+  <span class="nlbl">Technical Stuff</span>
+  <p><strong>Birth-time capture:</strong> like claude, codex's thread id is server-picked, not client-asserted. <code>bake-egg.sh</code>'s warm-up runs one <code>codex exec --json "init"</code> for each scope (main + talk), captures <code>thread_id</code> from <code>thread.started</code>, persists. Supervisor never needs a capture branch.</p>
+</div>
+
+<div class="icon-note warning">
+  <div class="badge">⚠️</div>
+  <span class="nlbl">Warning</span>
+  <p>Codex interactive TUI doesn't currently take a "resume this thread" flag at startup the way claude does. Best-effort: TUI shows you the cell's <em>last</em> codex conversation (whatever <code>codex</code>'s own UI surfaces). If we want a hard guarantee that TUI opens the Slack main thread, we may need a thin wrapper script. Not blocking for v1.</p>
+</div>
+
+
+<!-- ============ PART IV ============ -->
+<h2 id="part4"><span class="pt">Part IV</span>The Code Changes</h2>
+
+<h3>Chapter 10: The New File — <code>dna/cells/base/lib/harness-adapters.ts</code></h3>
+
+<p>
+  Today, the <code>HarnessAdapter</code> interface and the three implementations
+  (pi, claude-code, codex) live entirely inside <code>cli/host-bridge.ts</code>
+  (lines 135–345). We lift them out into DNA — the natural home, since this is
+  cell logic that happens to also run on the Mac for talk:
+</p>
+
+<pre>
+dna/cells/base/
+├── lib/
+│   └── harness-adapters.ts    ← NEW: HarnessAdapter + piAdapter + claudeAdapter + codexAdapter
+└── site/
+    └── server.ts              ← imports from ../lib/harness-adapters
+
+cli/
+└── host-bridge.ts             ← imports from ../dna/cells/base/lib/harness-adapters
+</pre>
+
+<div class="icon-note tip">
+  <div class="badge">💡</div>
+  <span class="nlbl">Tip</span>
+  <p>Mac-side TS importing from a DNA dir feels weird for two seconds, then it stops. The adapter <em>is</em> cell logic — Mac-side talk is just one of two callers. DNA is where it actually executes inside the cell, so DNA is where it should live. Side benefit: no bake-time copy step. The egg gets the adapter file as part of the normal DNA mirror.</p>
+</div>
+
+<h3>Chapter 11: <code>cli/host-bridge.ts</code> — Pure Refactor</h3>
+
+<p>
+  Behaviorally identical (almost). Delete the three adapter definitions, replace with
+  <code>import {getAdapter} from "../dna/cells/base/lib/harness-adapters"</code>. The
+  <code>CellSession</code> class is unchanged. Rename pi's session-dir to
+  <code>talk-&lt;name&gt;/</code> so the scratch path is obvious.
+</p>
+
+<ol class="steps">
+  <li><b>Move adapter code.</b> Cut lines 135–345 of host-bridge.ts into <code>dna/cells/base/lib/harness-adapters.ts</code>. Export <code>HarnessAdapter</code>, <code>piAdapter</code>, <code>claudeCodeAdapter</code>, <code>codexAdapter</code>, <code>getAdapter</code>.</li>
+  <li><b>Import.</b> At the top of host-bridge.ts: <code>import { getAdapter } from "../dna/cells/base/lib/harness-adapters";</code></li>
+  <li><b>Rename pi session-dir.</b> Line 444: <code>sessionDir = `/root/.pi/agent/sessions/talk-${cellName}`;</code> — scratch path. claude-code/codex talk paths use the <code>claude-talk-session</code> / <code>codex-talk-thread</code> caches captured at birth.</li>
+  <li><b>Smoke.</b> <code>bun build cli/host-bridge.ts --target=bun</code> clean. Restart the daemon: <code>launchctl kickstart -k gui/$(id -u)/com.pete.cells-host-bridge</code>. Smoke: <code>cells talk bob1 "ping"</code>, <code>cells talk claude-cell "ping"</code>, <code>cells talk codex-cell "ping"</code>.</li>
+</ol>
+
+<h3>Chapter 12: <code>dna/cells/base/site/server.ts</code> — Adapter-Driven Supervisor</h3>
+
+<p>This is the meat of the change. The single-process pi supervisor becomes:</p>
+
+<ol class="steps">
+  <li><b>Read harness at startup.</b> <code>const harness = readJson("/root/.pi/status.json").harness ?? "pi"</code>. <code>bake-egg.sh</code> already writes status.json with the harness baked in.</li>
+  <li><b>Pick the adapter.</b> <code>const adapter = getAdapter(harness);</code> (imported from <code>../lib/harness-adapters</code>).</li>
+  <li><b>Supervisor branches on <code>adapter.mode</code>.</b> <code>"persistent"</code> = spawn one long-lived process (pi, claude-code). <code>"per-turn"</code> = each incoming WS prompt spawns a fresh process (codex). Mirrors <code>CellSession.start()</code> in host-bridge.</li>
+  <li><b>Inbound translation.</b> For each <code>{type:"prompt",message}</code> from the cell Worker DO, run it through <code>adapter.translateInbound(cmd)</code> (or <code>runTurn</code> for per-turn) before writing to the harness.</li>
+  <li><b>Outbound translation.</b> Every stdout line from the harness runs through <code>adapter.translateOutbound(sess, line)</code>; the resulting pi-shaped events get broadcast to the WS clients (the cell Worker DO).</li>
+  <li><b>Lifecycle signals.</b> The existing <code>agent_start</code> / <code>agent_end</code> sniffing logic (lines 274–289) stays — every adapter outputs those events in their pi-shaped form, so the lifecycle hooks to <code>host.well:7879</code> still fire.</li>
+  <li><b>Session pinning is one-liner per harness</b> (because birth-time capture already filled the cache files). pi: <code>--session-dir /root/.pi/agent/sessions/root-&lt;name&gt;</code>. claude-code: <code>--resume $(cat /root/.cell/claude-main-session)</code>. codex (per-turn): <code>codex exec resume $(cat /root/.cell/codex-main-thread)</code>. No capture branch in the supervisor — the cache file is always there.</li>
+</ol>
+
+<div class="icon-note tip">
+  <div class="badge">💡</div>
+  <span class="nlbl">Tip</span>
+  <p>The cleanest split: keep the lifecycle / WS-server / site-publish parts of <code>site/server.ts</code> intact; replace ONLY the pi-supervisor section with an adapter-driven supervisor that wraps a <code>CellSession</code>-shaped object. Less invasive than a rewrite; one section in, one section out.</p>
+</div>
+
+<h3>Chapter 13: <code>cli/cells.ts</code> — TUI Default Opens Main</h3>
+
+<p>
+  <code>cmdTui</code> (lines 1254–1310) builds the remote tmux invocation. Today
+  the pi branch uses <code>~/.pi/agent/sessions/root-&lt;name&gt;/tui</code> — the
+  <code>/tui</code> subdir explicitly isolates TUI from main. The fix: drop the
+  subdir, point at <code>~/.pi/agent/sessions/root-&lt;name&gt;/</code>, so
+  <code>pi --session-dir &lt;dir&gt;</code> auto-loads <code>main.jsonl</code> by
+  default. The user can still <code>pi -r</code> from inside TUI to pick a side
+  conversation (any other file in the dir).
+</p>
+
+<p>For claude-code TUI, change the invocation from bare <code>claude</code> to:</p>
+
+<pre>
+cd /root && claude --resume "$(cat /root/.cell/claude-main-session)"
+</pre>
+
+<p>For codex TUI we leave it as bare <code>codex</code> for v1 (no clean way to bind the main thread into an interactive session yet — Chapter 9 caveat).</p>
+
+<h3>Chapter 14: <code>scripts/bake-egg.sh</code> — Capture Main Session/Thread IDs</h3>
+
+<p>
+  Birth-time warm-up is where the simplification lives. After the harness config is
+  imprinted (lines 75–82 in bake-egg.sh today), add a per-harness capture step:
+</p>
+
+<pre>
+elif [ "$HARNESS" = "claude-code" ]; then
+  # ... existing settings imprint ...
+  # Capture main + talk session ids
+  echo "sudo mkdir -p /root/.cell"
+  echo "MAIN_ID=\$(cd /root && echo init | sudo -E claude --print --output-format stream-json | head -1 | jq -r .session_id)"
+  echo "echo \"\$MAIN_ID\" | sudo tee /root/.cell/claude-main-session > /dev/null"
+  echo "TALK_ID=\$(cd /root && echo init | sudo -E claude --print --output-format stream-json | head -1 | jq -r .session_id)"
+  echo "echo \"\$TALK_ID\" | sudo tee /root/.cell/claude-talk-session > /dev/null"
+
+elif [ "$HARNESS" = "codex" ]; then
+  # ... existing settings imprint ...
+  # Capture main + talk thread ids
+  echo "sudo mkdir -p /root/.cell"
+  echo "MAIN_TID=\$(cd /root && sudo -E codex exec --json --skip-git-repo-check --dangerously-bypass-approvals-and-sandbox init | jq -rs '.[] | select(.type==\"thread.started\") | .thread_id' | head -1)"
+  echo "echo \"\$MAIN_TID\" | sudo tee /root/.cell/codex-main-thread > /dev/null"
+  echo "TALK_TID=\$(cd /root && sudo -E codex exec --json --skip-git-repo-check --dangerously-bypass-approvals-and-sandbox init | jq -rs '.[] | select(.type==\"thread.started\") | .thread_id' | head -1)"
+  echo "echo \"\$TALK_TID\" | sudo tee /root/.cell/codex-talk-thread > /dev/null"
+fi
+</pre>
+
+<p>
+  Two cheap warm-up turns (~3-5s each), four cache files, done. The runtime
+  supervisor never deals with capture — only with resume. Lower complexity in the
+  hot path, all the asymmetry pushed into birth time where it belongs.
+</p>
+
+<h3>Chapter 14b: Verification — Manual Slack Smoke (Not eval-birth)</h3>
+
+<p>
+  An earlier draft proposed adding Slack-DM-round-trip rows to <code>eval-birth.ts</code>.
+  Honest reassessment: that's <em>new</em> eval machinery (Slack API auth, message
+  send, message tail), not just a row. The cleaner scope for v1:
+</p>
+
+<ul class="plain">
+  <li>Keep <code>eval-birth</code> focused on <code>--talk-verify</code> (which already covers all three harnesses via host-bridge — proves the adapter works).</li>
+  <li>Slack delivery proven via manual smoke: birth a cell with <code>--channels=slack</code>, DM the channel, eyeball the reply.</li>
+  <li>A proper automated <code>eval-channels.ts</code> can come later as its own concern — don't conflate "the harness can chat" with "Slack delivery works."</li>
+</ul>
+
+<!-- ============ PART V ============ -->
+<h2 id="part5"><span class="pt">Part V</span>Rollout, Testing, Verification</h2>
+
+<h3>Chapter 15: Phase A — Extract + Refactor (No Behavior Change)</h3>
+
+<ol class="steps">
+  <li><b>Branch.</b> <code>git checkout -b feature/channels-every-harness</code>.</li>
+  <li><b>Create</b> <code>dna/cells/base/lib/harness-adapters.ts</code>. Move adapter code in (lines 135–345 of host-bridge.ts). Add explicit exports.</li>
+  <li><b>Refactor</b> <code>cli/host-bridge.ts</code> to import from <code>../dna/cells/base/lib/harness-adapters</code>. Smoke: <code>bun build cli/host-bridge.ts --target=bun</code> clean; restart the daemon; <code>cells talk pi-cell "ping"</code> + <code>cells talk claude-cell "ping"</code> + <code>cells talk codex-cell "ping"</code> all work.</li>
+  <li><b>Commit.</b> "extract harness adapters into DNA". Pure refactor — no behavior change.</li>
+</ol>
+
+<h3>Chapter 16: Phase B — Birth-Time Capture + Adapter-Driven Site Server</h3>
+
+<ol class="steps">
+  <li><b>Edit <code>scripts/bake-egg.sh</code></b> per Chapter 14. Two warm-up calls per harness (main + talk); four cache files written.</li>
+  <li><b>Edit <code>dna/cells/base/site/server.ts</code></b> per Chapter 12. Supervisor branches on adapter; pinning is one-liner per harness.</li>
+  <li><b>Edit <code>cli/cells.ts</code></b> per Chapter 13. TUI's pi path drops the <code>/tui</code> subdir; claude TUI gains <code>--resume</code>.</li>
+  <li><b>Smoke build.</b> <code>bun build dna/cells/base/site/server.ts --target=bun</code> clean.</li>
+</ol>
+
+<h3>Chapter 17: Phase C — Test On Existing Cells</h3>
+
+<p>The repo has <code>claude-cell</code> and <code>codex-cell</code> already (per <code>~/.cells/cells.json</code>), neither with channels bound. Both pre-date the new birth flow, so they have no <code>/root/.cell/*-session</code> cache files. Test loop:</p>
+
+<ol class="steps">
+  <li><b>Resolve well-name</b> via <code>~/.cells/cells.json</code> + <code>~/.cells/pool.json</code>. Push the new <code>site/server.ts</code> + DNA lib via <code>well exec</code>.</li>
+  <li><b>Manually run the birth-time warm-up</b> on each existing cell to seed the cache files (one-time per cell). Same shell commands the new bake-egg uses.</li>
+  <li><b>Restart the systemd <code>site</code> service</b>. Confirm via <code>curl -s http://&lt;well-ip&gt;:8080/health</code>.</li>
+  <li><b>Bind Slack + deploy worker</b>: <code>bash scripts/bind-cell-channels.sh claude-cell '{"channels":["slack"]}'</code> + <code>bash scripts/deploy-cell-worker.sh claude-cell &lt;well&gt;</code>. Same for codex-cell.</li>
+  <li><b>Send a Slack DM</b> to <code>#cells-claude-cell</code>. Expect a reply within ~30s.</li>
+  <li><b>Same for codex.</b> Expect a reply within ~60s (codex's per-turn cold spawn is slower than claude's persistent process).</li>
+  <li><b>Open TUI.</b> <code>cells tui claude-cell</code> — confirm the Slack exchange shows up as the cell's main conversation in the scrollback.</li>
+</ol>
+
+<div class="icon-note tip">
+  <div class="badge">💡</div>
+  <span class="nlbl">Tip</span>
+  <p>Iterate on these two existing cells until you're confident. Once Phase C is green, you're ~10% away from done — the rest is just baking it into birth and refilling the pool.</p>
+</div>
+
+<h3>Chapter 18: Phase D — Bake Into Birth + Refill Pool</h3>
+
+<ol class="steps">
+  <li><b>Drain the pool.</b> <code>cells pool drain -y</code>. (Existing eggs are frozen at bake time and won't have the new DNA.)</li>
+  <li><b>Refill.</b> <code>cells pool refill</code>. Wait for ~10 eggs to land (~5 min).</li>
+  <li><b>Birth fresh claude-code cell.</b> <code>cells birth charlie --harness=claude-code --model=opus --thinking=low --channels=slack --yes</code>. Birth time should be ~15s longer than before (the two warm-up turns).</li>
+  <li><b>DM <code>#cells-charlie</code></b> "hi". Verify reply.</li>
+  <li><b>Birth fresh codex cell.</b> <code>cells birth carol --harness=codex --model=gpt-5.5 --thinking=low --channels=slack --yes</code>.</li>
+  <li><b>DM <code>#cells-carol</code></b> "hi". Verify reply.</li>
+</ol>
+
+<h3>Chapter 19: Phase E — Squash Merge</h3>
+
+<ol class="steps">
+  <li><b>Run existing eval-birth</b> with <code>--talk-verify</code> for pi/claude/codex to confirm the adapter refactor didn't regress talk. (Slack-DM-round-trip eval deferred per Chapter 14b.)</li>
+  <li><b>If green: squash-merge to main.</b> <code>git checkout main && git merge --squash feature/channels-every-harness && git commit && git branch -d feature/channels-every-harness</code>.</li>
+  <li><b>Update memory.</b> Add a <code>project_channels_every_harness</code> note recording the design decision (one main per cell, side stays local, talk is scratch).</li>
+</ol>
+
+<!-- ============ PART VI ============ -->
+<h2 id="part6"><span class="pt">Part VI</span>The Part of Tens</h2>
+
+<h3>Ten Things This Change Does <em>Not</em> Touch</h3>
+<div class="tens">
+  <ol>
+    <li>The cell Worker DO (<code>cli/worker/cell/</code>) — already harness-agnostic.</li>
+    <li>The Slack Worker (<code>cli/worker/slack/</code>) — speaks pi RPC by design.</li>
+    <li>The Email Worker (<code>cli/worker/email/</code>) — same.</li>
+    <li><code>scripts/bind-cell-channels.sh</code> — harness-blind.</li>
+    <li><code>scripts/deploy-cell-worker.sh</code> — harness-blind.</li>
+    <li>The cells proxy (<code>cli/proxy.ts</code>) — fixed 2026-05-16.</li>
+    <li>welld and the substrate. Wells team's domain.</li>
+    <li>The birth picker UX. Channels question already asked regardless of harness.</li>
+    <li>The cell's public website (<code>&lt;name&gt;.cells.md</code>).</li>
+    <li><code>publish-image</code> and the CF Images path.</li>
+  </ol>
+</div>
+
+<h3>Ten Ways To Verify You're Done</h3>
+<div class="tens">
+  <ol>
+    <li>DM <code>#cells-bob1</code> (pi) — replies as before.</li>
+    <li>DM <code>#cells-charlie</code> (claude-code) — replies.</li>
+    <li>DM <code>#cells-carol</code> (codex) — replies.</li>
+    <li><code>cells tui charlie</code> — opens with the Slack exchange in scrollback.</li>
+    <li><code>cells tui charlie</code> + start a new claude session → that side conversation does NOT appear in #cells-charlie.</li>
+    <li><code>cells talk charlie "ping"</code> works and is its own scratch (doesn't pollute main).</li>
+    <li><code>bun scripts/eval-birth.ts --combo=claude-slack --repeat=3</code> green.</li>
+    <li><code>bun scripts/eval-birth.ts --combo=codex-slack --repeat=3</code> green.</li>
+    <li>Pool members built post-merge include the adapter file. <code>well exec -s &lt;egg&gt; -- ls /root/site/lib/</code> shows it.</li>
+    <li>Existing pi cells (pi-cell, bob1, mother, pulse) are unchanged. They still respond on Slack and their TUI still works.</li>
+  </ol>
+</div>
+
+<h3>Ten Footguns To Watch For</h3>
+<div class="tens">
+  <ol>
+    <li><strong>Restart the daemons</strong> after editing <code>cli/host-bridge.ts</code>. Stale code = silent failures.</li>
+    <li><strong>The bake-egg path</strong>: warm-ups MUST succeed (claude/codex) or the cell ships with empty cache files and the supervisor's <code>--resume</code> fails. Add a hard check that the cache files are non-empty before declaring BAKE-OK.</li>
+    <li><strong>Two pi processes appending to <code>main.jsonl</code></strong>. Acceptable but real. If it bites, simplest mitigation: make TUI read-only until you explicitly type (start a new turn). Out of scope for v1.</li>
+    <li><strong>Claude session id capture</strong> — must persist on FIRST <code>system/init</code>; later events still carry the id but you want to write the cache as early as possible. Get this wrong and every claude restart spawns a fresh conversation.</li>
+    <li><strong>Codex thread_id staleness</strong>. If codex's underlying API ages out a thread, <code>codex exec resume</code> will error. The supervisor should fall through to a fresh turn (and update the cache) on that failure.</li>
+    <li><strong>Permission flags</strong> for claude-code (<code>--permission-mode bypassPermissions</code>, <code>IS_SANDBOX=1</code>) and codex (<code>--dangerously-bypass-approvals-and-sandbox</code>) — same as host-bridge today. Copy verbatim.</li>
+    <li><strong>HOME=/root</strong> everywhere. The cell migrated to root-owned in 2026-05-15; harnesses look for their config under HOME (<code>~/.claude/</code>, <code>~/.codex/</code>, <code>~/.pi/</code>).</li>
+    <li><strong>cd /root</strong> before invoking the harness. claude's session storage is cwd-keyed; <code>cd</code>-ing elsewhere fragments the history. Same applies to <code>cells tui</code> already.</li>
+    <li><strong>Status.json must have harness</strong>. bake-egg writes it; existing pre-fix cells may not. Phase C pushes a status.json refresh as part of the upgrade.</li>
+    <li><strong>The eval-birth test</strong> must actually verify Slack delivery, not just liveness. Add a real DM round-trip step, not just <code>cells talk &lt;name&gt; "ping"</code>.</li>
+  </ol>
+</div>
+
+<!-- ============ PART VII ============ -->
+<h2 id="part7"><span class="pt">Part VII</span>Phase 2: One Harness Per Cell (Future)</h2>
+
+<div class="itc">
+  <div class="lbl">In This Chapter</div>
+  <ul>
+    <li>The collapsing idea: <code>cells talk</code> stops spawning its own harness</li>
+    <li>Why hibernation is already handled (wake-on-inbound is welld's job)</li>
+    <li>What "talk stays scratch" requires when there's only one process</li>
+    <li>The bonus: <strong>live mirror</strong> for free</li>
+  </ul>
+</div>
+
+<h3>Chapter 20: The Idea</h3>
+
+<p>
+  After Phase 1 ships, every cell still runs <strong>two</strong> harness processes in
+  active use: one inside the cell (site/server.ts, for Slack/email) and one on the
+  Mac (host-bridge, spawned via SSH for <code>cells talk</code>). They both implement
+  the same adapter contract and translate the same protocol. The bake-time copy is
+  gone; the runtime duplication isn't.
+</p>
+
+<p>
+  Phase 2's collapse: <code>cells talk</code> becomes a WebSocket client to the cell's
+  existing <code>/agent</code> endpoint, exactly the way the cell Worker DO already
+  works. <strong>Host-bridge stops spawning harnesses entirely</strong>; it becomes a
+  thin WS multiplexer or, more likely, vanishes — the CLI just opens a WS directly.
+</p>
+
+<pre>
+BEFORE (Phase 1):
+  cells talk → host-bridge → ssh ubuntu@&lt;well-ip&gt; → spawn pi/claude/codex
+                                                      ↑ separate harness process
+
+  Slack    → DO → wss://&lt;well&gt;.cells.md/agent → site/server.ts → pi/claude/codex
+                                                                    ↑ separate harness process
+
+AFTER (Phase 2):
+  cells talk → ws://127.0.0.1:7878/agent?session=scratch
+                                              ↓
+                                          welld (wakes cell if needed)
+                                              ↓
+                                          site/server.ts ─── one supervisor
+                                              ↓                   ↓
+                                          main process         scratch process
+                                              ↑
+  Slack → DO → wss://&lt;well&gt;.cells.md/agent ────┘  (no session query = main)
+</pre>
+
+<h3>Chapter 21: Hibernation — Already Handled By Wake-On-Inbound</h3>
+
+<p>
+  The reason this works seamlessly with hibernation: <strong>welld wakes the cell on
+  any inbound WebSocket connection to its <code>/agent</code> endpoint, regardless of
+  caller.</strong> The wake trigger is TCP, not Worker-specific. The Slack chain
+  already proves it; talk would inherit it.
+</p>
+
+<p>Walk through a cold-start <code>cells talk</code> on a hibernated cell:</p>
+
+<ol class="steps">
+  <li><b>You type</b> <code>cells talk bob1 "hi"</code> at 3am after bob1 has been asleep for hours.</li>
+  <li><b>The CLI opens a WS</b> to <code>ws://127.0.0.1:7878/agent?well=egg-19abf0</code> (welld's local listener).</li>
+  <li><b>welld sees inbound WS for a hibernated well</b> → triggers wake. ~0.5–2s for the VM to come back from RAM snapshot.</li>
+  <li><b>welld waits</b> for the guest's <code>:8080</code> (site/server.ts) to be listening — typically another ~1–2s post-wake.</li>
+  <li><b>welld forwards the WS upgrade</b> through to site/server.ts. From your terminal's perspective: "Connecting…" for ~3s, then the bridge_ready frame arrives.</li>
+  <li><b>You send the prompt.</b> Same WS, same site server, same supervisor, same adapter → same harness response path Slack uses.</li>
+  <li><b>You exit talk.</b> WS closes. Welld's idle timer starts. ~60s later the cell hibernates again.</li>
+</ol>
+
+<div class="icon-note remember">
+  <div class="badge">🧵</div>
+  <span class="nlbl">Remember</span>
+  <p>This is not a new mechanism. The DO has been doing exactly this for every Slack message, with the same ~3s cold-start cost. Talk would behave identically because welld doesn't care who's connecting.</p>
+</div>
+
+<div class="icon-note tech">
+  <div class="badge">🤓</div>
+  <span class="nlbl">Technical Stuff</span>
+  <p><strong>The local shortcut:</strong> <code>cells.ts</code> already knows about <code>ws://127.0.0.1:7878/agent</code> as a Mac-local path (<code>cli/cells.ts:4307</code>). Talk uses that — skipping CF round-trips entirely — while still going through welld's normal accept-and-wake logic. Slack uses the public <code>wss://&lt;well&gt;.cells.md/agent</code> path because the Slack Worker lives in Cloudflare. Both arrive at the same welld dispatcher.</p>
+</div>
+
+<h3>Chapter 22: Keeping "Talk Stays Scratch" When There's Only One Process</h3>
+
+<p>
+  Phase 1's safety net was process isolation — talk's harness was a different
+  process from Slack's harness, in different cwd, with different session paths.
+  Collapse them and we need a different mechanism to keep talk's traffic out of
+  main.
+</p>
+
+<p>Cleanest fix: <strong>session routing on the WS upgrade</strong>.</p>
+
+<pre>
+ws://127.0.0.1:7878/agent              ← Slack/email/DO use this → main session
+ws://127.0.0.1:7878/agent?session=scratch  ← talk uses this    → scratch session
+</pre>
+
+<p>
+  Site/server.ts inspects the query string on upgrade. Each session-id maps to its
+  own pinned conversation:
+</p>
+
+<table>
+  <thead>
+    <tr>
+      <th>session=</th>
+      <th>pi <code>--session-dir</code></th>
+      <th>claude resume id</th>
+      <th>codex resume thread</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>main (default)</td>
+      <td><code>root-&lt;name&gt;/</code></td>
+      <td><code>cat /root/.cell/claude-main-session</code></td>
+      <td><code>cat /root/.cell/codex-main-thread</code></td>
+    </tr>
+    <tr>
+      <td>scratch</td>
+      <td><code>talk-&lt;name&gt;/</code></td>
+      <td><code>cat /root/.cell/claude-talk-session</code></td>
+      <td><code>cat /root/.cell/codex-talk-thread</code></td>
+    </tr>
+  </tbody>
+</table>
+
+<p>
+  For pi (persistent process), the supervisor runs ONE pi per session — so on first
+  ?session=scratch connect, it spawns a second pi process bound to <code>talk-&lt;name&gt;/</code>.
+  Two long-running pi processes per cell. Acceptable: pi's RAM cost is low, and the
+  scratch process can hibernate-out if idle for a while (~5 min) — site/server.ts
+  shuts it down and re-spawns on the next scratch WS.
+</p>
+
+<p>
+  For claude-code: same pattern — one persistent <code>claude --print</code> per session.
+</p>
+
+<p>
+  For codex: it's already per-turn — each prompt spawns a fresh process anyway. The
+  session= param just picks which thread id to resume. Zero structural change.
+</p>
+
+<h3>Chapter 23: The Bonus — Live Mirror, For Free</h3>
+
+<p>
+  Today (and after Phase 1): if you're in <code>cells tui</code> while a Slack message
+  arrives, you don't see it stream in. You see it after the next TUI restart re-reads
+  the JSONL file from disk.
+</p>
+
+<p>
+  After Phase 2's collapse: TUI could optionally attach as a WS client to the cell's
+  <code>/agent</code> endpoint (same as talk and Slack). One harness process, multiple
+  WS clients all receiving the same event stream live. Slack reply streams visibly
+  in TUI as it happens; TUI input streams visibly into Slack as you type.
+</p>
+
+<div class="icon-note tip">
+  <div class="badge">💡</div>
+  <span class="nlbl">Tip</span>
+  <p>Live mirror is genuinely a free outcome of the collapse — you don't need to add anything to get it. The hard part was always "two processes can't share in-memory state." Collapse to one process and the problem evaporates.</p>
+</div>
+
+<h3>Chapter 24: Why We Defer</h3>
+
+<p>Phase 1 alone gives Pete what he asked for: Slack works on claude-code and codex; main thread shared between Slack and TUI's default open. The collapse is incremental upside, not table stakes.</p>
+
+<p>Deferring Phase 2 has concrete benefits:</p>
+
+<ul class="plain">
+  <li><strong>Smaller blast radius for the v1 ship.</strong> Phase 1 changes site/server.ts; Phase 2 changes host-bridge and adds welld query-string routing. One PR per shift, debug them separately.</li>
+  <li><strong>Phase 2 needs welld cooperation.</strong> Routing <code>?session=scratch</code> through cloudflared → cells proxy → welld → cell may or may not preserve the query string. We need to verify (or accept it as a Mac-local-only path).</li>
+  <li><strong>The ergonomics of "is talk live-mirrored?" need a few days of use to surface.</strong> Maybe you LIKE that talk is scratch and don't want it visible in TUI either. Phase 2 surfaces that tradeoff in production.</li>
+</ul>
+
+<p>So: ship Phase 1, live with it for a week, then revisit Phase 2 with real usage informing the design.</p>
+
+<!-- ============ CLOSE ============ -->
+<h2 id="close">Where to Go From Here</h2>
+
+<p><strong>Resolved by the design review (2026-05-16):</strong></p>
+<ul class="plain">
+  <li><strong>Adapter home:</strong> <code>dna/cells/base/lib/harness-adapters.ts</code>. DNA is its natural place; host-bridge imports from there.</li>
+  <li><strong>Session/thread id capture:</strong> birth time, in <code>bake-egg.sh</code>. Runtime supervisor only ever resumes — no capture branch.</li>
+  <li><strong>Pi session paths:</strong> keep <code>root-&lt;name&gt;</code> as canonical (no rename). TUI's <code>/tui</code> subdir is dropped. Talk renames to <code>talk-&lt;name&gt;/</code>.</li>
+  <li><strong>Eval scope:</strong> keep eval-birth's <code>--talk-verify</code> (proves adapter works for every harness); Slack delivery proven via manual smoke. Don't conflate.</li>
+  <li><strong>Live mirror:</strong> deferred to Phase 2 (Part VII). Falls out naturally from collapsing host-bridge.</li>
+</ul>
+
+<p><strong>Open questions still on the table:</strong></p>
+<ul class="plain">
+  <li><strong>Codex TUI ↔ main mirror</strong>. Accept v1's weaker guarantee (TUI shows the most-recent codex session, may or may not be main), or build a thin wrapper that forces it? Defer.</li>
+  <li><strong>Phase 2's welld query-string routing</strong>. Will <code>?session=scratch</code> survive the cloudflared → cells proxy → welld → guest hop? Test in isolation before committing to the design. Mac-local talk works regardless; only public-WS routing is at risk.</li>
+</ul>
+
+<p><strong>Follow-ups that fall out naturally:</strong></p>
+<ul class="plain">
+  <li><strong>Email + threading</strong>. The DO already speaks "from-email" payloads, which the harness sees as <code>from-email from=… text=…</code>. Today the response goes back to the original sender's email; threading is automatic. No change needed but worth eyeballing during Phase C.</li>
+  <li><strong>Other channels</strong> (Discord? SMS? Telegram?). The same adapter pattern makes any new channel a Worker concern, not a per-harness concern. Bind a channel → DO frames the inbound as <code>{type:"prompt",message}</code> → adapter handles it.</li>
+</ul>
+
+<div class="icon-note remember">
+  <div class="badge">🧵</div>
+  <span class="nlbl">Remember</span>
+  <p>The dream is: a cell is "the agent that lives at <code>bob1.cells.md</code> and answers in <code>#cells-bob1</code> and at <code>bob1@cells.md</code>." The harness is plumbing. Anything that makes the harness less visible to the user is progress.</p>
+</div>
+
+<div class="endnote">
+  Drafted by the channels-on-every-harness design session, 2026-05-16. Sibling docs: <a href="cell-web-presence.html">cell-web-presence.html</a>, <a href="claude-code-harness.html">claude-code-harness.html</a>, <a href="codex-harness.html">codex-harness.html</a>. Builds on commit <code>65b315b</code> (Slack→cell bridge fix).
+</div>
+
+</div>
+</body>
+</html>

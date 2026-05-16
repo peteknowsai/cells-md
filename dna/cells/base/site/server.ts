@@ -32,6 +32,7 @@ import { type Subprocess, spawn } from "bun";
 import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, watch } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
+import { getAdapter, type AdapterHost, type HarnessAdapter } from "../lib/harness-adapters";
 
 const PORT = Number(process.env.PORT ?? 8080);
 const NAME = process.env.CELL_NAME ?? "unknown";
@@ -42,11 +43,33 @@ const HOME = process.env.HOME ?? "/home/well";
 // 192.168.64.1; welld serves cooperation endpoints on :7879.
 const HOST_WELL = process.env.HOST_WELL_URL ?? "http://host.well:7879";
 
-// Stable per-cell session file. We pin pi to this on every spawn so
-// conversations survive pi restarts.
+// Harness baked at birth — pi | claude-code | codex. Read from status.json
+// (bake-egg writes it). Defaults to pi for safety.
+function readHarness(): string {
+  try {
+    const j = JSON.parse(readFileSync(`${HOME}/.pi/status.json`, "utf8"));
+    return typeof j?.harness === "string" ? j.harness : "pi";
+  } catch { return "pi"; }
+}
+const HARNESS = readHarness();
+const ADAPTER: HarnessAdapter = getAdapter(HARNESS);
+
+// Stable per-cell session file (pi). Pin pi to this on every spawn so
+// conversations survive pi restarts. claude/codex use their own birth-time
+// cached ids (see CLAUDE_MAIN_ID / CODEX_MAIN_THREAD below).
 const SESSION_DIR = `${HOME}/.pi/agent/sessions/root-${NAME}`;
 const SESSION_FILE = `${SESSION_DIR}/main.jsonl`;
 mkdirSync(SESSION_DIR, { recursive: true });
+
+// claude-code / codex resume ids captured at birth (bake-egg.sh). Empty
+// string if missing — the harness will start a fresh session on spawn and
+// the supervisor logs a warning. Phase B birth always seeds these; existing
+// pre-fix cells get a one-time manual warm-up before upgrade.
+function readIdCache(path: string): string {
+  try { return readFileSync(path, "utf8").trim(); } catch { return ""; }
+}
+const CLAUDE_MAIN_ID = HARNESS === "claude-code" ? readIdCache("/root/.cell/claude-main-session") : "";
+const CODEX_MAIN_THREAD = HARNESS === "codex" ? readIdCache("/root/.cell/codex-main-thread") : "";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const PUBLIC_DIR = join(HERE, "public");
@@ -157,25 +180,43 @@ function serveStatic(pathname: string): Response | null {
 }
 
 // ---------------------------------------------------------------------------
-// pi RPC subprocess supervisor
+// Harness supervisor — adapter-driven (pi, claude-code, codex)
 // ---------------------------------------------------------------------------
+//
+// The supervisor owns process lifecycle (spawn / respawn / per-turn spawn)
+// and the cell-side spawn argv. Translation in both directions lives in the
+// adapter (dna/cells/base/lib/harness-adapters.ts), so the cell Worker DO
+// upstream sees only the pi event vocabulary — the harness flavour is
+// invisible to anything past the supervisor.
 
-let pi: Subprocess<"pipe", "pipe", "pipe"> | null = null;
-let piStdoutBuffer = "";
-let piRespawnTimer: Timer | null = null;
-// Pi setup race: spawnPi() returns immediately, but switch_session +
-// set_model + set_thinking_level are delayed via setTimeout(750). If a
-// client `prompt` arrives during that window, sendToPi succeeds (pi's
-// stdin is open) but pi has no session pinned yet → the prompt is
-// processed against the default/transient session and the response is
-// effectively lost from the user's perspective. Track readiness; queue
-// pre-ready prompts and flush after setup completes.
-let piReady = false;
+// Persistent-harness state (pi, claude-code). null for per-turn (codex).
+let harnessProc: Subprocess<"pipe", "pipe", "pipe"> | null = null;
+let harnessStdoutBuffer = "";
+let harnessRespawnTimer: Timer | null = null;
+// Race-tolerance: spawnHarness() returns immediately, but pi's setup +
+// claude's first system/init take a few hundred ms. A `prompt` arriving in
+// that window can land before the harness is steerable. Track readiness;
+// queue pre-ready prompts and flush after the adapter flips ready.
+let harnessReady = false;
 const pendingPrompts: object[] = [];
-// Id of the bridge-issued switch_session we're waiting for pi to ack
-// before flushing pendingPrompts. null when no ack outstanding.
-let awaitingSwitchAck: string | null = null;
-const PI_RESPAWN_DELAY_MS = 1000;
+const HARNESS_RESPAWN_DELAY_MS = 1000;
+
+// Per-turn harness state (codex). turnInFlight gates one process at a time;
+// concurrent prompts queue and drain in order.
+let turnProc: Subprocess<"ignore", "pipe", "pipe"> | null = null;
+let turnInFlight = false;
+const pendingTurns: string[] = [];
+
+// AdapterHost shim — adapters read/write codexThreadId + awaitingSwitchAck
+// here, and call writeLine/log/err/onPiSetupAcked on us.
+const hostState: AdapterHost = {
+  codexThreadId: HARNESS === "codex" ? (CODEX_MAIN_THREAD || null) : null,
+  awaitingSwitchAck: null,
+  writeLine: (line) => writeToHarness(line),
+  log: (msg) => console.log(`[bridge] ${msg}`),
+  err: (msg) => console.error(`[bridge] ${msg}`),
+  onPiSetupAcked: () => onHarnessReady(),
+};
 
 // Active WebSocket clients (typically 0 or 1 — the cell Worker DO).
 type WsClient = { ws: any /* ServerWebSocket */ };
@@ -255,61 +296,59 @@ function broadcastToClients(line: string) {
   }
 }
 
-function onPiStdoutChunk(chunk: string) {
-  piStdoutBuffer += chunk;
-  const lines = piStdoutBuffer.split("\n");
-  piStdoutBuffer = lines.pop() ?? "";
+// One translated pi-shaped event line — broadcast to WS clients and sniff
+// for agent_end → idle lifecycle. agent_start is pi-only (passthrough); the
+// busy signal fires at WS-prompt-receive time for uniform coverage across
+// all three harnesses.
+function onTranslatedLine(line: string) {
+  broadcastToClients(line);
+  try {
+    const evt = JSON.parse(line);
+    if (evt?.type === "agent_end") {
+      void signalLifecycle("idle");
+      scheduleSleepAfterGrace();
+    } else if (evt?.type === "agent_start") {
+      cancelPendingSleep();
+      void signalLifecycle("busy");
+    }
+  } catch { /* not JSON — already broadcast */ }
+}
+
+// One raw harness stdout line → adapter → broadcast each resulting line.
+function onHarnessRawLine(line: string) {
+  const { lines, ready } = ADAPTER.translateOutbound(hostState, line);
+  for (const out of lines) onTranslatedLine(out);
+  if (ready && !harnessReady) onHarnessReady();
+}
+
+function onHarnessStdoutChunk(chunk: string) {
+  harnessStdoutBuffer += chunk;
+  const lines = harnessStdoutBuffer.split("\n");
+  harnessStdoutBuffer = lines.pop() ?? "";
   for (const line of lines) {
     const trimmed = line.replace(/\r$/, "");
     if (!trimmed.trim()) continue;
-    broadcastToClients(trimmed);
-
-    // Sniff for lifecycle events. Pi emits agent_start at the top of a turn
-    // and agent_end after the final stream chunk has flushed.
-    //   agent_start → cancel any pending sleep, signal busy
-    //   agent_end   → signal idle, schedule explicit sleep after grace
-    //   response (command=switch_session, our id) → run setup-acked hook
-    try {
-      const evt = JSON.parse(trimmed);
-      if (evt?.type === "agent_start") {
-        cancelPendingSleep();
-        void signalLifecycle("busy");
-      } else if (evt?.type === "agent_end") {
-        void signalLifecycle("idle");
-        scheduleSleepAfterGrace();
-      } else if (
-        evt?.type === "response" &&
-        evt?.command === "switch_session" &&
-        awaitingSwitchAck !== null &&
-        evt?.id === awaitingSwitchAck
-      ) {
-        console.log(`[bridge] switch_session acked`);
-        awaitingSwitchAck = null;
-        onPiSetupAcked();
-      }
-    } catch {
-      // not JSON or partial — broadcast already happened, lifecycle skipped
-    }
+    onHarnessRawLine(trimmed);
   }
 }
 
-async function pumpPiStream(stream: ReadableStream<Uint8Array>) {
+async function pumpHarnessStream(stream: ReadableStream<Uint8Array>) {
   const reader = stream.getReader();
   const decoder = new TextDecoder();
   try {
     while (true) {
       const { done, value } = await reader.read();
       if (done) return;
-      onPiStdoutChunk(decoder.decode(value, { stream: true }));
+      onHarnessStdoutChunk(decoder.decode(value, { stream: true }));
     }
   } catch (e) {
-    console.error(`[bridge] pi stdout reader error: ${String(e).slice(0, 200)}`);
+    console.error(`[bridge] harness stdout reader error: ${String(e).slice(0, 200)}`);
   } finally {
     reader.releaseLock();
   }
 }
 
-async function pumpPiStderr(stream: ReadableStream<Uint8Array>) {
+async function pumpHarnessStderr(stream: ReadableStream<Uint8Array>) {
   const reader = stream.getReader();
   const decoder = new TextDecoder();
   let buf = "";
@@ -321,104 +360,192 @@ async function pumpPiStderr(stream: ReadableStream<Uint8Array>) {
       const lines = buf.split("\n");
       buf = lines.pop() ?? "";
       for (const line of lines) {
-        if (line.trim()) console.error(`[pi-err] ${line}`);
+        if (line.trim()) console.error(`[${HARNESS}-err] ${line}`);
       }
     }
   } catch (e) {
-    console.error(`[bridge] pi stderr reader error: ${String(e).slice(0, 200)}`);
+    console.error(`[bridge] harness stderr reader error: ${String(e).slice(0, 200)}`);
   } finally {
     reader.releaseLock();
   }
 }
 
-function sendToPi(cmd: object): boolean {
-  if (!pi || pi.stdin == null) return false;
+// Write one already-serialized line to the persistent harness's stdin.
+// Bun's FileSink buffers writes; explicit flush keeps rapid back-to-back
+// setup commands from arriving as one chunk pi's RPC dispatcher fumbles.
+function writeToHarness(line: string): boolean {
+  if (!harnessProc || harnessProc.stdin == null) return false;
   try {
-    const sink = pi.stdin as any;
-    sink.write(JSON.stringify(cmd) + "\n");
-    // Force flush — Bun's FileSink buffers writes; without explicit flush,
-    // rapid back-to-back writes during setup can accumulate and arrive at
-    // pi in a single chunk that pi's RPC dispatcher fails to parse cleanly.
+    const sink = harnessProc.stdin as any;
+    sink.write(line + "\n");
     if (typeof sink.flush === "function") sink.flush();
     return true;
   } catch (e) {
-    console.error(`[bridge] pi stdin write failed: ${String(e).slice(0, 200)}`);
+    console.error(`[bridge] harness stdin write failed: ${String(e).slice(0, 200)}`);
     return false;
   }
 }
 
-function spawnPi() {
-  if (pi) return;
-  console.log(`[bridge] spawning pi --mode rpc`);
-  piStdoutBuffer = "";
-  pi = spawn(["pi", "--mode", "rpc", "--session-dir", SESSION_DIR], {
+// Build cell-side spawn argv + env for the persistent harnesses. Returns
+// null for codex (per-turn — runTurn() spawns one process per prompt).
+function persistentSpawnArgs(): { cmd: string[]; env: Record<string, string> } | null {
+  // HOME=/root: harnesses look for config under HOME (.pi/, .claude/, .codex/).
+  // PATH: process.env already carries /etc/profile.d/cells-env.sh additions.
+  const baseEnv = { ...process.env, HOME: "/root" } as Record<string, string>;
+  if (HARNESS === "pi") {
+    return {
+      cmd: ["pi", "--mode", "rpc", "--session-dir", SESSION_DIR],
+      env: baseEnv,
+    };
+  }
+  if (HARNESS === "claude-code") {
+    // --print + stream-json in/out keeps claude as a persistent multi-turn
+    // process driven over stdin/stdout, the same shape host-bridge gives pi.
+    // --resume pins to the birth-time main session id so every cell restart
+    // continues the same conversation. IS_SANDBOX=1 satisfies claude's root +
+    // bypassPermissions guard (the VM is the isolation boundary).
+    const argv = [
+      "claude", "--print",
+      "--input-format", "stream-json",
+      "--output-format", "stream-json",
+      "--verbose",
+      "--include-partial-messages",
+      "--permission-mode", "bypassPermissions",
+    ];
+    if (CLAUDE_MAIN_ID) {
+      argv.push("--resume", CLAUDE_MAIN_ID);
+    } else {
+      console.error(`[bridge] claude-main-session cache missing — running without --resume; first turn creates a fresh session, conversation won't survive restarts`);
+    }
+    return {
+      cmd: argv,
+      env: { ...baseEnv, IS_SANDBOX: "1" },
+    };
+  }
+  return null;
+}
+
+function spawnHarness() {
+  if (harnessProc) return;
+  if (ADAPTER.mode === "per-turn") {
+    // No persistent process to spawn. Mark ready so prompts flow into runTurn().
+    harnessReady = true;
+    for (const c of wsClients) {
+      try { c.ws.send(JSON.stringify({ type: "bridge_ready" })); } catch {}
+    }
+    if (HARNESS === "codex" && !CODEX_MAIN_THREAD) {
+      console.error(`[bridge] codex-main-thread cache missing — first turn creates a fresh thread, conversation won't survive restarts`);
+    } else if (HARNESS === "codex") {
+      console.log(`[bridge] codex per-turn ready (resuming thread ${CODEX_MAIN_THREAD.slice(0, 8)})`);
+    }
+    return;
+  }
+  const args = persistentSpawnArgs();
+  if (!args) {
+    console.error(`[bridge] no spawn args for harness=${HARNESS}`);
+    return;
+  }
+  console.log(`[bridge] spawning ${HARNESS}`);
+  harnessStdoutBuffer = "";
+  harnessReady = false;
+  harnessProc = spawn(args.cmd, {
     cwd: "/root",
     stdin: "pipe",
     stdout: "pipe",
     stderr: "pipe",
-    env: { ...process.env },
+    env: args.env,
   });
 
-  void pumpPiStream(pi.stdout!);
-  void pumpPiStderr(pi.stderr!);
+  void pumpHarnessStream(harnessProc.stdout!);
+  void pumpHarnessStderr(harnessProc.stderr!);
 
-  void pi.exited.then((code) => {
-    console.error(`[bridge] pi exited code=${code}; respawning in ${PI_RESPAWN_DELAY_MS}ms`);
-    pi = null;
-    // If pi died mid-turn welld would otherwise wait forever for agent_end.
-    // Force-clear the busy state so the well is hibernate-eligible.
+  void harnessProc.exited.then((code) => {
+    console.error(`[bridge] ${HARNESS} exited code=${code}; respawning in ${HARNESS_RESPAWN_DELAY_MS}ms`);
+    harnessProc = null;
+    // If the harness died mid-turn welld would otherwise wait forever for
+    // agent_end. Force-clear busy so the well is hibernate-eligible.
     void signalLifecycle("idle");
-    piRespawnTimer = setTimeout(() => {
-      piRespawnTimer = null;
-      spawnPi();
-    }, PI_RESPAWN_DELAY_MS);
+    harnessRespawnTimer = setTimeout(() => {
+      harnessRespawnTimer = null;
+      spawnHarness();
+    }, HARNESS_RESPAWN_DELAY_MS);
   });
 
-  // Pin to the stable per-cell session file. switch_session is best-effort —
-  // if the file doesn't exist yet, pi creates it; if it does, pi resumes.
-  // After switching, re-apply settings.json defaults — the session file may
-  // have been created under a different model/thinking level, and pi sticks
-  // with whatever is recorded in it unless we override per-session.
-  //
-  // Setup race: pi's rpc dispatcher takes a few hundred ms to come fully
-  // online after spawn. We tag switch_session with an id and wait for pi
-  // to ACK it via stdout before sending further commands or flushing
-  // queued prompts. Prior version used a blind setTimeout which was
-  // racy — observed: switch_session/set_model/set_thinking_level landed
-  // fine but immediately-flushed prompts were silently dropped (no user
-  // entry in pi's session jsonl). Waiting on the ACK is deterministic.
-  const SWITCH_ID = `bridge-init-${Date.now()}`;
-  awaitingSwitchAck = SWITCH_ID;
-  setTimeout(() => {
-    if (!sendToPi({ id: SWITCH_ID, type: "switch_session", sessionPath: SESSION_FILE })) {
-      console.error(`[bridge] could not send initial switch_session`);
-      return;
-    }
-    console.log(`[bridge] pinned pi to ${SESSION_FILE} (awaiting ack)`);
-  }, 250);
+  // Harness-specific ready handshake (pi sends switch_session; claude-code
+  // flips ready immediately — it has no pre-input ready event). ~250ms
+  // after spawn so the pipe is live.
+  if (ADAPTER.startHandshake) {
+    setTimeout(() => ADAPTER.startHandshake!(hostState, SESSION_DIR), 250);
+  }
 }
 
-// Called from onPiStdoutChunk when pi acks switch_session for our bridge-init
-// id. Sends set_model + set_thinking_level, flushes queued prompts, signals
-// bridge_ready to all ws clients.
-function onPiSetupAcked() {
-  try {
-    const settings = JSON.parse(readFileSync(`${HOME}/.pi/settings.json`, "utf8"));
-    if (settings.defaultProvider && settings.defaultModel) {
-      sendToPi({ type: "set_model", provider: settings.defaultProvider, modelId: settings.defaultModel });
-      console.log(`[bridge] set_model ${settings.defaultProvider}/${settings.defaultModel}`);
+// Per-turn-harness driver (codex). One process per prompt; subsequent
+// prompts queue and drain in order via the exited handler.
+function runTurn(prompt: string) {
+  if (turnInFlight) { pendingTurns.push(prompt); return; }
+  turnInFlight = true;
+  // codex exec [resume <id>] --json --skip-git-repo-check --dangerously-... <prompt>
+  const argv = ["codex", "exec"];
+  if (hostState.codexThreadId) argv.push("resume", hostState.codexThreadId);
+  argv.push("--json", "--skip-git-repo-check", "--dangerously-bypass-approvals-and-sandbox", prompt);
+  const label = hostState.codexThreadId ? `resume ${hostState.codexThreadId.slice(0, 8)}` : "new thread";
+  console.log(`[bridge] spawning codex turn (${label})`);
+  turnProc = spawn(argv, {
+    cwd: "/root",
+    stdin: "ignore",
+    stdout: "pipe",
+    stderr: "pipe",
+    env: { ...process.env, HOME: "/root" },
+  });
+  void pumpHarnessStream(turnProc.stdout!);
+  void pumpHarnessStderr(turnProc.stderr!);
+  void turnProc.exited.then((code) => {
+    console.log(`[bridge] codex turn exited code=${code}`);
+    turnProc = null;
+    turnInFlight = false;
+    // `codex exec` exits 0 even on turn.failed (the failure rides the event
+    // stream). Non-zero is an ssh/spawn failure — surface so the client isn't
+    // left hanging on a turn that never reported back.
+    if (code !== 0) {
+      broadcastToClients(JSON.stringify({ type: "response", success: false, error: `codex turn process exited ${code}` }));
     }
-    if (settings.defaultThinkingLevel) {
-      sendToPi({ type: "set_thinking_level", level: settings.defaultThinkingLevel });
-      console.log(`[bridge] set_thinking_level ${settings.defaultThinkingLevel}`);
+    const next = pendingTurns.shift();
+    if (next !== undefined) runTurn(next);
+  });
+}
+
+// Called when the adapter flips ready (pi: switch_session ack; claude-code:
+// immediately on spawn; codex: never via this path — runTurn-based). Re-apply
+// pi-only settings, flush queued prompts, fire bridge_ready to all clients.
+function onHarnessReady() {
+  if (HARNESS === "pi") {
+    try {
+      const settings = JSON.parse(readFileSync(`${HOME}/.pi/settings.json`, "utf8"));
+      if (settings.defaultProvider && settings.defaultModel) {
+        writeToHarness(JSON.stringify({ type: "set_model", provider: settings.defaultProvider, modelId: settings.defaultModel }));
+        console.log(`[bridge] set_model ${settings.defaultProvider}/${settings.defaultModel}`);
+      }
+      if (settings.defaultThinkingLevel) {
+        writeToHarness(JSON.stringify({ type: "set_thinking_level", level: settings.defaultThinkingLevel }));
+        console.log(`[bridge] set_thinking_level ${settings.defaultThinkingLevel}`);
+      }
+    } catch (e) {
+      console.error(`[bridge] failed to apply pi settings: ${String(e).slice(0, 200)}`);
     }
-  } catch (e) {
-    console.error(`[bridge] failed to apply settings: ${String(e).slice(0, 200)}`);
   }
-  piReady = true;
+  harnessReady = true;
   if (pendingPrompts.length > 0) {
     console.log(`[bridge] flushing ${pendingPrompts.length} pending prompt(s)`);
-    for (const cmd of pendingPrompts) sendToPi(cmd);
+    for (const cmd of pendingPrompts) {
+      if (ADAPTER.mode === "per-turn") {
+        if ((cmd as any)?.type === "prompt" && typeof (cmd as any).message === "string") {
+          runTurn((cmd as any).message);
+        }
+      } else {
+        const translated = ADAPTER.translateInbound?.(cmd);
+        if (translated !== null && translated !== undefined) writeToHarness(translated);
+      }
+    }
     pendingPrompts.length = 0;
   }
   for (const c of wsClients) {
@@ -597,11 +724,11 @@ const server = Bun.serve({
       (ws as any).__client = client;
       wsClients.add(client);
       console.log(`[bridge] ws client connected (total=${wsClients.size})`);
-      // Greet so client knows we're alive. If pi is already fully
-      // configured (post-warm-cell, late client connect), send
-      // bridge_ready immediately so the client doesn't wait.
-      try { ws.send(JSON.stringify({ type: "bridge_hello", cell: NAME })); } catch {}
-      if (piReady) {
+      // Greet so client knows we're alive. If the harness is already ready
+      // (post-warm-cell, late client connect), send bridge_ready immediately
+      // so the client doesn't wait.
+      try { ws.send(JSON.stringify({ type: "bridge_hello", cell: NAME, harness: HARNESS })); } catch {}
+      if (harnessReady) {
         try { ws.send(JSON.stringify({ type: "bridge_ready" })); } catch {}
       }
     },
@@ -614,30 +741,48 @@ const server = Bun.serve({
         try { cmd = JSON.parse(line); }
         catch (e) { console.error(`[bridge] bad ws json: ${String(e).slice(0, 120)}`); continue; }
 
-        // Bridge-level commands (don't forward to pi)
+        // Bridge-level commands (don't forward to the harness)
         if (cmd?.type === "ping") {
           try { ws.send(JSON.stringify({ type: "pong" })); } catch {}
           continue;
         }
 
-        // Buffer prompts that arrive before pi is fully configured. The
-        // setTimeout(750) in spawnPi() that does switch_session +
-        // set_model + set_thinking_level is a race window — if a prompt
-        // hits pi.stdin before switch_session, pi processes it against
-        // a default/transient session and the user sees nothing back.
-        if (!piReady && cmd?.type === "prompt") {
-          console.log(`[bridge] queuing prompt (pi not ready yet)`);
+        // Signal busy at prompt-receive time — uniform across harnesses. pi
+        // also emits agent_start through passthrough (no-op duplicate); claude
+        // and codex don't have an analogue, so this is their only busy signal.
+        if (cmd?.type === "prompt") {
+          cancelPendingSleep();
+          void signalLifecycle("busy");
+        }
+
+        // Buffer prompts that arrive before the harness is fully ready (pi
+        // setup race; claude's first-output delay). Without this, a prompt
+        // can hit a half-configured process and the response is silently lost.
+        if (!harnessReady && cmd?.type === "prompt") {
+          console.log(`[bridge] queuing prompt (harness not ready yet)`);
           pendingPrompts.push(cmd);
-          // Echo a response so client knows the prompt was accepted.
           try {
             ws.send(JSON.stringify({ type: "response", id: cmd.id, command: "prompt", success: true }));
           } catch {}
           continue;
         }
 
-        // Forward everything else to pi as-is. The DO speaks pi's RPC dialect.
-        if (!sendToPi(cmd)) {
-          console.error(`[bridge] pi not running, dropping cmd ${cmd?.type}`);
+        // Per-turn (codex): every prompt spawns a fresh `codex exec`. Pi-only
+        // commands (abort, set_model, …) have no per-turn equivalent — drop.
+        if (ADAPTER.mode === "per-turn") {
+          if (cmd?.type === "prompt" && typeof cmd.message === "string") {
+            runTurn(cmd.message);
+          }
+          continue;
+        }
+
+        // Persistent: translate inbound to the harness's wire format and
+        // write to its stdin. translateInbound returns null for commands
+        // the harness can't handle (e.g. abort on claude-code) — drop them.
+        const translated = ADAPTER.translateInbound?.(cmd);
+        if (translated === null || translated === undefined) continue;
+        if (!writeToHarness(translated)) {
+          console.error(`[bridge] harness not running, dropping cmd ${cmd?.type}`);
         }
       }
     },
@@ -649,6 +794,6 @@ const server = Bun.serve({
   },
 });
 
-console.log(`${NAME} site listening on :${server.port}`);
-spawnPi();
+console.log(`${NAME} site listening on :${server.port} (harness=${HARNESS})`);
+spawnHarness();
 startSitePublishing();

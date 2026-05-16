@@ -1317,20 +1317,29 @@ async function cmdTui(name: string, extra: string[] = []) {
   let mkdir = "";
   let agentInvocation: string;
   if (harness === "claude-code") {
-    // claude-code's own TUI: bare `claude` (no --print). It keys session
-    // history off cwd under ~/.claude/projects/, so `cd /root` isolates
-    // this cell's TUI history naturally — no --session-dir needed. extra
-    // args pass straight through as claude's own flags (e.g. --continue).
-    agentInvocation = extra.length ? `claude ${extra.map(quote).join(" ")}` : "claude";
+    // claude-code's own TUI. --resume pins to the birth-time main session id
+    // so TUI lands in the Slack/email main conversation by default. The user
+    // can run `claude --resume` (no id) from inside to pick another session.
+    // If extra args were passed, the user's calling the shots — honor them
+    // verbatim. Otherwise default to --resume <main>; if the cache file is
+    // missing (pre-fix cells until upgraded), fall back to bare claude.
+    if (extra.length) {
+      agentInvocation = `claude ${extra.map(quote).join(" ")}`;
+    } else {
+      agentInvocation = `if [ -s /root/.cell/claude-main-session ]; then claude --resume "$(cat /root/.cell/claude-main-session)"; else claude; fi`;
+    }
   } else if (harness === "codex") {
     // codex's own TUI: bare `codex` (no subcommand → the interactive CLI).
-    // CODEX_HOME keys off HOME=/root → /root/.codex/, so session history is
-    // isolated per cell. extra args pass through as codex's own flags.
+    // Codex interactive doesn't take a thread-id flag at startup, so we
+    // can't pin it to the Slack main thread the way claude does — TUI lands
+    // in codex's own picker. Caveat documented in the design doc Chapter 9.
     agentInvocation = extra.length ? `codex ${extra.map(quote).join(" ")}` : "codex";
   } else {
-    // pi's TUI. --session-dir keeps the TUI conversation isolated from the
-    // bridge's main.jsonl; pass `-c` to continue the latest, `-r` to pick.
-    const sessionDir = `~/.pi/agent/sessions/root-${name}/tui`;
+    // pi's TUI. Point at the canonical session dir (root-<name>/) — pi
+    // auto-loads main.jsonl by default, so TUI lands in the same thread
+    // Slack/email drive. The user runs `pi -r` inside to pick a side
+    // conversation. extra args pass through (e.g. `-c`, `-r`, `--session=`).
+    const sessionDir = `~/.pi/agent/sessions/root-${name}`;
     mkdir = `mkdir -p ${sessionDir} && `;
     agentInvocation = `pi ${["--session-dir", sessionDir, ...extra].map(quote).join(" ")}`;
   }
