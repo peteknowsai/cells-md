@@ -1329,11 +1329,17 @@ async function cmdTui(name: string, extra: string[] = []) {
       agentInvocation = `if [ -s /root/.cell/claude-main-session ]; then claude --resume "$(cat /root/.cell/claude-main-session)"; else claude; fi`;
     }
   } else if (harness === "codex") {
-    // codex's own TUI: bare `codex` (no subcommand → the interactive CLI).
-    // Codex interactive doesn't take a thread-id flag at startup, so we
-    // can't pin it to the Slack main thread the way claude does — TUI lands
-    // in codex's own picker. Caveat documented in the design doc Chapter 9.
-    agentInvocation = extra.length ? `codex ${extra.map(quote).join(" ")}` : "codex";
+    // codex's TUI lands in the Slack main thread via `codex resume <id>` —
+    // codex's session_id and thread_id are the same UUID, stored at birth in
+    // /root/.cell/codex-main-thread. User can run `codex resume` (no id)
+    // from inside to pick another session, or `codex resume --last` for the
+    // most recent. Falls back to bare codex when the cache is missing
+    // (pre-fix cells).
+    if (extra.length) {
+      agentInvocation = `codex ${extra.map(quote).join(" ")}`;
+    } else {
+      agentInvocation = `if [ -s /root/.cell/codex-main-thread ]; then codex resume "$(cat /root/.cell/codex-main-thread)"; else codex; fi`;
+    }
   } else {
     // pi's TUI. Point at the canonical session dir (root-<name>/) — pi
     // auto-loads main.jsonl by default, so TUI lands in the same thread
