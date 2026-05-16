@@ -3,7 +3,7 @@ import { $ } from "bun";
 import { readFile, writeFile, appendFile, mkdir, unlink, symlink, cp, readdir, stat, rm, rename } from "node:fs/promises";
 import { homedir, tmpdir, userInfo } from "node:os";
 import { dirname, join, basename } from "node:path";
-import { existsSync, statSync, readFileSync, unlinkSync } from "node:fs";
+import { existsSync, statSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import * as readline from "node:readline/promises";
 import { createHash, randomBytes } from "node:crypto";
@@ -894,7 +894,10 @@ async function runPiWithOutcome(
 
 const BIRTH_OUTCOMES_DIR_LOCAL = join(REGISTRY_DIR, "birth-outcomes");
 const BIRTH_LOCK_PATH = join(REGISTRY_DIR, "birth.lock");
-const TALK_OUTCOME_TIMEOUT_MS = 175_000;  // matches mother.lock envelope
+// 10 min — cells-mother adds latency (per-tool bridge round trips) on top
+// of the legacy ~90-140s envelope, especially on early births when she's
+// still mapping her tools.
+const TALK_OUTCOME_TIMEOUT_MS = 600_000;
 
 async function withBirthLock<T>(label: string, fn: () => Promise<T>): Promise<T> {
   // One birth at a time — mirrors mother.lock's serialization invariant
