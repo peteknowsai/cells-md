@@ -1045,10 +1045,27 @@ function humanDate(iso: string): string {
 }
 
 async function readCellModel(name: string): Promise<string | null> {
-  // Prefer the vault IDENTITY.md `model:` line if present (legacy mother-
-  // born cells). V1 cells skip the vault entry and just record modelChain
-  // in cells.json — fall back to the first chain entry, stripping the
-  // ":thinking" suffix for display.
+  // Registry is the source of truth — that's where the modelChain lives,
+  // derived from the cell's actual settings.json at bake time.
+  let reg: Awaited<ReturnType<typeof loadRegistry>> | null = null;
+  try { reg = await loadRegistry(); } catch { /* fall through */ }
+  const cell = reg?.cells.find((c: any) => c.name === name);
+
+  // For specials, ONLY the registry — never the vault. Legacy proto-mother
+  // had a stale Obsidian IDENTITY.md frontmatter that shadowed reality and
+  // made `cells list` lie about what mother was actually running.
+  if (cell?.special) {
+    const chain: string[] | undefined = cell.modelChain;
+    if (chain && chain.length > 0) {
+      const first = chain[0]!;
+      const slash = first.indexOf("/");
+      return slash >= 0 ? first.slice(slash + 1) : first;
+    }
+    return null;
+  }
+
+  // Non-specials: prefer the vault IDENTITY.md `model:` line if present
+  // (legacy mother-born cells), else fall back to the registry chain.
   const p = join(VAULT_DIR, name, "IDENTITY.md");
   if (existsSync(p)) {
     try {
@@ -1057,17 +1074,12 @@ async function readCellModel(name: string): Promise<string | null> {
       if (m) return m[1]!;
     } catch { /* fall through */ }
   }
-  try {
-    const reg = await loadRegistry();
-    const cell = reg.cells.find((c: any) => c.name === name);
-    const chain: string[] | undefined = cell?.modelChain;
-    if (chain && chain.length > 0) {
-      // "openai-codex/gpt-5.5:medium" → "gpt-5.5:medium" for compactness
-      const first = chain[0]!;
-      const slash = first.indexOf("/");
-      return slash >= 0 ? first.slice(slash + 1) : first;
-    }
-  } catch { /* fall through */ }
+  const chain: string[] | undefined = cell?.modelChain;
+  if (chain && chain.length > 0) {
+    const first = chain[0]!;
+    const slash = first.indexOf("/");
+    return slash >= 0 ? first.slice(slash + 1) : first;
+  }
   return null;
 }
 
@@ -2498,9 +2510,12 @@ type SpecialSpec = {
   name: "mother" | "pulse";
   wellName: string;
   harness: "pi";
-  provider: "anthropic" | "openai-codex";
-  model: string;
-  thinking: string;
+  // NOTE: model/provider/thinking are deliberately NOT here. Runtime model
+  // config lives in dna/specials/<name>/.pi/settings.json — single source of
+  // truth. The registry's modelChain is *derived* from that file at bake
+  // time (see readSpecialModelChain + cmdBirthSpecial). Putting them here
+  // too caused real drift: the registry showed claude-opus-4-7 while mother
+  // actually ran on codex.
 };
 
 const SPECIALS: Record<"mother" | "pulse", SpecialSpec> = {
@@ -2508,22 +2523,35 @@ const SPECIALS: Record<"mother" | "pulse", SpecialSpec> = {
     name: "mother",
     wellName: "cells-mother",
     harness: "pi",
-    // Codex by default (Pete's ChatGPT subscription — flat cost); opus
-    // sits below in modelChain for fallback. The DNA settings.json holds
-    // the actual chain; this provider/model are recorded in the registry.
-    provider: "openai-codex",
-    model: "gpt-5.5",
-    thinking: "high",
   },
   pulse: {
     name: "pulse",
     wellName: "cells-pulse",
     harness: "pi",
-    provider: "openai-codex",
-    model: "gpt-5.5",
-    thinking: "low",
   },
 };
+
+// Read the model chain straight out of the special's DNA settings.json.
+// This is the *single source of truth* for what a special is configured to
+// run on. Prefer the full `modelChain` array; fall back to default* fields
+// if the chain isn't explicitly listed.
+async function readSpecialModelChain(name: "mother" | "pulse"): Promise<string[]> {
+  const path = join(SPECIALS_DIR, name, ".pi", "settings.json");
+  const settings = JSON.parse(await readFile(path, "utf-8"));
+  if (Array.isArray(settings.modelChain) && settings.modelChain.length > 0) {
+    return settings.modelChain;
+  }
+  const provider = settings.defaultProvider;
+  const model = settings.defaultModel;
+  const thinking = settings.defaultThinkingLevel ?? "high";
+  if (!provider || !model) {
+    throw new Error(
+      `${name}'s settings.json has no modelChain and no defaultProvider/defaultModel — ` +
+      `can't derive registry modelChain. fix ${path}.`,
+    );
+  }
+  return [`${provider}/${model}:${thinking}`];
+}
 
 // Files in dna/cells/base/ that the base provision lays down at /root and
 // that the specials need to overlay/replace. We wipe these before pushing
@@ -2680,13 +2708,16 @@ echo "name-subst: $(grep -lc __NAME__ AGENTS.md SOUL.md package.json .tmux.conf 
   //    pin step reads where you'd expect it.)
   await setAutoSleep(spec.wellName, null);
 
-  // 9. Register.
+  // 9. Register. Read the model chain from the DNA settings.json — that file
+  //    is the single source of truth for what the special actually runs on.
+  //    (Previously we recorded a parallel hardcoded value here; drift bit us.)
+  const modelChain = await readSpecialModelChain(spec.name);
   reg.cells.push({
     name: spec.name,
     created_at: new Date().toISOString(),
     status: "alive",
     harness: spec.harness,
-    modelChain: [`${spec.provider}/${spec.model}:${spec.thinking}`],
+    modelChain,
     special: true,
     pinned: true,
   });
