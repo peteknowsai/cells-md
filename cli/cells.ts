@@ -192,6 +192,26 @@ const THINKING_OPTIONS = THINKING_OPTIONS_BASE;
 const THINKING_VALUES = [...THINKING_OPTIONS_BASE.map((o) => o.value), "adaptive"];
 const DEFAULT_THINKING = "medium";
 
+// claude-code's effortLevel scale (what the in-cell `/effort` slider shows).
+// Substituted verbatim into .claude/settings.json's `effortLevel` field.
+const THINKING_OPTIONS_CLAUDE_CODE: SelectOption[] = [
+  { value: "auto",   label: "auto",   hint: "(let the model decide)" },
+  { value: "low",    label: "low" },
+  { value: "medium", label: "medium" },
+  { value: "high",   label: "high" },
+  { value: "xhigh",  label: "xhigh" },
+  { value: "max",    label: "max" },
+];
+
+// codex's model_reasoning_effort scale. `xhigh` is codex's value; the
+// codex TUI labels it "Extra high".
+const THINKING_OPTIONS_CODEX: SelectOption[] = [
+  { value: "low",    label: "low" },
+  { value: "medium", label: "medium" },
+  { value: "high",   label: "high" },
+  { value: "xhigh",  label: "extra high" },
+];
+
 // Anthropic models silently disable thinking at sub-high levels — their
 // thinkingLevelMap only contains entries for high/xhigh, so medium maps
 // to "off". Default Claude cells to high so birth doesn't quietly produce
@@ -203,6 +223,28 @@ function defaultThinkingFor(modelKey: ModelKey): string {
 
 function thinkingOptionsFor(modelKey: ModelKey): SelectOption[] {
   return modelKey === "opus" ? [...THINKING_OPTIONS_BASE, ADAPTIVE_OPTION] : THINKING_OPTIONS_BASE;
+}
+
+// Harness-aware picker: claude-code and codex have their own effort scales
+// (different value sets, different labels). pi keeps the per-model picker.
+function thinkingOptionsForHarness(harness: string, modelKey: ModelKey): SelectOption[] {
+  if (harness === "claude-code") return THINKING_OPTIONS_CLAUDE_CODE;
+  if (harness === "codex") return THINKING_OPTIONS_CODEX;
+  return thinkingOptionsFor(modelKey);
+}
+
+function defaultThinkingForHarness(harness: string, modelKey: ModelKey): string {
+  if (harness === "claude-code") return "high";
+  if (harness === "codex") return "medium";
+  return defaultThinkingFor(modelKey);
+}
+
+// Match each harness's own terminology so the picker mirrors what the
+// user sees once they're inside the cell.
+function thinkingPromptFor(harness: string): string {
+  if (harness === "claude-code") return "Effort?";
+  if (harness === "codex") return "Reasoning?";
+  return "Thinking?";
 }
 
 // Models that reject low-effort thinking levels server-side. gpt-5.5-pro
@@ -1953,6 +1995,21 @@ async function cmdCreate(name: string | undefined, opts: CreateOpts): Promise<vo
           initialValue: answers[0] as string | undefined,
         });
       } else if (i === 1) {
+        // Coding-machine harnesses run a single subscription-backed model,
+        // so the model picker would be a one-option no-op — pin it and
+        // skip to the next step. claude-code → opus (Max sub); codex →
+        // gpt-5.5 (ChatGPT sub).
+        const harnessSel = answers[0] as string;
+        if (harnessSel === "claude-code") {
+          answers[1] = "opus";
+          i++;
+          continue;
+        }
+        if (harnessSel === "codex") {
+          answers[1] = "gpt-5.5";
+          i++;
+          continue;
+        }
         result = await selectOne("Model?", MODEL_OPTIONS, {
           canGoBack,
           initialValue: answers[1] as string | undefined,
@@ -1968,10 +2025,18 @@ async function cmdCreate(name: string | undefined, opts: CreateOpts): Promise<vo
           initialChecked: (answers[3] as string[] | undefined) ?? PACKAGE_DEFAULTS,
         });
       } else if (i === 4) {
-        result = await selectOne("Thinking?", thinkingOptionsFor(answers[1] as ModelKey), {
-          canGoBack,
-          initialValue: (answers[4] as string | undefined) ?? defaultThinkingFor(answers[1] as ModelKey),
-        });
+        const harnessSel = answers[0] as string;
+        const modelSel = answers[1] as ModelKey;
+        result = await selectOne(
+          thinkingPromptFor(harnessSel),
+          thinkingOptionsForHarness(harnessSel, modelSel),
+          {
+            canGoBack,
+            initialValue:
+              (answers[4] as string | undefined) ??
+              defaultThinkingForHarness(harnessSel, modelSel),
+          },
+        );
       } else {
         result = await selectMany("Channels?", CHANNEL_OPTIONS, {
           canGoBack,
@@ -1983,6 +2048,13 @@ async function cmdCreate(name: string | undefined, opts: CreateOpts): Promise<vo
         // the previous prompt's summary so it can be re-rendered fresh.
         process.stdout.write("\x1b[1A\x1b[2K");
         i--;
+        // The Model step is skipped for non-pi harnesses (claude-code/codex)
+        // — keep stepping back until we land on a step that was actually
+        // rendered. The skipped step printed nothing, so no extra wipe.
+        if (i === 1 && answers[0] !== "pi") {
+          answers[1] = undefined;
+          i--;
+        }
       } else {
         answers[i] = result;
         i++;
@@ -7227,7 +7299,8 @@ switch (sub) {
     console.log("  cells birth <name> [flags]  provision a new cell in a local well (alias: create)");
     console.log("                              flags: --harness=pi|claude-code|codex");
     console.log("                                     --model=opus|sonnet|haiku|gpt-5.5|gpt-5.5-pro|deepseek-v4-flash|deepseek-v4-pro");
-    console.log("                                     --thinking=off|minimal|low|medium|high|xhigh|adaptive");
+    console.log("                                     --thinking=off|minimal|low|medium|high|xhigh|adaptive|max|auto");
+    console.log("                                              (pi: off..xhigh + adaptive; claude-code: low..max + auto; codex: low..xhigh)");
     console.log("                                     --extensions=memory,mentality,wiki,dream");
     console.log("                                     --packages=pi-web-access");
     console.log("                                     --channels=slack         (auto-creates #cells-<name>, binds, deploys worker)");
