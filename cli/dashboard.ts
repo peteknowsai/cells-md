@@ -78,6 +78,10 @@ type CellSnapshot = {
   thinking: string;
   age_minutes: number;
   hatched_from: string | null;
+  // True for hand-baked named cells (mother, pulse) — they live in
+  // deterministic wells (cells-<name>) and have no pool egg. Downstream
+  // consumers (narrator → Convex) use this to derive well_name.
+  special: boolean;
   well_status: string | null;
   // Wells's wedge-detection signal (commit landing 2026-05-15). One of
   // "ok" | "suspected" | "confirmed", or null for cells whose well welld
@@ -255,6 +259,7 @@ async function buildState(): Promise<StatePayload> {
       thinking: thinking ?? "?",
       age_minutes: ageMinutes(c.created_at),
       hatched_from: c.hatched_from ?? null,
+      special: !!c.special,
       well_status: well?.status ?? null,
       wedge: well?.wedge ?? null,
       ip: well?.ip ?? null,
