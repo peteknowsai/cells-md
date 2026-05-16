@@ -81,16 +81,56 @@ async function readWranglerOauthToken(): Promise<string | null> {
   } catch { return null; }
 }
 
+// Verify a bearer token against the CF API. Used to detect a dead
+// CLOUDFLARE_API_TOKEN before we waste a real call on it. OAuth tokens
+// don't respond to this endpoint (returns success:false even for valid
+// ones), so callers MUST only invoke this on API tokens.
+async function verifyCfApiToken(token: string): Promise<boolean> {
+  try {
+    const r = await fetch("https://api.cloudflare.com/client/v4/user/tokens/verify", {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    if (!r.ok) return false;
+    const j = (await r.json()) as { success?: boolean };
+    return !!j.success;
+  } catch { return false; }
+}
+
+// Memoized so a single CLI invocation that writes multiple KV keys
+// (e.g. `cells channel sync`, or birth's bind-cell-channels for both
+// slack + email) only pays the verify round-trip once. Process-scoped —
+// each fresh `cells` invocation re-resolves.
+let _cfCredsCache: { accountId: string; token: string } | null | undefined;
+
 async function cfCreds(): Promise<{ accountId: string; token: string } | null> {
+  if (_cfCredsCache !== undefined) return _cfCredsCache;
   const accountId = process.env.CLOUDFLARE_ACCOUNT_ID
     ?? (await readSecretsKey("CLOUDFLARE_ACCOUNT_ID"));
-  // Prefer a long-lived API token; fall back to wrangler's OAuth token
-  // (refreshed by `bunx wrangler login`).
-  let token = process.env.CLOUDFLARE_API_TOKEN
+  if (!accountId) { _cfCredsCache = null; return null; }
+
+  // Prefer the long-lived API token from env/secrets. If it's present
+  // but invalid (revoked, rotated, typo) preflight-verify catches it and
+  // we fall through to wrangler's OAuth token (refreshed by
+  // `bunx wrangler login`). Previously a dead API token silently
+  // 401'd every KV write — the fallback path was unreachable.
+  const apiToken = process.env.CLOUDFLARE_API_TOKEN
     ?? (await readSecretsKey("CLOUDFLARE_API_TOKEN"));
-  if (!token) token = await readWranglerOauthToken();
-  if (!accountId || !token) return null;
-  return { accountId, token };
+  if (apiToken && await verifyCfApiToken(apiToken)) {
+    _cfCredsCache = { accountId, token: apiToken };
+    return _cfCredsCache;
+  }
+  if (apiToken) {
+    console.warn("[kv] CLOUDFLARE_API_TOKEN failed verify — falling back to wrangler OAuth. Rotate the token in ~/.cells/secrets.json to silence this.");
+  }
+
+  const oauth = await readWranglerOauthToken();
+  if (oauth) {
+    _cfCredsCache = { accountId, token: oauth };
+    return _cfCredsCache;
+  }
+
+  _cfCredsCache = null;
+  return null;
 }
 
 export async function kvUpsert(kind: ChannelKind, channelId: string, cell: string): Promise<void> {
@@ -300,8 +340,14 @@ mkdir -p "$(dirname "$F")"
 tmp=$(mktemp)
 jq --argjson ch '${channelsJson.replace(/'/g, "'\\''")}' '.channels = $ch' "$F" > "$tmp" && mv "$tmp" "$F"
 `.trim();
+  // Resolve the cell's well via the shared name→well lookup. Pool-hatched
+  // cells live in `egg-<hex>` wells; specials in `cells-<name>`; legacy
+  // ones in `<name>`. Previously this passed the cell name to `well exec`
+  // directly and failed for hatched cells.
+  const { wellNameForCell } = await import("./resolve");
+  const wellName = await wellNameForCell(cell);
   try {
-    const proc = Bun.spawn(["well", "exec", "-s", cell, "--", "sudo", "bash", "-c", remote], {
+    const proc = Bun.spawn(["well", "exec", "-s", wellName, "--", "sudo", "bash", "-c", remote], {
       stdout: "pipe",
       stderr: "pipe",
     });

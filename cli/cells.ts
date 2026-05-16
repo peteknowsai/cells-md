@@ -141,6 +141,7 @@ const RESERVED_NAMES = new Set([
   "schedule-host-bridge", "unschedule-host-bridge",
   "refresh-extensions", "heartbeat", "pulse",
   "channel", "channels",
+  "menubar",
 ]);
 
 type SelectOption = {
@@ -793,6 +794,72 @@ async function withMotherLock<T>(label: string, fn: () => Promise<T>): Promise<T
   }
 }
 
+// Run mother's birthing ritual under the claude-code harness instead of pi.
+// Same contract as runPiWithOutcome: writes outcome to CELL_OUTCOME_FILE,
+// returns {exit, outcome}. claude-code reads CLAUDE.md from cwd (MOTHER_ROOT)
+// and resolves the /cell-create slash command from .claude/commands/cell-create.md.
+//
+// "No outcome" + nonzero exit signals a *pre-flight* failure (rate limit,
+// auth failure, empty stream) — that's what the birth orchestrator falls
+// over on. An outcome with success=false is a real ritual failure and is
+// accepted as the verdict (no fallover).
+async function runClaudeWithOutcome(
+  slashCommand: string,
+  args: string[],
+  extraEnv?: Record<string, string>,
+  opts?: { progressName?: string },
+): Promise<{ exit: number; outcome: Outcome | null }> {
+  return withMotherLock(`claude:${slashCommand} ${args[0] ?? ""}`.trim(), async () => {
+    const outcomeFile = join(
+      tmpdir(),
+      `cell-outcome-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.json`,
+    );
+    if (existsSync(outcomeFile)) await unlink(outcomeFile);
+
+    const message = `/${slashCommand} ${args.join(" ")}`.trim();
+
+    const chipName = opts?.progressName;
+    const useChip = !!chipName && process.stderr.isTTY;
+    if (useChip) process.stderr.write(`\r\x1b[2K· birthing ${chipName} (claude-code)…`);
+
+    // --dangerously-skip-permissions: this is mother running her own ritual
+    // in her own dir; the interactive permission prompt would block the
+    // one-shot. claude inherits stdin/stdout/stderr but in --print mode
+    // it doesn't actually read stdin past the initial prompt.
+    //
+    // --effort=low: birth is mostly imperative bash execution, not reasoning.
+    // Drops per-turn thinking time without hurting correctness in practice.
+    // All other tools (Read, Grep, etc.) stay available as an escape hatch
+    // for anomalies; the skill prose tells her to default to Bash.
+    const proc = Bun.spawn(
+      ["claude", "--print", "--dangerously-skip-permissions", "--effort", "low", message],
+      {
+        cwd: MOTHER_ROOT,
+        env: {
+          ...process.env,
+          CELL_OUTCOME_FILE: outcomeFile,
+          ...(extraEnv ?? {}),
+        },
+        stdin: "ignore",
+        stdout: useChip ? "ignore" : "inherit",
+        stderr: useChip ? "ignore" : "inherit",
+      },
+    );
+
+    const exit = await proc.exited;
+    if (useChip) process.stderr.write("\r\x1b[2K");
+
+    let outcome: Outcome | null = null;
+    if (existsSync(outcomeFile)) {
+      try {
+        outcome = JSON.parse(await readFile(outcomeFile, "utf-8"));
+      } catch { /* malformed — leave null */ }
+      try { await unlink(outcomeFile); } catch { /* best-effort cleanup */ }
+    }
+    return { exit, outcome };
+  });
+}
+
 async function runPiWithOutcome(
   slashCommand: string,
   args: string[],
@@ -1057,9 +1124,7 @@ async function readCellModel(name: string): Promise<string | null> {
   if (cell?.special) {
     const chain: string[] | undefined = cell.modelChain;
     if (chain && chain.length > 0) {
-      const first = chain[0]!;
-      const slash = first.indexOf("/");
-      return slash >= 0 ? first.slice(slash + 1) : first;
+      return parseChainEntry(chain[0]!).display;
     }
     return null;
   }
@@ -1076,11 +1141,25 @@ async function readCellModel(name: string): Promise<string | null> {
   }
   const chain: string[] | undefined = cell?.modelChain;
   if (chain && chain.length > 0) {
-    const first = chain[0]!;
-    const slash = first.indexOf("/");
-    return slash >= 0 ? first.slice(slash + 1) : first;
+    return parseChainEntry(chain[0]!).display;
   }
   return null;
+}
+
+// Read post-birth deployment status from ~/.cells/logs/birth-postwork/<name>.log.
+//   "done"    — log exists and last line says "post-birth done"
+//   "running" — log exists, no done marker yet
+//   "—"       — no log (legacy birth before the post-birth split)
+function postBirthStatus(name: string): string {
+  const logPath = join(homedir(), ".cells", "logs", "birth-postwork", `${name}.log`);
+  if (!existsSync(logPath)) return "—";
+  try {
+    const txt = readFileSync(logPath, "utf-8");
+    if (txt.includes("post-birth done")) return "done";
+    return "running";
+  } catch {
+    return "—";
+  }
 }
 
 async function cmdList() {
@@ -1095,18 +1174,20 @@ async function cmdList() {
       name: c.name,
       model: (await readCellModel(c.name)) ?? "?",
       born: humanDate(c.created_at),
+      deploy: postBirthStatus(c.name),
     })),
   );
 
   const nameWidth = Math.max(4, ...rows.map((r) => r.name.length));
   const modelWidth = Math.max(5, ...rows.map((r) => r.model.length));
-  const header = `${"name".padEnd(nameWidth)}  ${"model".padEnd(modelWidth)}  birthday`;
+  const deployWidth = Math.max(6, ...rows.map((r) => r.deploy.length));
+  const header = `${"name".padEnd(nameWidth)}  ${"model".padEnd(modelWidth)}  ${"deploy".padEnd(deployWidth)}  birthday`;
 
   // Non-TTY (piped/scripted): plain columns with header, no picker.
   if (!process.stdout.isTTY) {
     console.log(header);
     for (const r of rows) {
-      console.log(`${r.name.padEnd(nameWidth)}  ${r.model.padEnd(modelWidth)}  ${r.born}`);
+      console.log(`${r.name.padEnd(nameWidth)}  ${r.model.padEnd(modelWidth)}  ${r.deploy.padEnd(deployWidth)}  ${r.born}`);
     }
     return;
   }
@@ -1115,7 +1196,7 @@ async function cmdList() {
   // Indent header by 2 to line up with the picker's "❯ " pointer column.
   const options: SelectOption[] = rows.map((r) => ({
     value: r.name,
-    label: `${r.name.padEnd(nameWidth)}  ${r.model.padEnd(modelWidth)}  ${r.born}`,
+    label: `${r.name.padEnd(nameWidth)}  ${r.model.padEnd(modelWidth)}  ${r.deploy.padEnd(deployWidth)}  ${r.born}`,
   }));
   // Embed header as a dim second line of the prompt so it sits between
   // "pick a cell..." and the options. \x1b[22m turns off bold from the
@@ -1243,9 +1324,16 @@ async function cmdTui(name: string, extra: string[] = []) {
 
 async function cmdShell(name: string) {
   if (name === "mother") {
-    // Mother lives on this Mac. Just print where; user cd's themselves.
-    // (Future: when mother might run on a dedicated host, dispatch via
-    // ~/.cells/mother.json — see docs/namespacing.md for the broader plan.)
+    // Two routes during cutover (same shape as cmdTalk):
+    //  - cells-mother registered → fall through and shell into the well.
+    //  - otherwise → legacy on-Mac mother (print anatomy and return).
+    // Registry check is self-healing: once mother is fully on-cell, the
+    // legacy branch never fires.
+    const reg = await loadRegistry();
+    const motherIsCell = reg.cells.some(c => c.name === "mother" && c.special);
+    if (motherIsCell) {
+      // intentional fall-through to the normal cell-shell path below
+    } else {
     console.log(`mother lives on this Mac. her anatomy:`);
     console.log(`  entrypoint: ${MOTHER_ROOT}/AGENTS.md         (cross-harness contract)`);
     console.log(`  soul:       ${MOTHER_ROOT}/SOUL.md           (persona — read by use-max into systemPrompt)`);
@@ -1261,6 +1349,7 @@ async function cmdShell(name: string) {
     console.log(`  pi data:    ${process.env.HOME}/.pi/agent/  (sessions, auth.json — shared with the proxy)`);
     console.log(`  runs from:  ${MOTHER_ROOT}  (mother's agent root; pi auto-discovers .pi/ here)`);
     return;
+    }
   }
   await requireCell(name);
   // Pool-hatched cells live in a well whose name is `egg-<id>`, not the
@@ -1376,6 +1465,114 @@ async function cmdUnpin(name: string) {
   const wellName = await wellNameForCell(name);
   await setAutoSleep(wellName, DEFAULT_AUTO_SLEEP_SECONDS);
   console.log(`✓ ${name} unpinned (auto-sleep ${DEFAULT_AUTO_SLEEP_SECONDS}s)`);
+}
+
+// ───── menubar ─────
+//
+// `cells menubar install`    — drop a SwiftBar plugin into ~/Library/Application
+//                              Support/SwiftBar/Plugins. Plugin is a 1-line .sh
+//                              that execs `cells menubar render`.
+// `cells menubar render`     — emit SwiftBar plugin text on stdout. Invoked
+//                              every few seconds by SwiftBar itself.
+// `cells menubar uninstall`  — remove the plugin.
+// `cells menubar status`     — show whether the plugin is installed.
+//
+// SwiftBar plugin filename convention: <name>.<interval>.<ext>. We use 10s.
+
+async function cmdMenubar(args: string[]) {
+  const sub = args[0] ?? "status";
+  if (sub === "render") {
+    const here = dirname(fileURLToPath(import.meta.url));
+    await import(join(here, "menubar/render.ts"));
+    return;
+  }
+  if (sub === "install")   { await cmdMenubarInstall();   return; }
+  if (sub === "uninstall") { await cmdMenubarUninstall(); return; }
+  if (sub === "status")    { await cmdMenubarStatus();    return; }
+  console.error(`unknown menubar subcommand: ${sub}`);
+  console.error("usage: cells menubar [install|uninstall|status|render]");
+  process.exit(1);
+}
+
+function menubarPluginPath(): string {
+  return join(
+    homedir(),
+    "Library",
+    "Application Support",
+    "SwiftBar",
+    "Plugins",
+    "cells.10s.sh",
+  );
+}
+
+async function cmdMenubarInstall() {
+  // Check SwiftBar is installed. We don't auto-install — Homebrew prompts for
+  // a password, and silently doing that from a CLI is rude.
+  if (!existsSync("/Applications/SwiftBar.app")) {
+    console.error("SwiftBar not found at /Applications/SwiftBar.app");
+    console.error("install it with: brew install --cask swiftbar");
+    process.exit(1);
+  }
+  const pluginsDir = dirname(menubarPluginPath());
+  await mkdir(pluginsDir, { recursive: true });
+  // Resolve the absolute path to the cells CLI entrypoint. SwiftBar runs the
+  // plugin under a sparse environment with no project-aware PATH, so we
+  // need an absolute path. Prefer ~/.local/bin/cells (the user's stable
+  // entry point) over the resolved-symlink target so a rename of the project
+  // directory doesn't break the plugin.
+  const preferred = join(homedir(), ".local", "bin", "cells");
+  const cellsBin = existsSync(preferred) ? preferred : (process.argv[1] ?? preferred);
+  const script =
+    `#!/usr/bin/env bash\n` +
+    `# Cells menubar — auto-generated by 'cells menubar install'.\n` +
+    `# Refresh interval encoded in the filename (cells.10s.sh = every 10s).\n` +
+    `exec ${cellsBin} menubar render\n`;
+  await writeFile(menubarPluginPath(), script, { mode: 0o755 });
+  // The action-runner helper: SwiftBar invokes this with "<subcommand> <name>"
+  // (e.g. "shell mother"), it opens Ghostty and runs `cells <args>` with a
+  // hold-open trailer so output stays visible if the command exits fast.
+  // Written here (not checked in) because it carries the absolute cells path
+  // resolved at install time.
+  const helperPath = join(homedir(), ".cells", "menubar", "run.sh");
+  await mkdir(dirname(helperPath), { recursive: true });
+  // The bash here uses single-quoted $'s so TS doesn't interpolate them; it
+  // composes the inner command via printf %q so cellsBin + args are safely
+  // quoted, then hands it to `bash -lc` inside Ghostty.
+  const helperLines = [
+    `#!/usr/bin/env bash`,
+    `# Cells menubar action runner — auto-generated by 'cells menubar install'.`,
+    `# Usage: run.sh <cells-subcommand> [args...]`,
+    `set -u`,
+    `CELLS=${JSON.stringify(cellsBin)}`,
+    `quoted=$(printf '%q ' "$CELLS" "$@")`,
+    `inner="$quoted; status=\\$?; echo; if [ \\$status -ne 0 ]; then echo \\"(exited \\$status)\\"; fi; read -n 1 -s -r -p \\"[any key to close]\\"; echo"`,
+    `exec /usr/bin/open -na "Ghostty.app" --args -e bash -lc "$inner"`,
+    ``,
+  ];
+  await writeFile(helperPath, helperLines.join("\n"), { mode: 0o755 });
+  console.log(`✓ installed ${menubarPluginPath()}`);
+  console.log(`✓ installed ${helperPath}`);
+  // Best-effort: nudge SwiftBar to pick up the new plugin. If it isn't
+  // running, this also launches it.
+  Bun.spawn(["open", "-a", "SwiftBar"], { stdout: "ignore", stderr: "ignore" });
+  console.log("✓ SwiftBar refreshed (or launched if it wasn't running)");
+}
+
+async function cmdMenubarUninstall() {
+  const path = menubarPluginPath();
+  if (!existsSync(path)) {
+    console.log(`not installed (no file at ${path})`);
+    return;
+  }
+  await unlink(path);
+  console.log(`✓ removed ${path}`);
+}
+
+async function cmdMenubarStatus() {
+  const path = menubarPluginPath();
+  const installed = existsSync(path);
+  console.log(`plugin: ${installed ? "installed" : "not installed"} (${path})`);
+  console.log(`SwiftBar.app: ${existsSync("/Applications/SwiftBar.app") ? "present" : "missing"}`);
 }
 
 // First-line diagnostic for "auth feels broken." See docs/oauth-refresh.md.
@@ -1494,6 +1691,43 @@ async function cmdDoctor() {
   } catch (e) {
     console.log(`well shim:     ${red}unreachable${reset} (${dim}${String(e).slice(0, 80)}${reset})`);
     console.log(`  fix:         check /Users/pete/.local/bin/well is in PATH and executable`);
+  }
+
+  // 6b. Post-birth deployment status across the fleet. Each cell that's
+  // been birthed since the gated/async split has a log at
+  // ~/.cells/logs/birth-postwork/<name>.log. "done" = worker deployed +
+  // checkpoint taken. "running" = still rolling. Anything that's been
+  // "running" for more than ~2 min is suspect — most post-births finish
+  // in ~10s. Legacy cells (pre-split) have no log; we surface them as "—".
+  console.log("");
+  const regForDeploy = await loadRegistry();
+  const postworkDir = join(homedir(), ".cells/logs/birth-postwork");
+  let staleCount = 0;
+  for (const c of regForDeploy.cells) {
+    const logPath = join(postworkDir, `${c.name}.log`);
+    if (!existsSync(logPath)) {
+      console.log(`deploy ${c.name.padEnd(18)} ${dim}— (legacy or pre-split birth)${reset}`);
+      continue;
+    }
+    try {
+      const txt = await readFile(logPath, "utf-8");
+      const done = txt.includes("post-birth done");
+      const ageMs = Date.now() - statSync(logPath).mtimeMs;
+      if (done) {
+        console.log(`deploy ${c.name.padEnd(18)} ${green}done${reset} ${dim}(${Math.round(ageMs / 60000)} min ago)${reset}`);
+      } else if (ageMs > 2 * 60 * 1000) {
+        console.log(`deploy ${c.name.padEnd(18)} ${red}STALE${reset} (${Math.round(ageMs / 60000)} min running, expected ~10s)`);
+        console.log(`  log: ${logPath}`);
+        staleCount++;
+      } else {
+        console.log(`deploy ${c.name.padEnd(18)} ${yellow}running${reset} (${Math.round(ageMs / 1000)}s in)`);
+      }
+    } catch (e) {
+      console.log(`deploy ${c.name.padEnd(18)} ${red}log unreadable${reset}`);
+    }
+  }
+  if (staleCount > 0) {
+    console.log(`  ${yellow}${staleCount} cell(s) have stuck post-birth tasks. tail the log file to see what failed.${reset}`);
   }
 
   // 7. Specials (mother, pulse) — if they've been baked as real cells,
@@ -1853,65 +2087,153 @@ async function cmdCreate(name: string | undefined, opts: CreateOpts): Promise<vo
   // Lazy reconcile first — evict stale entries (welld bounced, pool.json
   // still says warm) before we claim. Skip refill; we refill post-success.
   await reconcilePool({ silent: false, skipRefill: true }).catch(() => { /* don't fail birth on reconcile error */ });
-  const claim = await claimGenericEgg(name);
+  const claimAndReady = async () => {
+    const c = await claimGenericEgg(name);
+    if (!c) return null;
+    try {
+      await wakePoolMember(c.wellName, c.tier);
+      await ensureWellHasIp(c.wellName);
+      if (harness === "claude-code" || harness === "codex") {
+        await stripAnthropicKeyFromWell(c.wellName);
+      }
+      return c;
+    } catch (e) {
+      console.error(
+        `! egg ${c.wellName} couldn't be readied: ${e instanceof Error ? e.message : String(e)}`,
+      );
+      await directWellDestroy(c.wellName).catch(() => {});
+      await withPoolLock(async () => {
+        const file = await loadPool();
+        file.members = file.members.filter((m) => m.well_name !== c.wellName);
+        await savePool(file);
+      });
+      return null;
+    }
+  };
+  let claim = await claimAndReady();
   if (!claim) {
     console.error(
-      `birth failed: the egg pool is empty.\n` +
+      `birth failed: the egg pool is empty (or no egg could be readied).\n` +
       `  cells pool refill          # bake more pool members\n` +
       `  cells pool reconcile       # re-sync pool.json with welld`,
     );
     process.exit(1);
   }
-  const eggWell = claim.wellName;
-  const sweepEgg = async () => {
-    await directWellDestroy(eggWell).catch(() => {});
+  let eggWell = claim.wellName;
+  const sweepEgg = async (well: string) => {
+    await directWellDestroy(well).catch(() => {});
     await withPoolLock(async () => {
       const file = await loadPool();
-      file.members = file.members.filter((m) => m.well_name !== eggWell);
+      file.members = file.members.filter((m) => m.well_name !== well);
       await savePool(file);
     });
   };
-  try {
-    await wakePoolMember(eggWell, claim.tier);
-    await ensureWellHasIp(eggWell);
-    // claude-code and codex cells reach their LLM only through the
-    // subscriptions proxy — neither uses the paid ANTHROPIC_API_KEY the
-    // generic egg bakes into /etc/environment. Strip it now the harness
-    // is known, before mother births the cell.
-    if (harness === "claude-code" || harness === "codex") {
-      await stripAnthropicKeyFromWell(eggWell);
-    }
-  } catch (e) {
-    console.error(
-      `birth failed: could not ready egg ${eggWell}: ${e instanceof Error ? e.message : String(e)} — sweeping`,
-    );
-    await sweepEgg();
-    process.exit(1);
-  }
 
   // ── 5. Hand off to mother — she reads docs/birthing-ritual.html ──
-  // Two code paths during the Phase 2/3 transition:
-  //   - default: legacy on-Mac mother via runPiWithOutcome (mother.lock).
-  //   - CELLS_USE_MOTHER_CELL=1: talk to cells-mother, poll bridge outcome.
-  // Phase 4 deletes the legacy branch once the new path is validated live.
+  // Mother's registry modelChain encodes harness selection (mother is the
+  // only cell with this today). Each entry is "<harness>:<provider>/<model>:<thinking>"
+  // or, for legacy single-harness specials, "<provider>/<model>:<thinking>"
+  // (treated as pi). The orchestrator walks the chain: try harness #1,
+  // and on a pre-flight failure (no outcome written) sweep + reclaim a
+  // fresh egg and try the next. An outcome with success=false is the
+  // ritual's own verdict — accepted as-is, no fallover.
+  //
+  // Legacy gate CELLS_USE_MOTHER_CELL=1 still routes through cells-mother
+  // via talkAndAwaitOutcome; that path is single-harness (pi on her well)
+  // and bypasses the chain for now.
   if (!process.stdout.isTTY) console.log(`birthing ${name}…`);
   const useMotherCell = process.env.CELLS_USE_MOTHER_CELL === "1";
-  const { outcome } = useMotherCell
-    ? await talkAndAwaitOutcome("cell-create", [name, eggWell, JSON.stringify(blob)], { progressName: name })
-    : await runPiWithOutcome(
-        "cell-create",
-        [name, eggWell, JSON.stringify(blob)],
-        wellsEnv(),
-        { progressName: name },
-      );
+  const motherChain = await readMotherHarnessChain();
+
+  // Birth-log surface for mother.cells.md. talkAndAwaitOutcome writes its
+  // own entries; the legacy Mac-side path didn't, so mother.cells.md was
+  // missing all default-flow births. Write start + end records here too.
+  const birthId = `b${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
+  const birthStartedAt = Date.now();
+  const birthLogFile = join(BIRTH_LOG_DIR, `${birthId}.json`);
+  const writeBirthLog = async (
+    motherHarness: string | null,
+    finalOutcome?: Outcome | null,
+  ) => {
+    try {
+      await mkdir(BIRTH_LOG_DIR, { recursive: true });
+      const record: any = {
+        birthId,
+        name,
+        harness: blob.harness,
+        model: blob.model,
+        mother_harness: motherHarness,
+        started_at: new Date(birthStartedAt).toISOString(),
+      };
+      if (finalOutcome !== undefined) {
+        const endedAt = Date.now();
+        record.ended_at = new Date(endedAt).toISOString();
+        record.elapsed_ms = endedAt - birthStartedAt;
+        record.success = finalOutcome?.success ?? false;
+        record.message = finalOutcome?.message ?? "no outcome (timeout or mother crash)";
+      }
+      await writeFile(birthLogFile, JSON.stringify(record, null, 2));
+    } catch { /* log surface is best-effort */ }
+  };
+
+  let outcome: Outcome | null = null;
+  let usedMotherHarness: string | null = null;
+  if (useMotherCell) {
+    // talkAndAwaitOutcome handles its own birth-log entry.
+    const r = await talkAndAwaitOutcome("cell-create", [name, eggWell, JSON.stringify(blob)], { progressName: name });
+    outcome = r.outcome;
+  } else {
+    for (let attempt = 0; attempt < motherChain.length; attempt++) {
+      const { harness: motherHarness } = parseChainEntry(motherChain[attempt]!);
+      const which = motherHarness ?? "pi";
+      if (attempt > 0) {
+        console.warn(`! retrying birth with mother harness '${which}' (fresh egg)`);
+        await sweepEgg(eggWell);
+        const fresh = await claimAndReady();
+        if (!fresh) {
+          console.error(`birth failed: could not claim a fresh egg for retry`);
+          await writeBirthLog(which, null);
+          process.exit(1);
+        }
+        claim = fresh;
+        eggWell = fresh.wellName;
+      }
+      usedMotherHarness = which;
+      await writeBirthLog(which);  // start record (refreshed per attempt)
+      // claude-code mother uses /birth (her skill name); pi mother uses
+      // /cell-create (her existing prompt name). Same args either way.
+      const r = which === "claude-code"
+        ? await runClaudeWithOutcome(
+            "birth",
+            [name, eggWell, JSON.stringify(blob)],
+            wellsEnv(),
+            { progressName: name },
+          )
+        : await runPiWithOutcome(
+            "cell-create",
+            [name, eggWell, JSON.stringify(blob)],
+            wellsEnv(),
+            { progressName: name },
+          );
+      if (r.outcome) {
+        outcome = r.outcome;
+        break;
+      }
+      // No outcome = pre-flight failure (auth, empty stream, etc.). Try
+      // the next harness in mother's chain. If none left, fall through to
+      // the null-outcome handler below.
+      console.warn(`! mother harness '${which}' returned no outcome (exit ${r.exit})`);
+    }
+    await writeBirthLog(usedMotherHarness, outcome);
+  }
   if (!outcome) {
     console.error(`birth failed: mother did not report an outcome — sweeping egg ${eggWell}`);
-    await sweepEgg();
+    await sweepEgg(eggWell);
     process.exit(1);
   }
   if (!outcome.success) {
     console.error(`birth failed: ${outcome.message} — sweeping egg ${eggWell}`);
-    await sweepEgg();
+    await sweepEgg(eggWell);
     process.exit(1);
   }
 
@@ -2513,9 +2835,8 @@ type SpecialSpec = {
   // NOTE: model/provider/thinking are deliberately NOT here. Runtime model
   // config lives in dna/specials/<name>/.pi/settings.json — single source of
   // truth. The registry's modelChain is *derived* from that file at bake
-  // time (see readSpecialModelChain + cmdBirthSpecial). Putting them here
-  // too caused real drift: the registry showed claude-opus-4-7 while mother
-  // actually ran on codex.
+  // time (see cmdBirthSpecial). Putting them here too caused real drift:
+  // the registry showed claude-opus-4-7 while mother actually ran on codex.
 };
 
 const SPECIALS: Record<"mother" | "pulse", SpecialSpec> = {
@@ -2533,11 +2854,29 @@ const SPECIALS: Record<"mother" | "pulse", SpecialSpec> = {
 
 // Read the model chain straight out of the special's DNA settings.json.
 // This is the *single source of truth* for what a special is configured to
-// run on. Prefer the full `modelChain` array; fall back to default* fields
-// if the chain isn't explicitly listed.
+// run on.
+//
+// Two shapes possible — `harnessChain` wins if present (mother uses it for
+// her dual-harness setup), else fall back to the flat `modelChain` field
+// pi reads at runtime.
+//
+//   harnessChain: [{harness, model: "<provider>/<model>", thinking}, ...]
+//     → registry chain entries: "<harness>:<provider>/<model>:<thinking>"
+//   modelChain:    ["<provider>/<model>:<thinking>", ...]   (no harness prefix)
+//     → registry chain entries: unchanged
+//
+// The registry chain encodes harness selection for `cmdBirth` (which harness
+// runs the ritual) and for `cells list` (display). Pi's runtime only ever
+// reads `modelChain`, never the registry — so its fallback chain stays
+// pi-only even when harnessChain[0] is claude-code.
 async function readSpecialModelChain(name: "mother" | "pulse"): Promise<string[]> {
   const path = join(SPECIALS_DIR, name, ".pi", "settings.json");
   const settings = JSON.parse(await readFile(path, "utf-8"));
+  if (Array.isArray(settings.harnessChain) && settings.harnessChain.length > 0) {
+    return settings.harnessChain.map((e: { harness: string; model: string; thinking?: string }) =>
+      `${e.harness}:${e.model}:${e.thinking ?? "high"}`,
+    );
+  }
   if (Array.isArray(settings.modelChain) && settings.modelChain.length > 0) {
     return settings.modelChain;
   }
@@ -2551,6 +2890,45 @@ async function readSpecialModelChain(name: "mother" | "pulse"): Promise<string[]
     );
   }
   return [`${provider}/${model}:${thinking}`];
+}
+
+// Read mother's registry chain entries — used by cmdBirth to pick which
+// harness runs the ritual (and to fall over to the next on pre-flight
+// failure). Falls back to the legacy single-harness "pi" if mother isn't
+// in the registry yet, or her entry has no chain.
+async function readMotherHarnessChain(): Promise<string[]> {
+  try {
+    const reg = await loadRegistry();
+    const mother = reg.cells.find((c: any) => c.name === "mother");
+    if (mother && Array.isArray(mother.modelChain) && mother.modelChain.length > 0) {
+      return mother.modelChain;
+    }
+  } catch { /* fall through */ }
+  // Legacy: no registry entry → assume pi-only, single attempt.
+  return ["pi:openai-codex/gpt-5.5:high"];
+}
+
+// Parse a registry chain entry. Two formats:
+//   "<harness>:<provider>/<model>:<thinking>"   (dual-harness specials)
+//   "<provider>/<model>:<thinking>"             (everything else)
+// Detection: a harness prefix's colon comes BEFORE the first slash; old
+// format's only colons come after the slash (thinking-level separator).
+function parseChainEntry(entry: string): {
+  harness: string | null;
+  providerModel: string;  // "<provider>/<model>:<thinking>" — what fits everywhere else today
+  display: string;        // "<model>:<thinking>" — for cells list
+} {
+  const firstColon = entry.indexOf(":");
+  const firstSlash = entry.indexOf("/");
+  let harness: string | null = null;
+  let rest = entry;
+  if (firstColon >= 0 && firstSlash >= 0 && firstColon < firstSlash) {
+    harness = entry.slice(0, firstColon);
+    rest = entry.slice(firstColon + 1);
+  }
+  const slash = rest.indexOf("/");
+  const display = slash >= 0 ? rest.slice(slash + 1) : rest;
+  return { harness, providerModel: rest, display };
 }
 
 // Files in dna/cells/base/ that the base provision lays down at /root and
@@ -3256,6 +3634,24 @@ async function cmdDestroyOne(name: string): Promise<boolean> {
       /* best-effort journal */
     }
   }
+
+  // Death-log entry for mother.cells.md fleet timeline. Same shape as
+  // birth-log so the proxy can merge both chronologically. Best-effort.
+  try {
+    const deathDir = join(homedir(), ".cells", "death-log");
+    await mkdir(deathDir, { recursive: true });
+    const stamp = Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+    const file = join(deathDir, `${name}-${stamp}.json`);
+    await writeFile(file, JSON.stringify({
+      kind: "death",
+      name,
+      killed_at: new Date().toISOString(),
+      model: killedCell?.modelChain?.[0] ?? null,
+      harness: killedCell?.harness ?? null,
+      born_at: killedCell?.created_at ?? null,
+      destroyOk,
+    }, null, 2));
+  } catch { /* best-effort timeline */ }
 
   return destroyOk;
 }
@@ -5877,18 +6273,10 @@ async function cmdSync(name?: string) {
 // cell name is just our local alias. Anything that touches the
 // Wells API for a cell — well_exec, well_destroy, well info,
 // the worker's WELL_HOST binding — must go through this helper.
-async function wellNameForCell(name: string): Promise<string> {
-  const reg = await loadRegistry();
-  const cell = reg.cells.find((c) => c.name === name);
-  if (!cell) return name;
-  // Specials live in deterministic wells (cells-<name>) — they're hand-baked,
-  // not pool-born, so they have no hatched_from.
-  if (cell.special) return `cells-${name}`;
-  if (!cell.hatched_from) return name;
-  const pool = await loadPool();
-  const member = pool.members.find((e) => e.id === cell.hatched_from);
-  return member?.well_name ?? name; // fall back if the pool entry is gone
-}
+// Cell-name → well-name resolution lives in cli/lib/resolve.ts so every
+// caller (cells.ts, channels.ts, anything else) uses one definition.
+// Re-exported here for the existing intra-file callers.
+import { wellNameForCell } from "./lib/resolve";
 
 // ───── pool CLI ─────
 //

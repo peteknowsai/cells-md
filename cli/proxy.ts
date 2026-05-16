@@ -476,6 +476,78 @@ function forwardableHeaders(upstream: Headers): Headers {
   return h;
 }
 
+// ───────────────────── well-host fallthrough ─────────────────────
+//
+// The cloudflared tunnel routes `*.cells.md → cells proxy:8787` because the
+// cells proxy is the catch-all for known cell-shaped hostnames (mother,
+// pulse, proxy). Well-shaped hostnames (`egg-<hex>.cells.md`, served by
+// welld at 127.0.0.1:7878) ride the same tunnel and land here too — the
+// per-cell Cloudflare Worker DO opens `wss://<wellname>.cells.md/agent` to
+// push Slack-driven prompts into the live well. Without this fallthrough
+// that WS upgrade 404s and slack→cell is silently broken fleet-wide.
+//
+// Per the wells/cells V1 boundary, the namespace authority for "what's a
+// well?" is welld — we just forward anything matching the well-name shape
+// and let welld validate. Specials (`cells-mother`, `cells-pulse`) don't
+// match `egg-*` so they keep hitting their existing handlers above.
+const WELLD_HTTP = "http://127.0.0.1:7878";
+const WELLD_WS = "ws://127.0.0.1:7878";
+const WELL_HOST_RE = /^egg-[a-z0-9]+\.cells\.md(:\d+)?$/i;
+
+function isWellHost(host: string): boolean {
+  return WELL_HOST_RE.test(host);
+}
+
+async function handleWellHttp(req: Request): Promise<Response> {
+  const url = new URL(req.url);
+  const upstreamUrl = `${WELLD_HTTP}${url.pathname}${url.search}`;
+  try {
+    const upstream = await fetch(upstreamUrl, {
+      method: req.method,
+      headers: req.headers, // welld dispatches on the original Host
+      body: req.body,
+      // @ts-expect-error Bun streams bodies through fetch with duplex:'half'
+      duplex: req.body ? "half" : undefined,
+      redirect: "manual",
+    });
+    return new Response(upstream.body, {
+      status: upstream.status,
+      statusText: upstream.statusText,
+      headers: forwardableHeaders(upstream.headers),
+    });
+  } catch (e) {
+    return new Response(`welld unreachable: ${String(e).slice(0, 200)}`, { status: 502 });
+  }
+}
+
+// WS forwarding state, parked on `ws.data` for the lifetime of the upgrade.
+// `queued` buffers downstream→upstream frames that arrive before the
+// upstream socket finishes its handshake (the cell Worker DO sends nothing
+// before the server speaks first today, but the queue keeps us safe for
+// future protocols).
+type WellWsData = {
+  upstreamUrl: string;
+  fwdHeaders: Record<string, string>;
+  upstream: WebSocket | null;
+  upstreamReady: boolean;
+  queued: (string | ArrayBufferLike | Uint8Array)[];
+};
+
+function buildWellWsData(req: Request, host: string): WellWsData {
+  const url = new URL(req.url);
+  const upstreamUrl = `${WELLD_WS}${url.pathname}${url.search}`;
+  const fwdHeaders: Record<string, string> = { host };
+  const pass = ["authorization", "cookie", "origin", "sec-websocket-protocol"];
+  for (const h of pass) {
+    const v = req.headers.get(h);
+    if (v) fwdHeaders[h] = v;
+  }
+  for (const [k, v] of req.headers) {
+    if (k.toLowerCase().startsWith("x-")) fwdHeaders[k] = v;
+  }
+  return { upstreamUrl, fwdHeaders, upstream: null, upstreamReady: false, queued: [] };
+}
+
 // ───────────────────── proxy (api path) ─────────────────────
 
 function checkClientAuth(req: Request): { ok: true; cell: string } | { ok: false; reason: string } {
@@ -910,18 +982,34 @@ echo "$F"`;
 // the proxy.cells.md dashboard.
 
 const BIRTH_LOG_DIR_PROXY = join(homedir(), ".cells/birth-log");
+const DEATH_LOG_DIR_PROXY = join(homedir(), ".cells/death-log");
 
 type BirthLogEntry = {
   birthId: string;
   name?: string;
-  harness?: string;
-  model?: string;
+  harness?: string;          // the BIRTHED cell's harness
+  model?: string;            // the BIRTHED cell's model
+  mother_harness?: string;   // which harness mother used to run the ritual (pi | claude-code)
   started_at?: string;
   ended_at?: string;
   elapsed_ms?: number;
   success?: boolean;
   message?: string;
 };
+
+type DeathLogEntry = {
+  kind: "death";
+  name: string;
+  killed_at: string;
+  model?: string | null;
+  harness?: string | null;
+  born_at?: string | null;
+  destroyOk?: boolean;
+};
+
+type ActivityEntry =
+  | (BirthLogEntry & { kind: "birth"; t: string })
+  | (DeathLogEntry & { kind: "death"; t: string });
 
 function readBirthLog(limit = 50): BirthLogEntry[] {
   if (!existsSync(BIRTH_LOG_DIR_PROXY)) return [];
@@ -937,6 +1025,35 @@ function readBirthLog(limit = 50): BirthLogEntry[] {
   return entries.slice(0, limit);
 }
 
+function readDeathLog(limit = 50): DeathLogEntry[] {
+  if (!existsSync(DEATH_LOG_DIR_PROXY)) return [];
+  const entries: DeathLogEntry[] = [];
+  for (const f of require("node:fs").readdirSync(DEATH_LOG_DIR_PROXY)) {
+    if (!f.endsWith(".json")) continue;
+    try {
+      const body = readFileSync(join(DEATH_LOG_DIR_PROXY, f), "utf-8");
+      entries.push(JSON.parse(body));
+    } catch {/* skip malformed */}
+  }
+  entries.sort((a, b) => (b.killed_at ?? "").localeCompare(a.killed_at ?? ""));
+  return entries.slice(0, limit);
+}
+
+// Merge births and deaths into one chronological fleet activity feed.
+// Each entry has a unified `kind` + `t` (canonical timestamp) so the
+// renderer can format both uniformly.
+function readFleetActivity(limit = 50): ActivityEntry[] {
+  const births: ActivityEntry[] = readBirthLog(limit).map(b => ({
+    ...b, kind: "birth", t: b.started_at ?? "",
+  }));
+  const deaths: ActivityEntry[] = readDeathLog(limit).map(d => ({
+    ...d, kind: "death", t: d.killed_at ?? "",
+  }));
+  return [...births, ...deaths]
+    .sort((a, b) => b.t.localeCompare(a.t))
+    .slice(0, limit);
+}
+
 function formatElapsed(ms?: number): string {
   if (ms == null) return "—";
   if (ms < 1000) return `${ms}ms`;
@@ -947,8 +1064,9 @@ function formatElapsed(ms?: number): string {
   return `${m}m ${r}s`;
 }
 
-function escapeHtml(s: string): string {
-  return s.replace(/[&<>"']/g, ch =>
+function escapeHtml(s: string | null | undefined): string {
+  if (s == null) return "";
+  return String(s).replace(/[&<>"']/g, ch =>
     ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[ch]!);
 }
 
@@ -957,23 +1075,35 @@ async function handleMotherProxy(req: Request): Promise<Response> {
   if (req.method !== "GET" || (url.pathname !== "/" && url.pathname !== "")) {
     return new Response("not found", { status: 404 });
   }
-  const log = readBirthLog(50);
-  const total = log.length;
-  const successCount = log.filter(e => e.success).length;
-  const failCount = log.filter(e => e.success === false && e.ended_at).length;
-  const inFlight = log.filter(e => !e.ended_at).length;
+  const activity = readFleetActivity(50);
+  const births = activity.filter(e => e.kind === "birth") as Array<BirthLogEntry & { kind: "birth"; t: string }>;
+  const deaths = activity.filter(e => e.kind === "death") as Array<DeathLogEntry & { kind: "death"; t: string }>;
+  const successCount = births.filter(e => e.success).length;
+  const failCount = births.filter(e => e.success === false && e.ended_at).length;
+  const inFlight = births.filter(e => !e.ended_at).length;
 
-  const rows = log.length === 0
-    ? `<tr><td colspan="5"><em>no births recorded yet</em></td></tr>`
-    : log.map(e => {
+  const rows = activity.length === 0
+    ? `<tr><td colspan="6"><em>no fleet activity recorded yet</em></td></tr>`
+    : activity.map(e => {
+        if (e.kind === "death") {
+          return `<tr>
+            <td><code>${escapeHtml(e.name)}</code></td>
+            <td><span class="pill" style="background:#8884">killed</span></td>
+            <td>—</td>
+            <td>${formatBorn(e.killed_at)}</td>
+            <td><span style="color:#888;font-size:0.85em">${escapeHtml([e.harness, e.model].filter(Boolean).join(" · "))}</span></td>
+            <td><span style="color:#888;font-size:0.85em">—</span></td>
+          </tr>`;
+        }
         const status = !e.ended_at
           ? `<span class="pill">in flight</span>`
           : e.success
-            ? `<span class="pill" style="background:#0a01">ok</span>`
+            ? `<span class="pill" style="background:#0a01">born</span>`
             : `<span class="pill" style="background:#a001">FAIL</span>`;
         const when = e.started_at ? formatBorn(e.started_at) : "—";
         const dur = formatElapsed(e.elapsed_ms);
         const meta = [e.harness, e.model].filter(Boolean).join(" · ");
+        const motherCell = e.mother_harness ? `by ${e.mother_harness}` : "—";
         const note = e.message && !e.success ? `<br><code>${escapeHtml(e.message)}</code>` : "";
         return `<tr>
           <td><code>${escapeHtml(e.name ?? e.birthId)}</code></td>
@@ -981,25 +1111,26 @@ async function handleMotherProxy(req: Request): Promise<Response> {
           <td>${dur}</td>
           <td>${when}</td>
           <td><span style="color:#888;font-size:0.85em">${escapeHtml(meta)}</span></td>
+          <td><span style="color:#888;font-size:0.85em">${escapeHtml(motherCell)}</span></td>
         </tr>`;
       }).join("\n");
 
   const body = `
     <h1>mother</h1>
-    <p class="sub">she births and tends the family · activity · last 50</p>
+    <p class="sub">fleet activity · births + kills · last 50</p>
     <p>
-      <span class="pill">${total} total</span>
-      <span class="pill" style="background:#0a01">${successCount} ok</span>
+      <span class="pill" style="background:#0a01">${successCount} born</span>
       <span class="pill" style="background:#a001">${failCount} failed</span>
+      <span class="pill" style="background:#8884">${deaths.length} killed</span>
       ${inFlight > 0 ? `<span class="pill">${inFlight} in flight</span>` : ""}
     </p>
     <table>
       <thead><tr>
-        <th>Cell</th><th>Outcome</th><th>Duration</th><th>Started</th><th>Harness · Model</th>
+        <th>Cell</th><th>Event</th><th>Duration</th><th>When</th><th>Harness · Model</th><th>Born by</th>
       </tr></thead>
       <tbody>${rows}</tbody>
     </table>
-    <p class="sub">Data: <code>~/.cells/birth-log/</code> on Pete's Mac.</p>
+    <p class="sub">Data: <code>~/.cells/birth-log/</code> + <code>~/.cells/death-log/</code> on Pete's Mac.</p>
     <div data-private style="margin-top:2em;padding:1em;border:1px dashed #444;border-radius:6px">
       <p class="sub">🔓 You're signed in.</p>
       <p>This block is wrapped in <code>&lt;div data-private&gt;</code> —
@@ -1236,9 +1367,9 @@ async function dashboardHtml(): Promise<Response> {
 // would 401 until the first auth.json refresh).
 await refreshValidBearers();
 
-const server = Bun.serve({
+const server = Bun.serve<WellWsData>({
   port: PORT,
-  async fetch(req) {
+  async fetch(req, server) {
     const host = hostOf(req);
     const url = new URL(req.url);
 
@@ -1273,11 +1404,70 @@ const server = Bun.serve({
       return handleMotherProxy(req);
     }
 
+    // egg-*.cells.md → welld at 127.0.0.1:7878. The per-cell CF Worker DO
+    // hits this for the wss://<wellname>.cells.md/agent bridge; welld
+    // already dispatches by Host and bridges to the guest's :8080 (HTTP
+    // and WS). We're just a hop so cloudflared's `*.cells.md → :8787`
+    // catch-all can reach welld. See the well-host fallthrough block above.
+    if (isWellHost(host)) {
+      if (req.headers.get("upgrade")?.toLowerCase() === "websocket") {
+        const ok = server.upgrade<WellWsData>(req, { data: buildWellWsData(req, host) });
+        if (ok) return undefined as unknown as Response;
+        return new Response("ws upgrade failed", { status: 426 });
+      }
+      return handleWellHttp(req);
+    }
+
     // slack.cells.md → handled by Cloudflare Worker (cells-front-slack).
     // <cell>.cells.md → handled by per-cell Cloudflare Worker.
     // Neither reaches the subscriptions proxy in v2.
 
     return new Response("unknown host", { status: 404 });
+  },
+  websocket: {
+    // Downstream (CF Worker DO) is now upgraded. Open the matching upstream
+    // WS to welld, then bridge in both directions. Pre-handshake frames
+    // from downstream queue until the upstream open event fires.
+    open(ws) {
+      const data = ws.data;
+      let upstream: WebSocket;
+      try {
+        upstream = new WebSocket(data.upstreamUrl, { headers: data.fwdHeaders } as any);
+      } catch (e) {
+        console.error(`[well-ws] upstream construct: ${String(e).slice(0, 200)}`);
+        try { ws.close(1011, "upstream construct failed"); } catch {}
+        return;
+      }
+      data.upstream = upstream;
+      upstream.addEventListener("open", () => {
+        data.upstreamReady = true;
+        for (const frame of data.queued) {
+          try { upstream.send(frame as any); } catch {}
+        }
+        data.queued.length = 0;
+      });
+      upstream.addEventListener("message", (ev: MessageEvent) => {
+        try { ws.send(ev.data as any); } catch {}
+      });
+      upstream.addEventListener("close", (ev: CloseEvent) => {
+        try { ws.close(ev.code || 1000, ev.reason || ""); } catch {}
+      });
+      upstream.addEventListener("error", (ev) => {
+        console.error(`[well-ws] upstream error: ${String((ev as any)?.message ?? ev).slice(0, 200)}`);
+        try { ws.close(1011, "upstream error"); } catch {}
+      });
+    },
+    message(ws, msg) {
+      const data = ws.data;
+      if (data.upstreamReady && data.upstream && data.upstream.readyState === 1 /* OPEN */) {
+        try { data.upstream.send(msg as any); } catch {}
+      } else {
+        data.queued.push(msg as any);
+      }
+    },
+    close(ws) {
+      try { ws.data.upstream?.close(); } catch {}
+    },
   },
 });
 
@@ -1289,6 +1479,7 @@ console.log(`    proxy.cells.md/codex/*      → OpenAI Codex proxy (Bearer auth
 console.log(`    proxy.cells.md/_proxy/health`);
 console.log(`    proxy.cells.md/bridge/*     → back-channel for in-well cells (Bearer auth)`);
 console.log(`    pulse.cells.md/heartbeat-changed → pulse inbox (Bearer auth)`);
+console.log(`    egg-*.cells.md/*            → welld (HTTP + WS) at 127.0.0.1:7878`);
 console.log(`    (slack.cells.md and <cell>.cells.md handled by Cloudflare Workers)`);
 console.log(`  upstreams: ${UPSTREAM}, ${CODEX_UPSTREAM}`);
 console.log(`  auth file: ${AUTH_PATH}`);

@@ -1,0 +1,94 @@
+---
+name: birth
+description: Turn a claimed generic egg into a configured, live cell. Self-contained — everything is here.
+---
+
+# Birth
+
+Execute the steps below in order. **Do not read other files. Do not grep
+the codebase. Do not echo env vars to check them — they're set, trust it.**
+Everything you need is in this skill.
+
+## Inputs
+
+The user message is `/birth <NAME> <EGG_WELL> <BLOB_JSON>`. Three
+positional args after `/birth`. `$CELL_OUTCOME_FILE` is set in env — write
+the final JSON there at the end.
+
+## Step 1 · Imprint (one bash call)
+
+Bake the egg in one Mac-side script that handles identity + model config
++ status file + extensions. The script SSHes into the egg once and does
+everything; no escaping pitfalls.
+
+```bash
+cd /Users/pete/Projects/cells && \
+  bash scripts/bake-egg.sh "<EGG_WELL>" "<NAME>" '<BLOB_JSON>'
+```
+
+Substitute the three positional args from the slash command. The blob
+JSON goes in single quotes verbatim (it contains double quotes already).
+
+The last line of output must be `BAKE-OK`. If it isn't, jump to **Failure**.
+
+## Step 2 · End-test (proves the cell's brain works)
+
+Pick by harness — same egg, different CLI:
+
+```bash
+# pi cells
+well exec -s "<EGG_WELL>" -- bash -lc "cd /root && source /etc/profile.d/cells-env.sh && timeout 30 pi --print 'say ok' && echo PI-OK"
+
+# claude-code cells
+well exec -s "<EGG_WELL>" -- bash -lc "cd /root && source /etc/profile.d/cells-env.sh && timeout 60 claude --print 'say ok' && echo CLAUDE-OK"
+
+# codex cells
+well exec -s "<EGG_WELL>" -- bash -lc "cd /root && source /etc/profile.d/cells-env.sh && timeout 120 codex exec --skip-git-repo-check --dangerously-bypass-approvals-and-sandbox 'say ok' < /dev/null && echo CODEX-OK"
+```
+
+Output must end with `PI-OK` / `CLAUDE-OK` / `CODEX-OK`. If not, the
+cell's brain is broken — jump to **Failure**.
+
+## Step 3 · Fire post-birth tasks in the background, then write outcome
+
+Site service registration, Cloudflare Worker deploy, and the well
+checkpoint all run async — the cell is already alive and you can already
+`cells talk` her. They land in the background. Mother does not wait.
+
+```bash
+POSTLOG="/Users/pete/.cells/logs/birth-postwork/<NAME>.log"
+mkdir -p "$(dirname "$POSTLOG")"
+nohup bash -c '
+  set -e
+  cd /Users/pete/Projects/cells
+  echo "[$(date -Iseconds)] post-birth start"
+  bash scripts/register-site-service.sh "<NAME>" "<EGG_WELL>" && echo "[$(date -Iseconds)] site service registered"
+  well url update --auth public -s "<EGG_WELL>" && echo "[$(date -Iseconds)] well url public"
+  bash scripts/deploy-cell-worker.sh "<NAME>" "<EGG_WELL>" && echo "[$(date -Iseconds)] worker deployed"
+  bash scripts/bind-cell-channels.sh "<NAME>" '"'"'<BLOB_JSON>'"'"' && echo "[$(date -Iseconds)] channels bound"
+  bash scripts/update-cell-harness.sh "<EGG_WELL>" '"'"'<BLOB_JSON>'"'"' && echo "[$(date -Iseconds)] harness updated"
+  well checkpoint create -s "<EGG_WELL>" --comment "born-<NAME>" && echo "[$(date -Iseconds)] checkpoint"
+  echo "[$(date -Iseconds)] post-birth done"
+' > "$POSTLOG" 2>&1 &
+disown
+
+# Write outcome — birth is done.
+echo "{\"success\":true,\"message\":\"cell <NAME> alive · <MODEL> (post-birth async)\"}" > "$CELL_OUTCOME_FILE"
+```
+
+Substitute `<NAME>`, `<EGG_WELL>`, `<MODEL>` (from the blob). After the
+outcome write, print exactly:
+
+> Cell `<NAME>` is alive. Talk to it with `cells talk <NAME>`.
+
+Stop. No further checks, no memory writes, no exploration.
+
+## Failure
+
+Any gated step fails (`BAKE-OK` missing, end-test wrong):
+
+```bash
+echo "{\"success\":false,\"message\":\"step <N>: <one-line reason>\"}" > "$CELL_OUTCOME_FILE"
+```
+
+Then stop. The CLI will sweep the egg.

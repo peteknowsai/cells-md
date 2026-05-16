@@ -25,6 +25,10 @@
   "defaultModel": "gpt-5.5",
   "defaultThinkingLevel": "high",
   "modelChain": ["openai-codex/gpt-5.5:high", "anthropic/claude-opus-4-7:high", "deepseek/deepseek-v4-pro:high"],
+  "harnessChain": [
+    { "harness": "claude-code", "model": "anthropic/claude-opus-4-7", "thinking": "high" },
+    { "harness": "pi",          "model": "openai-codex/gpt-5.5",      "thinking": "high" }
+  ],
   "warnings": {
     "anthropicExtraUsage": false
   },
