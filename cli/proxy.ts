@@ -550,6 +550,34 @@ function buildWellWsData(req: Request, host: string): WellWsData {
 
 // ───────────────────── proxy (api path) ─────────────────────
 
+// Peer registry — discovery surface for `cells talk --list`. Reads the
+// operator's local registry at ~/.cells/cells.json and returns the alive
+// cells in a stable shape. Bearer-auth-gated (same secret as other proxy
+// routes). The agent-comms primitive doesn't lean on capability filtering
+// yet — that lands when we add `~/.cells/capabilities/<name>.json` files
+// (deferred from v1).
+async function handlePeers(req: Request): Promise<Response> {
+  const auth = checkClientAuth(req);
+  if (!auth.ok) return new Response(auth.reason, { status: 401 });
+  try {
+    const reg = JSON.parse(readFileSync(CELLS_REGISTRY, "utf8"));
+    const cells: any[] = Array.isArray(reg?.cells) ? reg.cells : [];
+    const peers = cells
+      .filter((c) => c?.status !== "killed")
+      .map((c) => ({
+        name: c.name,
+        status: c.status ?? "unknown",
+        harness: c.harness ?? "pi",
+        model: Array.isArray(c.modelChain) ? c.modelChain[0] : (c.model ?? ""),
+        special: !!c.special,
+        site_url: `https://${c.name}.cells.md`,
+      }));
+    return Response.json({ peers, as_of: new Date().toISOString() });
+  } catch (e) {
+    return new Response(`could not read registry: ${String(e).slice(0, 200)}`, { status: 500 });
+  }
+}
+
 function checkClientAuth(req: Request): { ok: true; cell: string } | { ok: false; reason: string } {
   const auth = req.headers.get("authorization") ?? "";
   const m = auth.match(/^Bearer\s+(.+)$/i);
@@ -1382,6 +1410,9 @@ const server = Bun.serve<WellWsData>({
     ) {
       if (url.pathname === "/" || url.pathname === "") {
         return await dashboardHtml();
+      }
+      if (url.pathname === "/peers") {
+        return handlePeers(req);
       }
       if (url.pathname.startsWith("/codex/")) {
         return handleCodexProxy(req);

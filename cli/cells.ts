@@ -1282,15 +1282,253 @@ async function cmdTalk(name: string, args: string[]) {
     await streamCellBridge(name, { interactive: true });
     return;
   }
-  if (args[0]!.startsWith("-")) {
-    console.error(
-      `flag '${args[0]}' isn't supported on cell talk. Use 'cells talk ${name}' for an interactive chat, 'cells talk ${name} "<msg>"' for one-shot, or 'cells tui ${name}' to drop into the well shell.`,
-    );
+  // Flag parsing for the new fork-based one-shot path. Recognized flags:
+  //   --await       (default for one-shot now — Pete wants the answer back)
+  //   --main        (write to receiver's main thread; default is fork)
+  //   --timeout=Ns  (defaults to 120s)
+  // Anything we don't recognize falls through to streamCellBridge so older
+  // habits (cells talk <name> --foo "msg") still surface a useful error.
+  let useMain = false;
+  let timeoutS = 120;
+  const positional: string[] = [];
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i] ?? "";
+    if (a === "--await") { /* await is the default for one-shot; flag harmless */ continue; }
+    if (a === "--main") { useMain = true; continue; }
+    if (a.startsWith("--timeout=")) {
+      const v = a.slice("--timeout=".length);
+      const m = v.match(/^(\d+)\s*([smh]?)$/);
+      timeoutS = m ? Number(m[1]) * (m[2] === "h" ? 3600 : m[2] === "m" ? 60 : 1) : 120;
+      continue;
+    }
+    if (a === "--timeout") {
+      const v = args[++i] ?? "120s";
+      const m = v.match(/^(\d+)\s*([smh]?)$/);
+      timeoutS = m ? Number(m[1]) * (m[2] === "h" ? 3600 : m[2] === "m" ? 60 : 1) : 120;
+      continue;
+    }
+    if (a.startsWith("-")) {
+      console.error(
+        `flag '${a}' isn't supported on cells talk. Use 'cells talk ${name}' for an interactive chat, 'cells talk ${name} "<msg>"' for one-shot, --main to write to main, --timeout=Ns to override the wait, or 'cells tui ${name}' to drop into the well shell.`,
+      );
+      process.exit(1);
+    }
+    positional.push(a);
+  }
+  const message = positional.join(" ");
+  // One-shot uses the new fork-based agent-comms path: SSH into the cell and
+  // run the on-cell CLI, which POSTs the envelope and long-polls for the
+  // reply. Default target is "fork" (receiver answers from main context but
+  // main stays untouched); --main escalates to writing the exchange into the
+  // receiver's main thread (Slack/email equivalent).
+  await macTalkOneShotFork(name, message, { timeoutS, useMain });
+}
+
+async function macTalkOneShotFork(
+  cellName: string,
+  message: string,
+  opts: { timeoutS: number; useMain: boolean },
+): Promise<void> {
+  const result = await runTalkOnCell(cellName, message, opts);
+  if (!result.ok) {
+    console.error(`! cells talk failed (exit ${result.exitCode}): ${result.error.slice(0, 500)}`);
+    if (result.text) console.error(result.text);
+    process.exit(result.exitCode);
+  }
+  if (result.text) console.log(result.text);
+}
+
+// Run a one-shot `cells talk` inside the peer's well and return the
+// response. Wrapped because cmdTalk wants print-and-exit semantics, while
+// cmdVerify wants parallel collection. Both share this transport.
+async function runTalkOnCell(
+  cellName: string,
+  message: string,
+  opts: { timeoutS: number; useMain: boolean },
+): Promise<{ ok: true; text: string } | { ok: false; exitCode: number; error: string; text: string }> {
+  const wellName = await wellNameForCell(cellName);
+  if (!wellName) {
+    return { ok: false, exitCode: 1, error: `unknown cell or well-mapping for: ${cellName}`, text: "" };
+  }
+  const escaped = message.replace(/'/g, "'\\''");
+  const flag = opts.useMain ? "--main" : "";
+  const remote = `/root/bin/cells talk '${cellName}' --await --timeout=${opts.timeoutS}s ${flag} '${escaped}'`;
+  const proc = Bun.spawn(
+    [
+      "well", "exec", "-s", wellName, "--",
+      "sudo", "bash", "-lc", `export HOME=/root; ${remote}`,
+    ],
+    { stdin: "ignore", stdout: "pipe", stderr: "pipe" },
+  );
+  const [stdoutRaw, stderrRaw] = await Promise.all([
+    new Response(proc.stdout).text(),
+    new Response(proc.stderr).text(),
+  ]);
+  const exitCode = await proc.exited;
+  const stdoutTrimmed = stdoutRaw.trim();
+  if (exitCode !== 0) {
+    return { ok: false, exitCode, error: stderrRaw.trim(), text: stdoutTrimmed };
+  }
+  return { ok: true, text: stdoutTrimmed };
+}
+
+// `cells verify` — fan out a decision to N peers in parallel, return their
+// takes side-by-side. The killer-app pattern over `cells talk`: every
+// Pete-affecting decision a cell makes can be cross-checked against a
+// sibling on a different model before committing.
+//
+// Each peer forks its main read-only (existing cells talk default), so the
+// verifier query never pollutes anyone's main thread. v1 doesn't try to
+// route to model-specific siblings automatically — caller names the peers
+// explicitly via --to. Future: --models=opus,gpt-5.5 resolves to peers
+// once the capability/model registry lands.
+async function cmdVerify(args: string[]) {
+  let decision = "";
+  let context = "";
+  let timeoutS = 90;
+  const peers: string[] = [];
+  // Deduped at end so --to=foo,foo,bar doesn't run two forks of foo.
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i] ?? "";
+    if (a.startsWith("--to=")) {
+      peers.push(...a.slice("--to=".length).split(",").map(s => s.trim()).filter(Boolean));
+      continue;
+    }
+    if (a === "--to") {
+      const v = args[++i] ?? "";
+      peers.push(...v.split(",").map(s => s.trim()).filter(Boolean));
+      continue;
+    }
+    if (a.startsWith("--context=")) {
+      context = a.slice("--context=".length);
+      continue;
+    }
+    if (a === "--context") {
+      context = args[++i] ?? "";
+      continue;
+    }
+    if (a.startsWith("--context-file=")) {
+      const p = a.slice("--context-file=".length);
+      try { context = await readFile(p, "utf-8"); }
+      catch (e) { console.error(`--context-file: cannot read ${p}: ${(e as Error).message}`); process.exit(1); }
+      continue;
+    }
+    if (a.startsWith("--timeout=")) {
+      const v = a.slice("--timeout=".length);
+      const m = v.match(/^(\d+)\s*([smh]?)$/);
+      timeoutS = m ? Number(m[1]) * (m[2] === "h" ? 3600 : m[2] === "m" ? 60 : 1) : 90;
+      continue;
+    }
+    if (a.startsWith("-")) {
+      console.error(`unknown flag: ${a}`);
+      process.exit(1);
+    }
+    decision = decision ? decision + " " + a : a;
+  }
+  const uniquePeers = Array.from(new Set(peers));
+  if (!decision || uniquePeers.length === 0) {
+    console.error("usage: cells verify \"<decision>\" --to=<cellA>[,<cellB>...] [--context=<text>] [--context-file=<path>] [--timeout=<Ns>]");
     process.exit(1);
   }
-  // One-shot bridge prompt — reply streams here AND in Slack.
-  const message = args.join(" ");
-  await streamCellBridge(name, { interactive: false, initialMessage: message });
+  const prompt = verifierPrompt(decision, context);
+  // Parallel fan-out. Each peer answers from its own main context in a fork.
+  const t0 = Date.now();
+  const results = await Promise.all(
+    uniquePeers.map(async (peer) => {
+      const r = await runTalkOnCell(peer, prompt, { timeoutS, useMain: false });
+      return { peer, result: r };
+    })
+  );
+  const dt = Date.now() - t0;
+
+  // Render pretty + summary. Counts AGREE / DISAGREE / UNCLEAR by simple
+  // keyword sniff at the head of each response — good enough for v1.
+  let agree = 0;
+  let disagree = 0;
+  let unclear = 0;
+  const takes: Array<{ peer: string; stance: string; ok: boolean; text: string; exit_code?: number; error?: string }> = [];
+  console.log(`# cells verify · ${uniquePeers.length} peers · ${Math.round(dt / 100) / 10}s`);
+  console.log(`# decision: ${decision}`);
+  if (context) console.log(`# context: ${context.length > 80 ? context.slice(0, 77) + "..." : context}`);
+  console.log("");
+  for (const { peer, result } of results) {
+    if (!result.ok) {
+      console.log(`## ${peer} — ERROR`);
+      console.log(`  exit ${result.exitCode}: ${result.error.slice(0, 240)}`);
+      console.log("");
+      unclear++;
+      takes.push({ peer, stance: "error", ok: false, text: result.text, exit_code: result.exitCode, error: result.error });
+      continue;
+    }
+    const stance = classifyStance(result.text);
+    if (stance === "agree") agree++;
+    else if (stance === "disagree") disagree++;
+    else unclear++;
+    const label = stance === "agree" ? "AGREE" : stance === "disagree" ? "DISAGREE" : "UNCLEAR";
+    console.log(`## ${peer} — ${label}`);
+    for (const line of result.text.split("\n")) console.log(`  ${line}`);
+    console.log("");
+    takes.push({ peer, stance, ok: true, text: result.text });
+  }
+  // Consensus header — useful for scripts that grep the last line.
+  const verdict =
+    agree > 0 && disagree === 0 ? "CONSENSUS-AGREE" :
+    disagree > 0 && agree === 0 ? "CONSENSUS-DISAGREE" :
+    agree > 0 && disagree > 0 ? "SPLIT" :
+    "UNCLEAR";
+  console.log(`# verdict: ${verdict} (agree=${agree} disagree=${disagree} unclear=${unclear})`);
+  // Append to the daily audit log. Best-effort — never fail the verify on
+  // a log write error.
+  try { await appendVerifyLog({ decision, context, peers: uniquePeers, takes, verdict, dt_ms: dt }); }
+  catch (e) { console.error(`# (log append failed: ${(e as Error).message})`); }
+}
+
+// One line per `cells verify` invocation. Daily file. Mostly for "what did
+// the cells decide last week?" — no schema dependents yet, evolve freely.
+async function appendVerifyLog(rec: {
+  decision: string;
+  context: string;
+  peers: string[];
+  takes: Array<{ peer: string; stance: string; ok: boolean; text: string; exit_code?: number; error?: string }>;
+  verdict: string;
+  dt_ms: number;
+}): Promise<void> {
+  const dir = join(homedir(), ".cells", "verify-log");
+  await mkdir(dir, { recursive: true });
+  const date = new Date().toISOString().slice(0, 10);
+  const file = join(dir, `${date}.jsonl`);
+  const line = JSON.stringify({ ts: new Date().toISOString(), ...rec }) + "\n";
+  await appendFile(file, line);
+}
+
+function verifierPrompt(decision: string, context: string = ""): string {
+  const lines = [
+    "[PEER VERIFIER QUERY]",
+    "Another cell is considering a decision and wants your take before acting.",
+    "You're being consulted in a forked read-only branch — don't update your plans",
+    "or memory based on this; just give your honest read using what you already know.",
+    "",
+  ];
+  if (context.trim()) {
+    lines.push("CALLER CONTEXT:");
+    lines.push(context.trim());
+    lines.push("");
+  }
+  lines.push("DECISION: " + decision);
+  lines.push("");
+  lines.push("Respond in this exact format (2-3 short sentences total):");
+  lines.push("  AGREE or DISAGREE: <one word>");
+  lines.push("  WHY: <1 sentence>");
+  lines.push("  CONCERN: <flag any risk, or \"none\">");
+  return lines.join("\n");
+}
+
+function classifyStance(text: string): "agree" | "disagree" | "unclear" {
+  const head = text.slice(0, 200).toUpperCase();
+  // Look at the first line / first 200 chars for the canonical AGREE/DISAGREE marker.
+  if (/\bDISAGREE\b/.test(head)) return "disagree";
+  if (/\bAGREE\b/.test(head)) return "agree";
+  return "unclear";
 }
 
 async function cmdTui(name: string, extra: string[] = []) {
@@ -7271,6 +7509,7 @@ switch (sub) {
     await cmdTalk(targetName, rest.slice(1));
     break;
   }
+  case "verify":     await cmdVerify(rest); break;
   case "list":       await cmdList(); break;
   case "sleep":      await cmdSleep(needName(rest, "sleep")); break;
   case "stop":       await cmdStop(needName(rest, "stop")); break;

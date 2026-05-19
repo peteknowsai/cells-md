@@ -21,6 +21,17 @@ function die(msg: string, code = 1): never {
 }
 
 function selfName(): string {
+  // CELL_NAME is the canonical source. The supervisor and well-firstboot both
+  // bake it in; the on-cell login env (bash -lc → /etc/profile.d) may not
+  // surface it, so we fall back to /root/.pi/status.json's first channel
+  // (#<cellname>) and finally to hostname. Hostname returns the well name
+  // for hatched cells (e.g. egg-0f7d66), which is *not* the cell name.
+  if (process.env.CELL_NAME) return process.env.CELL_NAME;
+  try {
+    const j = JSON.parse(Bun.spawnSync(["cat", "/root/.pi/status.json"]).stdout.toString());
+    const first = Array.isArray(j?.channels) ? j.channels[0] : "";
+    if (typeof first === "string" && first.startsWith("#")) return first.slice(1);
+  } catch { /* fall through */ }
   return Bun.spawnSync(["hostname"]).stdout.toString().trim();
 }
 
@@ -132,35 +143,265 @@ async function cmdCheckpoint(arg: string) {
   console.log(id ? `checkpoint created: ${id}` : `checkpoint created (id unknown)`);
 }
 
-async function cmdTalk(name: string, message: string) {
-  if (!name || !message) die("usage: cells talk <name> <message>");
-  if (name === selfName()) die("can't talk to self via cells talk — use talk_to_self instead");
+// `cells talk` — the agent-comms primitive (substrate-native cells-to-cells
+// RPC). Sender constructs an envelope, POSTs it to the peer's per-cell
+// Worker /inbox/append (kind:"agent"); the peer's supervisor forks its
+// main session read-only, answers, and the response routes back via
+// reply_to. With --await, the CLI blocks until the reply arrives (true
+// RPC). Without, it returns immediately (fire-and-forget).
+//
+// Supersedes the sprites-era tmux-send-keys + sleep 8 implementation.
+// That ran from cells-to-cells via the Sprites API; this runs over the
+// public CF Worker per-cell, using the same path as Slack/email but with
+// a different envelope kind.
 
-  // Inject into the peer's tmux session and capture the pane after a short
-  // delay. Mirrors what the keeper's talk_to_agent does, but issued from
-  // inside a cell via the Sprites API exec endpoint.
-  //
-  // Lazy-start: if the peer has never been visited interactively, no tmux
-  // server is running there — `send-keys` would fail. Start one if missing.
-  const escaped = message.replace(/'/g, "'\\''");
-  const script = [
-    // Env (PATH, secrets) comes from /etc/profile.d/cells-env.sh sourced
-    // automatically by /etc/profile for any login shell, including
-    // non-interactive `bash -lc`.
-    `tmux has-session -t agent 2>/dev/null || tmux new-session -d -s agent -c /root pi`,
-    `sleep 1`,
-    `tmux send-keys -t agent '${escaped}' Enter`,
-    `sleep 8`,
-    `tmux capture-pane -t agent -p | tail -40`,
-  ].join(" && ");
-  const r = await api(`/v1/sprites/${encodeURIComponent(name)}/exec`, {
-    method: "POST",
-    body: JSON.stringify({ command: ["bash", "-lc", script] }),
+import { makeOutgoing, type AgentTarget } from "/root/lib/agent-envelope";
+
+type TalkOpts = {
+  peer: string;
+  message: string;
+  wantsAwait: boolean;
+  target: AgentTarget;
+  thread: string;
+  timeoutS: number;
+};
+
+function parseTimeout(s: string): number {
+  const m = String(s).match(/^(\d+)\s*([smh]?)$/);
+  if (!m) return 120;
+  const n = Number(m[1] ?? 120);
+  return m[2] === "h" ? n * 3600 : m[2] === "m" ? n * 60 : n;
+}
+
+function parseTalkArgs(rest: string[]): TalkOpts {
+  let peer = "";
+  let wantsAwait = false;
+  let target: AgentTarget = "fork";
+  let thread = "";
+  let timeoutS = 120;
+  const positional: string[] = [];
+  let i = 0;
+  while (i < rest.length) {
+    const a = rest[i] ?? "";
+    if (a === "--await") { wantsAwait = true; i++; continue; }
+    if (a === "--main") { target = "main"; i++; continue; }
+    if (a.startsWith("--thread=")) { thread = a.slice("--thread=".length); i++; continue; }
+    if (a === "--thread") { thread = rest[++i] ?? ""; i++; continue; }
+    if (a.startsWith("--timeout=")) { timeoutS = parseTimeout(a.slice("--timeout=".length)); i++; continue; }
+    if (a === "--timeout") { timeoutS = parseTimeout(rest[++i] ?? "120s"); i++; continue; }
+    positional.push(a);
+    i++;
+  }
+  peer = positional[0] ?? "";
+  const message = positional.slice(1).join(" ");
+  return { peer, message, wantsAwait, target, thread, timeoutS };
+}
+
+function getProxySecret(): string {
+  const v = process.env.CELLS_PROXY_SECRET ?? "";
+  if (!v) die("CELLS_PROXY_SECRET not set in env (sourced by /etc/profile.d/cells-env.sh)");
+  return v;
+}
+
+// `cells verify` — fan-out a decision to N peers in parallel via cells talk,
+// aggregate AGREE/DISAGREE stances. Killer-app pattern over the talk
+// primitive: every Pete-affecting decision can be cross-checked against
+// siblings on different models before committing.
+async function cmdVerify(rest: string[]): Promise<void> {
+  let decision = "";
+  let context = "";
+  let timeoutS = 90;
+  const peers: string[] = [];
+  for (let i = 0; i < rest.length; i++) {
+    const a = rest[i] ?? "";
+    if (a.startsWith("--to=")) { peers.push(...a.slice(5).split(",").map(s => s.trim()).filter(Boolean)); continue; }
+    if (a === "--to") { const v = rest[++i] ?? ""; peers.push(...v.split(",").map(s => s.trim()).filter(Boolean)); continue; }
+    if (a.startsWith("--context=")) { context = a.slice("--context=".length); continue; }
+    if (a === "--context") { context = rest[++i] ?? ""; continue; }
+    if (a.startsWith("--context-file=")) {
+      const p = a.slice("--context-file=".length);
+      try { context = await Bun.file(p).text(); }
+      catch (e) { die(`--context-file: cannot read ${p}: ${(e as Error).message}`); }
+      continue;
+    }
+    if (a.startsWith("--timeout=")) {
+      const v = a.slice("--timeout=".length);
+      const m = v.match(/^(\d+)\s*([smh]?)$/);
+      timeoutS = m ? Number(m[1]) * (m[2] === "h" ? 3600 : m[2] === "m" ? 60 : 1) : 90;
+      continue;
+    }
+    if (a.startsWith("-")) die(`unknown flag: ${a}`);
+    decision = decision ? decision + " " + a : a;
+  }
+  const uniquePeers = Array.from(new Set(peers));
+  if (!decision || uniquePeers.length === 0) {
+    die("usage: cells verify \"<decision>\" --to=<cellA>[,<cellB>...] [--context=<text>] [--context-file=<path>] [--timeout=<Ns>]");
+  }
+  const promptLines: string[] = [
+    "[PEER VERIFIER QUERY]",
+    "Another cell is considering a decision and wants your take before acting.",
+    "You're being consulted in a forked read-only branch — don't update your plans",
+    "or memory based on this; just give your honest read using what you already know.",
+    "",
+  ];
+  if (context.trim()) {
+    promptLines.push("CALLER CONTEXT:");
+    promptLines.push(context.trim());
+    promptLines.push("");
+  }
+  promptLines.push("DECISION: " + decision);
+  promptLines.push("");
+  promptLines.push("Respond in this exact format (2-3 short sentences total):");
+  promptLines.push("  AGREE or DISAGREE: <one word>");
+  promptLines.push("  WHY: <1 sentence>");
+  promptLines.push("  CONCERN: <flag any risk, or \"none\">");
+  const prompt = promptLines.join("\n");
+  // Parallel via Promise.all + Bun.spawn.
+  const t0 = Date.now();
+  const responses = await Promise.all(uniquePeers.map(async (peer) => {
+    const proc = Bun.spawn(
+      ["/root/bin/cells", "talk", peer, "--await", `--timeout=${timeoutS}s`, prompt],
+      { stdin: "ignore", stdout: "pipe", stderr: "pipe" },
+    );
+    const [stdout, stderr] = await Promise.all([
+      new Response(proc.stdout).text(),
+      new Response(proc.stderr).text(),
+    ]);
+    const code = await proc.exited;
+    return { peer, code, stdout: stdout.trim(), stderr: stderr.trim() };
+  }));
+  const dt = Date.now() - t0;
+
+  let agree = 0, disagree = 0, unclear = 0;
+  const takes: Array<{ peer: string; stance: string; ok: boolean; text: string; exit_code?: number; error?: string }> = [];
+  console.log(`# cells verify · ${uniquePeers.length} peers · ${Math.round(dt / 100) / 10}s`);
+  console.log(`# decision: ${decision}`);
+  if (context) console.log(`# context: ${context.length > 80 ? context.slice(0, 77) + "..." : context}`);
+  console.log("");
+  for (const r of responses) {
+    if (r.code !== 0) {
+      console.log(`## ${r.peer} — ERROR`);
+      console.log(`  exit ${r.code}: ${(r.stderr || r.stdout).slice(0, 240)}`);
+      console.log("");
+      unclear++;
+      takes.push({ peer: r.peer, stance: "error", ok: false, text: r.stdout, exit_code: r.code, error: r.stderr });
+      continue;
+    }
+    const head = r.stdout.slice(0, 200).toUpperCase();
+    const stance = /\bDISAGREE\b/.test(head) ? "disagree" : /\bAGREE\b/.test(head) ? "agree" : "unclear";
+    if (stance === "agree") agree++; else if (stance === "disagree") disagree++; else unclear++;
+    const label = stance === "agree" ? "AGREE" : stance === "disagree" ? "DISAGREE" : "UNCLEAR";
+    console.log(`## ${r.peer} — ${label}`);
+    for (const line of r.stdout.split("\n")) console.log(`  ${line}`);
+    console.log("");
+    takes.push({ peer: r.peer, stance, ok: true, text: r.stdout });
+  }
+  const verdict =
+    agree > 0 && disagree === 0 ? "CONSENSUS-AGREE" :
+    disagree > 0 && agree === 0 ? "CONSENSUS-DISAGREE" :
+    agree > 0 && disagree > 0 ? "SPLIT" :
+    "UNCLEAR";
+  console.log(`# verdict: ${verdict} (agree=${agree} disagree=${disagree} unclear=${unclear})`);
+  // Best-effort append to /root/.cell/verify-log/<date>.jsonl so the cell
+  // has a trail of "what did I cross-check, and what did the peers say?"
+  try {
+    const { appendFile, mkdir } = await import("node:fs/promises");
+    const dir = "/root/.cell/verify-log";
+    await mkdir(dir, { recursive: true });
+    const date = new Date().toISOString().slice(0, 10);
+    const file = `${dir}/${date}.jsonl`;
+    const rec = { ts: new Date().toISOString(), from: selfName(), decision, context, peers: uniquePeers, takes, verdict, dt_ms: dt };
+    await appendFile(file, JSON.stringify(rec) + "\n");
+  } catch (e) {
+    console.error(`# (log append failed: ${(e as Error).message})`);
+  }
+}
+
+async function cmdTalkList(): Promise<void> {
+  const secret = getProxySecret();
+  const res = await fetch("https://proxy.cells.md/peers", {
+    headers: { authorization: `Bearer ${secret}` },
   });
-  // exec response shape may include stdout/stderr — print whatever we got
-  if (typeof r === "string") console.log(r);
-  else if (r?.stdout) console.log(r.stdout);
-  else console.log(JSON.stringify(r, null, 2));
+  if (!res.ok) {
+    const body = await res.text();
+    die(`peers lookup failed (${res.status}): ${body.slice(0, 300)}`);
+  }
+  const data = await res.json() as { peers: Array<{ name: string; status: string; harness: string; model: string; special: boolean; site_url: string }>; as_of: string };
+  // Pretty list — one row per peer.
+  for (const p of data.peers) {
+    const marker = p.special ? "*" : " ";
+    const status = p.status === "alive" ? "alive" : p.status;
+    console.log(`${marker} ${p.name.padEnd(20)} ${status.padEnd(10)} ${p.harness.padEnd(12)} ${p.model}`);
+  }
+}
+
+async function cmdTalk(rest: string[]) {
+  // --list short-circuits before envelope parsing — it has no peer/message.
+  if (rest[0] === "--list" || rest.includes("--list")) {
+    return cmdTalkList();
+  }
+  const { peer, message, wantsAwait, target, thread, timeoutS } = parseTalkArgs(rest);
+  if (!peer || !message) {
+    die("usage: cells talk <peer> [--await] [--main] [--thread=<id>] [--timeout=<Ns>] <message>\n  or: cells talk --list");
+  }
+  const self = selfName();
+  const secret = getProxySecret();
+  const replyTo = wantsAwait ? `https://${self}.cells.md/inbox/append` : "";
+  const env = makeOutgoing({
+    from: self,
+    to: peer,
+    text: message,
+    target,
+    thread_id: thread || undefined,
+    reply_to: replyTo,
+    timeout_seconds: wantsAwait ? timeoutS : undefined,
+  });
+
+  // POST envelope to peer's inbox/append. 202 means accepted; the supervisor
+  // is now forking (or routing to main) and will reply asynchronously.
+  const postRes = await fetch(`https://${peer}.cells.md/inbox/append`, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      authorization: `Bearer ${secret}`,
+    },
+    body: JSON.stringify({ event: env }),
+  });
+  if (!postRes.ok) {
+    const body = await postRes.text();
+    die(`POST to ${peer} failed (${postRes.status}): ${body.slice(0, 300)}`);
+  }
+
+  if (!wantsAwait) {
+    console.log(JSON.stringify({ ok: true, command: "talk", data: { corr_id: env.corr_id, sent_to: peer } }));
+    return;
+  }
+
+  // --await: HTTP long-poll the local supervisor for the matching reply.
+  // The supervisor holds the connection until DO forwards an agent_reply
+  // with matching corr_id, or the timeout expires.
+  const waitUrl = `http://localhost:8080/agent-wait?corr_id=${encodeURIComponent(env.corr_id)}&timeout=${timeoutS}`;
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), (timeoutS + 5) * 1000); // +5s buffer past server-side timeout
+  try {
+    const waitRes = await fetch(waitUrl, { signal: ctrl.signal });
+    clearTimeout(timer);
+    if (waitRes.status === 408) {
+      die(JSON.stringify({ ok: false, command: "talk", error: "timeout", diagnosis: `no reply from ${peer} within ${timeoutS}s` }));
+    }
+    if (!waitRes.ok) {
+      const body = await waitRes.text();
+      die(JSON.stringify({ ok: false, command: "talk", error: `wait failed ${waitRes.status}`, diagnosis: body.slice(0, 200) }));
+    }
+    const reply = await waitRes.json() as { text?: string };
+    console.log(reply?.text ?? "");
+  } catch (e: any) {
+    clearTimeout(timer);
+    if (e?.name === "AbortError") {
+      die(JSON.stringify({ ok: false, command: "talk", error: "timeout", diagnosis: "client-side timeout" }));
+    }
+    die(JSON.stringify({ ok: false, command: "talk", error: String(e).slice(0, 200) }));
+  }
 }
 
 // ───── dispatch ─────
@@ -179,7 +420,10 @@ switch (sub) {
     await cmdInfo(rest[0] ?? "self");
     break;
   case "talk":
-    await cmdTalk(rest[0] ?? "", rest.slice(1).join(" "));
+    await cmdTalk(rest);
+    break;
+  case "verify":
+    await cmdVerify(rest);
     break;
   case "checkpoint":
     await cmdCheckpoint(rest[0] ?? "self");
@@ -191,7 +435,8 @@ switch (sub) {
     console.log("  cells whoami              print self name");
     console.log("  cells list                list peer cells (status, age)");
     console.log("  cells info [name|self]    show name, status, egress (default: self)");
-    console.log("  cells talk <name> <msg>   send a message to a peer's Pi, capture reply");
+    console.log("  cells talk <peer> [flags] <msg>   send to a peer; --await blocks for reply, --main escalates to peer's main thread");
+    console.log("  cells verify <decision> --to=<peers> fan out a decision to N peers, aggregate AGREE/DISAGREE");
     console.log("  cells checkpoint [self]   snapshot your own filesystem (~300ms)");
     console.log("");
     console.log("not available on cells (keeper-only):");

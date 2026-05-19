@@ -21,6 +21,14 @@
  */
 
 import { gateHtml } from "../../shared/clerk-gate";
+import {
+  validateEnvelope,
+  isExpired,
+  MAX_HOPS,
+  ulid,
+  sortedThreadId,
+  type AgentEnvelope,
+} from "../../shared/agent-envelope";
 
 interface Env {
   CELL_NAME: string;
@@ -135,6 +143,11 @@ export class CellAgent {
   // active; decays back when no 429 has been seen for FLUSH_BACKOFF_DECAY_MS.
   private flushBackoffMs = FLUSH_INTERVAL_MS;
   private last429At = 0;
+  // Outstanding agent forks: corr_id → reply context. Populated when an
+  // inbound kind:"agent" arrives and we hand it off to the supervisor;
+  // drained when the supervisor's agent_response event matches. In-memory
+  // only — a DO restart drops them, sender will time out cleanly.
+  private pendingAgentForks: Map<string, { reply_to: string; from: string; thread_id: string }> = new Map();
 
   constructor(state: DurableObjectState, env: Env) {
     this.state = state;
@@ -209,6 +222,16 @@ export class CellAgent {
     try { body = await req.json(); } catch { return new Response("bad json", { status: 400 }); }
 
     const event = body?.event ?? {};
+
+    // Cells-to-cells agent comms. Sender POSTed a kind:"agent" envelope to
+    // our /inbox/append. Routing depends on whether this is a new message
+    // (no in_reply_to → forward to supervisor) or a reply to one of our
+    // outgoing awaits (in_reply_to → match to a pending corr_id). Slack
+    // and email continue through their existing path below.
+    if (event.kind === "agent") {
+      return this.handleAgentEnvelope(event);
+    }
+
     const channel = String(event.channel ?? "");
     const user = String(event.user ?? "");
     const threadTs = String(event.thread_ts ?? "");
@@ -258,6 +281,140 @@ export class CellAgent {
     }
 
     return new Response(null, { status: 202 });
+  }
+
+  // ---- inbound from cell Worker /inbox/append (kind:"agent") ----
+
+  // Two routes from here:
+  //   (1) in_reply_to is set → this is a reply to one of our outgoing awaits.
+  //       Match to a pending corr_id (Phase 2 wires the corr_id→ws matcher;
+  //       for now we log and 202).
+  //   (2) in_reply_to is null → new inbound. Validate, hops-cap, forward to
+  //       the supervisor via the existing WS as an `agent_message` frame.
+  //       Supervisor will run fork-and-ask (Phase 1) and emit `agent_response`
+  //       on the WS, which onPiEvent routes back to reply_to.
+  private async handleAgentEnvelope(rawEvent: any): Promise<Response> {
+    const v = validateEnvelope(rawEvent);
+    if (!v.ok) {
+      console.error(`[${this.env.CELL_NAME}] bad agent envelope: ${v.reason}`);
+      return new Response(`bad envelope: ${v.reason}`, { status: 400 });
+    }
+    const env = v.env;
+
+    if (env.hops > MAX_HOPS) {
+      console.log(`[${this.env.CELL_NAME}] dropping agent envelope: hops=${env.hops} > ${MAX_HOPS}`);
+      return new Response(null, { status: 200 });
+    }
+    // Re-enabled 2026-05-19 after fixing chrony makestep on wells VMs (cells
+    // were hibernating, waking with stale RTC, and chrony defaults only
+    // step at startup — they slewed forever on offsets >1s). bake-egg.sh
+    // now appends `makestep 1.0 -1` to /etc/chrony/chrony.conf at birth.
+    if (isExpired(env)) {
+      console.log(`[${this.env.CELL_NAME}] dropping expired agent envelope corr=${env.corr_id.slice(0, 10)}`);
+      return new Response(null, { status: 200 });
+    }
+
+    // (1) Reply path. Forward to the supervisor over the existing WS so
+    // a waiting CLI (cells talk --await) can match by corr_id and unblock.
+    // Best-effort: if the WS is down the CLI will time out cleanly.
+    if (env.in_reply_to) {
+      console.log(
+        `[${this.env.CELL_NAME}] inbound agent_reply from=${env.from} in_reply_to=${env.in_reply_to.slice(0, 10)} text=${env.text.slice(0, 100).replace(/\n/g, " ")}`
+      );
+      await this.ensureConnection();
+      if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+        try {
+          this.ws.send(JSON.stringify({
+            type: "agent_reply",
+            in_reply_to: env.in_reply_to,
+            from: env.from,
+            text: env.text,
+          }));
+        } catch (e) {
+          console.error(`[${this.env.CELL_NAME}] failed to forward agent_reply: ${String(e).slice(0, 160)}`);
+        }
+      }
+      return new Response(null, { status: 202 });
+    }
+
+    // (2) Inbound new agent message — forward to the supervisor.
+    // The supervisor's response will arrive over the WS as agent_response;
+    // onPiEvent looks up pendingAgentForks[corr_id] and POSTs to reply_to.
+    if (env.reply_to) {
+      this.pendingAgentForks.set(env.corr_id, {
+        reply_to: env.reply_to,
+        from: env.from,
+        thread_id: env.thread_id,
+      });
+    }
+
+    await this.bumpActivity();
+    await this.ensureConnection();
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
+      this.pendingAgentForks.delete(env.corr_id);
+      return new Response("ws not connected", { status: 503 });
+    }
+
+    // The supervisor speaks pi's RPC vocabulary; agent_message is a new
+    // frame type that bypasses the prompt path (different routing target).
+    this.ws.send(JSON.stringify({
+      type: "agent_message",
+      from: env.from,
+      corr_id: env.corr_id,
+      thread_id: env.thread_id,
+      target: env.target,
+      hops: env.hops,
+      text: env.text,
+    }));
+
+    const existing = await this.state.storage.getAlarm();
+    if (existing === null) {
+      await this.state.storage.setAlarm(Date.now() + ALARM_INTERVAL_MS);
+    }
+    return new Response(null, { status: 202 });
+  }
+
+  // POST our cell's response back to the sender's inbox/append. Called
+  // from onPiEvent when the supervisor emits agent_response.
+  private async forwardAgentResponse(corrId: string, text: string): Promise<void> {
+    const pending = this.pendingAgentForks.get(corrId);
+    if (!pending) {
+      console.log(`[${this.env.CELL_NAME}] agent_response for unknown corr=${corrId.slice(0, 10)} — discarding`);
+      return;
+    }
+    this.pendingAgentForks.delete(corrId);
+    if (!pending.reply_to) return; // fire-and-forget — no callback to make
+
+    const reply: AgentEnvelope = {
+      kind: "agent",
+      from: this.env.CELL_NAME,
+      to: pending.from,
+      corr_id: ulid(),
+      thread_id: pending.thread_id || sortedThreadId(this.env.CELL_NAME, pending.from),
+      target: "fork",
+      reply_to: "",
+      hops: 0,
+      sent_at: new Date().toISOString(),
+      expires_at: "",
+      in_reply_to: corrId,
+      text,
+    };
+    try {
+      const res = await fetch(pending.reply_to, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          authorization: `Bearer ${this.env.CELLS_PROXY_SECRET}`,
+        },
+        body: JSON.stringify({ event: reply }),
+        signal: AbortSignal.timeout(10_000),
+      });
+      if (!res.ok) {
+        console.error(`[${this.env.CELL_NAME}] reply POST to ${pending.reply_to} → ${res.status}: ${(await res.text()).slice(0, 200)}`);
+      }
+    } catch (e) {
+      console.error(`[${this.env.CELL_NAME}] reply POST error: ${String(e).slice(0, 200)}`);
+    }
   }
 
   private async handleDebug(): Promise<Response> {
@@ -443,6 +600,17 @@ export class CellAgent {
     // Any pi event counts as activity — extends the idle window so a long
     // turn doesn't get cut off mid-flight.
     void this.bumpActivity();
+
+    // agent_response — supervisor's reply to an agent_message we forwarded.
+    // Look up the pending corr_id and POST a kind:"agent" envelope back to
+    // the sender's reply_to. Does not touch turn state — main is untouched
+    // for fork-targeted messages (Phase 1 enforces that on the supervisor).
+    if (type === "agent_response") {
+      const corrId = typeof ev.in_reply_to === "string" ? ev.in_reply_to : "";
+      const text = typeof ev.text === "string" ? ev.text : "";
+      if (corrId) void this.forwardAgentResponse(corrId, text);
+      return;
+    }
 
     if (type === "agent_start") {
       this.startTurn();

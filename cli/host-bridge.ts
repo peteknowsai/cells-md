@@ -211,12 +211,15 @@ class CellSession {
       this.broadcastJSON({ type: "bridge_ready" });
       return;
     }
-    // pi talk uses a clearly-named scratch dir — separate from the main
-    // session (root-<name>) that site/server.ts drives for Slack/email.
+    // pi talk uses the MAIN session dir — same as site/server.ts drives for
+    // Slack/email. Was a separate talk-<name>/ scratch; retired 2026-05-19
+    // (agent-comms primitive forks main read-only for one-shot RPC, while
+    // interactive `cells talk` is a persistent write channel that should
+    // share main with Slack/email/TUI — "TUI is persistent" per Pete).
     // claude-code / codex ignore sessionDir (their resume id comes from a
     // birth-time cache file the adapter reads at the cell — see their
     // buildRemoteCmd / buildTurnCmd in harness-adapters.ts).
-    const sessionDir = `/root/.pi/agent/sessions/talk-${this.cellName}`;
+    const sessionDir = `/root/.pi/agent/sessions/root-${this.cellName}`;
     // The remote command is harness-specific (pi --mode rpc vs the claude
     // CLI in stream-json mode) — the adapter builds it. We SSH as `ubuntu`
     // (lume's default; it has the substrate ssh key) and the adapter's

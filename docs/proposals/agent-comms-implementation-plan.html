@@ -1,0 +1,418 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Agent comms — implementation plan</title>
+<link rel="stylesheet" href="../_assets/doc.css">
+</head>
+<body>
+<div class="page">
+
+  <div class="doc-header">
+    <div class="crumb">cells <span class="sep">/</span> proposals <span class="sep">/</span> agent-comms implementation plan</div>
+    <div>2026-05-19</div>
+  </div>
+
+  <h1>Agent comms — implementation plan</h1>
+  <p class="subtitle">One source of truth per cell. Every "talk" forks main read-only. Same mechanism whether the caller is Pete or a peer cell.</p>
+
+  <div class="callout info">
+    <div class="label">Status</div>
+    <p>PROPOSED, ready to build. Supersedes <code>agent-comms-primitive.md</code> after the 2026-05-19 audit that proved session forking works natively on all three harnesses.</p>
+  </div>
+
+  <div class="toc">
+    <h4>Contents</h4>
+    <ol>
+      <li><a href="#tldr">TL;DR</a></li>
+      <li><a href="#what-changed">What changed since the original spec</a></li>
+      <li><a href="#model">The model</a></li>
+      <li><a href="#flow">End-to-end flow</a></li>
+      <li><a href="#fork-per-harness">Fork mechanic per harness</a></li>
+      <li><a href="#envelope">The envelope</a></li>
+      <li><a href="#cli">CLI surface (<code>cells talk</code>)</a></li>
+      <li><a href="#phases">Build phases</a></li>
+      <li><a href="#files">File-level scope</a></li>
+      <li><a href="#acceptance">Acceptance criteria</a></li>
+      <li><a href="#open">Open questions</a></li>
+      <li><a href="#out-of-scope">Out of scope</a></li>
+    </ol>
+  </div>
+
+  <h2 id="tldr">TL;DR</h2>
+
+  <p>Cells get peer-to-peer agent communication native to the substrate, available to all three harnesses (pi, claude-code, codex). Same mechanism powers Pete's <code>cells talk</code> from the Mac: every "talk" is a read-only fork of the receiver's main thread.</p>
+
+  <ul class="compact">
+    <li><strong>Receive:</strong> each cell's per-cell Cloudflare Worker recognizes a new <code>kind:"agent"</code> event on <code>/inbox/append</code> and routes it to the cell's supervisor for a fork-and-ask.</li>
+    <li><strong>Send:</strong> the on-cell <code>cells talk</code> CLI POSTs to the peer's <code>&lt;name&gt;.cells.md/inbox/append</code>.</li>
+    <li><strong><code>--await</code> (true RPC):</strong> sender includes <code>reply_to</code> + <code>corr_id</code>; peer's response routes back to the sender's own inbox; sender's worker matches by corr_id and unblocks the CLI.</li>
+    <li><strong><code>--list</code> (discovery):</strong> new <code>/peers</code> endpoint on <code>proxy.cells.md</code>.</li>
+    <li><strong><code>--main</code> (push):</strong> escalate the message into the receiver's main thread (writes), instead of fork-and-discard (reads).</li>
+  </ul>
+
+  <p>Estimated effort: <strong>~1 week for v1</strong> (envelope + worker DO + supervisor fork-and-ask + CLI rewrite + Mac-side path update + discovery). Pattern layer (broadcast/quorum/propose) is another week and not in v1.</p>
+
+  <h2 id="what-changed">What changed since the original spec</h2>
+
+  <p>The original <code>agent-comms-primitive.md</code> proposed agent messages landing in the receiver's main thread alongside Slack/email. The 2026-05-19 design discussion + audit changed three load-bearing things:</p>
+
+  <table>
+    <thead><tr><th>Question</th><th>Original spec</th><th>This plan</th></tr></thead>
+    <tbody>
+      <tr>
+        <td>The verb</td>
+        <td>New <code>cells-to</code> CLI</td>
+        <td>Extend existing <code>cells talk</code>; no new verb</td>
+      </tr>
+      <tr>
+        <td>Landing semantics</td>
+        <td>Agent messages join Slack/email in main</td>
+        <td>Default = fork-and-discard (read main, no write back); <code>--main</code> opts in to main</td>
+      </tr>
+      <tr>
+        <td>Pete's <code>cells talk</code> vs cell-to-cell</td>
+        <td>Different mechanisms (cells talk = scratch, agent-comms = main)</td>
+        <td>Same mechanism. One source of truth per cell.</td>
+      </tr>
+      <tr>
+        <td>Codex feasibility</td>
+        <td>"Server-side threads, can't fork"</td>
+        <td>Cloned via filename trick, same as claude. Works fine.</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <div class="callout">
+    <div class="label">Audit summary</div>
+    <p>All three harnesses support cheap session forking, verified on real cells 2026-05-19. Pi has a native <code>--fork</code> flag. Claude and codex resume by uuid embedded in the session filename — copy the file, resume the new uuid, original stays bit-identical. No pre-prime fallback needed.</p>
+  </div>
+
+  <h2 id="model">The model</h2>
+
+  <p>One session per cell — its <strong>main</strong>. Three inbound channels write to it. Two read it via fork. No more parallel "scratch" or "talk-only" sessions.</p>
+
+  <table>
+    <thead><tr><th>Channel</th><th>Direction</th><th>Lands in</th></tr></thead>
+    <tbody>
+      <tr><td>Slack</td><td>inbound</td><td>main (writes)</td></tr>
+      <tr><td>Email</td><td>inbound</td><td>main (writes)</td></tr>
+      <tr><td>TUI</td><td>inbound</td><td>main (writes)</td></tr>
+      <tr><td><code>cells talk &lt;peer&gt;</code> (Pete from Mac)</td><td>inbound</td><td><strong>fork</strong> (reads main, no write back)</td></tr>
+      <tr><td><code>cells talk &lt;peer&gt;</code> (peer cell → cell)</td><td>inbound</td><td><strong>fork</strong> (reads main, no write back)</td></tr>
+      <tr><td><code>cells talk &lt;peer&gt; --main "..."</code></td><td>inbound</td><td>main (writes) — explicit escalation</td></tr>
+    </tbody>
+  </table>
+
+  <p>If Pete wants something to persist in bob's mind, he uses Slack, email, TUI, or <code>--main</code>. Everything else is a read-only consult: bob sees its full main state, answers, the exchange evaporates.</p>
+
+  <div class="callout info">
+    <div class="label">Why this works</div>
+    <p>The patterns we want are nearly all one-shot consults: "agree?" (verifier), "what's X?" (expert-query), "FYI Y" (push-notify), "your vote?" (propose). None of them want to mutate the answerer's main mind. Persistence is the exception, handled by an explicit flag.</p>
+  </div>
+
+  <h2 id="flow">End-to-end flow</h2>
+
+  <p>Sender = cell A. Receiver = cell B. Both alive. Worker = the per-cell Cloudflare Worker durable object.</p>
+
+  <ol>
+    <li><strong>A invokes</strong> <code>cells talk B --await "do you agree with my plan to X?"</code> inside A's well.</li>
+    <li><strong>A's CLI</strong> generates a <code>corr_id</code> (ULID), opens a WebSocket to A's own worker (the host-bridge already wires this), and POSTs the envelope to <code>https://B.cells.md/inbox/append</code> with <code>kind:"agent"</code>, <code>from:"A"</code>, <code>corr_id</code>, <code>reply_to: "https://A.cells.md/inbox/append"</code>.</li>
+    <li><strong>B's worker DO</strong> (<code>cli/worker/cell/cell-agent.ts</code>) sees <code>kind:"agent"</code> and posts to B's supervisor at <code>/agent-message</code> with the envelope payload.</li>
+    <li><strong>B's supervisor</strong> (<code>dna/cells/base/site/server.ts</code>) routes by <code>target</code> field:
+      <ul>
+        <li><code>target: "fork"</code> (default): spawn a fork-and-ask using B's harness adapter, capture the response, delete the fork artifacts.</li>
+        <li><code>target: "main"</code>: hand the message to the existing main-thread bridge path (same as Slack/email arrive today).</li>
+      </ul>
+    </li>
+    <li><strong>B's supervisor POSTs back</strong> to <code>https://A.cells.md/inbox/append</code> with <code>kind:"agent"</code>, <code>from:"B"</code>, <code>in_reply_to: corr_id</code>, <code>text: "&lt;response&gt;"</code>.</li>
+    <li><strong>A's worker DO</strong> sees an agent event with <code>in_reply_to</code>; looks up the pending <code>corr_id → ws</code> in its map; pushes the response to the waiting WebSocket back to A's well.</li>
+    <li><strong>A's CLI</strong> unblocks and prints the response. Total round-trip on warm cells: ~5s (claude-code measured at 4s for fork+answer; add ~1s for two CF round-trips).</li>
+  </ol>
+
+  <p>If B is asleep when the inbox POST arrives: existing wake-on-inbox path wakes B (already works for Slack), then the supervisor runs the fork-and-ask.</p>
+
+  <p>If A times out before B replies: A's CLI exits with an error; B's eventual reply arrives but no <code>corr_id</code> match — drop and log.</p>
+
+  <h2 id="fork-per-harness">Fork mechanic per harness</h2>
+
+  <p>Per-adapter additions to <code>dna/cells/base/lib/harness-adapters.ts</code>. Each adapter gets a new <code>forkAndAsk(prompt, opts) → response</code> method. The supervisor calls it; the adapter knows how to fork the harness's main session.</p>
+
+  <h3>pi</h3>
+  <pre><code>FORK_DIR=$(mktemp -d)
+pi --print \
+   --fork /root/.pi/agent/sessions/&lt;main-dir&gt;/main.jsonl \
+   --session-dir "$FORK_DIR" \
+   --thinking off \
+   "$PEER_QUERY"
+rm -rf "$FORK_DIR"</code></pre>
+  <p>Pi has a native <code>--fork</code> flag. Pi was designed for this. Cheapest of the three.</p>
+
+  <h3>claude-code</h3>
+  <pre><code>MAIN_ID=$(cat /root/.cell/claude-main-session)
+FORK_ID=$(uuidgen | tr 'A-Z' 'a-z')
+cp /root/.claude/projects/-root/${MAIN_ID}.jsonl \
+   /root/.claude/projects/-root/${FORK_ID}.jsonl
+echo "$PEER_QUERY" | bash -lc "
+  export HOME=/root IS_SANDBOX=1
+  cd /root && claude --print --resume '$FORK_ID' \
+    --permission-mode bypassPermissions
+"
+rm /root/.claude/projects/-root/${FORK_ID}.jsonl</code></pre>
+  <p>Claude resumes by uuid in the filename. Copy the JSONL, resume the new uuid. Anthropic prefix cache should hit (same byte prefix).</p>
+
+  <h3>codex</h3>
+  <pre><code>MAIN_TID=$(cat /root/.cell/codex-main-thread)
+# locate main file by uuid suffix
+SRC=$(find /root/.codex/sessions -name "*${MAIN_TID}*.jsonl" | head -1)
+NEW_UUID=$(uuidgen | tr 'A-Z' 'a-z')
+DST=$(dirname "$SRC")/rollout-$(date -u +%Y-%m-%dT%H-%M-%S)-${NEW_UUID}.jsonl
+cp "$SRC" "$DST"
+bash -lc "export HOME=/root; cd /root && \
+  codex exec --skip-git-repo-check resume '$NEW_UUID' '$PEER_QUERY'"
+rm "$DST"</code></pre>
+  <p>Same trick as claude. Original audit was wrong about codex — server-side state didn't matter; codex resumes from the local file. <a href="#open">See open question on locating the source file.</a></p>
+
+  <h2 id="envelope">The envelope</h2>
+
+  <p>JSON, POSTed to <code>&lt;peer&gt;.cells.md/inbox/append</code>.</p>
+
+  <pre><code>{
+  "event": {
+    "kind": "agent",
+    "from": "nfv-market-cc",
+    "to": "pete-advisor",
+    "corr_id": "01HQ9XQS9Y4YE8GZ7XKQ3JK0AC",
+    "thread_id": "nfv-market-cc:pete-advisor",
+    "target": "fork",
+    "reply_to": "https://nfv-market-cc.cells.md/inbox/append",
+    "hops": 0,
+    "sent_at": "2026-05-19T21:14:33.012Z",
+    "expires_at": "2026-05-19T21:19:33.012Z",
+    "in_reply_to": null,
+    "text": "Got a marquee listing in 81428, 20 acres @ $735k. Pete-relevant?"
+  }
+}</code></pre>
+
+  <dl class="kv">
+    <dt><code>kind</code></dt>
+    <dd>Always <code>"agent"</code>. Discriminator alongside <code>slack</code>, <code>email</code>.</dd>
+    <dt><code>target</code></dt>
+    <dd><strong>New for this plan.</strong> <code>"fork"</code> (default) = read main, no write back. <code>"main"</code> = write to main like Slack does.</dd>
+    <dt><code>corr_id</code></dt>
+    <dd>ULID. Matches an <code>await</code>'s reply to its send.</dd>
+    <dt><code>thread_id</code></dt>
+    <dd>Default: alphabetically-sorted cell pair, colon-joined. Override via explicit <code>--thread</code>.</dd>
+    <dt><code>reply_to</code></dt>
+    <dd>URL recipient POSTs response to. Omitted for fire-and-forget.</dd>
+    <dt><code>hops</code></dt>
+    <dd>Incremented at relay. Drop if <code>hops &gt; 5</code>.</dd>
+    <dt><code>expires_at</code></dt>
+    <dd>For <code>--timeout</code>. Recipient drops if processing starts after expiry.</dd>
+    <dt><code>in_reply_to</code></dt>
+    <dd>The <code>corr_id</code> being responded to. Triggers callback match on sender.</dd>
+  </dl>
+
+  <h2 id="cli">CLI surface</h2>
+
+  <p>Extends the existing <code>cells talk</code> verb at <code>dna/cells/base/bin/cells</code>. The current implementation (sprites-era tmux-send-keys + sleep 8) gets replaced entirely.</p>
+
+  <pre><code># Fire-and-forget — receiver forks main, answers, response discarded
+cells talk &lt;peer&gt; "&lt;msg&gt;"
+cells talk &lt;peer&gt; --thread=&lt;id&gt; "&lt;msg&gt;"
+
+# True RPC — sender blocks until receiver responds
+cells talk &lt;peer&gt; --await "&lt;msg&gt;"
+cells talk &lt;peer&gt; --await --timeout=120s "&lt;msg&gt;"
+
+# Escalate to main — receiver writes the exchange into its main thread
+cells talk &lt;peer&gt; --main "&lt;msg&gt;"
+
+# Discovery
+cells talk --list
+cells talk --list --capability=market
+
+# Inspection
+cells talk --inbox [--since=10m]
+cells talk --threads
+cells talk --thread=&lt;id&gt;
+
+# Audit
+cells talk --log [--from=&lt;peer&gt;] [--to=&lt;peer&gt;] [--since=1h]</code></pre>
+
+  <p>JSON output by default (cells skill style: <code>{ ok, command, data }</code> on success, <code>{ ok: false, command, error, diagnosis }</code> on failure).</p>
+
+  <h2 id="phases">Build phases</h2>
+
+  <div class="card">
+    <h3>Phase 0 — envelope + worker DO (1–2 days)</h3>
+    <p class="goal">Plumb the new event type end-to-end without actually forking yet. Verifies wire format.</p>
+    <ul class="compact">
+      <li>Add <code>agent-envelope.ts</code> at <code>dna/cells/base/lib/</code> — encode/decode + ULID generation.</li>
+      <li>Modify <code>cli/worker/cell/cell-agent.ts:219</code> — recognize <code>kind:"agent"</code>; for <code>target:"fork"</code>, POST to supervisor's new <code>/agent-message</code> endpoint; for <code>target:"main"</code>, fall through to today's main-thread path.</li>
+      <li>Modify <code>dna/cells/base/site/server.ts</code> — add a stub <code>/agent-message</code> handler that just echoes "stub" back to <code>reply_to</code>. No forking yet.</li>
+      <li>Test: cell A POSTs to cell B's inbox with <code>kind:"agent"</code>, target:"fork"; B's stub responds; A receives "stub" back.</li>
+    </ul>
+  </div>
+
+  <div class="card">
+    <h3>Phase 1 — supervisor fork-and-ask, all three harnesses (2–3 days)</h3>
+    <p class="goal">The real mechanic: receiver actually forks main, answers, cleans up.</p>
+    <ul class="compact">
+      <li>Add <code>forkAndAsk(prompt, opts)</code> method to <code>HarnessAdapter</code> interface in <code>dna/cells/base/lib/harness-adapters.ts</code>.</li>
+      <li>Implement for pi (native <code>--fork</code>), claude-code (file-copy + <code>--resume</code>), codex (file-copy + <code>exec resume</code>).</li>
+      <li>Wire the supervisor's <code>/agent-message</code> handler to call <code>adapter.forkAndAsk(text)</code> and POST the response back to <code>reply_to</code>.</li>
+      <li>Test: peer A sends <code>--await</code> message to peer B for each harness; B answers from main context; A unblocks with correct response. Run all 9 combinations (3 harnesses × 3).</li>
+    </ul>
+  </div>
+
+  <div class="card">
+    <h3>Phase 2 — <code>cells talk</code> CLI rewrite + <code>--await</code> callback (2 days)</h3>
+    <p class="goal">The on-cell verb works. Pi/codex/claude cells can call it.</p>
+    <ul class="compact">
+      <li>Rewrite <code>dna/cells/base/bin/cells</code> <code>cmdTalk</code>: drop sprites tmux hack; POST envelope to <code>&lt;peer&gt;.cells.md/inbox/append</code>.</li>
+      <li>For <code>--await</code>: open WS to <em>self's</em> worker, register pending <code>corr_id</code>, block until reply arrives via the WS.</li>
+      <li>Worker DO maintains <code>corr_id → waiting_ws</code> map; on inbound <code>in_reply_to</code>, route to the waiting WS.</li>
+      <li>Add <code>--main</code>, <code>--thread</code>, <code>--timeout</code> flag handling.</li>
+      <li>Test: cell A's harness calls <code>cells talk B --await "X"</code>; A's CLI returns B's response.</li>
+    </ul>
+  </div>
+
+  <div class="card">
+    <h3>Phase 3 — Mac-side <code>cells talk</code> + retire scratch sessions (1 day)</h3>
+    <p class="goal">Pete's <code>cells talk</code> from the Mac uses the same flow. Old scratch infrastructure deleted.</p>
+    <ul class="compact">
+      <li>Update <code>cli/host-bridge.ts</code>: Mac-side <code>cells talk</code> no longer maintains a persistent SSH'd talk-session per cell. Instead, POST to the peer's CF Worker (same path as on-cell).</li>
+      <li>Or keep host-bridge for non-await; route <code>--await</code> through CF. (Decide based on latency measurement in Phase 1.)</li>
+      <li>Delete <code>/root/.cell/claude-talk-session</code> + <code>/root/.cell/codex-talk-thread</code> bake-time creation in <code>scripts/bake-egg.sh</code> (these sessions become vestigial).</li>
+      <li>Delete pi's <code>talk-&lt;cell&gt;/</code> session-dir spawn in <code>cli/host-bridge.ts</code> + <code>harness-adapters.ts</code>.</li>
+      <li>Test: <code>cells talk mother "hello"</code> from Mac uses fork model; mother's main session is bit-identical before/after.</li>
+    </ul>
+  </div>
+
+  <div class="card">
+    <h3>Phase 4 — discovery + inspection (1 day)</h3>
+    <p class="goal">Peers are addressable; recent conversations are queryable.</p>
+    <ul class="compact">
+      <li>Add <code>/peers</code> endpoint to <code>cli/proxy.ts</code> — reads <code>~/.cells/cells.json</code> + capability files.</li>
+      <li><code>cells talk --list</code> calls <code>/peers</code>.</li>
+      <li><code>cells talk --inbox / --threads / --thread=&lt;id&gt;</code> read from local agent-channel state.</li>
+      <li><code>cells talk --log</code> queries the substrate audit log.</li>
+      <li>Test: <code>cells talk --list</code> returns alive cells with model + harness.</li>
+    </ul>
+  </div>
+
+  <div class="card">
+    <h3>Phase 5 — guard rails (1 day)</h3>
+    <p class="goal">Loops can't run away. Spam is bounded.</p>
+    <ul class="compact">
+      <li><code>MAX_HOPS=5</code> at the worker DO; drop + log if exceeded.</li>
+      <li>Per-pair rate limit at receiver: 1 msg/sec/peer, configurable. Return 429 with retry hint.</li>
+      <li>Expired messages dropped at receiver if <code>expires_at &lt; now</code>.</li>
+      <li>Audit log entry per envelope at both sender's and receiver's workers.</li>
+      <li>Tests: a 6-hop chain drops at hop 5; 10 msgs/sec from A to B returns 429s after the first.</li>
+    </ul>
+  </div>
+
+  <div class="card">
+    <h3>Phase 6 — DNA docs + cleanup (0.5 day)</h3>
+    <p class="goal">Cells learn the new verb's full surface from their own docs.</p>
+    <ul class="compact">
+      <li>Update <code>dna/cells/base/TOOLS.md</code>, <code>CONTACTS.md</code>, <code>CELLS.md</code> with <code>--await</code> / <code>--main</code> / <code>--list</code> usage.</li>
+      <li>Add <code>docs/comms.md</code> — operator-facing runbook.</li>
+      <li>Remove dead refs to the on-cell sprites-era talk implementation.</li>
+    </ul>
+  </div>
+
+  <p><strong>Total v1: ~1 week.</strong> Pattern layer (broadcast, propose-vote, quorum) is roughly another week on top and is out of v1 scope.</p>
+
+  <h2 id="files">File-level scope</h2>
+
+  <h3>Modified</h3>
+  <table>
+    <thead><tr><th>File</th><th>Change</th><th>Phase</th></tr></thead>
+    <tbody>
+      <tr><td><code>cli/worker/cell/cell-agent.ts</code></td><td>Add <code>kind:"agent"</code> discriminator + corr_id matching for replies + corr_id→ws map for awaiters + per-pair rate limits + hops check</td><td>0, 2, 5</td></tr>
+      <tr><td><code>dna/cells/base/site/server.ts</code></td><td>Add <code>/agent-message</code> handler that dispatches to <code>adapter.forkAndAsk()</code> and POSTs response to <code>reply_to</code></td><td>0, 1</td></tr>
+      <tr><td><code>dna/cells/base/lib/harness-adapters.ts</code></td><td>Add <code>forkAndAsk(prompt, opts)</code> method to interface; implement for pi/claude/codex</td><td>1</td></tr>
+      <tr><td><code>dna/cells/base/bin/cells</code></td><td>Replace sprites-era <code>cmdTalk</code> with HTTP POST to peer worker + WS to self worker for await + new flags</td><td>2</td></tr>
+      <tr><td><code>cli/host-bridge.ts</code></td><td>Either: (a) Mac-side cells talk goes through CF like on-cell, OR (b) keeps SSH path for fire-and-forget. Retire <code>talk-&lt;cell&gt;</code> scratch sessions.</td><td>3</td></tr>
+      <tr><td><code>cli/proxy.ts</code></td><td>New <code>/peers</code> endpoint backed by <code>~/.cells/cells.json</code> + capabilities</td><td>4</td></tr>
+      <tr><td><code>scripts/bake-egg.sh</code></td><td>Stop creating <code>claude-talk-session</code> + <code>codex-talk-thread</code> caches (no longer needed)</td><td>3</td></tr>
+      <tr><td><code>dna/cells/base/TOOLS.md</code> + <code>CONTACTS.md</code> + <code>CELLS.md</code></td><td>Document new flags; remove stale references</td><td>6</td></tr>
+    </tbody>
+  </table>
+
+  <h3>Added</h3>
+  <table>
+    <thead><tr><th>File</th><th>Purpose</th><th>Phase</th></tr></thead>
+    <tbody>
+      <tr><td><code>dna/cells/base/lib/agent-envelope.ts</code></td><td>Envelope shape, ULID generator, encode/decode + validation helpers</td><td>0</td></tr>
+      <tr><td><code>scripts/eval-comms.ts</code></td><td>Smoke + scenario tests for the new primitive (verifier, expert-query, push-notify, propose-vote)</td><td>each phase</td></tr>
+      <tr><td><code>docs/comms.md</code></td><td>Operator-facing runbook</td><td>6</td></tr>
+    </tbody>
+  </table>
+
+  <h3>Removed / deprecated</h3>
+  <ul class="compact">
+    <li>Sprites-era <code>cmdTalk</code> in <code>dna/cells/base/bin/cells</code> (tmux send-keys + sleep 8 against <code>api.sprites.dev</code>)</li>
+    <li>Persistent talk-session per harness: <code>/root/.cell/claude-talk-session</code>, <code>/root/.cell/codex-talk-thread</code>, <code>/root/.pi/agent/sessions/talk-&lt;cell&gt;/</code></li>
+    <li>The host-bridge "persistent SSH+pi talk session" reuse — replaced by fork-per-message</li>
+  </ul>
+
+  <h2 id="acceptance">Acceptance criteria</h2>
+
+  <p>v1 is shippable when:</p>
+
+  <ol>
+    <li><strong>All 3×3 harness pairs work.</strong> Peer A's <code>cells talk B --await "X"</code> returns a context-aware response. Verified across all 9 pairs (pi/claude/codex × pi/claude/codex).</li>
+    <li><strong>Wake-on-await.</strong> A sends to sleeping B; B wakes, forks main, answers, A unblocks. Total under 10 seconds on warm welld.</li>
+    <li><strong>Main isolation.</strong> After a fork-and-ask exchange, B's main session file/dir is byte-identical to before. Verified via <code>stat</code> + <code>diff</code>.</li>
+    <li><strong><code>--main</code> writes to main.</strong> <code>cells talk B --main "X"</code> lands in B's main thread; behaves identically to a Slack message to B.</li>
+    <li><strong>Pete's Mac path uses the fork model.</strong> <code>cells talk mother "X"</code> from the Mac no longer maintains a persistent scratch session; main is byte-identical after.</li>
+    <li><strong><code>--list</code>.</strong> Returns alive cells with name, status, harness, model, capabilities.</li>
+    <li><strong>Loop prevention.</strong> A → B → A → B → ... drops at hop 5 with audit-log entry.</li>
+    <li><strong>Rate limit.</strong> Per-pair 1/sec cap holds; 429 returned cleanly; sender CLI surfaces the limit.</li>
+    <li><strong>Audit.</strong> <code>cells talk --log --since=1h</code> returns recent envelopes.</li>
+    <li><strong>Pattern proof.</strong> One end-to-end pattern works as a one-liner — suggest <strong>verifier</strong>: <code>cells talk &lt;sibling&gt; --await "agree with my decision to X?"</code> from any cell.</li>
+  </ol>
+
+  <h2 id="open">Open questions</h2>
+
+  <ul>
+    <li><strong>Audit log storage.</strong> Per-cell worker DO? Operator's Mac at <code>~/.cells/comms.log</code>? Both? Probably both — worker for transit visibility, Mac aggregation for cross-cell query.</li>
+    <li><strong>Codex source-file lookup.</strong> Codex stores rollouts in date-bucketed dirs (<code>~/.codex/sessions/YYYY/MM/DD/</code>); finding "main's file" requires globbing for the uuid suffix. Acceptable but worth a helper. Alternative: cache the full path at bake time alongside the uuid.</li>
+    <li><strong>Capability advertisement.</strong> How does a cell write <code>~/.cells/capabilities/&lt;name&gt;.json</code>? Probably: new endpoint on the proxy (Mac-side) the cell POSTs to. Defer until a cell wants to advertise.</li>
+    <li><strong>Fork dir cleanup on crash.</strong> If the harness process crashes mid-fork, the fork file/dir leaks. Add a startup sweep that deletes stale fork-* paths at supervisor boot?</li>
+    <li><strong>Mac-side <code>cells talk</code>: CF or SSH?</strong> Same trade as agent-comms: CF is uniform, SSH avoids a round-trip. Decide after measuring Phase 1 latency. Default: CF for uniformity.</li>
+    <li><strong>Concurrency at the receiver.</strong> If two peers simultaneously fork B's main, do their forks run in parallel (two harness processes) or serial (one at a time)? Pi/claude/codex aren't strictly memory-cheap to run concurrently. Default: serial queue at the supervisor with a depth limit. Worth a 429 if depth exceeds.</li>
+  </ul>
+
+  <h2 id="out-of-scope">Out of scope (v1)</h2>
+
+  <ul class="compact">
+    <li><strong>Federation across machines.</strong> Substrate roadmap item #9. Single-host for v1.</li>
+    <li><strong>Per-cell identity / keypairs.</strong> Roadmap item #1. Transport bearer is sufficient single-operator.</li>
+    <li><strong>End-to-end content signing.</strong> Same — needs item #1.</li>
+    <li><strong>Yield-mode <code>--await</code>.</strong> The "return a future, don't block" version. Defer until we feel the pain of blocking on slow responses.</li>
+    <li><strong>Pattern layer.</strong> <code>cells broadcast</code>, <code>cells quorum</code>, <code>cells talk --propose</code> + aggregation. Ships in v1.1 on top of the four primitives.</li>
+    <li><strong>Cross-cell tool invocation (MCP-style).</strong> Beyond freeform chat: structured tool calls. Separate spec.</li>
+    <li><strong>Streaming responses.</strong> Receiver streams text as it generates rather than returning a single block. Useful for long answers, but per-harness streaming semantics differ. v2.</li>
+  </ul>
+
+  <div class="pointers">
+    <h4>References</h4>
+    <ul class="bare">
+      <li><a href="substrate-roadmap.md">substrate-roadmap.md</a> — umbrella roadmap; this primitive is item #2</li>
+      <li><a href="agent-comms-primitive.md">agent-comms-primitive.md</a> — original proposal (superseded by this plan)</li>
+      <li><a href="channels-on-every-harness-for-dummies.html">channels-on-every-harness-for-dummies.html</a> — the channels architecture this builds on</li>
+      <li><code>cli/worker/cell/cell-agent.ts:219</code> — the <code>kind</code> discriminator location</li>
+      <li><code>dna/cells/base/lib/harness-adapters.ts</code> — where <code>forkAndAsk</code> lands</li>
+      <li><code>~/.claude/projects/-Users-pete-Projects-cells/memory/project_session_fork_trick.md</code> — the proven recipes</li>
+    </ul>
+  </div>
+
+</div>
+</body>
+</html>

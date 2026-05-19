@@ -68,11 +68,17 @@ Tools registered by the `self` extension:
 These are thin wrappers over the on-cell `cells` CLI, which is on your PATH:
 
 - `cells whoami` — your well name.
-- `cells list` — list peer cells with status.
 - `cells info [name|self]` — inspect a cell (default: self).
 - `cells checkpoint [self]` — snapshot self (only self; ask the user for peers).
-- `cells talk <name> <msg>` — send a one-shot message to a peer and
-  capture the reply. Use sparingly — you're interrupting another agent.
+- `cells talk --list` — list alive peer cells with harness + model.
+- `cells talk <peer> <msg>` — fire-and-forget; the peer forks main (read-only) to answer; the exchange evaporates.
+- `cells talk <peer> --await <msg>` — true RPC; blocks until the peer answers, prints the response. Default timeout 120s; override with `--timeout=60s`.
+- `cells talk <peer> --main <msg>` — escalate: the message lands in the peer's main thread (writes), like a Slack message would. Use only when you want the peer to *remember* it.
+- `cells verify "<decision>" --to=<peerA>,<peerB>` — fan-out to N peers in parallel and aggregate their AGREE/DISAGREE stances. Each peer answers from a read-only fork; they don't remember being asked. Add `--context=<text>` (or `--context-file=<path>`) to pass background so peers aren't answering cold. Verdict line is `CONSENSUS-AGREE`, `CONSENSUS-DISAGREE`, `SPLIT`, or `UNCLEAR`. Default timeout 90s; override with `--timeout=60s`.
+
+`cells talk` is fork-by-default: the peer reads its main thread for context, answers, and the conversation doesn't pollute either side's main. Use it freely for verifier-style "do you agree?" cross-checks, expert-query lookups ("what's the latest X you know?"), and propose-vote among siblings. Reserve `--main` for push-notify cases where the peer's *public* mind should be updated.
+
+**Cross-check before acting.** Before any action that affects Pete or anything outside your own cell (publishing, contacting someone, listing a thing for sale, sending a recommendation, committing code), run `cells verify "<the action in one sentence>" --to=<sibling>`. If verdict is `SPLIT` or `CONSENSUS-DISAGREE`, surface to the user rather than acting. This is the substrate's safety pattern; the `agent-comms` skill covers when/how in depth.
 
 Create / destroy and peer-targeted lifecycle ops live with the mother. Ask
 her via the user.

@@ -71,6 +71,15 @@ function readIdCache(path: string): string {
 const CLAUDE_MAIN_ID = HARNESS === "claude-code" ? readIdCache("/root/.cell/claude-main-session") : "";
 const CODEX_MAIN_THREAD = HARNESS === "codex" ? readIdCache("/root/.cell/codex-main-thread") : "";
 
+// Per-harness reference to the cell's main session, passed to the adapter's
+// forkAndAsk. Format is harness-specific (see HarnessAdapter doc).
+function getMainRef(): string {
+  if (HARNESS === "pi") return SESSION_FILE;
+  if (HARNESS === "claude-code") return CLAUDE_MAIN_ID;
+  if (HARNESS === "codex") return CODEX_MAIN_THREAD;
+  return "";
+}
+
 const HERE = dirname(fileURLToPath(import.meta.url));
 const PUBLIC_DIR = join(HERE, "public");
 
@@ -684,12 +693,61 @@ function startSitePublishing() {
 // HTTP + WebSocket server
 // ---------------------------------------------------------------------------
 
+// Pending --await callers, keyed by corr_id. When the DO forwards an
+// agent_reply over the WS, we look up the corr_id here and resolve the
+// waiter's response promise — that completes the HTTP long-poll and the
+// `cells talk --await` CLI prints the response and exits.
+type AwaitWaiter = {
+  resolve: (text: string) => void;
+  timer: ReturnType<typeof setTimeout>;
+};
+const agentAwaiters = new Map<string, AwaitWaiter>();
+
 const server = Bun.serve({
   port: PORT,
+  // /agent-wait is a long-poll that holds the connection until a matching
+  // agent_reply arrives (default 120s, capped at 600s). Bun.serve's default
+  // idle timeout is 10s — bump it past our hard cap.
+  idleTimeout: 0,
   async fetch(req, srv) {
     const url = new URL(req.url);
 
     if (url.pathname === "/health") return new Response("ok");
+
+    // /agent-wait — long-poll endpoint for `cells talk --await`. The CLI
+    // calls this with its corr_id immediately after POSTing the envelope
+    // to the peer's inbox. We hold the connection until the matching
+    // agent_reply arrives over the bridge WS (forwarded by our DO when
+    // the peer's response lands in our inbox), or the timeout expires.
+    // No auth — bound to localhost-only callers (inside the cell VM).
+    if (url.pathname === "/agent-wait") {
+      const corrId = url.searchParams.get("corr_id") ?? "";
+      const timeoutS = Math.max(1, Math.min(600, Number(url.searchParams.get("timeout") ?? "120")));
+      if (!corrId) return new Response("missing corr_id", { status: 400 });
+      const existing = agentAwaiters.get(corrId);
+      if (existing) {
+        // A second waiter for the same corr_id would race the first; reject.
+        return new Response("already awaiting this corr_id", { status: 409 });
+      }
+      return new Promise<Response>((resolve) => {
+        const timer = setTimeout(() => {
+          agentAwaiters.delete(corrId);
+          resolve(new Response("timeout", { status: 408 }));
+        }, timeoutS * 1000);
+        agentAwaiters.set(corrId, {
+          resolve: (text: string) => {
+            clearTimeout(timer);
+            agentAwaiters.delete(corrId);
+            resolve(
+              new Response(JSON.stringify({ text }), {
+                headers: { "content-type": "application/json" },
+              })
+            );
+          },
+          timer,
+        });
+      });
+    }
 
     // WebSocket bridge endpoint. The cell Worker DO connects here.
     if (url.pathname === "/agent") {
@@ -744,6 +802,78 @@ const server = Bun.serve({
         // Bridge-level commands (don't forward to the harness)
         if (cmd?.type === "ping") {
           try { ws.send(JSON.stringify({ type: "pong" })); } catch {}
+          continue;
+        }
+
+        // agent_reply — forwarded by our DO when an in_reply_to envelope
+        // landed in our inbox. Match the corr_id against waiting CLIs that
+        // called /agent-wait. If no match, drop silently (timed out or never
+        // registered — Pete might have run cells talk --await on the Mac).
+        if (cmd?.type === "agent_reply") {
+          const corrId = typeof cmd.in_reply_to === "string" ? cmd.in_reply_to : "";
+          const text = typeof cmd.text === "string" ? cmd.text : "";
+          const waiter = corrId ? agentAwaiters.get(corrId) : undefined;
+          if (waiter) {
+            waiter.resolve(text);
+            console.log(`[bridge] agent_reply matched corr=${corrId.slice(0, 10)} → resolved waiter`);
+          } else {
+            console.log(`[bridge] agent_reply for unknown corr=${corrId.slice(0, 10)} — no local waiter`);
+          }
+          continue;
+        }
+
+        // agent_message — a peer cell (or Pete via the Mac path) is asking
+        // us something. Default target="fork": fork main read-only, answer,
+        // discard the fork. The adapter owns the fork mechanic per harness
+        // (pi: --fork; claude/codex: filename-clone + --resume).
+        if (cmd?.type === "agent_message") {
+          const corrId = typeof cmd.corr_id === "string" ? cmd.corr_id : "";
+          const from = typeof cmd.from === "string" ? cmd.from : "unknown";
+          const text = typeof cmd.text === "string" ? cmd.text : "";
+          const target = typeof cmd.target === "string" ? cmd.target : "fork";
+          console.log(`[bridge] agent_message corr=${corrId.slice(0, 10)} from=${from} target=${target} text=${text.slice(0, 100).replace(/\n/g, " ")}`);
+          if (target === "main") {
+            // --main escalation: write into the main thread like Slack/email.
+            // Phase 4 wires this; for now reject so we don't silently fall through.
+            try {
+              ws.send(JSON.stringify({
+                type: "agent_response",
+                in_reply_to: corrId,
+                text: `[error] target="main" not yet implemented (Phase 4)`,
+              }));
+            } catch {}
+            continue;
+          }
+          // Fork path. Wrap in an IIFE so we don't block the WS message loop;
+          // multiple peers can pipeline (the harness adapter itself runs the
+          // fork to completion; concurrency limits land in Phase 5).
+          const cellName = NAME;
+          void (async () => {
+            const t0 = Date.now();
+            const result = await ADAPTER.forkAndAsk({
+              prompt: text,
+              mainRef: getMainRef(),
+              cellName,
+            });
+            const dt = Date.now() - t0;
+            if (result.ok) {
+              console.log(`[bridge] agent_response corr=${corrId.slice(0, 10)} dt=${dt}ms text=${result.text.slice(0, 100).replace(/\n/g, " ")}`);
+              try {
+                ws.send(JSON.stringify({ type: "agent_response", in_reply_to: corrId, text: result.text }));
+              } catch (e) {
+                console.error(`[bridge] failed to send agent_response: ${String(e).slice(0, 160)}`);
+              }
+            } else {
+              console.error(`[bridge] forkAndAsk failed corr=${corrId.slice(0, 10)} dt=${dt}ms: ${result.error}`);
+              try {
+                ws.send(JSON.stringify({
+                  type: "agent_response",
+                  in_reply_to: corrId,
+                  text: `[error] ${result.error}`,
+                }));
+              } catch {}
+            }
+          })();
           continue;
         }
 

@@ -50,6 +50,15 @@ cells talk <name> "message"  # one-shot
 ```
 Routes through host-bridge → SSH into the cell's well → spawns the harness. `connected via local bridge` in the output = the host-bridge path (good). `cells talk mother` opens mother's TUI; pi flags (`-c`, `-r`, `--session=`, `-p ...`) pass through.
 
+### Cross-check a decision before acting
+```
+cells verify "<decision>" --to=<a>,<b>                                   # 2-peer fan-out, fork (default)
+cells verify "<decision>" --to=<a>,<b> --context="<background>"          # include caller context (highly recommended)
+cells verify "<decision>" --to=<a>,<b> --context-file=<path>             # context from file
+cells verify "<decision>" --to=<a>,<b> --timeout=60s                     # default is 90s
+```
+Fan-outs in parallel via Promise.all. Each peer forks its main read-only, answers in `AGREE/DISAGREE + WHY + CONCERN` format, the head of each response is classified, and the last line is a verdict: `CONSENSUS-AGREE` / `CONSENSUS-DISAGREE` / `SPLIT` / `UNCLEAR`. Every call appended to `~/.cells/verify-log/<date>.jsonl`. Pair peers on different models for real signal. See the `agent-comms` skill on the cell side for the in-cell pattern (cells calling `cells verify` themselves before external-effect actions).
+
 ### Kill a cell
 ```
 cells kill <name>... [--yes]

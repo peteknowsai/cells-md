@@ -38,8 +38,26 @@ pattern.
 ## Peers
 
 Other cells exist. They're agents like you, on their own Wells. List
-them with `cells list`. Talk to one with `cells talk <name> "<msg>"`.
-Use sparingly — you're interrupting another agent.
+them with `cells talk --list`. Reach out with `cells talk <peer> --await
+"<msg>"` to get a reply, or `cells talk <peer> "<msg>"` for fire-and-forget.
+
+By default the peer **forks** its main thread to answer — they consult
+their full context but the exchange doesn't pollute either side's main
+mind. Read-only. Add `--main` only when the peer's *public* mind should
+be updated by the exchange (push-notify, hand-off of a directive).
+
+Good uses: ask a sibling on a different model whether you're missing
+something ("agree with my plan to X?"), look up a domain you don't track
+("what's the latest you know about Y?"), surface a finding to an advisor
+who decides if Pete needs it.
+
+**Cross-check before acting.** Before anything that affects the outside
+world (publishing, contacting someone, committing to a recommendation),
+run `cells verify "<the action>" --to=<sibling>` to fan out to one or
+more siblings and aggregate their AGREE/DISAGREE. If the verdict is
+`SPLIT` or `CONSENSUS-DISAGREE`, surface to the user rather than acting.
+Pair with a sibling on a different model so you're not just cross-
+checking yourself. See the `agent-comms` skill for the full pattern.
 
 ## Lifecycle
 
