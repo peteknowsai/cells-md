@@ -54,15 +54,16 @@ type PoolMemberSnapshot = {
   // Harness (agent runtime) baked into the egg's pi-coding-agent install.
   // Today: always "pi". v2 variants: claude-code, codex, etc.
   harness: string;
-  // Default model the egg's harness is configured for. Today: deepseek-v4-flash.
-  // v2 variants will pre-bake different model chains per egg.
+  // Default model the egg's harness is configured for. Today: gpt-5.5
+  // (ChatGPT subscription via openai-codex). v2 variants will pre-bake
+  // different model chains per egg.
   model: string;
 };
 
 // Map variant_signature → user-facing harness + model strings. Add rows as
 // new variant eggs ship (v2 will introduce claude-code-* and codex-* variants).
 const POOL_VARIANT_META: Record<string, { harness: string; model: string }> = {
-  "v1-generic": { harness: "pi", model: "deepseek-v4-flash" },
+  "v1-generic": { harness: "pi", model: "gpt-5.5" },
 };
 function poolMemberMeta(variantSig: string | undefined): { harness: string; model: string } {
   if (variantSig && POOL_VARIANT_META[variantSig]) return POOL_VARIANT_META[variantSig];

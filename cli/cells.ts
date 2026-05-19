@@ -81,8 +81,6 @@ const MODEL_IDS = {
   haiku:               { provider: "anthropic", modelId: "claude-haiku-4-5" },
   "gpt-5.5":           { provider: "openai-codex", modelId: "gpt-5.5" },
   "gpt-5.5-pro":       { provider: "openai",    modelId: "gpt-5.5-pro" },
-  "deepseek-v4-flash": { provider: "deepseek",  modelId: "deepseek-v4-flash" },
-  "deepseek-v4-pro":   { provider: "deepseek",  modelId: "deepseek-v4-pro" },
 } as const;
 type ModelKey = keyof typeof MODEL_IDS;
 
@@ -93,23 +91,18 @@ type ModelKey = keyof typeof MODEL_IDS;
 // `<provider>/<modelId>:<thinking>` shorthand; pi-coding-agent's
 // parseModelPattern resolves it.
 //
-// Two-subscription + one-API-key pattern, derived empirically:
-// when *both* subscriptions are in trouble at once (opus terminating AND
-// gpt-5.5 returning usage_limit_reached, observed 2026-05-06 13:50), having
-// a third tier on a fully API-billed provider keeps the fleet alive. The
-// usage_limit case caught the harden loop with a 2-tier chain and 3-of-3
-// births failed; tier 3 prevents that.
+// Two-subscription pattern, no per-token leaf:
+//   - anthropic primary → opus → gpt-5.5:high
+//   - openai-codex primary → gpt-5.5 (no fallback — already the cheap leaf)
 //
-//   - anthropic primary → opus → gpt-5.5:high → deepseek-v4-pro:high
-//   - openai-codex primary → gpt-5.5 → deepseek-v4-pro:<same-thinking>
-//   - deepseek primary → no fallback in v1 (already on the API-billed leaf)
+// If both subscriptions degrade simultaneously (observed 2026-05-06), the
+// fleet pauses until one recovers. Deepseek was the API-billed third tier
+// for exactly this scenario; dropped 2026-05-19 to stop the per-token bill.
+// Add a leaf back if dual-degradation starts costing us real downtime.
 function buildDefaultChain(primary: { provider: string; modelId: string; thinking: string }): string[] {
   const head = `${primary.provider}/${primary.modelId}:${primary.thinking}`;
   if (primary.provider === "anthropic") {
-    return [head, "openai-codex/gpt-5.5:high", "deepseek/deepseek-v4-pro:high"];
-  }
-  if (primary.provider === "openai-codex") {
-    return [head, `deepseek/deepseek-v4-pro:${primary.thinking}`];
+    return [head, "openai-codex/gpt-5.5:high"];
   }
   return [head];
 }
@@ -163,8 +156,6 @@ const MODEL_OPTIONS: SelectOption[] = [
   { value: "haiku",             label: "haiku" },
   { value: "gpt-5.5",           label: "gpt-5.5         (sub · ChatGPT Plus)" },
   { value: "gpt-5.5-pro",       label: "gpt-5.5-pro     (api · paid)" },
-  { value: "deepseek-v4-flash", label: "deepseek-v4-flash" },
-  { value: "deepseek-v4-pro",   label: "deepseek-v4-pro" },
 ];
 
 // Pi thinking levels — `xhigh` only takes effect on a few codex-max models;
@@ -2324,12 +2315,9 @@ async function cmdCreate(name: string | undefined, opts: CreateOpts): Promise<vo
   } else {
     harness = opts.harness ?? "pi";
     // Per-harness default model: claude-code → Anthropic (opus); codex →
-    // the ChatGPT-subscription model (gpt-5.5); pi → the cheap/fast
-    // deepseek leaf.
+    // gpt-5.5 (ChatGPT sub); pi → gpt-5.5 (also ChatGPT sub, flat-cost).
     modelKey = opts.model ?? (
-      harness === "claude-code" ? "opus" :
-      harness === "codex" ? "gpt-5.5" :
-      "deepseek-v4-flash"
+      harness === "claude-code" ? "opus" : "gpt-5.5"
     );
     thinking = opts.thinking ?? defaultThinkingFor(modelKey);
     extensions = opts.extensions ?? [];
@@ -2847,7 +2835,6 @@ async function collectCellLlmEnv(): Promise<Record<string, string>> {
   const keys = [
     "CELLS_PROXY_SECRET",   // openai-codex (gpt-5.5 via proxy.cells.md/codex); claude-code's ANTHROPIC_AUTH_TOKEN
     "ANTHROPIC_API_KEY",    // pi cells on anthropic models — direct api.anthropic.com (paid key, not the Max sub)
-    "DEEPSEEK_API_KEY",     // deepseek-v4-flash, deepseek-v4-pro (direct)
     "OPENAI_API_KEY",       // openai/* non-codex (direct)
     "GEMINI_API_KEY",       // google/gemini-* (direct)
     "EXA_API_KEY",          // web_search tool
@@ -6807,9 +6794,8 @@ type PoolConfigRow = {
 // Used when ~/.cells/pool-config.json doesn't exist. Can be regenerated
 // by `cells pool refill` with --reset (TBD).
 const DEFAULT_POOL_CONFIG: PoolConfigRow[] = [
-  { model: "gpt-5.5",         extensions: [],         packages: [], depth: 3 },
+  { model: "gpt-5.5",         extensions: [],         packages: [], depth: 4 },
   { model: "gpt-5.5",         extensions: ["memory"], packages: [], depth: 2 },
-  { model: "deepseek-v4-pro", extensions: [],         packages: [], depth: 1 },
 ];
 
 async function loadPoolConfig(): Promise<PoolConfigRow[]> {
@@ -7552,7 +7538,7 @@ switch (sub) {
     console.log("                              DNA template at dna/specials/<name>/. --rebuild tears down the existing well first.");
     console.log("  cells birth <name> [flags]  provision a new cell in a local well (alias: create)");
     console.log("                              flags: --harness=pi|claude-code|codex");
-    console.log("                                     --model=opus|sonnet|haiku|gpt-5.5|gpt-5.5-pro|deepseek-v4-flash|deepseek-v4-pro");
+    console.log("                                     --model=opus|sonnet|haiku|gpt-5.5|gpt-5.5-pro");
     console.log("                                     --thinking=off|minimal|low|medium|high|xhigh|adaptive|max|auto");
     console.log("                                              (pi: off..xhigh + adaptive; claude-code: low..max + auto; codex: low..xhigh)");
     console.log("                                     --extensions=memory,mentality,wiki,dream");

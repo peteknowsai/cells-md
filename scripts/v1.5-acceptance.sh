@@ -4,8 +4,8 @@
 # Runbook for post-Piece-2 verification. Tests VM-level hibernate/wake
 # through `cells sleep` + welld /wake (auto-wake-on-traffic is via welld,
 # not the talk model path). Skips the talk-greeting model interaction
-# because the v1 generic pool's deepseek model can take a while to first-
-# token; V1.5's load-bearing question is "does sleep+wake work without
+# because the cold-fork model warmup can take a while to first-token;
+# V1.5's load-bearing question is "does sleep+wake work without
 # clipping siblings", which is a welld-level invariant.
 #
 # Assumes:

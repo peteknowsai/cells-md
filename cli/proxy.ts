@@ -121,7 +121,7 @@ type AuthJson = {
   // Optional — mother always has it, but tolerate absence so startup doesn't
   // hard-fail when only one sub is configured.
   "openai-codex"?: CodexAuth;
-  // Other providers (openai, deepseek, ...) may live alongside; we don't touch them.
+  // Other providers (openai, ...) may live alongside; we don't touch them.
   [k: string]: unknown;
 };
 

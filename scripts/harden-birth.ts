@@ -84,17 +84,15 @@ type Combo = {
 // Baseline = gpt-5.5 at low thinking — the free path (ChatGPT subscription
 // via codex), so it's cheap to run every fire. The held-constant model on
 // the thinking/extension/channel axes is gpt-5.5 for the same reason. The
-// model axis is where the paid providers (deepseek, anthropic, gpt-5.5-pro
-// all bill per-token) get exercised — those rows only run when hour/random
-// picks them, not every fire. The claude-code and codex rows ride the
+// model axis is where the paid providers (anthropic, gpt-5.5-pro both bill
+// per-token) get exercised — those rows only run when hour/random picks
+// them, not every fire. The claude-code and codex rows ride the
 // subscription path (flat cost), so they're safe to exercise often.
 const COMBOS: Combo[] = [
   { id: "smoke",          harness: "pi", model: "gpt-5.5",           thinking: "low",    extensions: [],                                    packages: [],                channels: [] },
   // model axis — the paid providers. Thinking sits at low to isolate the
   // model dimension; gpt-5.5-pro rejects sub-medium and the anthropic
   // models disable thinking below high, so those four hold at high.
-  { id: "deepseek-flash", harness: "pi", model: "deepseek-v4-flash", thinking: "low",    extensions: [],                                    packages: [],                channels: [] },
-  { id: "deepseek-pro",   harness: "pi", model: "deepseek-v4-pro",   thinking: "low",    extensions: [],                                    packages: [],                channels: [] },
   { id: "gpt55-pro",      harness: "pi", model: "gpt-5.5-pro",       thinking: "high",   extensions: [],                                    packages: [],                channels: [] },
   { id: "opus",           harness: "pi", model: "opus",              thinking: "high",   extensions: [],                                    packages: [],                channels: [] },
   { id: "sonnet",         harness: "pi", model: "sonnet",            thinking: "high",   extensions: [],                                    packages: [],                channels: [] },
@@ -117,7 +115,6 @@ const COMBOS: Combo[] = [
   { id: "ch-both",        harness: "pi", model: "gpt-5.5",           thinking: "low",    extensions: [],                                    packages: [],                channels: ["slack","email"] },
   // crosses — multiple axes at once (paid models, occasional).
   { id: "combo-gpt",      harness: "pi", model: "gpt-5.5-pro",       thinking: "high",   extensions: ["memory"],                            packages: ["pi-web-access"], channels: ["slack"] },
-  { id: "combo-deepseek", harness: "pi", model: "deepseek-v4-pro",   thinking: "high",   extensions: ["memory","mentality","wiki","dream"],  packages: ["pi-web-access"], channels: ["slack","email"] },
   { id: "combo-opus",     harness: "pi", model: "opus",              thinking: "high",   extensions: ["memory"],                            packages: [],                channels: [] },
 ];
 
