@@ -1,0 +1,665 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>JURYPOOL — Operating Model &amp; Design Map</title>
+<style>
+  :root {
+    --ink: #1a2950;
+    --ink-soft: #4a5b85;
+    --muted: #6b7a99;
+    --rule: #c8d2e3;
+    --rule-soft: #e6ecf6;
+    --bg: #ffffff;
+    --paper: #ffffff;
+    --tint: #eef3fb;
+    --tint-deep: #dde8f7;
+    --accent: #2868d0;
+    --accent-soft: #e2ecfa;
+    --accent-ink: #1a4ca0;
+    --cell-green: #4f9d52;
+    --cell-green-soft: #e6f1e6;
+    --warn: #b8770b;
+    --warn-soft: #faf1de;
+    --code-bg: #f5f7fb;
+    --code-ink: #1a2950;
+    --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    --sans: -apple-system, BlinkMacSystemFont, "Inter", "Helvetica Neue", system-ui, sans-serif;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
+  body {
+    background: var(--bg);
+    color: var(--ink);
+    font-family: var(--sans);
+    font-size: 15px;
+    line-height: 1.55;
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+  }
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  code { font-family: var(--mono); font-size: 12.5px; background: var(--code-bg); color: var(--code-ink); padding: 1px 6px; border-radius: 3px; }
+  p { margin: 0 0 12px; max-width: 880px; }
+
+  /* Page frame */
+  .page { max-width: 1180px; margin: 0 auto; padding: 48px 40px 80px; }
+
+  /* Title block */
+  .title-block { border-bottom: 2px solid var(--ink); padding-bottom: 18px; margin-bottom: 36px; }
+  h1.deck-title {
+    font-size: 44px;
+    line-height: 1.05;
+    letter-spacing: -0.025em;
+    margin: 0 0 10px;
+    font-weight: 800;
+    color: var(--ink);
+  }
+  .deck-sub {
+    font-size: 17px;
+    color: var(--accent-ink);
+    font-weight: 500;
+    margin: 0;
+    letter-spacing: -0.005em;
+  }
+
+  /* Section headers */
+  .section { margin-top: 44px; }
+  .section-header {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    margin: 0 0 22px;
+  }
+  .section-header .num {
+    font-size: 22px;
+    font-weight: 700;
+    color: var(--ink);
+    letter-spacing: -0.01em;
+    white-space: nowrap;
+  }
+  .section-header .title {
+    font-size: 22px;
+    font-weight: 700;
+    color: var(--ink);
+    letter-spacing: -0.01em;
+    white-space: nowrap;
+  }
+  .section-header .rule {
+    flex: 1;
+    height: 2px;
+    background: var(--accent);
+    align-self: center;
+  }
+  .section-lede {
+    font-size: 14px;
+    color: var(--ink-soft);
+    margin: 0 0 22px;
+    max-width: 880px;
+  }
+
+  /* Subhead inside section */
+  h3 { font-size: 14px; text-transform: uppercase; letter-spacing: 0.06em; font-weight: 700; color: var(--accent-ink); margin: 24px 0 10px; }
+  h4 { font-size: 12px; text-transform: uppercase; letter-spacing: 0.06em; font-weight: 700; color: var(--muted); margin: 16px 0 6px; }
+
+  /* ── Control flow diagram (Section 1) ── */
+  .flow-diagram {
+    position: relative;
+    padding: 20px;
+    border: 1px solid var(--rule);
+    border-radius: 10px;
+    background: var(--bg);
+    margin: 16px 0;
+  }
+  .flow-grid {
+    display: grid;
+    grid-template-columns: 150px 1fr 220px 1fr 180px;
+    gap: 0;
+    align-items: center;
+    min-height: 360px;
+  }
+  .node {
+    border: 1.5px solid var(--accent);
+    background: var(--accent-soft);
+    border-radius: 6px;
+    padding: 14px 16px;
+    text-align: center;
+    color: var(--accent-ink);
+  }
+  .node.muted { background: var(--tint); border-color: var(--rule); color: var(--ink-soft); }
+  .node.cell { background: var(--cell-green-soft); border-color: var(--cell-green); color: #2a6b2c; }
+  .node.foreman { background: var(--accent-soft); border-color: var(--accent); color: var(--accent-ink); padding: 18px 16px; box-shadow: 0 2px 0 var(--accent); }
+  .node.surface { background: var(--bg); border: 1px solid var(--rule); color: var(--ink-soft); padding: 10px 12px; font-size: 12px; }
+  .node .label { font-size: 13px; font-weight: 700; letter-spacing: -0.005em; }
+  .node .role { font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); margin-top: 4px; }
+  .node .desc { font-size: 11.5px; color: var(--ink-soft); margin-top: 6px; line-height: 1.35; }
+  .node.cell .role { color: var(--cell-green); }
+  .node.cell .desc { color: #3d5e3f; }
+  .stack { display: flex; flex-direction: column; gap: 8px; }
+  .stack > .node { margin: 0; }
+
+  /* Arrow svg helpers */
+  .arrow-h { display: flex; align-items: center; justify-content: center; padding: 0 8px; }
+  .arrow-h svg { width: 100%; max-width: 140px; height: 28px; }
+  .arrow-label {
+    text-align: center;
+    font-size: 11px;
+    color: var(--accent-ink);
+    font-family: var(--mono);
+    letter-spacing: 0.02em;
+    margin: -8px 0 4px;
+  }
+
+  /* ── Lifecycle steps (Section 2) ── */
+  .lifecycle {
+    display: grid;
+    grid-template-columns: repeat(5, 1fr);
+    gap: 12px;
+    margin: 16px 0 8px;
+  }
+  .step {
+    position: relative;
+    background: var(--bg);
+    border: 1.5px solid var(--accent);
+    border-radius: 10px;
+    padding: 16px 14px 14px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+  .step .stepnum {
+    position: absolute;
+    top: -14px;
+    left: 14px;
+    width: 28px;
+    height: 28px;
+    border-radius: 50%;
+    background: var(--accent);
+    color: white;
+    font-size: 13px;
+    font-weight: 700;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    box-shadow: 0 0 0 3px var(--bg);
+  }
+  .step .stepname {
+    font-size: 13.5px;
+    font-weight: 700;
+    color: var(--ink);
+    margin-top: 8px;
+  }
+  .step .stepdesc {
+    font-size: 12.5px;
+    color: var(--ink-soft);
+    line-height: 1.45;
+  }
+  .lifecycle-callout {
+    margin: 20px 0 0;
+    padding: 12px 16px;
+    background: var(--tint);
+    border-left: 4px solid var(--accent);
+    border-radius: 0 6px 6px 0;
+    font-size: 13.5px;
+    color: var(--ink);
+    display: flex;
+    align-items: center;
+    gap: 12px;
+  }
+  .lifecycle-callout .star {
+    color: var(--accent);
+    font-weight: 700;
+    font-size: 16px;
+  }
+
+  /* ── Tables (cast, capabilities, repos) ── */
+  table { border-collapse: collapse; width: 100%; margin: 12px 0; font-size: 13.5px; }
+  th, td { padding: 9px 12px; text-align: left; border-bottom: 1px solid var(--rule); vertical-align: top; }
+  th { font-weight: 700; background: var(--code-bg); font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); border-bottom: 1px solid var(--rule); }
+  td code { font-size: 12.5px; }
+  tr.section-row td { background: var(--tint); font-family: var(--mono); font-size: 11px; color: var(--accent-ink); text-transform: uppercase; letter-spacing: 0.06em; padding: 6px 12px; font-weight: 600; }
+
+  .badge { display: inline-block; padding: 2px 8px; border-radius: 10px; font-size: 10.5px; font-weight: 600; font-family: var(--mono); letter-spacing: 0.04em; white-space: nowrap; }
+  .badge.pi      { background: var(--accent-soft); color: var(--accent-ink); }
+  .badge.claude  { background: #f4e6ef; color: #883a66; }
+  .badge.codex   { background: #dfeaeb; color: #2a5e6d; }
+  .badge.high    { background: #d7e3f6; color: var(--accent-ink); }
+  .badge.medium  { background: var(--rule-soft); color: var(--muted); }
+  .badge.low     { background: #f1f3f8; color: var(--muted); }
+  .badge.port    { background: var(--warn-soft); color: var(--warn); }
+  .badge.role-thinker { background: var(--cell-green-soft); color: #2a6b2c; }
+  .badge.role-builder { background: var(--accent-soft); color: var(--accent-ink); }
+  .badge.role-cos     { background: #f0e3d0; color: #8a5a14; }
+  .meta-row { display: flex; gap: 4px; flex-wrap: wrap; align-items: center; }
+
+  /* ── Open questions panel (Section 6) ── */
+  .open-questions {
+    background: #fffae0;
+    border: 1.5px solid #efd45a;
+    border-radius: 10px;
+    padding: 22px 26px;
+    margin: 16px 0;
+  }
+  .open-questions h3 {
+    margin: 0 0 16px;
+    color: #8a6b14;
+  }
+  .open-questions ol {
+    list-style: none;
+    padding: 0;
+    margin: 0;
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+    gap: 12px;
+  }
+  .open-questions li {
+    display: flex;
+    gap: 12px;
+    align-items: flex-start;
+    font-size: 13.5px;
+    color: #5a4910;
+    line-height: 1.5;
+  }
+  .open-questions li .qn {
+    flex: 0 0 24px;
+    width: 24px;
+    height: 24px;
+    background: #efd45a;
+    color: #5a4910;
+    border-radius: 50%;
+    font-weight: 700;
+    font-size: 12px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+
+  /* Status pills row */
+  .status-row {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+    gap: 10px;
+    margin: 0 0 22px;
+  }
+  .status-pill {
+    background: var(--tint);
+    border: 1px solid var(--rule);
+    border-radius: 8px;
+    padding: 10px 14px;
+  }
+  .status-pill .k { font-size: 10.5px; font-family: var(--mono); text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); display: block; margin-bottom: 3px; }
+  .status-pill .v { font-size: 14px; font-weight: 600; color: var(--ink); }
+
+  /* Page footer */
+  .page-foot { margin-top: 56px; padding-top: 16px; border-top: 1px solid var(--rule); color: var(--muted); font-family: var(--mono); font-size: 11.5px; display: flex; justify-content: space-between; flex-wrap: wrap; gap: 12px; }
+
+  /* Misc */
+  ul { margin: 0 0 14px; padding-left: 22px; max-width: 800px; }
+  li { margin: 3px 0; font-size: 14px; }
+
+  /* Pix-sketch container */
+  .pix-sketch { margin: 14px 0; text-align: center; background: var(--code-bg); border: 1px dashed var(--rule); border-radius: 8px; padding: 14px; }
+  .pix-sketch img { max-width: 70%; height: auto; border-radius: 4px; }
+  .pix-sketch .cap { margin-top: 8px; font-size: 11.5px; color: var(--muted); font-family: var(--mono); }
+
+  @media (max-width: 980px) {
+    .flow-grid { grid-template-columns: 1fr; gap: 12px; }
+    .arrow-h { display: none; }
+    .arrow-label { display: none; }
+    .lifecycle { grid-template-columns: 1fr 1fr; }
+  }
+  @media (max-width: 600px) {
+    .lifecycle { grid-template-columns: 1fr; }
+  }
+</style>
+</head>
+<body>
+<div class="page">
+
+  <div class="title-block">
+    <h1 class="deck-title">JURYPOOL — Operating Model &amp; Design Map</h1>
+    <p class="deck-sub">Port of <code>~/Projects/archived/jurypool</code> into the cells substrate. How the colony is coordinated, plus the cell roster and open decisions.</p>
+  </div>
+
+  <div style="text-align:center; margin: -16px 0 32px; background:#fbfaf6; border:1px solid var(--rule); border-radius:10px; padding:14px;">
+    <img src="portraits/colony-portrait.png" alt="jurypool team photo" style="max-width:100%; height:auto; border-radius:6px;">
+    <div style="margin-top:10px; font-family:var(--mono); font-size:11.5px; color:var(--muted); letter-spacing:0.04em;">colony portrait · 13 cells · gpt-image-2</div>
+  </div>
+
+  <div class="status-row">
+    <div class="status-pill"><span class="k">phase</span><span class="v" style="color:#2a6b2c;">bringup complete</span></div>
+    <div class="status-pill"><span class="k">cells alive</span><span class="v" style="color:#2a6b2c;">13 / 13</span></div>
+    <div class="status-pill"><span class="k">shape</span><span class="v">with-CoS</span></div>
+    <div class="status-pill"><span class="k">CoS name</span><span class="v">Foreman</span></div>
+    <div class="status-pill"><span class="k">repos</span><span class="v">pete/jurypool · pete/jurypool-portal</span></div>
+    <div class="status-pill"><span class="k">model in use</span><span class="v" style="color:#2a6b2c;">gpt-5.5 · medium (codex sub)</span></div>
+  </div>
+
+  <div class="callout" style="background:#e6f1e6; border-left:3px solid var(--cell-green); padding:14px 18px; margin:16px 0 24px; border-radius:0 6px 6px 0;">
+    <div style="font-family:var(--mono); font-size:11px; text-transform:uppercase; letter-spacing:0.08em; color:var(--cell-green); margin-bottom:4px;">bringup status</div>
+    <p style="margin:0 0 6px; color:#2a6b2c; font-size:14px;"><strong>All 13 cells birthed</strong> 2026-05-16 21:44–22:01. Each has its own well, IP, pi (or claude-code) installed, and a working <code>&lt;name&gt;.cells.md</code> Worker. <strong>Talk verified end-to-end on the ChatGPT subscription path</strong> (openai-codex/gpt-5.5/medium via proxy.cells.md):</p>
+    <ul style="margin:6px 0 8px 20px; color:#2a6b2c; font-size:13.5px; font-style:italic;">
+      <li>jesus: "I am Jesus of Nazareth, here to meet you with mercy and truth."</li>
+      <li>gandhi: "Conflict is a test of truth: meet it without hatred, with courage, and with means worthy of the peace you seek."</li>
+    </ul>
+    <p style="margin:0; color:#2a6b2c; font-size:13.5px;"><strong>Substrate fix applied per-cell</strong> (DNA bake patches wrong pi-ai path — see <a href="https://github.com/peteknowsai/jurypool/blob/main/BRINGUP.md" style="color:var(--accent);">BRINGUP.md</a>). Personas live; codex/gpt-5.5 live; deepseek as fallback. <strong>Still V1-pending</strong>: port <code>jurypool-extension</code> (sprite → cells), set up <code>deliberations.db</code>, first end-to-end deliberation through Foreman, portal scaffold.</p>
+  </div>
+
+  <!-- ───────────── Section 1: Control Flow ───────────── -->
+  <div class="section">
+    <div class="section-header">
+      <span class="num">1.</span>
+      <span class="title">Control Flow</span>
+      <span class="rule"></span>
+    </div>
+    <p class="section-lede"><strong>The user surfaces are the control plane.</strong> You ask a question via TUI, Slack DM, or the portal at <code>jury.cells.md</code>. Foreman is the only cell that hears you directly. Foreman frames the question, fans it out to all 9 jurors in parallel via the <code>deliberate</code> tool, picks 2–3 for deep follow-ups, and synthesizes a verdict back. Verdicts persist in a SQLite file inside Foreman's well; the portal reads them by hitting Foreman's per-cell API layer (the substrate primitive — same Worker/DO as the web surface, just routed to a cell-side handler instead of a static asset).</p>
+
+    <div class="flow-diagram">
+      <div class="flow-grid">
+
+        <!-- col 1: user surfaces -->
+        <div class="stack">
+          <div class="node surface"><div class="label">SLACK DM</div></div>
+          <div class="node surface"><div class="label">TUI</div></div>
+          <div class="node surface"><div class="label">PORTAL</div><div style="font-size:10.5px;color:var(--muted);margin-top:2px;">jury.cells.md</div></div>
+          <div class="node surface" style="background:var(--tint); font-size:10.5px; text-transform:uppercase; letter-spacing:0.06em; color:var(--muted);">USER SURFACES</div>
+        </div>
+
+        <!-- arrow 1 -->
+        <div>
+          <div class="arrow-label">submit question</div>
+          <div class="arrow-h">
+            <svg viewBox="0 0 140 28" xmlns="http://www.w3.org/2000/svg">
+              <defs><marker id="a1" markerWidth="8" markerHeight="8" refX="6" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="#2868d0"/></marker></defs>
+              <line x1="2" y1="14" x2="128" y2="14" stroke="#2868d0" stroke-width="1.8" marker-end="url(#a1)"/>
+            </svg>
+          </div>
+          <div class="arrow-label" style="color:var(--muted)">verdict back</div>
+          <div class="arrow-h">
+            <svg viewBox="0 0 140 28" xmlns="http://www.w3.org/2000/svg">
+              <defs><marker id="a1b" markerWidth="8" markerHeight="8" refX="6" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="#6b7a99"/></marker></defs>
+              <line x1="128" y1="14" x2="12" y2="14" stroke="#6b7a99" stroke-width="1.4" stroke-dasharray="4 3" marker-end="url(#a1b)"/>
+            </svg>
+          </div>
+        </div>
+
+        <!-- col 2: foreman -->
+        <div class="node foreman">
+          <div class="label" style="font-size:15px">FOREMAN</div>
+          <div class="role">CoS · pi · gpt-5.5 · high</div>
+          <div class="desc">Frames the question.<br>Dispatches to all 9.<br>Picks 2–3 for deep dives.<br>Synthesizes verdict.</div>
+        </div>
+
+        <!-- arrow 2 -->
+        <div>
+          <div class="arrow-label">deliberate(question)</div>
+          <div class="arrow-h">
+            <svg viewBox="0 0 140 28" xmlns="http://www.w3.org/2000/svg">
+              <defs><marker id="a2" markerWidth="8" markerHeight="8" refX="6" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="#2868d0"/></marker></defs>
+              <line x1="2" y1="14" x2="128" y2="14" stroke="#2868d0" stroke-width="1.8" marker-end="url(#a2)"/>
+            </svg>
+          </div>
+          <div class="arrow-label" style="color:var(--muted)">takes return</div>
+          <div class="arrow-h">
+            <svg viewBox="0 0 140 28" xmlns="http://www.w3.org/2000/svg">
+              <defs><marker id="a2b" markerWidth="8" markerHeight="8" refX="6" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="#6b7a99"/></marker></defs>
+              <line x1="128" y1="14" x2="12" y2="14" stroke="#6b7a99" stroke-width="1.4" stroke-dasharray="4 3" marker-end="url(#a2b)"/>
+            </svg>
+          </div>
+        </div>
+
+        <!-- col 3: jury stack -->
+        <div class="stack">
+          <div class="node cell"><div class="label">JESUS</div><div class="desc">compassion · parables</div></div>
+          <div class="node cell"><div class="label">BUDDHA</div><div class="desc">middle path · suffering</div></div>
+          <div class="node cell"><div class="label">RUMI</div><div class="desc">love · mystical</div></div>
+          <div class="node cell"><div class="label">MARCUS AURELIUS</div><div class="desc">stoic duty · control</div></div>
+          <div class="node cell"><div class="label">LAO TZU</div><div class="desc">wu wei · paradox</div></div>
+          <div class="node cell"><div class="label">CONFUCIUS</div><div class="desc">harmony · virtue</div></div>
+          <div class="node cell"><div class="label">TESLA</div><div class="desc">systems · vision</div></div>
+          <div class="node cell"><div class="label">FULLER</div><div class="desc">comprehensive · efficient</div></div>
+          <div class="node cell"><div class="label">GANDHI</div><div class="desc">nonviolent truth · justice</div></div>
+          <div class="node" style="background:var(--cell-green-soft); border-color:var(--cell-green); color:#2a6b2c; font-size:10.5px; text-transform:uppercase; letter-spacing:0.06em; padding:6px 10px;">JURY · 9 THINKER CELLS · pi · gpt-5.5 · medium</div>
+        </div>
+
+      </div>
+
+      <!-- portal build row, separate from the main flow -->
+      <div style="margin-top:22px; padding-top:18px; border-top:1px dashed var(--rule); display:grid; grid-template-columns:150px 1fr 220px 1fr 180px; align-items:center; gap:0;">
+        <div class="node muted" style="font-size:10.5px; text-transform:uppercase; letter-spacing:0.06em;">SCRATCH RING</div>
+
+        <div>
+          <div class="arrow-label">scratch · specs</div>
+          <div class="arrow-h">
+            <svg viewBox="0 0 140 28" xmlns="http://www.w3.org/2000/svg">
+              <defs><marker id="a3" markerWidth="8" markerHeight="8" refX="6" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="#2868d0"/></marker></defs>
+              <line x1="2" y1="14" x2="128" y2="14" stroke="#2868d0" stroke-width="1.8" marker-end="url(#a3)"/>
+            </svg>
+          </div>
+        </div>
+
+        <div class="node foreman" style="background:var(--accent-soft); border-color:var(--accent);">
+          <div class="label">PORTAL POD</div>
+          <div class="role">3 BUILDER CELLS · mixed</div>
+          <div class="desc">designer (pi)<br>engineer (claude-code · opus)<br>PM (pi)</div>
+        </div>
+
+        <div>
+          <div class="arrow-label">build · deploy</div>
+          <div class="arrow-h">
+            <svg viewBox="0 0 140 28" xmlns="http://www.w3.org/2000/svg">
+              <defs><marker id="a4" markerWidth="8" markerHeight="8" refX="6" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="#2868d0"/></marker></defs>
+              <line x1="2" y1="14" x2="128" y2="14" stroke="#2868d0" stroke-width="1.8" marker-end="url(#a4)"/>
+            </svg>
+          </div>
+        </div>
+
+        <div class="stack">
+          <div class="node">
+            <div class="label">JURY.CELLS.MD</div>
+            <div class="desc">Next.js portal — submit questions, browse verdicts, see juror histories</div>
+          </div>
+          <div class="node" style="border-color:#5a6b85; background:#eef1f5; color:#3a4860;">
+            <div class="label">SQLITE</div>
+            <div class="desc" style="color:#506181">deliberations.db in Foreman's well · portal queries via Foreman's HTTP API</div>
+          </div>
+        </div>
+      </div>
+
+    </div>
+  </div>
+
+  <!-- ───────────── Section 2: Deliberation Lifecycle ───────────── -->
+  <div class="section">
+    <div class="section-header">
+      <span class="num">2.</span>
+      <span class="title">Deliberation Lifecycle</span>
+      <span class="rule"></span>
+    </div>
+    <p class="section-lede">One question → one verdict, in five stages. Each stage either runs on Foreman (1, 2, 4, 5) or fans out across the jury (3).</p>
+
+    <div class="lifecycle">
+      <div class="step">
+        <div class="stepnum">1</div>
+        <div class="stepname">Frame</div>
+        <div class="stepdesc">Foreman reads the raw question. Strips noise. Decides the deliberation shape — quick poll vs. deep deliberation.</div>
+      </div>
+      <div class="step">
+        <div class="stepnum">2</div>
+        <div class="stepname">Dispatch</div>
+        <div class="stepdesc">Foreman calls <code>deliberate(question)</code>. Question fans out to all 9 jurors in parallel.</div>
+      </div>
+      <div class="step">
+        <div class="stepnum">3</div>
+        <div class="stepname">Jury thinks</div>
+        <div class="stepdesc">Each juror reads its own memory, deliberates from its persona, returns a take. All 9 in parallel; medium-effort cap to avoid throttle.</div>
+      </div>
+      <div class="step">
+        <div class="stepnum">4</div>
+        <div class="stepname">Deep dives</div>
+        <div class="stepdesc">Foreman picks 2–3 takes worth pursuing. Sends follow-up questions to those jurors. They respond with elaborated reasoning.</div>
+      </div>
+      <div class="step">
+        <div class="stepnum">5</div>
+        <div class="stepname">Verdict</div>
+        <div class="stepdesc">Foreman synthesizes consensus, dissent, and an actionable close. Returns verdict to the user via the original surface (Slack, email, TUI).</div>
+      </div>
+    </div>
+
+    <div class="lifecycle-callout">
+      <span class="star">★</span>
+      <span>Each juror writes to its own memory on every deliberation. Nightly <code>dream</code> cycle consolidates new signal into durable memory files — so over time, the jury learns the user.</span>
+    </div>
+  </div>
+
+  <!-- ───────────── Section 3: The Cast ───────────── -->
+  <div class="section">
+    <div class="section-header">
+      <span class="num">3.</span>
+      <span class="title">The Cast</span>
+      <span class="rule"></span>
+    </div>
+    <p class="section-lede">Thirteen cells. One CoS (Foreman) · nine thinker cells (the jury, uniform spec, persona-differentiated) · three builder cells (the portal pod, mixed harnesses).</p>
+
+    <table>
+      <thead><tr>
+        <th>cell</th><th>role</th><th>harness</th><th>model · effort</th><th>kit</th><th>repo</th>
+      </tr></thead>
+      <tbody>
+        <tr>
+          <td><code>foreman</code> <span style="color:var(--cell-green);">●</span></td>
+          <td><span class="badge role-cos">CoS</span></td>
+          <td><span class="badge pi">pi</span></td>
+          <td><span class="badge high">gpt-5.5 · high</span></td>
+          <td><div class="meta-row">
+            <span class="badge port">jurypool-extension</span>
+            <span class="badge">memory</span><span class="badge">dream</span><span class="badge">comms</span>
+          </div></td>
+          <td><code>pete/jurypool</code></td>
+        </tr>
+        <tr class="section-row"><td colspan="6">jury — 9 thinker cells, uniform spec</td></tr>
+        <tr><td><code>jesus</code> <span style="color:var(--cell-green);">●</span></td><td><span class="badge role-thinker">thinker</span></td><td><span class="badge pi">pi</span></td><td><span class="badge medium">gpt-5.5 · medium</span></td><td><div class="meta-row"><span class="badge">memory</span><span class="badge">dream</span><span class="badge">persona</span></div></td><td>—</td></tr>
+        <tr><td><code>buddha</code> <span style="color:var(--cell-green);">●</span></td><td><span class="badge role-thinker">thinker</span></td><td><span class="badge pi">pi</span></td><td><span class="badge medium">gpt-5.5 · medium</span></td><td><div class="meta-row"><span class="badge">memory</span><span class="badge">dream</span><span class="badge">persona</span></div></td><td>—</td></tr>
+        <tr><td><code>rumi</code> <span style="color:var(--cell-green);">●</span></td><td><span class="badge role-thinker">thinker</span></td><td><span class="badge pi">pi</span></td><td><span class="badge medium">gpt-5.5 · medium</span></td><td><div class="meta-row"><span class="badge">memory</span><span class="badge">dream</span><span class="badge">persona</span></div></td><td>—</td></tr>
+        <tr><td><code>marcus-aurelius</code> <span style="color:var(--cell-green);">●</span></td><td><span class="badge role-thinker">thinker</span></td><td><span class="badge pi">pi</span></td><td><span class="badge medium">gpt-5.5 · medium</span></td><td><div class="meta-row"><span class="badge">memory</span><span class="badge">dream</span><span class="badge">persona</span></div></td><td>—</td></tr>
+        <tr><td><code>lao-tzu</code> <span style="color:var(--cell-green);">●</span></td><td><span class="badge role-thinker">thinker</span></td><td><span class="badge pi">pi</span></td><td><span class="badge medium">gpt-5.5 · medium</span></td><td><div class="meta-row"><span class="badge">memory</span><span class="badge">dream</span><span class="badge">persona</span></div></td><td>—</td></tr>
+        <tr><td><code>confucius</code> <span style="color:var(--cell-green);">●</span></td><td><span class="badge role-thinker">thinker</span></td><td><span class="badge pi">pi</span></td><td><span class="badge medium">gpt-5.5 · medium</span></td><td><div class="meta-row"><span class="badge">memory</span><span class="badge">dream</span><span class="badge">persona</span></div></td><td>—</td></tr>
+        <tr><td><code>tesla</code> <span style="color:var(--cell-green);">●</span></td><td><span class="badge role-thinker">thinker</span></td><td><span class="badge pi">pi</span></td><td><span class="badge medium">gpt-5.5 · medium</span></td><td><div class="meta-row"><span class="badge">memory</span><span class="badge">dream</span><span class="badge">persona</span></div></td><td>—</td></tr>
+        <tr><td><code>fuller</code> <span style="color:var(--cell-green);">●</span></td><td><span class="badge role-thinker">thinker</span></td><td><span class="badge pi">pi</span></td><td><span class="badge medium">gpt-5.5 · medium</span></td><td><div class="meta-row"><span class="badge">memory</span><span class="badge">dream</span><span class="badge">persona</span></div></td><td>—</td></tr>
+        <tr><td><code>gandhi</code> <span style="color:var(--cell-green);">●</span></td><td><span class="badge role-thinker">thinker</span></td><td><span class="badge pi">pi</span></td><td><span class="badge medium">gpt-5.5 · medium</span></td><td><div class="meta-row"><span class="badge">memory</span><span class="badge">dream</span><span class="badge">persona</span></div></td><td>—</td></tr>
+        <tr class="section-row"><td colspan="6">portal pod — 3 builder cells, mixed harnesses</td></tr>
+        <tr>
+          <td><code>portal-designer</code> <span style="color:var(--cell-green);">●</span></td>
+          <td><span class="badge role-builder">builder</span></td>
+          <td><span class="badge pi">pi</span></td>
+          <td><span class="badge medium">gpt-5.5 · medium</span></td>
+          <td><div class="meta-row"><span class="badge">pix</span><span class="badge port">design-system</span></div></td>
+          <td><code>pete/jurypool-portal</code></td>
+        </tr>
+        <tr>
+          <td><code>portal-engineer</code> <span style="color:var(--cell-green);">●</span></td>
+          <td><span class="badge role-builder">builder</span></td>
+          <td><span class="badge claude">claude-code</span></td>
+          <td><span class="badge high">opus-4-7 · high</span></td>
+          <td><div class="meta-row"><span class="badge port">nextjs</span><span class="badge port">convex-oss</span></div></td>
+          <td><code>pete/jurypool-portal</code></td>
+        </tr>
+        <tr>
+          <td><code>portal-pm</code> <span style="color:var(--cell-green);">●</span></td>
+          <td><span class="badge role-builder">builder</span></td>
+          <td><span class="badge pi">pi</span></td>
+          <td><span class="badge medium">gpt-5.5 · medium</span></td>
+          <td><div class="meta-row"><span class="badge">colony-skill</span></div></td>
+          <td><code>pete/jurypool-portal</code></td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <!-- ───────────── Section 4: Capabilities — Port Candidates ───────────── -->
+  <div class="section">
+    <div class="section-header">
+      <span class="num">4.</span>
+      <span class="title">Capabilities — Port Candidates</span>
+      <span class="rule"></span>
+    </div>
+    <p class="section-lede">Things flagged <span class="badge port">port</span> in the cast above. Pi's library is canonical. <strong>Skill-first, CLI only when an external API genuinely demands it.</strong> Each row below is work the cells team owes the colony before bringup can complete.</p>
+
+    <table>
+      <thead><tr><th>capability</th><th>type</th><th>source</th><th>effort</th><th>shape</th></tr></thead>
+      <tbody>
+        <tr><td><code>jurypool-extension</code></td><td>pi extension</td><td>existing at <code>archived/jurypool/.pi/extensions/jury-pool/</code></td><td>low</td><td>Already pi-shape. Move + re-test. TUI widgets + <code>deliberate</code> tool.</td></tr>
+        <tr><td><code>memory</code></td><td>pi skill</td><td>existing at <code>archived/jurypool/.pi/skills/memory/</code></td><td>none</td><td>Pi-canonical. Direct lift.</td></tr>
+        <tr><td><code>dream</code></td><td>pi skill</td><td>existing at <code>archived/jurypool/.pi/skills/dream/</code></td><td>none</td><td>Pi-canonical. Direct lift.</td></tr>
+        <tr><td><code>design-system</code></td><td>pi skill</td><td>—</td><td>medium</td><td>Author from scratch. Codifies juror cards, deliberation views, portal aesthetic.</td></tr>
+        <tr><td><code>nextjs</code></td><td>claude-code skill</td><td>—</td><td>low</td><td>App-router patterns, layouts, server actions. Most likely already exists in claude-code skill catalog — verify.</td></tr>
+        <tr><td><code>convex-oss</code></td><td>claude-code skill</td><td>—</td><td>medium</td><td>Self-hosted OSS Convex (not the hosted product). Schema, queries/mutations, realtime subscriptions, docker setup. Likely new authoring work.</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <!-- ───────────── Section 5: Repos & Artifacts ───────────── -->
+  <div class="section">
+    <div class="section-header">
+      <span class="num">5.</span>
+      <span class="title">Repos &amp; Artifacts</span>
+      <span class="rule"></span>
+    </div>
+    <p class="section-lede">Builder cells get repos. Thinker cells don't — their substance is their memory, which lives in their well. Repos live under <code>pete/</code> (no GitHub orgs).</p>
+
+    <table>
+      <thead><tr><th>repo / artifact</th><th>steward</th><th>contents</th></tr></thead>
+      <tbody>
+        <tr><td><code>pete/jurypool</code></td><td><code>foreman</code></td><td>The colony home — <code>colony.md</code>, <code>cells/</code>, <code>design/</code>, <code>artifacts.json</code>.</td></tr>
+        <tr><td><code>pete/jurypool-portal</code></td><td>portal pod (3 cells)</td><td>The <code>jury.cells.md</code> web UI. Designer + engineer + PM all push.</td></tr>
+        <tr><td>per-juror site (<code>&lt;juror&gt;.cells.md</code>)</td><td>each juror</td><td>Each juror writes <code>site/public/</code> in own well; the cells Worker serves. No git repo; live cells push directly.</td></tr>
+        <tr><td>juror memories</td><td>each juror</td><td>Lives at <code>~/.pi/memory/</code> inside each well. Survives sleep/wake. Cell <em>is</em> the memory.</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <!-- ───────────── Section 6: Open Questions ───────────── -->
+  <div class="section">
+    <div class="section-header">
+      <span class="num">6.</span>
+      <span class="title">Open Questions</span>
+      <span class="rule"></span>
+    </div>
+    <p class="section-lede">Decisions still pending before bringup can begin. Each one is a single call the user owes Creator.</p>
+
+    <p style="margin-top:0; color:#5a4910; font-size:13px;"><em>Resolved:</em> cast locked · modes dropped · V2 dropped · email dropped · stack = Next.js + SQLite (in Foreman's well) · Slack handled by channels infra · portal↔Foreman uses existing cells comms layer.</p>
+    <div class="open-questions">
+      <h3>Bringup complete — what's left for V1 functional</h3>
+      <ol>
+        <li><span class="qn">1</span><span><strong>Port the <code>jurypool-extension</code></strong> from sprite-shape to cells-shape. Original uses <code>sprite.exec</code> to fan out to jurors; the cells version swaps that for <code>cells talk &lt;juror&gt;</code> (or the host-bridge equivalent). Estimated few hours of straightforward porting.</span></li>
+        <li><span class="qn">2</span><span><strong>Install personas into juror cells</strong> — copy each <code>persona-md</code> from <code>archived/jurypool/.pi/agents/&lt;juror&gt;.md</code> into the corresponding cell's well (IDENTITY/SOUL overrides). Each juror will then respond in character.</span></li>
+        <li><span class="qn">3</span><span><strong>First deliberation test</strong> — ask Foreman a real question, verify it fans out to all 9 jurors and synthesizes a verdict. End-to-end smoke test.</span></li>
+        <li><span class="qn">4</span><span><strong>Portal pod gets to work</strong> — wake portal-engineer (claude-code · opus), have it scaffold Next.js + SQLite against Foreman's API. Designer drafts juror cards; PM writes spec into SPECS.md. All coordinate via scratch ring.</span></li>
+        <li><span class="qn">5</span><span><strong>Bind Slack channels</strong> — once the workspace is selected, run <code>cells</code> channel-add and Foreman becomes reachable from Slack DM.</span></li>
+      </ol>
+    </div>
+  </div>
+
+  <!-- ───────────── Pix sketch as supplementary ───────────── -->
+  <div class="section">
+    <div class="section-header">
+      <span class="num">7.</span>
+      <span class="title">Sketch (pix)</span>
+      <span class="rule"></span>
+    </div>
+    <p class="section-lede">Rough architecture sketch generated by pix as a complement to the structured diagram above. Useful for sharing or quick visual reference; defer to Section 1 for the canonical view.</p>
+    <div class="pix-sketch">
+      <img src="diagrams/01-system.png" alt="pix architecture sketch">
+      <div class="cap">01-system.png · gpt-image-2 · 2026-05-16</div>
+    </div>
+  </div>
+
+  <div class="page-foot">
+    <span>cells/colonies/jurypool · map version 0.2 · in design</span>
+    <span>generated 2026-05-16</span>
+  </div>
+
+</div>
+</body>
+</html>
