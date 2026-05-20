@@ -45,6 +45,8 @@
   }
   .header-strip a { color: var(--muted); text-decoration: none; }
   .header-strip a:hover { color: var(--accent); }
+  .header-strip nav { display: flex; gap: 22px; flex-wrap: wrap; }
+  .header-strip nav a { letter-spacing: 0.05em; }
   .dot {
     display: inline-block; width: 8px; height: 8px;
     background: var(--accent); border-radius: 50%;
@@ -241,8 +243,8 @@
   .ctas .wrap {
     padding: 80px 32px;
     display: grid;
-    grid-template-columns: repeat(3, 1fr);
-    gap: 24px;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 18px;
   }
   .cta {
     display: block;
@@ -312,12 +314,14 @@
     .hero-art { order: -1; aspect-ratio: 4 / 3; }
     .facts .wrap { grid-template-columns: 1fr; gap: 36px; }
     .shots-grid { grid-template-columns: repeat(2, 1fr); }
-    .ctas .wrap { grid-template-columns: 1fr; }
+    .ctas .wrap { grid-template-columns: repeat(2, 1fr); }
+    .header-strip nav { display: none; }
   }
   @media (max-width: 520px) {
     .wrap { padding-left: 20px; padding-right: 20px; }
     .header-strip .inner { padding-left: 20px; padding-right: 20px; }
     .shots-grid { grid-template-columns: 1fr; }
+    .ctas .wrap { grid-template-columns: 1fr; }
   }
 </style>
 </head>
@@ -325,8 +329,14 @@
 
 <div class="header-strip">
   <div class="inner">
-    <span><span class="dot"></span>cells.md</span>
-    <span>2026 &nbsp;·&nbsp; alpha</span>
+    <a href="/"><span class="dot"></span>cells.md</a>
+    <nav>
+      <a href="/capabilities">capabilities</a>
+      <a href="/brief">brief</a>
+      <a href="/gallery">gallery</a>
+      <a href="/colony">colony</a>
+      <a href="https://github.com/peteknowsai/cells-md">source</a>
+    </nav>
   </div>
 </div>
 
@@ -439,15 +449,20 @@
 
 <section class="ctas">
   <div class="wrap">
+    <a class="cta" href="/capabilities">
+      <span class="label">Capabilities</span>
+      <h3>What cells can do <span class="arrow">→</span></h3>
+      <p>The full tour — birth, hibernate, verify, channels, colonies, the numbers.</p>
+    </a>
     <a class="cta" href="/brief">
       <span class="label">The brief</span>
       <h3>What cells is <span class="arrow">→</span></h3>
-      <p>The full deck — eleven slides on the idea, the unit, the shape, the substrate, the numbers.</p>
+      <p>The deck — eleven slides on the idea, the unit, the shape, the substrate.</p>
     </a>
-    <a class="cta" href="/gallery">
-      <span class="label">The gallery</span>
-      <h3>What cells make <span class="arrow">→</span></h3>
-      <p>Ten generated images, one per concept — birth, channels, the pool, the substrate.</p>
+    <a class="cta" href="/colony">
+      <span class="label">The colony</span>
+      <h3>One problem, a team <span class="arrow">→</span></h3>
+      <p>Jurypool — thirteen cells, a foreman and nine jurors, deliberating live.</p>
     </a>
     <a class="cta" href="https://github.com/peteknowsai/cells-md">
       <span class="label">The source</span>
