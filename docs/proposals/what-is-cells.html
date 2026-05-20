@@ -223,8 +223,13 @@
     margin-right: 8px;
     vertical-align: middle;
   }
+  .header-strip a { color: var(--muted); text-decoration: none; }
+  .header-strip a:hover { color: var(--accent); }
+  .header-strip nav { display: flex; gap: 22px; flex-wrap: wrap; }
+  .header-strip nav a.here { color: var(--accent); }
 
   @media (max-width: 640px) {
+    .header-strip nav { display: none; }
     .deck { padding: 0 20px; }
     .slide { padding: 60px 0; }
     ul.bare li, .story li { grid-template-columns: 1fr; gap: 4px; }
@@ -240,8 +245,14 @@
 
 <div class="header-strip">
   <div class="inner">
-    <span><span class="dot"></span>cells &nbsp;·&nbsp; what it is</span>
-    <span>2026</span>
+    <a href="/"><span class="dot"></span>cells.md</a>
+    <nav>
+      <a href="/capabilities">capabilities</a>
+      <a href="/brief" class="here">brief</a>
+      <a href="/gallery">gallery</a>
+      <a href="/colony">colony</a>
+      <a href="https://github.com/peteknowsai/cells-md">source</a>
+    </nav>
   </div>
 </div>
 
@@ -382,7 +393,7 @@
       <li><strong>Local</strong> — for speed, for latency, for control.</li>
       <li>One <strong>substrate</strong> for every problem. You describe the company; it spins up.</li>
     </ul>
-    <p class="meta" style="margin-top:64px">cells &nbsp;·&nbsp; 2026 &nbsp;·&nbsp; <a href="cells-gallery.html" style="color:var(--accent)">pictures →</a></p>
+    <p class="meta" style="margin-top:64px">cells &nbsp;·&nbsp; 2026 &nbsp;·&nbsp; <a href="/gallery" style="color:var(--accent)">pictures →</a></p>
   </section>
 
 </div>

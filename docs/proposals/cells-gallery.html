@@ -55,8 +55,10 @@
     margin-right: 8px;
     vertical-align: middle;
   }
-  .header-strip a { color: var(--muted); }
+  .header-strip a { color: var(--muted); text-decoration: none; }
   .header-strip a:hover { color: var(--accent); }
+  .header-strip nav { display: flex; gap: 22px; flex-wrap: wrap; }
+  .header-strip nav a.here { color: var(--accent); }
 
   .page { max-width: 1240px; margin: 0 auto; padding: 64px 32px 120px; }
 
@@ -182,6 +184,7 @@
   .footnote a { color: var(--accent); }
 
   @media (max-width: 640px) {
+    .header-strip nav { display: none; }
     .page { padding: 32px 18px 80px; }
     .gallery { grid-template-columns: 1fr; gap: 20px; }
     .header-strip .inner { padding: 0 20px; }
@@ -192,8 +195,14 @@
 
 <div class="header-strip">
   <div class="inner">
-    <span><span class="dot"></span>cells &nbsp;·&nbsp; pictures</span>
-    <span><a href="/">← back</a></span>
+    <a href="/"><span class="dot"></span>cells.md</a>
+    <nav>
+      <a href="/capabilities">capabilities</a>
+      <a href="/brief">brief</a>
+      <a href="/gallery" class="here">gallery</a>
+      <a href="/colony">colony</a>
+      <a href="https://github.com/peteknowsai/cells-md">source</a>
+    </nav>
   </div>
 </div>
 
