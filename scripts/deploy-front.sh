@@ -35,4 +35,4 @@ CLOUDFLARE_ACCOUNT_ID="${CLOUDFLARE_ACCOUNT_ID:-5a6fef07a998d84ec047ef43d0543342
   wrangler deploy
 
 echo
-echo "deployed -> https://cells.md (also https://brief.cells.md)"
+echo "deployed -> https://www.cells.md (cells.md + brief.cells.md 301 here)"
