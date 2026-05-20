@@ -1,0 +1,284 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Cells — a fleet of AI agents, each in its own little Linux machine</title>
+<meta name="description" content="A substrate that turns any business problem into a working fleet of AI agents — each in its own Linux machine, all running on your Mac.">
+<meta property="og:title" content="Cells">
+<meta property="og:description" content="A fleet of AI agents, each in its own little Linux machine. Running on your Mac.">
+<meta property="og:type" content="website">
+<meta property="og:url" content="https://cells.md">
+<style>
+  :root {
+    --bg: #faf8f3;
+    --ink: #1a1a1a;
+    --muted: #6b6b65;
+    --rule: #d9d6cc;
+    --accent: #6e8b3a;
+    --accent-soft: #e7ebd6;
+    --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    --sans: -apple-system, BlinkMacSystemFont, "Inter", "Helvetica Neue", system-ui, sans-serif;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; background: var(--bg); color: var(--ink); font-family: var(--sans); }
+  body { font-size: 18px; line-height: 1.55; -webkit-font-smoothing: antialiased; }
+
+  .header-strip {
+    position: sticky; top: 0; z-index: 10;
+    background: var(--bg);
+    border-bottom: 1px solid var(--rule);
+    font-family: var(--mono);
+    font-size: 12px;
+    color: var(--muted);
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+  }
+  .header-strip .inner {
+    max-width: 1100px;
+    margin: 0 auto;
+    padding: 14px 32px;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+  }
+  .dot {
+    display: inline-block; width: 8px; height: 8px;
+    background: var(--accent); border-radius: 50%;
+    margin-right: 8px; vertical-align: middle;
+  }
+
+  .wrap { max-width: 1100px; margin: 0 auto; padding: 0 32px; }
+
+  /* Hero */
+  .hero {
+    padding: 100px 0 80px;
+    border-bottom: 1px solid var(--rule);
+  }
+  h1.title {
+    font-size: clamp(64px, 10vw, 140px);
+    line-height: 0.95;
+    letter-spacing: -0.045em;
+    margin: 0 0 32px;
+    font-weight: 700;
+  }
+  .lead {
+    font-size: clamp(24px, 3.2vw, 36px);
+    line-height: 1.32;
+    max-width: 820px;
+    margin: 0 0 28px;
+    font-weight: 400;
+    color: var(--ink);
+  }
+  .lead em { font-style: italic; color: var(--accent); }
+  .sub {
+    font-size: clamp(20px, 2.4vw, 26px);
+    color: var(--muted);
+    max-width: 740px;
+    margin: 0;
+  }
+
+  /* Three facts */
+  .facts {
+    padding: 80px 0 60px;
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 56px;
+    border-bottom: 1px solid var(--rule);
+  }
+  @media (max-width: 820px) { .facts { grid-template-columns: 1fr; gap: 40px; } }
+  .fact h3 {
+    font-size: 20px;
+    margin: 0 0 12px;
+    letter-spacing: -0.01em;
+    font-weight: 600;
+  }
+  .fact p {
+    margin: 0;
+    color: var(--muted);
+    line-height: 1.55;
+  }
+  .fact .marker {
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--accent);
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    margin-bottom: 10px;
+    display: block;
+  }
+
+  /* CTAs */
+  .ctas {
+    padding: 80px 0;
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 24px;
+    border-bottom: 1px solid var(--rule);
+  }
+  @media (max-width: 820px) { .ctas { grid-template-columns: 1fr; } }
+  .cta {
+    display: block;
+    padding: 36px 32px;
+    background: var(--accent-soft);
+    border: 1px solid transparent;
+    text-decoration: none;
+    color: var(--ink);
+    transition: border-color 0.15s ease, transform 0.15s ease;
+  }
+  .cta:hover { border-color: var(--accent); transform: translateY(-2px); }
+  .cta .label {
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--accent);
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    display: block;
+    margin-bottom: 12px;
+  }
+  .cta .title {
+    font-size: 22px;
+    font-weight: 600;
+    margin: 0 0 8px;
+    letter-spacing: -0.01em;
+  }
+  .cta .desc {
+    margin: 0;
+    color: var(--muted);
+    font-size: 15px;
+    line-height: 1.5;
+  }
+  .cta .arrow {
+    font-family: var(--mono);
+    color: var(--accent);
+    margin-left: 6px;
+  }
+
+  /* Status / footer */
+  .status {
+    padding: 70px 0 40px;
+  }
+  .status .badge {
+    display: inline-block;
+    font-family: var(--mono);
+    font-size: 11px;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--accent);
+    background: var(--accent-soft);
+    padding: 6px 12px;
+    border-radius: 999px;
+    margin-bottom: 16px;
+  }
+  .status p {
+    max-width: 720px;
+    margin: 0 0 12px;
+    color: var(--muted);
+    line-height: 1.6;
+  }
+  .status p.foreground { color: var(--ink); font-size: 18px; }
+  footer {
+    padding: 24px 0 60px;
+    border-top: 1px solid var(--rule);
+    margin-top: 40px;
+    font-family: var(--mono);
+    font-size: 12px;
+    color: var(--muted);
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    display: flex;
+    justify-content: space-between;
+    gap: 16px;
+    flex-wrap: wrap;
+  }
+  footer a { color: var(--muted); text-decoration: none; }
+  footer a:hover { color: var(--accent); }
+</style>
+</head>
+<body>
+
+<div class="header-strip">
+  <div class="inner">
+    <span><span class="dot"></span>cells.md</span>
+    <span>2026 &nbsp;·&nbsp; alpha</span>
+  </div>
+</div>
+
+<section class="hero">
+  <div class="wrap">
+    <h1 class="title">Cells.</h1>
+    <p class="lead">A fleet of AI agents, each in its own little Linux machine.</p>
+    <p class="sub">Hand it a problem. A team spins up to do it — each agent in its own machine, the whole fleet on your Mac.</p>
+  </div>
+</section>
+
+<section class="facts">
+  <div class="wrap" style="grid-column: 1 / -1; display: contents;">
+
+    <div class="fact">
+      <span class="marker">The unit</span>
+      <h3>A cell is a little Linux machine.</h3>
+      <p>One agent inside, its own files and memory and identity. Real hardware virtualization — not a container, not a sandbox-in-a-tab. The machine is the boundary.</p>
+    </div>
+
+    <div class="fact">
+      <span class="marker">The shape</span>
+      <h3>A fleet, not a chatbot.</h3>
+      <p>A Chief of Staff with cells under it, each owning a piece of the work. Drop into any cell, tune it, swap its model. Every cell is reachable and yours to shape.</p>
+    </div>
+
+    <div class="fact">
+      <span class="marker">The substrate</span>
+      <h3>Local-first. Always reachable.</h3>
+      <p>Lives on your Mac — fast, no network tax between agents. Cloudflare marries the fleet to the network: your cells stay online even with the lid closed.</p>
+    </div>
+
+  </div>
+</section>
+
+<section class="ctas">
+  <div class="wrap" style="display: contents;">
+
+    <a class="cta" href="/brief">
+      <span class="label">The brief</span>
+      <h3 class="title">What cells is <span class="arrow">→</span></h3>
+      <p class="desc">The full deck — eleven slides on the idea, the unit, the shape, the substrate, the numbers.</p>
+    </a>
+
+    <a class="cta" href="/gallery">
+      <span class="label">The gallery</span>
+      <h3 class="title">What cells make <span class="arrow">→</span></h3>
+      <p class="desc">A look at the colonies — multi-cell teams. Jury Pool, narrator, more.</p>
+    </a>
+
+    <a class="cta" href="https://github.com/peteknowsai/cells-md">
+      <span class="label">The source</span>
+      <h3 class="title">github.com/peteknowsai/cells-md <span class="arrow">→</span></h3>
+      <p class="desc">MIT. The CLI, the DNA, the workers, the design docs. Built in the open.</p>
+    </a>
+
+  </div>
+</section>
+
+<section class="status">
+  <div class="wrap">
+    <span class="badge">Status — alpha</span>
+    <p class="foreground">Being built in the open. The repo is real; the substrate isn't self-serve yet.</p>
+    <p>A working install needs a host substrate (<em>wells</em>) that owns the Linux VMs, a proxy bridge that routes a cell's LLM calls through your own subscriptions, and two consumer subscriptions in good standing. None of that is one-command yet.</p>
+    <p>If you want to follow along, the brief and the source are the entry points.</p>
+  </div>
+</section>
+
+<div class="wrap">
+  <footer>
+    <span>cells.md &nbsp;·&nbsp; 2026</span>
+    <span>
+      <a href="/brief">brief</a> &nbsp;·&nbsp;
+      <a href="/gallery">gallery</a> &nbsp;·&nbsp;
+      <a href="https://github.com/peteknowsai/cells-md">source</a>
+    </span>
+  </footer>
+</div>
+
+</body>
+</html>
