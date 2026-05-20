@@ -4,6 +4,9 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Cells — capabilities</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&display=swap" rel="stylesheet">
 <meta name="description" content="What cells can do — birth agents in 90 seconds, hibernate them at zero cost, cross-check decisions across models, give every agent a live web page. The full capability surface.">
 <meta property="og:title" content="Cells — capabilities">
 <meta property="og:description" content="What a fleet of AI agents in local Linux machines can actually do.">
@@ -19,14 +22,16 @@
     --muted: #6b6b65;
     --rule: #d9d6cc;
     --rule-soft: #ede9dd;
-    --accent: #6e8b3a;
-    --accent-soft: #e7ebd6;
+    --accent: #6c4da6;
+    --accent-soft: #ebe5f7;
     --code-bg: #1d1f1a;
     --code-ink: #e8e6dc;
     --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
     --sans: -apple-system, BlinkMacSystemFont, "Inter", "Helvetica Neue", system-ui, sans-serif;
+    --display: "Space Grotesk", -apple-system, BlinkMacSystemFont, "Inter", system-ui, sans-serif;
   }
   * { box-sizing: border-box; }
+  h1, h2, h3 { font-family: var(--display); }
   html, body { margin: 0; padding: 0; background: var(--bg); color: var(--ink); font-family: var(--sans); }
   body { font-size: 18px; line-height: 1.55; -webkit-font-smoothing: antialiased; text-rendering: optimizeLegibility; }
   img { display: block; }
@@ -140,7 +145,7 @@
     font-family: var(--mono); font-size: 14px; line-height: 1.65;
     overflow-x: auto; white-space: pre;
   }
-  .term .p { color: var(--accent); }
+  .term .p { color: #a9c46c; }
   .term .u { color: #e8e6dc; }
   .term .c { color: #8a8a7e; }
   .term .g { color: #a9c46c; }
