@@ -84,7 +84,9 @@
   .numbers .wrap {
     padding: 52px 32px;
     display: grid; grid-template-columns: repeat(5, 1fr); gap: 28px;
+    justify-items: center;
   }
+  .stat { text-align: center; }
   .stat .n {
     font-size: clamp(30px, 3.6vw, 46px);
     font-weight: 700; letter-spacing: -0.03em; color: #fff;
@@ -100,7 +102,7 @@
   /* Capability section */
   .cap .wrap {
     padding: 80px 32px;
-    display: grid; grid-template-columns: 1fr 1fr; gap: 56px; align-items: center;
+    display: grid; grid-template-columns: 1fr 1fr; gap: 56px; align-items: start;
   }
   .cap.alt .wrap { direction: rtl; }
   .cap.alt .wrap > * { direction: ltr; }
@@ -129,7 +131,7 @@
     border-radius: 14px; overflow: hidden; aspect-ratio: 3 / 2;
   }
   .art img { width: 100%; height: 100%; object-fit: cover; }
-  .art.square { aspect-ratio: 1 / 1; }
+  .art.square { aspect-ratio: 4 / 3; }
 
   /* Terminal block */
   .term {
@@ -175,8 +177,7 @@
     letter-spacing: 0.06em; text-transform: uppercase;
   }
   .node .big { font-size: 18px; font-weight: 600; margin-top: 4px; }
-  .pipe { width: 2px; height: 26px; background: var(--rule); }
-  .pipe.tall { height: 30px; }
+  .pipe { width: 2px; height: 24px; background: var(--rule); }
   .fanrow {
     display: grid; grid-template-columns: repeat(3, 1fr); gap: 20px; width: 100%;
   }
@@ -197,14 +198,19 @@
   }
   .vd.agree { background: var(--accent-soft); color: var(--accent); }
   .vd.disagree { background: #f3ddd6; color: #b5532f; }
-  .fanwrap { width: 100%; position: relative; }
-  .fanwrap::before {
-    content: ""; position: absolute; top: 0; left: 16.66%; right: 16.66%;
+  /* connector bus — horizontal rail + 3 ticks aligned to the peer columns */
+  .bus {
+    position: relative; width: 100%; height: 20px;
+    display: grid; grid-template-columns: repeat(3, 1fr); gap: 20px;
+  }
+  .bus::before {
+    content: ""; position: absolute;
+    left: calc((100% - 40px) / 6); right: calc((100% - 40px) / 6);
     height: 2px; background: var(--rule);
   }
-  .fanlegs { display: grid; grid-template-columns: repeat(3,1fr); }
-  .fanlegs .leg { display: flex; justify-content: center; }
-  .fanlegs .leg .pipe { height: 22px; }
+  .bus.down::before { top: 0; }
+  .bus.up::before { bottom: 0; }
+  .bus span { width: 2px; height: 100%; background: var(--rule); margin: 0 auto; }
   .verdict {
     background: var(--ink); color: #fff;
     border-radius: 10px; padding: 18px 28px; text-align: center;
@@ -333,7 +339,7 @@
     .wrap { padding-left: 20px; padding-right: 20px; }
     .header-strip .inner { padding-left: 20px; padding-right: 20px; }
     .fanrow { grid-template-columns: 1fr; }
-    .fanwrap::before { display: none; }
+    .bus { display: none; }
     .ctas .wrap { grid-template-columns: 1fr; }
   }
 </style>
@@ -462,31 +468,26 @@
         <div class="lab">cells verify</div>
         <div class="big">“List the property at $42k/acre.”</div>
       </div>
-      <div class="pipe tall"></div>
-      <div class="fanwrap">
-        <div class="fanrow">
-          <div class="peer">
-            <div class="who">scout</div>
-            <div class="model">claude · opus</div>
-            <div class="vd agree">AGREE</div>
-          </div>
-          <div class="peer">
-            <div class="who">ledger</div>
-            <div class="model">openai · gpt-5.5</div>
-            <div class="vd disagree">DISAGREE</div>
-          </div>
-          <div class="peer">
-            <div class="who">archive</div>
-            <div class="model">claude · sonnet</div>
-            <div class="vd agree">AGREE</div>
-          </div>
+      <div class="pipe"></div>
+      <div class="bus down"><span></span><span></span><span></span></div>
+      <div class="fanrow">
+        <div class="peer">
+          <div class="who">scout</div>
+          <div class="model">claude · opus</div>
+          <div class="vd agree">AGREE</div>
         </div>
-        <div class="fanlegs">
-          <div class="leg"><div class="pipe"></div></div>
-          <div class="leg"><div class="pipe"></div></div>
-          <div class="leg"><div class="pipe"></div></div>
+        <div class="peer">
+          <div class="who">ledger</div>
+          <div class="model">openai · gpt-5.5</div>
+          <div class="vd disagree">DISAGREE</div>
+        </div>
+        <div class="peer">
+          <div class="who">archive</div>
+          <div class="model">claude · sonnet</div>
+          <div class="vd agree">AGREE</div>
         </div>
       </div>
+      <div class="bus up"><span></span><span></span><span></span></div>
       <div class="pipe"></div>
       <div class="verdict">
         <div class="v">SPLIT</div>
