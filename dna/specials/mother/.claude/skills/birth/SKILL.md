@@ -22,7 +22,7 @@ Bake the egg in one Mac-side script that handles identity + model config
 everything; no escaping pitfalls.
 
 ```bash
-cd /Users/pete/Projects/cells && \
+cd "${CELLS_REPO:-$HOME/Projects/cells}" && \
   bash scripts/bake-egg.sh "<EGG_WELL>" "<NAME>" '<BLOB_JSON>'
 ```
 
@@ -59,11 +59,11 @@ checkpoint all run async — the cell is already alive and you can already
 `cells talk` her. They land in the background. Mother does not wait.
 
 ```bash
-POSTLOG="/Users/pete/.cells/logs/birth-postwork/<NAME>.log"
+POSTLOG="$HOME/.cells/logs/birth-postwork/<NAME>.log"
 mkdir -p "$(dirname "$POSTLOG")"
 nohup bash -c '
   set -e
-  cd /Users/pete/Projects/cells
+  cd "${CELLS_REPO:-$HOME/Projects/cells}"
   echo "[$(date -Iseconds)] post-birth start"
   bash scripts/register-site-service.sh "<NAME>" "<EGG_WELL>" && echo "[$(date -Iseconds)] site service registered"
   well url update --auth public -s "<EGG_WELL>" && echo "[$(date -Iseconds)] well url public"

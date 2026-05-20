@@ -1953,12 +1953,9 @@ async function cmdDoctor() {
     console.log(`  fix:         cells schedule-pi-patches`);
   }
 
-  // 6. well shim probe — catches gitignored bin wrappers that point at
-  // stale absolute paths after a project folder rename. Bit us on
-  // 2026-05-13 when wells's splites→wells rename left /Users/pete/.local/bin/well
-  // exec'ing a deleted path; every wellExecCapture silently failed under
-  // waitForCloudInit's 5-min retry loop. A single `well --help` probe
-  // catches this in milliseconds.
+  // well shim probe — catches gitignored bin wrappers that point at
+  // stale absolute paths after a project folder rename. A single
+  // `well --help` probe catches this in milliseconds.
   console.log("");
   try {
     const probe = Bun.spawn(["well", "--help"], {
@@ -1972,11 +1969,11 @@ async function cmdDoctor() {
       console.log(`well shim:     ${green}responsive${reset}`);
     } else {
       console.log(`well shim:     ${red}exit ${code}${reset} — ${stderr.slice(0, 200)}`);
-      console.log(`  fix:         check /Users/pete/.local/bin/well exec path; common after wells repo rename`);
+      console.log(`  fix:         check ${homedir()}/.local/bin/well exec path; common after wells repo rename`);
     }
   } catch (e) {
     console.log(`well shim:     ${red}unreachable${reset} (${dim}${String(e).slice(0, 80)}${reset})`);
-    console.log(`  fix:         check /Users/pete/.local/bin/well is in PATH and executable`);
+    console.log(`  fix:         check ${homedir()}/.local/bin/well is in PATH and executable`);
   }
 
   // 6b. Post-birth deployment status across the fleet. Each cell that's
@@ -5040,7 +5037,7 @@ function piPatchesWatchPaths(): string[] {
 function buildPiPatchesPlist(): string {
   const scriptPath = join(MOTHER_ROOT, "dna/scripts/apply-pi-patches.sh");
   const logsDir = join(homedir(), ".cells", "logs");
-  const path = "/Users/pete/.bun/bin:/Users/pete/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin";
+  const path = `${homedir()}/.bun/bin:${homedir()}/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin`;
   const watchPaths = piPatchesWatchPaths()
     .map((p) => `    <string>${p}</string>`)
     .join("\n");
@@ -5131,10 +5128,10 @@ function hostBridgePlistPath(): string {
 }
 
 function buildHostBridgePlist(): string {
-  const bunBin = "/Users/pete/.bun/bin/bun";
+  const bunBin = process.execPath;
   const script = join(REPO_ROOT, "cli/host-bridge.ts");
   const logsDir = join(homedir(), ".cells", "logs");
-  const path = "/Users/pete/.bun/bin:/Users/pete/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin";
+  const path = `${homedir()}/.bun/bin:${homedir()}/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin`;
   return `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -5214,7 +5211,7 @@ function pulsePlistPath(): string {
 function buildPulsePlist(): string {
   const launcher = join(PULSE_ROOT, "bin", "pulse-run");
   const logsDir = join(homedir(), ".cells", "logs");
-  const path = "/Users/pete/.bun/bin:/Users/pete/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin";
+  const path = `${homedir()}/.bun/bin:${homedir()}/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin`;
   return `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -7235,9 +7232,8 @@ async function waitForCloudInit(name: string): Promise<void> {
   // marker landed before SSH key injection completed (defensive).
   //
   // Non-transient signatures bail immediately rather than waste the full
-  // 5-minute retry window. Hit on 2026-05-13 when /Users/pete/.local/bin/well
-  // pointed at a deleted splites path — every probe threw "Module not found",
-  // identical to "still booting" to the retry loop. Cost 5min of silent hang.
+  // 5-minute retry window — a stale `well` shim throws "Module not found",
+  // which is indistinguishable from "still booting" to the retry loop.
   const NON_TRANSIENT = /Module not found|Permission denied \(publickey\)|Host key verification failed|command not found: well|ENOENT.*well\.ts|cli\/well\.ts/i;
   const deadlineMs = Date.now() + 5 * 60 * 1000;
   let lastErr = "";

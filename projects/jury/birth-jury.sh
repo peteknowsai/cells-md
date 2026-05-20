@@ -15,7 +15,9 @@ ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 JURY_DIR="$ROOT/projects/jury"
 PERSONAS_DIR="$JURY_DIR/personas"
 EXT_DIR="$JURY_DIR/extension/deliberate"
-ARCHIVED_PERSONAS="$HOME/Projects/archived/jurypool/.pi/agents"
+# Default: ship juror personas in projects/jury/personas/{name}.md.
+# Override with JURY_PERSONAS=path/to/agents if your personas live elsewhere.
+ARCHIVED_PERSONAS="${JURY_PERSONAS:-$JURY_DIR/personas}"
 
 ALL_CELLS=(jesus buddha rumi marcus-aurelius lao-tzu confucius tesla fuller gandhi foreman)
 JUROR_CELLS=(jesus buddha rumi marcus-aurelius lao-tzu confucius tesla fuller gandhi)
@@ -49,8 +51,9 @@ birth_cell() {
     --packages=pi-web-access
 }
 
-# Build a SOUL.md for a juror by combining the cells SOUL template with the
-# philosopher's persona body (from archived/jurypool).
+# Build a SOUL.md for a juror by combining the cells SOUL template with
+# the philosopher's persona body. Persona MD files (with YAML frontmatter,
+# stripped here) live in $ARCHIVED_PERSONAS — by default projects/jury/personas/.
 build_juror_soul() {
   local name="$1"
   local src="$ARCHIVED_PERSONAS/$name.md"

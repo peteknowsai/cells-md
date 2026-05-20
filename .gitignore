@@ -12,12 +12,26 @@ build/
 # only the top-level memory dir (cell-keeper's data) — NOT the memory extension code under template/.pi/
 /memory/
 
-# .claude/ is mostly committed (Pete Loop infra: hooks, commands, loops).
-# Runtime state + per-machine settings are not.
+# Internal working docs — kept out of public-release tree.
+JOURNAL.md
+BOARD.md
+BOARD.html
+PLAN.md
+PLAN.html
+STATUS.md
+STATUS.html
+NEEDS_PETE.md
+
+# Private .claude/ infra — keep .claude/skills/ tracked but exclude the rest.
+.claude/.steward-silent-until
 .claude/.pete-loop.active
 .claude/scheduled_tasks.lock
 .claude/settings.json
-NEEDS_PETE.md
+.claude/settings.local.json
+.claude/commands/
+.claude/hooks/
+.claude/loops/
+.claude/sent-pings/
 
 # Gemini Antigravity CLI config symlink (per-machine)
 .antigravitycli/

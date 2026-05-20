@@ -1,6 +1,8 @@
 # Jury Pool — cells port
 
-Port of `~/Projects/archived/jurypool/` onto cells.
+A multi-cell colony where 9 philosopher cells deliberate, with a foreman cell that calls them in parallel and synthesizes the verdict. Example of a non-trivial fleet structure.
+
+See also the colony showcase at `colonies/jurypool/`.
 
 ## Architecture
 
@@ -18,6 +20,6 @@ After all are alive: `cells talk foreman "<question>"`.
 
 ## Files
 
-- `personas/` — none yet (we read directly from `~/Projects/archived/jurypool/.pi/agents/`)
+- `personas/` — philosopher personas baked into each juror cell's `SOUL.md` at birth.
 - `extension/deliberate/` — the foreman's tool. Pushed to foreman cell only post-birth.
 - `birth-jury.sh` — orchestrates birth + persona injection + deliberate-extension installation.
