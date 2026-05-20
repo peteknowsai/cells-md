@@ -11,7 +11,7 @@ You hand it a problem. It builds the team — a Chief of Staff with cells under 
 This is being built in the open. **You cannot run it on a fresh machine yet.**
 
 A working install needs:
-- a host substrate (`wells`) that owns the Linux VMs — a separate component
+- **[wells](https://github.com/peteknowsai/wells)** running first — the substrate that owns the Linux VMs (see below)
 - a proxy bridge (`cells-proxy`) that routes a cell's LLM calls through your own Claude Max / ChatGPT Plus subscriptions instead of API billing
 - two consumer subscriptions in good standing (Anthropic + OpenAI)
 
@@ -26,6 +26,12 @@ Cells is the layer above all of that — the CLI, the birth ritual, the agent-to
 - Three harnesses today: **pi** (full agent stack), **claude-code** (Anthropic's CLI), **codex** (OpenAI's CLI). All three speak the same channels primitive.
 
 For the long form, see [`docs/proposals/what-is-cells.html`](docs/proposals/what-is-cells.html).
+
+## Runs on wells
+
+Cells is the top layer. Underneath it is **[wells](https://github.com/peteknowsai/wells)** — the substrate that owns the Linux VMs cells live in. A daemon on your Mac brings a stateful VM up on demand; cells is the agent that lives inside it.
+
+**Cells cannot run without wells.** It's a hard dependency, not an option: wells makes the machine, cells makes it think. Bring up wells first, then `cells birth` onto it.
 
 ## Layout
 
