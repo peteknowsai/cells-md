@@ -24,15 +24,15 @@ cost scales with cell lifetime: every talk gets slower forever.
 correct (the peer should answer as itself); replaying *all* of it forever
 is not.
 
-## pi / hermes cells have no `main` session until first conversed with
+## hermes cells return empty text when there's no `main` session
 
 `cells talk` defaults to forking `main`. claude-code cells get a `main`
-session created at birth (bake-egg.sh's claude session-capture warm-up).
-pi and hermes cells do not — their `main` is created lazily on the first
-real turn. So `cells talk` to a pi/hermes cell that has never been talked
-to fails: pi errors `main session not found`, hermes returns empty text.
-Seen 2026-05-21 on `wells` (pi) and `hbtest` (hermes).
+session at birth (bake-egg.sh's session-capture warm-up); pi and hermes
+create it lazily on the first real turn.
 
-**Fix:** add a birth-time main-session warm-up for pi and hermes, the same
-way claude-code already does it — or make forkAndAsk fall back to a fresh
-(empty-fork) session when no `main` exists yet.
+pi was fixed 2026-05-21 (`3a98e89`): forkAndAsk drops `--fork` when no
+main exists and runs a fresh session. hermes still returns empty text in
+the same situation (seen on the now-deleted `hbtest`).
+
+**Fix:** give the hermes adapter the same no-main fallback, or add a
+birth-time main-session warm-up for hermes the way claude-code has one.
