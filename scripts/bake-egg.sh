@@ -54,15 +54,17 @@ if [ "$HARNESS" = "pi" ]; then
   fi
 fi
 
-# hermes DNA — config.yaml + the provider plugin — postdates the current
-# egg pool: eggs baked before the hermes harness merged have no
-# /root/.hermes at all. Push it fresh from the Mac so a hermes birth works
-# on any egg regardless of when its pool was baked; the SSH block below then
-# substitutes __MODEL__/__THINKING__ into the config it lands.
-if [ "$HARNESS" = "hermes" ]; then
-  tar czf - -C "$REPO_ROOT/dna/cells/base" .hermes \
-    | well exec -s "$EGG_WELL" -- bash -c 'sudo bash -c "cd /root && tar xzf -"'
-fi
+# Re-overlay current DNA onto the egg before imprinting it. A pool egg
+# carries the DNA snapshot from when it was baked; by the time it's claimed
+# that snapshot can be stale — the agent-comms code (bin/cells, lib/,
+# site/server.ts), harness configs and skills all move faster than the pool
+# cycles, so a cell hatched from an old egg inherits old DNA. Re-pushing
+# dna/cells/base makes every cell born current regardless of its egg's age.
+# tar-extract is overlay-only (it overwrites and adds, never deletes), and
+# the fresh files still carry their __NAME__/__MODEL__/__THINKING__
+# placeholders — the SSH block below does the substitution on these copies.
+tar czf - -C "$REPO_ROOT/dna/cells/base" . \
+  | well exec -s "$EGG_WELL" -- bash -c 'sudo bash -c "cd /root && tar xzf -"'
 
 # Single SSH session for everything on the egg.
 {
@@ -78,6 +80,12 @@ fi
   echo "  sudo systemctl restart chrony 2>/dev/null || true"
   echo "  sudo chronyc makestep > /dev/null 2>&1 || true"
   echo "fi"
+
+  echo "# ===dna perms ==="
+  # The DNA overlay carries each file's mode from the repo; make sure the
+  # bin/ entries are executable regardless of how the working copy was
+  # checked out (git mode bits don't always survive every clone/zip path).
+  echo "sudo chmod +x /root/bin/* 2>/dev/null || true"
 
   echo "# ===identity ==="
   echo "sudo sed -i 's/__NAME__/$NAME/g' /root/AGENTS.md /root/CLAUDE.md /root/SOUL.md /root/IDENTITY.md /root/CELLS.md /root/CONTACTS.md /root/HEARTBEAT.md /root/package.json 2>/dev/null || true"
@@ -137,8 +145,8 @@ fi
     echo "  curl -fsSL https://raw.githubusercontent.com/NousResearch/hermes-agent/v2026.5.16/scripts/install.sh | sudo bash -s -- --skip-setup --skip-browser --branch v2026.5.16"
     echo "fi"
     echo "command -v hermes >/dev/null 2>&1 || { echo 'hermes binary still missing after install'; exit 1; }"
-    # .hermes/ was pushed fresh from the Mac above (it postdates the egg
-    # pool), so config.yaml is guaranteed present here.
+    # The DNA overlay above landed a fresh /root/.hermes/config.yaml — still
+    # carrying its __MODEL__/__THINKING__ placeholders. Substitute them now.
     echo "sudo sed -i \"s/__MODEL__/$MODEL/g; s/__THINKING__/$THINKING/g\" /root/.hermes/config.yaml"
     echo "! grep -q __ /root/.hermes/config.yaml"
     # hermes loads its persona from \$HERMES_HOME/SOUL.md (= /root/.hermes/SOUL.md);
@@ -147,6 +155,13 @@ fi
     # resumes the latest session (session.most_recent) or creates one at connect.
     echo "sudo ln -sf /root/SOUL.md /root/.hermes/SOUL.md"
   fi
+
+  echo "# ===supervisor refresh ==="
+  # The DNA overlay replaced site/server.ts + lib/ on disk. If well-site is
+  # already running on this egg it's still holding the pre-overlay code in
+  # memory — try-restart picks up the fresh supervisor. No-op if it isn't
+  # running (it'll start fresh on the next boot regardless).
+  echo "sudo systemctl try-restart well-site.service 2>/dev/null || true"
 
   echo "# ===status ==="
   echo "sudo mkdir -p /root/.pi"
