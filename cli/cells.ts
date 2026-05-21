@@ -7432,8 +7432,11 @@ fi
 # user at bake time (~/.bun for well = /home/well/.bun); /home/well is
 # mode 0755 so cell can execute. Include both \$HOME/.bun/bin (well's
 # own login shells) and the absolute /home/well/.bun/bin (cell's login
-# shells, where \$HOME=/root — \$HOME/.bun is empty).
-export PATH="\$HOME/.bun/bin:/home/well/.bun/bin:/root/bin:\$PATH"
+# shells, where \$HOME=/root — \$HOME/.bun is empty). /root/.local/bin is
+# where the claude CLI installs itself — the claude-code harness and its
+# agent-comms forkAndAsk shell out to \`claude\`, so it has to resolve on
+# a plain login-shell PATH.
+export PATH="\$HOME/.bun/bin:/home/well/.bun/bin:/root/bin:/root/.local/bin:\$PATH"
 
 # Standard terminal-editing toolkit (apt-installed at bake: micro, fzf,
 # ripgrep, batcat). FZF gitignore-aware via ripgrep, preview via bat.
