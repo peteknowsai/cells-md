@@ -36,7 +36,7 @@ above except parse-prose-into-cron and write-daily-log is deterministic.
 
 - **Push, not poll.** Cells notify you via the `heartbeat-watch` extension
   shipped in their DNA — when a cell's HEARTBEAT.md changes, it POSTs the
-  new content to `pulse.cells.md/heartbeat-changed`, which the subscriptions proxy
+  new content to `proxy.cells.md/heartbeat-changed`, which the subscriptions proxy
   drops into your inbox at `~/.cells/pulse-inbox/`. You never `well exec`
   to read HEARTBEAT.md — that warms otherwise-hibernating cells.
 - **Fire and forget.** Send the wake-message via `cells talk`. Don't wait

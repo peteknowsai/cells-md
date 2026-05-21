@@ -2,7 +2,7 @@
  * heartbeat-watch — push HEARTBEAT.md changes to pulse.
  *
  * Watches the agent's HEARTBEAT.md for writes. On change, POSTs the new
- * content to https://pulse.cells.md/heartbeat-changed. Pulse drains its
+ * content to https://proxy.cells.md/heartbeat-changed. Pulse drains its
  * inbox each tick, re-interprets the prose schedule (LLM call), and updates
  * its cached cron table. Without this, pulse would have to poll every cell
  * over well_exec — wasteful and warms otherwise-hibernating wells.
@@ -22,7 +22,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 
-const PULSE_URL = "https://pulse.cells.md/heartbeat-changed";
+const PULSE_URL = "https://proxy.cells.md/heartbeat-changed";
 const DEBOUNCE_MS = 2000;
 const HEARTBEAT_FILENAME = "HEARTBEAT.md";
 

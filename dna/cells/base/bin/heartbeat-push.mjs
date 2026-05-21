@@ -12,7 +12,7 @@
  *   SessionStart                       — the cell woke; re-push the current
  *                                        schedule so pulse re-syncs.
  *
- * Either way it POSTs {cell, content, ts} to pulse.cells.md/heartbeat-changed,
+ * Either way it POSTs {cell, content, ts} to proxy.cells.md/heartbeat-changed,
  * byte-for-byte the same payload the pi extension sends. Pulse hash-dedupes,
  * so a redundant push costs nothing.
  *
@@ -31,7 +31,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 
 // PULSE_HEARTBEAT_URL overrides the endpoint (used by the end-to-end test).
-const PULSE_URL = process.env.PULSE_HEARTBEAT_URL ?? "https://pulse.cells.md/heartbeat-changed";
+const PULSE_URL = process.env.PULSE_HEARTBEAT_URL ?? "https://proxy.cells.md/heartbeat-changed";
 
 function log(msg) {
   process.stderr.write(`[heartbeat-push] ${msg}\n`);

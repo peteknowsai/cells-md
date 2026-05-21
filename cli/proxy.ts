@@ -4,12 +4,9 @@
 //     /                   → fleet dashboard (HTML)
 //     /v1/*               → Anthropic API proxy (Bearer auth required)
 //     /codex/*            → OpenAI Codex (ChatGPT sub) proxy (Bearer auth required)
-//     /_proxy/health      → JSON health
-//
-//   pulse.cells.md
-//     /                   → pulse status page (HTML)
 //     /heartbeat-changed  → cell HEARTBEAT.md change events written to
 //                           ~/.cells/pulse-inbox/ (Bearer auth required)
+//     /_proxy/health      → JSON health
 //
 //   slack.cells.md
 //     /                   → slack status page (HTML)
@@ -774,35 +771,16 @@ async function handleCodexProxy(req: Request): Promise<Response> {
   });
 }
 
-// ───────────────────── pulse.cells.md ─────────────────────
+// ───────────────────── heartbeat inbox ─────────────────────
 
-// pulse.cells.md is the front door for events the pulse agent cares about.
-// Mother proxy receives, validates the bearer, and writes payloads to a
-// directory pulse owns. File system is the IPC — pulse drains the inbox
-// each tick.
-
-async function handlePulseProxy(req: Request): Promise<Response> {
+// proxy.cells.md/heartbeat-changed — the fleet heartbeat inbox. Cells POST
+// HEARTBEAT.md change events here; the proxy validates the bearer and writes
+// the payload where the pulse scheduler drains it. This lived on
+// pulse.cells.md until 2026-05-21, when the pulse cell got a per-cell Worker
+// that needed the hostname — moved here so a fleet endpoint isn't squatting
+// a cell's hostname.
+async function handleHeartbeatChanged(req: Request): Promise<Response> {
   const url = new URL(req.url);
-
-  if (req.method === "GET" && (url.pathname === "/" || url.pathname === "")) {
-    return gateProxyHtml(
-      req,
-      htmlPage(
-        "pulse · cells",
-        `<h1>pulse</h1>
-         <p class="sub">timekeeper · reads HEARTBEAT.md, fires scheduled wake-ups</p>
-         <p>This is the inbox endpoint pulse listens to. Cells POST schedule
-         changes here; pulse drains them on its next tick. See
-         <a href="https://proxy.cells.md/">the proxy</a> for the fleet dashboard.</p>
-         <div data-private style="margin-top:2em;padding:1em;border:1px dashed #444;border-radius:6px">
-           <p class="sub">🔓 You're signed in.</p>
-           <p>This block is wrapped in <code>&lt;div data-private&gt;</code> —
-              anonymous visitors never see it. The same gating as the
-              per-cell sites, served straight from the Mac proxy.</p>
-         </div>`,
-      ),
-    );
-  }
 
   if (req.method === "POST" && url.pathname === "/heartbeat-changed") {
     const auth = checkClientAuth(req);
@@ -1011,172 +989,17 @@ echo "$F"`;
   return new Response(null, { status: 204 });
 }
 
-// ──────────────────────── mother.cells.md activity ────────────────────────
+// ──────────────────────────────── html escape ─────────────────────────────
 //
-// Mother's public face. Reads ~/.cells/birth-log/*.json (written by the
-// cells CLI's talkAndAwaitOutcome) and renders a minimalist table: each
-// birth, duration, success/failure, the message on issue. Style matches
-// the proxy.cells.md dashboard.
-
-const BIRTH_LOG_DIR_PROXY = join(homedir(), ".cells/birth-log");
-const DEATH_LOG_DIR_PROXY = join(homedir(), ".cells/death-log");
-
-type BirthLogEntry = {
-  birthId: string;
-  name?: string;
-  harness?: string;          // the BIRTHED cell's harness
-  model?: string;            // the BIRTHED cell's model
-  mother_harness?: string;   // which harness mother used to run the ritual (pi | claude-code)
-  started_at?: string;
-  ended_at?: string;
-  elapsed_ms?: number;
-  success?: boolean;
-  message?: string;
-};
-
-type DeathLogEntry = {
-  kind: "death";
-  name: string;
-  killed_at: string;
-  model?: string | null;
-  harness?: string | null;
-  born_at?: string | null;
-  destroyOk?: boolean;
-};
-
-type ActivityEntry =
-  | (BirthLogEntry & { kind: "birth"; t: string })
-  | (DeathLogEntry & { kind: "death"; t: string });
-
-function readBirthLog(limit = 50): BirthLogEntry[] {
-  if (!existsSync(BIRTH_LOG_DIR_PROXY)) return [];
-  const entries: BirthLogEntry[] = [];
-  for (const f of require("node:fs").readdirSync(BIRTH_LOG_DIR_PROXY)) {
-    if (!f.endsWith(".json")) continue;
-    try {
-      const body = readFileSync(join(BIRTH_LOG_DIR_PROXY, f), "utf-8");
-      entries.push(JSON.parse(body));
-    } catch {/* skip malformed */}
-  }
-  entries.sort((a, b) => (b.started_at ?? "").localeCompare(a.started_at ?? ""));
-  return entries.slice(0, limit);
-}
-
-function readDeathLog(limit = 50): DeathLogEntry[] {
-  if (!existsSync(DEATH_LOG_DIR_PROXY)) return [];
-  const entries: DeathLogEntry[] = [];
-  for (const f of require("node:fs").readdirSync(DEATH_LOG_DIR_PROXY)) {
-    if (!f.endsWith(".json")) continue;
-    try {
-      const body = readFileSync(join(DEATH_LOG_DIR_PROXY, f), "utf-8");
-      entries.push(JSON.parse(body));
-    } catch {/* skip malformed */}
-  }
-  entries.sort((a, b) => (b.killed_at ?? "").localeCompare(a.killed_at ?? ""));
-  return entries.slice(0, limit);
-}
-
-// Merge births and deaths into one chronological fleet activity feed.
-// Each entry has a unified `kind` + `t` (canonical timestamp) so the
-// renderer can format both uniformly.
-function readFleetActivity(limit = 50): ActivityEntry[] {
-  const births: ActivityEntry[] = readBirthLog(limit).map(b => ({
-    ...b, kind: "birth", t: b.started_at ?? "",
-  }));
-  const deaths: ActivityEntry[] = readDeathLog(limit).map(d => ({
-    ...d, kind: "death", t: d.killed_at ?? "",
-  }));
-  return [...births, ...deaths]
-    .sort((a, b) => b.t.localeCompare(a.t))
-    .slice(0, limit);
-}
-
-function formatElapsed(ms?: number): string {
-  if (ms == null) return "—";
-  if (ms < 1000) return `${ms}ms`;
-  const s = ms / 1000;
-  if (s < 60) return `${s.toFixed(1)}s`;
-  const m = Math.floor(s / 60);
-  const r = Math.round(s % 60);
-  return `${m}m ${r}s`;
-}
+// (The mother.cells.md fleet-activity page that used to live here was
+// retired 2026-05-21 when cells-mother got a per-cell Worker and the
+// agent-comms bridge. The births/kills surface now lives in the cells
+// dashboard — see buildFleetSnapshot in cli/dashboard.ts.)
 
 function escapeHtml(s: string | null | undefined): string {
   if (s == null) return "";
   return String(s).replace(/[&<>"']/g, ch =>
     ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[ch]!);
-}
-
-async function handleMotherProxy(req: Request): Promise<Response> {
-  const url = new URL(req.url);
-  if (req.method !== "GET" || (url.pathname !== "/" && url.pathname !== "")) {
-    return new Response("not found", { status: 404 });
-  }
-  const activity = readFleetActivity(50);
-  const births = activity.filter(e => e.kind === "birth") as Array<BirthLogEntry & { kind: "birth"; t: string }>;
-  const deaths = activity.filter(e => e.kind === "death") as Array<DeathLogEntry & { kind: "death"; t: string }>;
-  const successCount = births.filter(e => e.success).length;
-  const failCount = births.filter(e => e.success === false && e.ended_at).length;
-  const inFlight = births.filter(e => !e.ended_at).length;
-
-  const rows = activity.length === 0
-    ? `<tr><td colspan="6"><em>no fleet activity recorded yet</em></td></tr>`
-    : activity.map(e => {
-        if (e.kind === "death") {
-          return `<tr>
-            <td><code>${escapeHtml(e.name)}</code></td>
-            <td><span class="pill" style="background:#8884">killed</span></td>
-            <td>—</td>
-            <td>${formatBorn(e.killed_at)}</td>
-            <td><span style="color:#888;font-size:0.85em">${escapeHtml([e.harness, e.model].filter(Boolean).join(" · "))}</span></td>
-            <td><span style="color:#888;font-size:0.85em">—</span></td>
-          </tr>`;
-        }
-        const status = !e.ended_at
-          ? `<span class="pill">in flight</span>`
-          : e.success
-            ? `<span class="pill" style="background:#0a01">born</span>`
-            : `<span class="pill" style="background:#a001">FAIL</span>`;
-        const when = e.started_at ? formatBorn(e.started_at) : "—";
-        const dur = formatElapsed(e.elapsed_ms);
-        const meta = [e.harness, e.model].filter(Boolean).join(" · ");
-        const motherCell = e.mother_harness ? `by ${e.mother_harness}` : "—";
-        const note = e.message && !e.success ? `<br><code>${escapeHtml(e.message)}</code>` : "";
-        return `<tr>
-          <td><code>${escapeHtml(e.name ?? e.birthId)}</code></td>
-          <td>${status}${note}</td>
-          <td>${dur}</td>
-          <td>${when}</td>
-          <td><span style="color:#888;font-size:0.85em">${escapeHtml(meta)}</span></td>
-          <td><span style="color:#888;font-size:0.85em">${escapeHtml(motherCell)}</span></td>
-        </tr>`;
-      }).join("\n");
-
-  const body = `
-    <h1>mother</h1>
-    <p class="sub">fleet activity · births + kills · last 50</p>
-    <p>
-      <span class="pill" style="background:#0a01">${successCount} born</span>
-      <span class="pill" style="background:#a001">${failCount} failed</span>
-      <span class="pill" style="background:#8884">${deaths.length} killed</span>
-      ${inFlight > 0 ? `<span class="pill">${inFlight} in flight</span>` : ""}
-    </p>
-    <table>
-      <thead><tr>
-        <th>Cell</th><th>Event</th><th>Duration</th><th>When</th><th>Harness · Model</th><th>Born by</th>
-      </tr></thead>
-      <tbody>${rows}</tbody>
-    </table>
-    <p class="sub">Data: <code>~/.cells/birth-log/</code> + <code>~/.cells/death-log/</code> on Pete's Mac.</p>
-    <div data-private style="margin-top:2em;padding:1em;border:1px dashed #444;border-radius:6px">
-      <p class="sub">🔓 You're signed in.</p>
-      <p>This block is wrapped in <code>&lt;div data-private&gt;</code> —
-         anonymous visitors never see it. Same gating as the per-cell
-         <code>&lt;name&gt;.cells.md</code> sites; just served straight
-         from the proxy instead of a per-cell Worker.</p>
-    </div>
-  `;
-  return gateProxyHtml(req, htmlPage("mother · cells", body));
 }
 
 const MAC_EXEC_LOG = join(homedir(), ".cells/logs/mac_exec.log");
@@ -1420,6 +1243,9 @@ const server = Bun.serve<WellWsData>({
       if (url.pathname === "/" || url.pathname === "") {
         return await dashboardHtml();
       }
+      if (url.pathname === "/heartbeat-changed") {
+        return handleHeartbeatChanged(req);
+      }
       if (url.pathname === "/peers") {
         return handlePeers(req);
       }
@@ -1430,18 +1256,6 @@ const server = Bun.serve<WellWsData>({
         return handleBridgeProxy(req);
       }
       return handleApiProxy(req);
-    }
-
-    // pulse.cells.md → pulse's inbox (POST /heartbeat-changed) + status page
-    if (host.startsWith("pulse.cells.md")) {
-      return handlePulseProxy(req);
-    }
-
-    // mother.cells.md → mother's activity page (births, durations, issues).
-    // Served by this proxy until cells-mother gets a per-cell Cloudflare
-    // Worker; the dashboard reads ~/.cells/birth-log/*.json directly.
-    if (host.startsWith("mother.cells.md")) {
-      return handleMotherProxy(req);
     }
 
     // <well>.cells.md (egg-* or cells-*) → welld at 127.0.0.1:7878. The
@@ -1519,8 +1333,8 @@ console.log(`    proxy.cells.md/v1/*         → Anthropic proxy (Bearer auth)`)
 console.log(`    proxy.cells.md/codex/*      → OpenAI Codex proxy (Bearer auth)`);
 console.log(`    proxy.cells.md/_proxy/health`);
 console.log(`    proxy.cells.md/bridge/*     → back-channel for in-well cells (Bearer auth)`);
-console.log(`    pulse.cells.md/heartbeat-changed → pulse inbox (Bearer auth)`);
-console.log(`    egg-*.cells.md/*            → welld (HTTP + WS) at 127.0.0.1:7878`);
+console.log(`    proxy.cells.md/heartbeat-changed → pulse heartbeat inbox (Bearer auth)`);
+console.log(`    <well>.cells.md/*           → welld (HTTP + WS) at 127.0.0.1:7878`);
 console.log(`    (slack.cells.md and <cell>.cells.md handled by Cloudflare Workers)`);
 console.log(`  upstreams: ${UPSTREAM}, ${CODEX_UPSTREAM}`);
 console.log(`  auth file: ${AUTH_PATH}`);
