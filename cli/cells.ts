@@ -7420,8 +7420,20 @@ ln -sf /root/bin/cells ~/.local/bin/cells`);
 // of truth used at bake time (bakeWriteProfileD) AND at shell time
 // (refreshShellNiceness, called from cmdShell for self-healing on
 // pre-existing cells). Keep both call sites pointing here.
-const CELLS_ENV_SH_BODY = `# CELLS_PROXY_SECRET is set by /etc/environment at boot (well-firstboot).
-# Re-export under the names pi-ai's auth dispatch + codex-proxy expect.
+const CELLS_ENV_SH_BODY = `# /etc/environment carries CELLS_PROXY_SECRET (welld writes it when the
+# well is created). PAM loads it for interactive login sessions — but
+# systemd services (the site supervisor) and the bash -lc children its
+# agent-comms forkAndAsk spawns never go through PAM, so the secret would
+# be missing there. Source it here so it's in scope wherever cells-env.sh
+# is read, not just on PAM logins.
+if [ -r /etc/environment ]; then
+  set -a
+  . /etc/environment
+  set +a
+fi
+
+# Re-export CELLS_PROXY_SECRET under the names pi-ai's auth dispatch +
+# codex-proxy expect.
 if [ -n "\${CELLS_PROXY_SECRET:-}" ]; then
   export ANTHROPIC_OAUTH_TOKEN="\$CELLS_PROXY_SECRET"
   export ANTHROPIC_AUTH_TOKEN="\$CELLS_PROXY_SECRET"
