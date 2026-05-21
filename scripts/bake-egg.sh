@@ -54,6 +54,16 @@ if [ "$HARNESS" = "pi" ]; then
   fi
 fi
 
+# hermes DNA — config.yaml + the provider plugin — postdates the current
+# egg pool: eggs baked before the hermes harness merged have no
+# /root/.hermes at all. Push it fresh from the Mac so a hermes birth works
+# on any egg regardless of when its pool was baked; the SSH block below then
+# substitutes __MODEL__/__THINKING__ into the config it lands.
+if [ "$HARNESS" = "hermes" ]; then
+  tar czf - -C "$REPO_ROOT/dna/cells/base" .hermes \
+    | well exec -s "$EGG_WELL" -- bash -c 'sudo bash -c "cd /root && tar xzf -"'
+fi
+
 # Single SSH session for everything on the egg.
 {
   echo "# ===clock sync ==="
@@ -117,13 +127,24 @@ fi
     echo "echo \"  codex main: \$MAIN_TID\""
   elif [ "$HARNESS" = "hermes" ]; then
     echo "# ===hermes settings ==="
+    # Self-heal a stale egg. The egg pool predates the hermes harness, so
+    # pre-merge eggs ship pi/claude/codex but no hermes binary. Install it
+    # on demand; fresh eggs (baked post-merge by bakePoolMember, step 5c)
+    # already have it, so this is a no-op there. Version tag is kept in
+    # sync with that recipe in cli/cells.ts.
+    echo "if ! command -v hermes >/dev/null 2>&1; then"
+    echo "  echo '  hermes binary missing on this egg — installing…'"
+    echo "  curl -fsSL https://raw.githubusercontent.com/NousResearch/hermes-agent/v2026.5.16/scripts/install.sh | sudo bash -s -- --skip-setup --skip-browser --branch v2026.5.16"
+    echo "fi"
+    echo "command -v hermes >/dev/null 2>&1 || { echo 'hermes binary still missing after install'; exit 1; }"
+    # .hermes/ was pushed fresh from the Mac above (it postdates the egg
+    # pool), so config.yaml is guaranteed present here.
     echo "sudo sed -i \"s/__MODEL__/$MODEL/g; s/__THINKING__/$THINKING/g\" /root/.hermes/config.yaml"
     echo "! grep -q __ /root/.hermes/config.yaml"
     # hermes loads its persona from \$HERMES_HOME/SOUL.md (= /root/.hermes/SOUL.md);
     # the cell's SOUL.md lives at /root/SOUL.md. Symlink so hermes finds it and
     # edits track. No birth-time session capture — the host-bridge adapter
     # resumes the latest session (session.most_recent) or creates one at connect.
-    echo "sudo mkdir -p /root/.hermes"
     echo "sudo ln -sf /root/SOUL.md /root/.hermes/SOUL.md"
   fi
 

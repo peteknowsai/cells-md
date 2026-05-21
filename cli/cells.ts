@@ -227,6 +227,21 @@ function thinkingOptionsForHarness(harness: string, modelKey: ModelKey): SelectO
   return thinkingOptionsFor(modelKey);
 }
 
+// Models offered for a given harness. pi gets the full chain picker; the
+// coding-machine harnesses each run a single subscription-backed model, so
+// the picker shows just that one pinned option. The Model step is still
+// always rendered — the user should always see (and confirm) what their
+// cell will run, even when there's nothing to choose between.
+function modelOptionsForHarness(harness: string): SelectOption[] {
+  if (harness === "claude-code") {
+    return [{ value: "opus", label: "opus", hint: "(Anthropic · via Max sub)" }];
+  }
+  if (harness === "codex" || harness === "hermes") {
+    return [{ value: "gpt-5.5", label: "gpt-5.5", hint: "(OpenAI · via ChatGPT sub)" }];
+  }
+  return MODEL_OPTIONS;
+}
+
 function defaultThinkingForHarness(harness: string, modelKey: ModelKey): string {
   if (harness === "claude-code") return "high";
   if (harness === "codex") return "medium";
@@ -2238,9 +2253,24 @@ async function cmdCreate(name: string | undefined, opts: CreateOpts): Promise<vo
   if (interactive) {
     console.log(`\nbirthing cell '${name}'\n`);
     // Step machine so the user can ←/⌫ back to a previous prompt mid-flow.
+    //   0 Harness · 1 Model · 2 Extensions · 3 Packages · 4 Thinking · 5 Channels
+    // Extensions and Packages are pi-only concepts (.pi/extensions, npm
+    // packages) — skipped, and left empty, for the coding-machine harnesses.
+    // Every other step is always shown; the Model step renders even when the
+    // harness pins a single model, so the user always sees what will run.
     const answers: (string | string[] | undefined)[] = [];
+    const stepActive = (step: number, harnessSel: string): boolean =>
+      (step === 2 || step === 3) ? harnessSel === "pi" : true;
     let i = 0;
     while (i < 6) {
+      const harnessSel = (answers[0] as string | undefined) ?? "pi";
+      // Skip pi-only steps for the coding-machine harnesses — record an
+      // empty answer and move on without rendering anything.
+      if (!stepActive(i, harnessSel)) {
+        answers[i] = [];
+        i++;
+        continue;
+      }
       const canGoBack = i > 0;
       let result: string | string[] | Back;
       if (i === 0) {
@@ -2248,22 +2278,9 @@ async function cmdCreate(name: string | undefined, opts: CreateOpts): Promise<vo
           initialValue: answers[0] as string | undefined,
         });
       } else if (i === 1) {
-        // Coding-machine harnesses run a single subscription-backed model,
-        // so the model picker would be a one-option no-op — pin it and
-        // skip to the next step. claude-code → opus (Max sub); codex and
-        // hermes → gpt-5.5 (ChatGPT sub).
-        const harnessSel = answers[0] as string;
-        if (harnessSel === "claude-code") {
-          answers[1] = "opus";
-          i++;
-          continue;
-        }
-        if (harnessSel === "codex" || harnessSel === "hermes") {
-          answers[1] = "gpt-5.5";
-          i++;
-          continue;
-        }
-        result = await selectOne("Model?", MODEL_OPTIONS, {
+        // pi → full chain picker; coding-machine harnesses → their single
+        // pinned model. Always shown so the model is visible/confirmed.
+        result = await selectOne("Model?", modelOptionsForHarness(harnessSel), {
           canGoBack,
           initialValue: answers[1] as string | undefined,
         });
@@ -2278,7 +2295,6 @@ async function cmdCreate(name: string | undefined, opts: CreateOpts): Promise<vo
           initialChecked: (answers[3] as string[] | undefined) ?? PACKAGE_DEFAULTS,
         });
       } else if (i === 4) {
-        const harnessSel = answers[0] as string;
         const modelSel = answers[1] as ModelKey;
         result = await selectOne(
           thinkingPromptFor(harnessSel),
@@ -2301,11 +2317,10 @@ async function cmdCreate(name: string | undefined, opts: CreateOpts): Promise<vo
         // the previous prompt's summary so it can be re-rendered fresh.
         process.stdout.write("\x1b[1A\x1b[2K");
         i--;
-        // The Model step is skipped for non-pi harnesses (claude-code/codex)
-        // — keep stepping back until we land on a step that was actually
-        // rendered. The skipped step printed nothing, so no extra wipe.
-        if (i === 1 && answers[0] !== "pi") {
-          answers[1] = undefined;
+        // Step back over any skipped (pi-only) steps — they rendered
+        // nothing, so they need no extra line wipe.
+        while (i > 0 && !stepActive(i, harnessSel)) {
+          answers[i] = undefined;
           i--;
         }
       } else {
