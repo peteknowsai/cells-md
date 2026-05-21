@@ -1300,7 +1300,9 @@ async function cmdTalk(name: string, args: string[]) {
   // Anything we don't recognize falls through to streamCellBridge so older
   // habits (cells talk <name> --foo "msg") still surface a useful error.
   let useMain = false;
-  let timeoutS = 120;
+  // 180s — must clear the peer's forkAndAsk ceiling (pi: 150s) plus
+  // inbox→DO→WS→reply routing. See dna/.../bin/cells parseTalkArgs.
+  let timeoutS = 180;
   const positional: string[] = [];
   for (let i = 0; i < args.length; i++) {
     const a = args[i] ?? "";
@@ -7483,6 +7485,21 @@ fi
 # a plain login-shell PATH.
 export PATH="\$HOME/.bun/bin:/home/well/.bun/bin:/root/bin:/root/.local/bin:\$PATH"
 
+# Cell identity. The substrate hostname is the well's egg-id (e.g.
+# egg-403c69) — unfriendly and *not* the cell name. The real name is the
+# first heading of the harness entrypoint: AGENTS.md (pi) or CLAUDE.md
+# (claude-code/codex/hermes), sed'd in at birth. \`cells talk\` builds
+# reply_to = https://\$CELL_NAME.cells.md/inbox/append from this, so every
+# shell — including the non-interactive bash -lc that runs \`cells talk\` —
+# must have CELL_NAME set, not just interactive tmux logins. Without this
+# the reply routes to https://egg-XXXXXX.cells.md and 404s.
+if [ -z "\${CELL_NAME:-}" ]; then
+  CELL_NAME=\$(sed -n '1s/^# //p' /root/AGENTS.md 2>/dev/null)
+  [ -z "\$CELL_NAME" ] && CELL_NAME=\$(sed -n '1s/^# //p' /root/CLAUDE.md 2>/dev/null)
+  : "\${CELL_NAME:=\$(hostname)}"
+  export CELL_NAME
+fi
+
 # Standard terminal-editing toolkit (apt-installed at bake: micro, fzf,
 # ripgrep, batcat). FZF gitignore-aware via ripgrep, preview via bat.
 # The two helpers below — \`mf\` (pick one + open in micro) and \`mft\`
@@ -7513,13 +7530,8 @@ mft() {
 # Niceness for interactive tmux shells (i.e. cells shell <name>): a
 # violet prompt with the cell's name + a one-shot welcome banner per
 # pane. Skips one-off well_exec commands (no \$PS1, no \$TMUX) so
-# automation stays quiet. Cell name comes from /root/AGENTS.md's
-# first line, which is sed'd in at hatch (the substrate's hostname is
-# the well's egg-id and unfriendly).
+# automation stays quiet. CELL_NAME is already resolved + exported above.
 if [ -n "\${PS1:-}" ] && [ -n "\${TMUX:-}" ]; then
-  CELL_NAME=\$(sed -n '1s/^# //p' /root/AGENTS.md 2>/dev/null)
-  : "\${CELL_NAME:=\$(hostname)}"
-  export CELL_NAME
   export PS1="\\[\\e[38;5;141m\\]\${CELL_NAME}\\[\\e[0m\\] \\w \\\$ "
   _banner_marker="/tmp/.cells-banner-\${TMUX_PANE//[^A-Za-z0-9]/_}"
   if [ ! -f "\$_banner_marker" ]; then

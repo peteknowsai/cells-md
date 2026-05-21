@@ -203,7 +203,13 @@ export const piAdapter: HarnessAdapter = {
   // fresh --session-dir for the fork's writes, and the original main.jsonl
   // stays bit-identical. Prompt is passed as argv (pi's standard one-shot
   // shape with --print).
-  async forkAndAsk({ prompt, mainRef, cellName, timeoutMs = 90_000 }) {
+  // 150s default: a pi --fork replays the cell's *entire* main session as
+  // context before the first token. A long-lived cell's main.jsonl runs to
+  // megabytes (cells-narrator: 2.3 MB / 4.8k lines), and prefill of that on
+  // gpt-5.5 measures 28–90s with a fat tail. 90s clipped real replies; 150s
+  // covers observed variance. Root cause is unbounded fork-context growth —
+  // the durable fix is capping/compacting fork context, not this ceiling.
+  async forkAndAsk({ prompt, mainRef, cellName, timeoutMs = 150_000 }) {
     if (!mainRef) {
       return { ok: false, error: "pi forkAndAsk: empty mainRef" };
     }

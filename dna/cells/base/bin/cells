@@ -178,7 +178,10 @@ function parseTalkArgs(rest: string[]): TalkOpts {
   let wantsAwait = false;
   let target: AgentTarget = "fork";
   let thread = "";
-  let timeoutS = 120;
+  // 180s: must exceed the peer's forkAndAsk ceiling (pi: 150s) plus the
+  // inbox→DO→WS→reply routing round-trips, or the CLI gives up before a
+  // slow-but-healthy fork can answer.
+  let timeoutS = 180;
   const positional: string[] = [];
   let i = 0;
   while (i < rest.length) {
