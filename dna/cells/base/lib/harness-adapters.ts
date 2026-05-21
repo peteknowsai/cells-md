@@ -223,6 +223,11 @@ export const piAdapter: HarnessAdapter = {
           "--thinking", "off",
           prompt,
         ],
+        // pi resolves its provider config + auth from the cwd's .pi/
+        // directory. The supervisor runs from /root/site, where there is
+        // no .pi/ — so without this, pi forks with no openai-codex key
+        // and dies "No API key found". /root has the cell's .pi/.
+        cwd: "/root",
         timeoutMs,
       });
       if (r.exitCode !== 0) {

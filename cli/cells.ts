@@ -1699,6 +1699,39 @@ async function cmdShell(name: string) {
   await proc.exited;
 }
 
+// `cells exec <name> [--] <command…>` — run a command as root on a cell,
+// non-interactively, in the agent's own context (HOME=/root, cwd /root,
+// /etc/profile.d/cells-env.sh sourced for PATH + proxy secret). The
+// cells-layer counterpart to `cells shell`: shell is the interactive
+// tmux drop-in, exec is the scriptable one-shot. Wraps the well-exec →
+// sudo-to-root plumbing once so callers never hand-roll it (and never
+// trip over `well exec` landing as the unprivileged `well` user).
+async function cmdExec(name: string, rest: string[]) {
+  // Everything after an optional `--` is the command; without one, the
+  // remaining args are the command. `cells exec c -- ls -la` and
+  // `cells exec c ls -la` both work.
+  const dd = rest.indexOf("--");
+  const cmdParts = dd >= 0 ? rest.slice(dd + 1) : rest;
+  if (cmdParts.length === 0) {
+    console.error("usage: cells exec <name> [--] <command…>");
+    process.exit(1);
+  }
+  await requireCell(name);
+  const wellName = await wellNameForCell(name);
+  // bash -lc joins the args into one command line and sources cells-env.sh;
+  // sudo -H makes HOME=/root — the agent's home. stdio is inherited so
+  // output streams live and the caller can pipe into stdin.
+  const remote = cmdParts.join(" ");
+  const proc = Bun.spawn(
+    [
+      "well", "exec", "-s", wellName, "--",
+      "sudo", "-H", "bash", "-lc", `cd /root; ${remote}`,
+    ],
+    { stdin: "inherit", stdout: "inherit", stderr: "inherit" },
+  );
+  process.exit(await proc.exited);
+}
+
 async function cmdSleep(name: string) {
   // `cells sleep` = hibernate the agent (release VM RAM, restore on inbound
   // traffic). Distinct from `cells stop`, which is an explicit power-off
@@ -7585,6 +7618,7 @@ switch (sub) {
   case "channels":              await cmdChannel(rest); break;
   case "doctor":             await cmdDoctor(); break;
   case "shell":              await cmdShell(needName(rest, "shell")); break;
+  case "exec":               await cmdExec(needName(rest, "exec"), rest.slice(1)); break;
   case "see":                await cmdSee(needName(rest, "see")); break;
   case "pool":               await cmdPool(rest); break;
   case "egg":                await cmdPool(rest); break;  // deprecated alias
@@ -7622,6 +7656,7 @@ switch (sub) {
     console.log("  cells sync [name]           pull cell markdown into ~/Obsidian/cells/ (default: all + mother)");
     console.log("  cells doctor                inspect mother OAuth state + proxy health (run when cells act 401-y)");
     console.log("  cells shell <name>          drop into a bash shell on a cell (separate tmux from the agent; Ctrl+D exits)");
+    console.log("  cells exec <name> [--] <cmd>  run a command as root on a cell, non-interactively (HOME=/root, cells-env sourced)");
     console.log("  cells see <name>            open https://<name>.cells.md in the browser");
     console.log("  cells schedule-pi-patches   install launchd watcher (re-applies pi patches when pi-ai is reinstalled)");
     console.log("  cells unschedule-pi-patches remove launchd watcher");
