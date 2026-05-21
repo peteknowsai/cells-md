@@ -25,7 +25,7 @@
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { readFile } from "node:fs/promises";
-import { readFileSync } from "node:fs";
+import { readFileSync, existsSync, readdirSync } from "node:fs";
 import { connect as netConnect } from "node:net";
 
 const PORT = Number(process.env.CELLS_DASHBOARD_PORT ?? 7881);
@@ -115,6 +115,30 @@ type StatePayload = {
     welld: { ok: boolean; uptime_minutes: number | null; degraded: boolean; vmnet_orphans: number };
     host_bridge: { ok: boolean; sessions: number };
   };
+  fleet: FleetSnapshot;
+};
+
+// Fleet activity — births + kills, read from the Mac-side birth/death logs.
+// Folded in from the standalone mother.cells.md page when cells-mother got
+// a per-cell Worker (which took over that hostname).
+type FleetActivityRow = {
+  kind: "birth" | "death";
+  name: string;
+  status: "born" | "failed" | "in flight" | "killed";
+  t: string;                  // canonical ISO timestamp
+  elapsed: string;            // pre-formatted duration, or "—"
+  harness: string;
+  model: string;
+  mother: string;             // which harness mother used, or "—"
+  message: string | null;     // failure message, if any
+};
+
+type FleetSnapshot = {
+  born: number;
+  failed: number;
+  killed: number;
+  in_flight: number;
+  activity: FleetActivityRow[];
 };
 
 // ── Helpers ───────────────────────────────────────────────────────────────
@@ -195,6 +219,98 @@ async function loadFirstTokenIndex(): Promise<Map<string, number>> {
   } catch {
     return new Map();
   }
+}
+
+// ── Fleet activity (births + kills) ────────────────────────────────────────
+//
+// Reads the Mac-side birth/death logs that `cells birth` / `cells kill`
+// write. Mirrors the reader that used to live in cli/proxy.ts's
+// handleMotherProxy, before cells-mother got a per-cell Worker.
+
+const BIRTH_LOG_DIR = join(homedir(), ".cells/birth-log");
+const DEATH_LOG_DIR = join(homedir(), ".cells/death-log");
+
+type BirthLogEntry = {
+  birthId: string;
+  name?: string;
+  harness?: string;
+  model?: string;
+  mother_harness?: string;
+  started_at?: string;
+  ended_at?: string;
+  elapsed_ms?: number;
+  success?: boolean;
+  message?: string;
+};
+
+type DeathLogEntry = {
+  name: string;
+  killed_at: string;
+  model?: string | null;
+  harness?: string | null;
+};
+
+function readLogDir<T>(dir: string): T[] {
+  if (!existsSync(dir)) return [];
+  const out: T[] = [];
+  for (const f of readdirSync(dir)) {
+    if (!f.endsWith(".json")) continue;
+    try { out.push(JSON.parse(readFileSync(join(dir, f), "utf-8"))); }
+    catch { /* skip malformed */ }
+  }
+  return out;
+}
+
+function fmtElapsed(ms?: number): string {
+  if (ms == null) return "—";
+  if (ms < 1000) return `${ms}ms`;
+  const s = ms / 1000;
+  if (s < 60) return `${s.toFixed(1)}s`;
+  return `${Math.floor(s / 60)}m ${Math.round(s % 60)}s`;
+}
+
+function buildFleetSnapshot(limit = 50): FleetSnapshot {
+  const births = readLogDir<BirthLogEntry>(BIRTH_LOG_DIR);
+  const deaths = readLogDir<DeathLogEntry>(DEATH_LOG_DIR);
+
+  const rows: FleetActivityRow[] = [];
+  for (const b of births) {
+    const status: FleetActivityRow["status"] =
+      !b.ended_at ? "in flight" : b.success ? "born" : "failed";
+    rows.push({
+      kind: "birth",
+      name: b.name ?? b.birthId,
+      status,
+      t: b.started_at ?? "",
+      elapsed: fmtElapsed(b.elapsed_ms),
+      harness: b.harness ?? "",
+      model: b.model ?? "",
+      mother: b.mother_harness ?? "—",
+      message: !b.success && b.message ? b.message : null,
+    });
+  }
+  for (const d of deaths) {
+    rows.push({
+      kind: "death",
+      name: d.name,
+      status: "killed",
+      t: d.killed_at ?? "",
+      elapsed: "—",
+      harness: d.harness ?? "",
+      model: d.model ?? "",
+      mother: "—",
+      message: null,
+    });
+  }
+  rows.sort((a, b) => b.t.localeCompare(a.t));
+
+  return {
+    born: rows.filter(r => r.status === "born").length,
+    failed: rows.filter(r => r.status === "failed").length,
+    killed: rows.filter(r => r.status === "killed").length,
+    in_flight: rows.filter(r => r.status === "in flight").length,
+    activity: rows.slice(0, limit),
+  };
 }
 
 async function buildState(): Promise<StatePayload> {
@@ -305,6 +421,7 @@ async function buildState(): Promise<StatePayload> {
         sessions: (hbHealth?.sessions ?? []).length,
       },
     },
+    fleet: buildFleetSnapshot(),
   };
 }
 
@@ -472,6 +589,10 @@ const HTML = `<!DOCTYPE html>
   .pill-warming { background: var(--warn-light); color: #8a6a1f; }
   .pill-running { background: var(--cells-light); color: var(--cells-dark); }
   .pill-stopped { background: var(--neutral-light); color: var(--neutral); }
+  .pill-born { background: var(--cells-light); color: var(--cells-dark); }
+  .pill-failed { background: var(--leak-light); color: #8a3333; }
+  .pill-killed { background: var(--neutral-light); color: var(--neutral); }
+  .pill-in-flight { background: var(--warn-light); color: #8a6a1f; }
 
   .daemons {
     display: grid;
@@ -590,6 +711,23 @@ const HTML = `<!DOCTYPE html>
   </thead>
   <tbody id="pool-body">
     <tr class="empty"><td colspan="7">…</td></tr>
+  </tbody>
+</table>
+
+<h2>Fleet activity <span class="muted" style="text-transform: none; letter-spacing: 0; font-weight: 400; font-size: 12px;" id="fleet-headline"></span></h2>
+<table id="fleet-table">
+  <thead>
+    <tr>
+      <th>Cell</th>
+      <th>Event</th>
+      <th>Duration</th>
+      <th>When</th>
+      <th>Detail</th>
+      <th>Mother</th>
+    </tr>
+  </thead>
+  <tbody id="fleet-body">
+    <tr class="empty"><td colspan="6">…</td></tr>
   </tbody>
 </table>
 
@@ -754,6 +892,56 @@ const HTML = `<!DOCTYPE html>
       }
     }
     setText("pool-headline", "  ·  hot " + s.pool.hot + " · cold " + s.pool.cold + " · claimed " + s.pool.claimed + " · hatched " + s.pool.live + (s.pool.culling ? " · culling " + s.pool.culling : ""));
+
+    // Fleet activity
+    const fleetBody = $("fleet-body");
+    fleetBody.innerHTML = "";
+    const fa = (s.fleet && s.fleet.activity) || [];
+    if (fa.length === 0) {
+      const tr = document.createElement("tr");
+      tr.className = "empty";
+      const td = document.createElement("td");
+      td.colSpan = 6;
+      td.textContent = "no fleet activity recorded yet";
+      tr.appendChild(td);
+      fleetBody.appendChild(tr);
+    } else {
+      for (const e of fa) {
+        const tr = document.createElement("tr");
+        const nameTd = document.createElement("td");
+        nameTd.innerHTML = '<code>' + e.name + '</code>';
+        tr.appendChild(nameTd);
+        const evTd = document.createElement("td");
+        evTd.appendChild(pill(e.status, e.status.replace(/ /g, "-")));
+        if (e.message) {
+          const m = document.createElement("div");
+          m.className = "mono muted";
+          m.style.fontSize = "11px";
+          m.style.marginTop = "3px";
+          m.textContent = e.message;
+          evTd.appendChild(m);
+        }
+        tr.appendChild(evTd);
+        const durTd = document.createElement("td");
+        durTd.textContent = e.elapsed;
+        tr.appendChild(durTd);
+        const whenTd = document.createElement("td");
+        whenTd.textContent = e.t
+          ? fmtAge(Math.max(0, Math.round((Date.now() - new Date(e.t).getTime()) / 60000)))
+          : "—";
+        tr.appendChild(whenTd);
+        const detTd = document.createElement("td");
+        detTd.className = "mono muted";
+        detTd.textContent = [e.harness, e.model].filter(Boolean).join(" · ") || "—";
+        tr.appendChild(detTd);
+        const motherTd = document.createElement("td");
+        motherTd.className = "mono muted";
+        motherTd.textContent = e.mother;
+        tr.appendChild(motherTd);
+        fleetBody.appendChild(tr);
+      }
+    }
+    setText("fleet-headline", "  ·  " + s.fleet.born + " born · " + s.fleet.failed + " failed · " + s.fleet.killed + " killed" + (s.fleet.in_flight ? " · " + s.fleet.in_flight + " in flight" : ""));
 
     // Daemons
     const daemonsEl = $("daemons");
