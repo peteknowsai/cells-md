@@ -210,12 +210,12 @@ export const piAdapter: HarnessAdapter = {
   // covers observed variance. Root cause is unbounded fork-context growth —
   // the durable fix is capping/compacting fork context, not this ceiling.
   async forkAndAsk({ prompt, mainRef, cellName, timeoutMs = 150_000 }) {
-    if (!mainRef) {
-      return { ok: false, error: "pi forkAndAsk: empty mainRef" };
-    }
-    if (!existsSync(mainRef)) {
-      return { ok: false, error: `pi forkAndAsk: main session not found at ${mainRef}` };
-    }
+    // A cell that has never had a main turn has no main.jsonl yet (pi
+    // creates it lazily on the first real conversation). Rather than
+    // failing the talk, run pi with no --fork: a fresh session still
+    // loads /root/AGENTS.md from cwd, so the cell answers as itself —
+    // just without prior-conversation memory it doesn't have anyway.
+    const hasMain = !!mainRef && existsSync(mainRef);
     const slug = forkSlug();
     const forkDir = `/tmp/agent-fork-${cellName}-${slug}`;
     try {
@@ -224,7 +224,7 @@ export const piAdapter: HarnessAdapter = {
         cmd: [
           "pi",
           "--print",
-          "--fork", mainRef,
+          ...(hasMain ? ["--fork", mainRef] : []),
           "--session-dir", forkDir,
           "--thinking", "off",
           prompt,
