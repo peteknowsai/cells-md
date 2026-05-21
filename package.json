@@ -9,7 +9,8 @@
     "@mariozechner/pi-tui": "^0.70.5",
     "@sinclair/typebox": "^0.34.49",
     "@types/bun": "latest",
-    "@types/react": "^19.2.14"
+    "@types/react": "^19.2.14",
+    "react-devtools-core": "^7.0.1"
   },
   "dependencies": {
     "cron-parser": "^5.5.0",
