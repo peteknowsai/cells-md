@@ -96,7 +96,7 @@ fi
     # the now-retired Mac-side `cells talk` scratch path). ~5-8s.
     echo "# ===claude session capture ==="
     echo "sudo mkdir -p /root/.cell"
-    echo "MAIN_ID=\$(sudo bash -lc 'export HOME=/root IS_SANDBOX=1; cd /root && claude --print ping --output-format stream-json --verbose --permission-mode bypassPermissions 2>/dev/null' | jq -rs 'map(select(.type==\"system\" and .subtype==\"init\")) | .[0].session_id // \"\"')"
+    echo "MAIN_ID=\$(sudo bash -lc 'export HOME=/root IS_SANDBOX=1; cd /root && claude --print ping --output-format stream-json --verbose --permission-mode bypassPermissions 2>/dev/null' < /dev/null | jq -rs 'map(select(.type==\"system\" and .subtype==\"init\")) | .[0].session_id // \"\"')"
     echo "[ -n \"\$MAIN_ID\" ] || { echo 'claude-main-session capture FAILED'; exit 1; }"
     echo "echo \"\$MAIN_ID\" | sudo tee /root/.cell/claude-main-session > /dev/null"
     echo "echo \"  claude main: \$MAIN_ID\""

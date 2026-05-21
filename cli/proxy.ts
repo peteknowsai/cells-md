@@ -56,6 +56,7 @@ import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { verifyClerkSession, gateHtml } from "./shared/clerk-gate";
+import { wellNameForCell } from "./lib/resolve";
 
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = dirname(SCRIPT_DIR);
@@ -816,8 +817,9 @@ async function handlePulseProxy(req: Request): Promise<Response> {
 
     // Two destinations during the Phase 3 transition:
     //   - default: Mac path (~/.cells/pulse-inbox/) — legacy pulse-on-Mac.
-    //   - CELLS_USE_PULSE_CELL=1: bridge into cells-pulse's well at
-    //     /var/cells/pulse/inbox/. Phase 4 deletes the Mac branch.
+    //   - CELLS_USE_PULSE_CELL=1: bridge into the active pulse cell's well
+    //     at /var/cells/pulse/pulse-inbox/. Which cell is CELLS_PULSE_CELL
+    //     (default `pulse`; set `pulse-cc` for the claude-code pulse).
     const useCell = process.env.CELLS_USE_PULSE_CELL === "1";
     const tsMs = Date.now();
     const filename = `${cell}-${tsMs}.md`;
@@ -986,6 +988,9 @@ async function bridgeTalk(body: { cell: string; message: string }): Promise<Resp
 async function bridgeInboxPulse(body: { cell: string; content: string }): Promise<Response> {
   if (!body.cell || !/^[a-z0-9-]+$/.test(body.cell)) return new Response("bad cell", { status: 400 });
   if (typeof body.content !== "string") return new Response("bad content", { status: 400 });
+  // The active pulse — pi `pulse` by default, `pulse-cc` (claude-code)
+  // when CELLS_PULSE_CELL says so. Resolved to a well name per call.
+  const pulseWell = await wellNameForCell(process.env.CELLS_PULSE_CELL ?? "pulse");
   const script = `set -euo pipefail
 sudo mkdir -p /var/cells/pulse/pulse-inbox
 TS=$(date +%s%N)
@@ -994,7 +999,7 @@ sudo tee "$F" >/dev/null <<'__INBOX_EOF__'
 ${body.content}
 __INBOX_EOF__
 echo "$F"`;
-  const proc = Bun.spawn(["well", "exec", "-s", "cells-pulse", "--", "bash", "-c", script], {
+  const proc = Bun.spawn(["well", "exec", "-s", pulseWell, "--", "bash", "-c", script], {
     stdio: ["ignore", "pipe", "pipe"],
   });
   const exit = await proc.exited;

@@ -4,5 +4,22 @@
   "env": {
     "ANTHROPIC_BASE_URL": "https://proxy.cells.md",
     "ANTHROPIC_CUSTOM_HEADERS": "x-cell-name: __NAME__"
+  },
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Write|Edit|MultiEdit",
+        "hooks": [
+          { "type": "command", "command": "node \"$CLAUDE_PROJECT_DIR/bin/heartbeat-push.mjs\"" }
+        ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "hooks": [
+          { "type": "command", "command": "node \"$CLAUDE_PROJECT_DIR/bin/heartbeat-push.mjs\"" }
+        ]
+      }
+    ]
   }
 }

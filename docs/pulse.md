@@ -1,8 +1,10 @@
 # Pulse
 
-> **Status:** shipped. Pulse is the family scheduler — a print-mode pi
-> agent that pulses every 60s under launchd, reads each cell's
-> `HEARTBEAT.md`, and fires wake-ups via `cells talk`.
+> **Status:** shipped. Pulse is the family scheduler — it reads each
+> cell's `HEARTBEAT.md` and fires wake-ups via `cells talk`. As of
+> 2026-05-20 the live pulse is **pulse-cc**, a claude-code cell running
+> an always-on agent loop; the original pi `pulse` cell is parked as a
+> one-command rollback. See "pulse-cc — the live claude-code pulse" below.
 
 ## Layout
 
@@ -15,6 +17,51 @@
 | Launcher (loads secrets, isolates pi auth) | `dna/specials/pulse/bin/pulse-run` |
 | Inbox push extension (ships in cell DNA) | `dna/cells/base/.pi/extensions/heartbeat-watch/index.ts` |
 | Inbox endpoint (subscriptions proxy host route) | `cli/proxy.ts` (`pulse.cells.md/heartbeat-changed`) |
+
+## Harness-portable refactor — `feature/claude-code-heartbeat`
+
+Pulse is being reworked so claude-code cells are first-class — both as
+schedule *producers* and as the harness pulse itself runs on. Built and
+verified end to end on the branch (`dna/specials/pulse/lib/heartbeat-e2e.test.mjs`
+runs a real heartbeat through hook → POST → inbox → drain → fire → wake):
+
+| Piece | Where |
+|---|---|
+| Deterministic core — sentinel, drain, save, fire, digest, daily-log | `dna/specials/pulse/lib/pulse-core.mjs` — harness-neutral, dependency-free |
+| Vendored 5-field cron evaluator | `dna/specials/pulse/lib/cron.mjs` — replaces the `cron-parser` dep, cross-checked against it over 328 cases |
+| pulse-core CLI (the 9 ops as JSON subcommands) | `dna/specials/pulse/bin/pulse-core.mjs` — the claude-code-side driver |
+| claude-code heartbeat hook (producer side) | `dna/cells/base/bin/heartbeat-push.mjs` — `PostToolUse`+`SessionStart` hook; the claude-code counterpart to the pi `heartbeat-watch` extension |
+| `heartbeat` skill (claude-code cells learn to use HEARTBEAT.md) | `dna/cells/base/.claude/skills/heartbeat/SKILL.md` |
+| pulse-cc DNA (claude-code pulse) | `dna/specials/pulse/CLAUDE.md`, `.claude/settings.json`, `.claude/skills/pulse/SKILL.md` |
+
+`pulse-tools` (the pi extension) now wraps `pulse-core` rather than
+carrying its own copy — pi pulse and the claude-code CLI share one
+source of truth. The pulse DNA dir is dual-harness: `.pi/` + `.claude/`.
+
+## pulse-cc — the live claude-code pulse
+
+`pulse-cc` is the claude-code pulse, **birthed and made primary 2026-05-20**.
+Rather than extending `cmdBirthSpecial`, it was born as an ordinary
+generic cell (`cells birth pulse-cc --harness=claude-code --model=opus
+--thinking=high`) and then hand-overlaid with the pulse DNA — pulse-cc is
+a normal **pinned** cell, not a registered special.
+
+| Piece | Where |
+|---|---|
+| Tick mechanism | `dna/specials/pulse/systemd/pulse-cc.service` + `pulse-cc-wrapper` — an always-on agent loop (`Restart=always`): one `claude --print` pulse tick per pass, sleeping the remainder of a 60s interval. Not a timer + oneshot (that is pi-pulse's shape). |
+| Per-tick body | the `pulse` skill (`.claude/skills/pulse/SKILL.md`) driving the `pulse-core` CLI |
+| Runtime | well `egg-22f210`, pinned (`auto_sleep_seconds=null`), runtime dir `/var/cells/pulse` |
+
+The proxy routes the fleet's heartbeats to whichever cell `CELLS_PULSE_CELL`
+names — `bridgeInboxPulse` resolves it (default `pulse`); it is set to
+`pulse-cc` in the proxy's launchd env. The pi `pulse` cell is parked: its
+`pulse.timer` is stopped and disabled, the cell left intact. Rollback is
+two commands — unset `CELLS_PULSE_CELL` (restart the proxy) and
+`systemctl enable --now pulse.timer` inside `cells-pulse`.
+
+At cutover, pi-pulse's schedule cache + `pulse.json` (the `lastFire` map)
+were transplanted onto pulse-cc so the handoff dropped no wakes and
+double-fired nothing.
 
 ## Runtime state (on Pete's Mac)
 

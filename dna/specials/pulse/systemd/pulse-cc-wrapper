@@ -1,0 +1,65 @@
+#!/bin/bash
+# pulse-cc-wrapper — the claude-code pulse loop.
+#
+# The claude-code counterpart to pulse-pi-wrapper. pi-pulse uses a 60s
+# systemd timer firing a Type=oneshot service; pulse-cc is instead an
+# always-on agent loop — this wrapper IS the loop. One `claude` pulse
+# tick per pass, then sleep to the next tick.
+#
+# Each tick is timeout-guarded so a wedged turn can't stall the loop;
+# pulse-core's own 5-minute sentinel handles overlap if a tick somehow
+# runs past the interval. The wrapper itself is meant to run forever —
+# if it ever exits, pulse-cc.service (Restart=always) brings it back.
+#
+# Installed at /usr/local/bin/pulse-cc-wrapper by the overlay step.
+set -uo pipefail
+
+export HOME=/root
+# IS_SANDBOX=1 satisfies claude's "running as root with bypassPermissions"
+# guard — the well VM is the isolation boundary, same rationale the cell
+# channel adapters use.
+export IS_SANDBOX=1
+export PULSE_RUNTIME_DIR=/var/cells/pulse
+export CELLS_BRIDGE_URL=https://proxy.cells.md/bridge
+
+# cells-env.sh exports CELLS_PROXY_SECRET (bearer auth for the bridge
+# /talk call that fires a wake) and extends PATH. systemd doesn't read
+# profile.d, so source it explicitly — HOME must be set first (the shim
+# references $HOME under `set -u`).
+# shellcheck disable=SC1091
+[ -f /etc/profile.d/cells-env.sh ] && . /etc/profile.d/cells-env.sh
+
+# Belt-and-suspenders: make sure the claude CLI is reachable regardless of
+# where it landed at provision time.
+export PATH="/root/.local/bin:/usr/local/bin:${PATH:-/usr/bin:/bin}"
+
+cd /root
+
+LOG=/var/cells/pulse/logs/pulse-cc.log
+TICK_INTERVAL="${PULSE_TICK_INTERVAL:-60}"
+TICK_TIMEOUT="${PULSE_TICK_TIMEOUT:-240}"
+
+# One pulse tick = read the pulse skill and follow it. The prompt names the
+# skill file explicitly rather than leaning on slash-command parsing, so a
+# tick is deterministic in headless --print mode.
+TICK_PROMPT='Run exactly one pulse tick now: read .claude/skills/pulse/SKILL.md and follow it start to finish, then stop. No narration.'
+
+echo "[$(date -u +%FT%TZ)] pulse-cc loop started (interval=${TICK_INTERVAL}s timeout=${TICK_TIMEOUT}s)" >>"$LOG"
+
+while :; do
+  start=$(date +%s)
+  if timeout "${TICK_TIMEOUT}s" claude --print --permission-mode bypassPermissions \
+       "$TICK_PROMPT" >>"$LOG" 2>&1; then
+    :
+  else
+    rc=$?  # capture before any $(...) below clobbers $?
+    echo "[$(date -u +%FT%TZ)] tick exited non-zero (rc=$rc)" >>"$LOG"
+  fi
+  # Sleep the remainder of the interval — a tick that overran shortens
+  # (or skips) the wait so the loop self-corrects back toward cadence.
+  elapsed=$(( $(date +%s) - start ))
+  remaining=$(( TICK_INTERVAL - elapsed ))
+  if [ "$remaining" -gt 0 ]; then
+    sleep "$remaining"
+  fi
+done
