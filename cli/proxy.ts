@@ -489,11 +489,15 @@ function forwardableHeaders(upstream: Headers): Headers {
 //
 // Per the wells/cells V1 boundary, the namespace authority for "what's a
 // well?" is welld — we just forward anything matching the well-name shape
-// and let welld validate. Specials (`cells-mother`, `cells-pulse`) don't
-// match `egg-*` so they keep hitting their existing handlers above.
+// and let welld validate. Two well-name shapes: pool/egg wells (`egg-<hex>`)
+// and special wells (`cells-<name>`, e.g. cells-pulse / cells-mother). Both
+// need the fallthrough once the special runs the agent-comms bridge — its
+// CF Worker DO opens `wss://cells-<name>.cells.md/agent`. The special's
+// *cell* host (`pulse.cells.md`, `mother.cells.md`) is unaffected: those
+// are matched by the bespoke handlers above, before this fallthrough.
 const WELLD_HTTP = "http://127.0.0.1:7878";
 const WELLD_WS = "ws://127.0.0.1:7878";
-const WELL_HOST_RE = /^egg-[a-z0-9]+\.cells\.md(:\d+)?$/i;
+const WELL_HOST_RE = /^(egg-[a-z0-9]+|cells-[a-z0-9-]+)\.cells\.md(:\d+)?$/i;
 
 function isWellHost(host: string): boolean {
   return WELL_HOST_RE.test(host);
@@ -1440,8 +1444,9 @@ const server = Bun.serve<WellWsData>({
       return handleMotherProxy(req);
     }
 
-    // egg-*.cells.md → welld at 127.0.0.1:7878. The per-cell CF Worker DO
-    // hits this for the wss://<wellname>.cells.md/agent bridge; welld
+    // <well>.cells.md (egg-* or cells-*) → welld at 127.0.0.1:7878. The
+    // per-cell CF Worker DO hits this for the wss://<wellname>.cells.md/agent
+    // bridge; welld
     // already dispatches by Host and bridges to the guest's :8080 (HTTP
     // and WS). We're just a hop so cloudflared's `*.cells.md → :8787`
     // catch-all can reach welld. See the well-host fallthrough block above.
