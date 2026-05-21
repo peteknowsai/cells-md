@@ -161,10 +161,15 @@ class CellSession {
   // The harness process is up and listening on stdin. (Named for pi's
   // history; claude-code uses the same flag.)
   piReady = false;
-  // Prompts received before the harness was ready, already translated to
-  // the harness's stdin wire format — flushed in order once ready.
-  pendingPrompts: string[] = [];
+  // Raw client commands received before the harness handshake completed —
+  // translated and flushed in order once ready. Translation is deferred to
+  // flush time so an adapter can use post-handshake state (hermes needs its
+  // gateway session id, known only once the handshake lands).
+  pendingPrompts: any[] = [];
   awaitingSwitchAck: string | null = null;
+  // hermes's gateway session id, captured by hermesAdapter during its
+  // handshake. Unused by other harnesses — present to satisfy AdapterHost.
+  hermesSessionId: string | null = null;
   stdoutBuffer = "";
   clients = new Set<any>(); // ServerWebSocket
   idleTimer: Timer | null = null;
@@ -350,7 +355,10 @@ class CellSession {
     this.readyResolvers.length = 0;
     if (this.pendingPrompts.length > 0) {
       this.log(`flushing ${this.pendingPrompts.length} pending prompt(s)`);
-      for (const line of this.pendingPrompts) this.writeLine(line);
+      for (const cmd of this.pendingPrompts) {
+        const translated = this.adapter.translateInbound!(cmd, this);
+        if (translated !== null) this.writeLine(translated);
+      }
       this.pendingPrompts.length = 0;
     }
     this.broadcastJSON({ type: "bridge_ready" });
@@ -472,19 +480,24 @@ class CellSession {
         }
         continue;
       }
-      // The adapter translates the pi-RPC-shaped client command into the
-      // harness's stdin wire format (identity for pi). null = no harness
-      // equivalent (e.g. `abort` on claude-code) — drop it.
-      const translated = this.adapter.translateInbound!(cmd);
-      if (translated === null) continue;
+      // Queue prompts that arrive before the harness handshake completes —
+      // store the RAW command and translate at flush time, since an adapter
+      // may need post-handshake state to translate (hermes: the gateway
+      // session id, known only once the handshake lands).
       if (!this.piReady && cmd?.type === "prompt") {
         this.log(`queuing prompt (harness not ready yet)`);
-        this.pendingPrompts.push(translated);
+        this.pendingPrompts.push(cmd);
         try {
           ws.send(JSON.stringify({ type: "response", id: cmd.id, command: "prompt", success: true }));
         } catch {}
         continue;
       }
+      // The adapter translates the pi-RPC-shaped client command into the
+      // harness's stdin wire format (identity for pi). null = no harness
+      // equivalent (e.g. `abort` on claude-code, or hermes pre-handshake) —
+      // drop it.
+      const translated = this.adapter.translateInbound!(cmd, this);
+      if (translated === null) continue;
       if (!this.writeLine(translated)) {
         this.err(`harness not running, dropping cmd ${cmd?.type}`);
       }

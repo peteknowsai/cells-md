@@ -1,0 +1,98 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Adding the hermes harness</title>
+<link rel="stylesheet" href="../_assets/doc.css">
+</head>
+<body>
+<div class="page">
+
+  <div class="doc-header">
+    <div class="crumb">cells <span class="sep">/</span> proposals <span class="sep">/</span> hermes harness</div>
+    <div>2026-05-19</div>
+  </div>
+
+  <h1>Adding the hermes harness</h1>
+  <p class="subtitle">A fourth harness — Nous Research's <code>hermes-agent</code>, on <code>gpt-5.5</code> via the ChatGPT subscription, driven persistently like <code>pi</code>.</p>
+
+  <div class="callout">
+    <div class="label">Built — birth verified, wire blocked — 2026-05-20</div>
+    <p>Code-complete on branch <code>feature/hermes-harness</code>; mother's birth skill carries the hermes branch. <strong>Verified live:</strong> the egg bakes hermes clean, <code>hermes-probe</code> was born alive through mother's <code>h1</code>–<code>h7</code> branch, and host-bridge's <code>hermesAdapter</code> spawns the gateway + completes the <code>gateway.ready</code>→<code>session.create</code> handshake. <strong>One blocker remains:</strong> every hermes turn is edge-blocked by the ChatGPT codex backend — <code>HTTP 403 "Your request was blocked"</code>, instant, from <code>proxy.cells.md/codex</code>. The same proxy path returns 200 for codex and pi cells, so it is a request-fingerprint mismatch, not a config error — see the open-blocker callout in §2.</p>
+  </div>
+
+  <div class="toc">
+    <h4>Contents</h4>
+    <ol>
+      <li><a href="#what">What hermes is — and what shape of harness it is</a></li>
+      <li><a href="#sub">gpt-5.5 on the ChatGPT subscription — the proxy, unchanged</a></li>
+      <li><a href="#egg">What's on the egg</a></li>
+      <li><a href="#hostbridge">host-bridge — persistent, over the TUI gateway</a></li>
+      <li><a href="#branch">The birth ritual branch</a></li>
+      <li><a href="#build">The build</a></li>
+    </ol>
+  </div>
+
+  <h2 id="what">What hermes is — and what shape of harness it is</h2>
+  <p><code>hermes-agent</code> (Nous Research, v0.14.0) is a self-improving agent — its own skills system, cross-session memory, a learning loop, a persona file, and its own messaging gateway. It is not a coding CLI; it's a general agent in its own right.</p>
+  <p>In cells terms, hermes joins claude-code and codex as a <strong>subscription harness</strong>: a single agent CLI run on a flat-cost subscription, which birth <em>activates</em> rather than builds a stack around. A hermes cell gets no cells-side extensions, no pi packages, no birth-wired Slack/email — and that is not a stripped cell, because hermes already carries all of that itself. The capability stack <code>pi</code> gets <em>from cells</em>, a hermes cell gets <em>from hermes</em>. (The codex harness framing applies verbatim: "any integrations come through the harness's own surface.")</p>
+  <p>It differs from codex in two ways. hermes is a general agent, not a coding machine. And hermes is <strong>persistent</strong> — it has a long-lived JSON-RPC server, so host-bridge drives it the way it drives <code>pi</code>, not the per-turn <code>codex exec</code> way (§4).</p>
+  <p>"All the same capabilities as pi, claude-code, and codex" — concretely, that means a hermes cell is a first-class cell: birth, <code>cells talk</code>, <code>cells tui</code>, agent-comms (<code>cells verify</code> + peer RPC via session fork), checkpoint / sleep / wake, and its own web presence. It does <em>not</em> mean pi's <code>.pi/extensions</code> — that is pi's plugin system; hermes has its own.</p>
+
+  <h2 id="sub">gpt-5.5 on the ChatGPT subscription — the proxy, unchanged</h2>
+  <div class="callout">
+    <div class="label">The key finding</div>
+    <p><code>cli/proxy.ts</code> needs zero changes — same as it needed zero changes for codex. It already has everything hermes needs.</p>
+  </div>
+  <p>The subscriptions proxy already routes a <code>/codex</code> path: a client sends <code>Authorization: Bearer &lt;CELLS_PROXY_SECRET&gt;</code>; the proxy validates it, swaps in the real ChatGPT-subscription OAuth JWT (kept fresh by the proxy's own refresh manager), injects <code>chatgpt-account-id</code> + <code>originator: codex_cli</code>, and relays to <code>chatgpt.com/backend-api/codex/responses</code>. The codex CLI already uses this path; pi's <code>gpt-5.5</code> already uses it via the <code>openai-codex</code> provider.</p>
+  <p>hermes ships a <code>codex_responses</code> transport — the Responses-API wire protocol, the same one its own built-in <code>openai-codex</code> provider speaks to <code>chatgpt.com/backend-api/codex</code>. The egg points that transport at the proxy with a provider plugin — <code>dna/cells/base/.hermes/plugins/model-providers/cells/</code> — a small <code>ProviderProfile</code> registering a <code>cells</code> provider:</p>
+  <pre><code># .hermes/plugins/model-providers/cells/__init__.py
+register_provider(ProviderProfile(
+    name="cells",
+    api_mode="codex_responses",
+    base_url="https://proxy.cells.md/codex",
+    env_vars=("OPENAI_CODEX_API_KEY",),
+    supports_health_check=False,
+))</code></pre>
+  <p><code>.hermes/config.yaml</code> then selects it with <code>model.provider: cells</code>. It must be a <em>plugin</em>, not a <code>config.yaml</code> <code>providers:</code> entry: a config-defined provider resolves to hermes's Ollama-flavoured <code>custom</code> profile, which pre-flight-probes Ollama endpoints (<code>/api/show</code>) the codex backend 403s. A registered <code>ProviderProfile</code> is a first-class provider — its own <code>api_mode</code>, no Ollama behaviour. The egg's env shim (<code>/etc/profile.d/cells-env.sh</code>) already exports <code>OPENAI_CODEX_API_KEY=$CELLS_PROXY_SECRET</code>, so hermes sends Responses-API traffic with the shared secret as bearer — no ChatGPT OAuth token on the cell, exactly like codex and claude-code. The proxy forwards <code>/codex/*</code> verbatim and supplies the codex-specific headers (<code>originator</code>, <code>chatgpt-account-id</code>).</p>
+
+  <div class="callout">
+    <div class="label">Open blocker — the wire fingerprint</div>
+    <p>Live testing (2026-05-20) found one unresolved issue. hermes turns reach <code>proxy.cells.md/codex</code>, but the ChatGPT codex backend returns <code>HTTP 403 "Your request was blocked"</code> — instant, before generation. The proxy is healthy (<code>POST /codex/responses → 200</code> for codex and pi cells all day) and the provider config is correct (the plugin above — <code>provider: custom</code> and a <code>providers:</code> entry were both tried and ruled out). The signal: the codex backend's edge blocks hermes's request <em>fingerprint</em>. The proxy injects <code>originator: codex_cli</code> + the account id, but hermes's HTTP client isn't codex-CLI-shaped (User-Agent, etc.) — codex and pi get through because their traffic looks like the real Codex client. The fix is at the proxy/wire boundary: have <code>proxy.cells.md/codex</code> normalise the User-Agent / fingerprint headers for hermes traffic (it already swaps auth + injects <code>originator</code>) — a small proxy change codex did not need. Next step: log hermes's outbound headers to confirm, then normalise. <code>hermes-probe</code> stays alive as the test rig.</p>
+  </div>
+
+  <h2 id="egg">What's on the egg</h2>
+  <p>One uniform generic egg, now four harnesses baked. hermes installs through Nous's own installer — <code>curl -fsSL &hellip;/install.sh | bash -s -- --skip-setup --skip-browser</code> — uv-based, Python 3.11, fully unattended (the setup wizard self-skips with no TTY). It is added to <code>provisionCellInWell</code> alongside <code>npm install -g @openai/codex</code>, since hermes — like codex — is not in the wells base image.</p>
+  <p>The egg also carries <code>dna/cells/base/.hermes/</code>: <code>config.yaml</code> with <code>__MODEL__</code> / <code>__THINKING__</code> placeholders, and the <code>cells</code> provider plugin under <code>plugins/model-providers/</code>. hermes auto-loads <code>AGENTS.md</code> from the working directory as its workspace entrypoint — the same file <code>pi</code> and <code>codex</code> already load. Its persona file <code>SOUL.md</code> it expects under <code>$HERMES_HOME</code>; the birth branch links the cell's <code>SOUL.md</code> into place. Birth activates one harness; it never installs one.</p>
+
+  <h2 id="hostbridge">host-bridge — persistent, over the TUI gateway</h2>
+  <p>This is where hermes diverges from codex. <code>codex exec</code> is one-shot, so host-bridge spawns a fresh process per turn. hermes runs a long-lived JSON-RPC server — the same stdio server hermes's own TUI speaks — so host-bridge drives it the way it drives <code>pi</code>: one SSH'd process, prompts over stdin, an event stream back. hermes is a <em>persistent</em> harness; the per-turn machinery codex needed does not apply.</p>
+  <p>The <code>HarnessAdapter</code> gains a <code>hermesAdapter</code>, <code>mode: "persistent"</code>. host-bridge spawns hermes's TUI-gateway server unbuffered (<code>python -u</code> — buffered stdout would hang the ready handshake). The gateway greets with a <code>gateway.ready</code> event; <code>translateOutbound</code> answers it with <code>session.create</code> and flips the session ready once the gateway returns a session id. From there <code>translateOutbound</code> maps hermes's events — <code>message.delta</code> text, <code>message.complete</code>, errors — into the same pi-shaped events the talk CLI renders, and <code>translateInbound</code> turns a <code>prompt</code> into hermes's <code>prompt.submit</code> (and an <code>abort</code> into <code>session.interrupt</code>). <code>forkAndAsk</code> (the agent-comms primitive) runs hermes's <code>-z</code> one-shot mode — a fresh, context-free turn, the same path the other harnesses take when there's no main session to fork; hermes's own cross-session memory still gives the sibling continuity. Net: <code>cells talk</code> and <code>cells tui</code> work identically across all four harnesses, and the CLI never knows the difference — Nous even publishes a pi-RPC&nbsp;&harr;&nbsp;gateway mapping, the two protocols being close cousins.</p>
+  <p>Two small interface changes: hermes's <code>prompt.submit</code> carries a session id, so <code>translateInbound</code> gains the session handle (today it takes only the command); and <code>CellSession</code> gets a <code>hermesSessionId</code> field, the way it already has <code>codexThreadId</code>.</p>
+
+  <h2 id="branch">The birth ritual branch</h2>
+  <p>The config blob's <code>harness</code> field picks the branch. <code>hermes</code> follows a short branch (<code>h1</code>&ndash;<code>h7</code> in <code>docs/birthing-ritual.html</code>), parallel to codex's: imprint identity, substitute the model config into <code>.hermes/config.yaml</code>, link <code>SOUL.md</code> into <code>$HERMES_HOME</code>, write <code>status.json</code>, register the site service + cloud edge, checkpoint, end-test, report outcome. No birth-time session capture — the adapter opens the gateway session at connect. No extensions, no packages, no cells-side channels — short by design, like codex.</p>
+
+  <h2 id="build">The build</h2>
+  <ol>
+    <li><strong>Phase 0 — spike.</strong> Point hermes's <code>codex_responses</code> transport at <code>proxy.cells.md/codex</code> with the shared secret; confirm a <code>gpt-5.5</code> turn round-trips. The one external unknown — de-risk it first.</li>
+    <li><strong>Phase 1 — egg.</strong> hermes installed in <code>provisionCellInWell</code>; <code>dna/cells/base/.hermes/config.yaml</code> (model config + the <code>cells</code> proxy provider); the <code>bake-egg.sh</code> hermes branch.</li>
+    <li><strong>Phase 2 — host-bridge.</strong> The <code>hermesAdapter</code>; the <code>hermesSessionId</code> field; the <code>translateInbound</code> signature change.</li>
+    <li><strong>Phase 3 — CLI + ritual.</strong> <code>hermes</code> in <code>HARNESS_OPTIONS</code>, the <code>Cell.harness</code> type, the create-command defaults + validation, the harness-aware thinking picker, the birthing-ritual <code>h1</code>&ndash;<code>h7</code> branch.</li>
+    <li><strong>Phase 4 — tests + verify.</strong> A hermes row in <code>harden-birth.ts</code>; end-to-end birth + talk + tui.</li>
+  </ol>
+
+  <h3>Pointers</h3>
+  <ul>
+    <li><code>cli/proxy.ts</code> — the subscriptions proxy — reused as-is</li>
+    <li><code>cli/host-bridge.ts</code> + <code>dna/cells/base/lib/harness-adapters.ts</code> — the <code>hermesAdapter</code>, persistent mode</li>
+    <li><code>dna/cells/base/.hermes/</code> — <code>config.yaml</code> + the <code>cells</code> provider plugin</li>
+    <li><code>scripts/bake-egg.sh</code> — the hermes branch</li>
+    <li><code>docs/proposals/codex-harness.html</code> — the sibling harness it most resembles</li>
+    <li><code>github.com/NousResearch/hermes-agent</code> — upstream, v0.14.0</li>
+  </ul>
+
+</div>
+</body>
+</html>

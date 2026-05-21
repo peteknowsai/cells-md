@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Log a hermes cell into ChatGPT</title>
+<link rel="stylesheet" href="_assets/doc.css">
+</head>
+<body>
+<div class="page">
+
+  <div class="doc-header">
+    <div class="crumb">cells <span class="sep">/</span> guide <span class="sep">/</span> hermes &middot; chatgpt login</div>
+    <div>2026-05-20</div>
+  </div>
+
+  <h1>Log a hermes cell into ChatGPT</h1>
+  <p class="subtitle">Four commands to authenticate the hermes harness on your ChatGPT subscription and confirm a live turn.</p>
+
+  <div class="callout">
+    <div class="label">What you're testing</div>
+    <p>hermes can't ride the cells proxy the way pi and codex do &mdash; it hardwires its codex path to OAuth and won't accept the proxy's shared-secret bearer. So a hermes cell logs into ChatGPT <em>directly</em>. This is the test of that flow. Test cell: <code>hermes-probe</code> &mdash; already running, with auto-sleep disabled so it won't hibernate under you.</p>
+  </div>
+
+  <h2>1 &middot; Open a shell on the cell</h2>
+  <p>In your terminal:</p>
+  <pre><code>cells shell hermes-probe</code></pre>
+  <p>Drops you into a root shell inside the cell. If the cell is asleep, wake it first with <code>cells wake hermes-probe</code>.</p>
+
+  <h2>2 &middot; Log in to ChatGPT</h2>
+  <p>From inside that shell:</p>
+  <pre><code>hermes auth add openai-codex --type oauth --no-browser</code></pre>
+  <p>This runs an OAuth <strong>device flow</strong>: hermes prints a URL and a short code. Open the URL in your browser on the Mac, sign in to ChatGPT, and enter the code. No browser is needed on the cell itself. The token is saved on the cell at <code>/root/.hermes/auth.json</code>.</p>
+
+  <h2>3 &middot; Confirm hermes runs</h2>
+  <p>Still in the cell shell:</p>
+  <pre><code>hermes -z "Reply with exactly: OK"</code></pre>
+  <p>If <code>OK</code> comes back, hermes is running on your ChatGPT subscription &mdash; talking straight to <code>chatgpt.com</code>, no proxy. The test passes.</p>
+
+  <h2>4 &middot; Talk to it as a cell</h2>
+  <p>Exit the shell with <code>Ctrl+D</code>, then from the Mac:</p>
+  <pre><code>cells tui hermes-probe</code></pre>
+  <p>This is the normal way to use the cell. The login in step 2 had to happen from the shell &mdash; <code>cells tui</code> drives the agent, it doesn't expose the OAuth flow.</p>
+
+  <div class="callout">
+    <div class="label">If it passes</div>
+    <p>Box-OAuth works, and hermes is a viable fourth harness. The remaining decision is the production shape: an interactive login per birth (this flow), or baking your ChatGPT token onto every hermes egg at bake time &mdash; hands-off, but the real token then lives on each cell. That's the next call.</p>
+  </div>
+
+</div>
+<script src="_assets/doc.js" defer></script>
+</body>
+</html>

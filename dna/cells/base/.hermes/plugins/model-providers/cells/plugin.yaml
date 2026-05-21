@@ -1,0 +1,5 @@
+name: cells-provider
+kind: model-provider
+version: 1.0.0
+description: cells proxy — gpt-5.5 on the ChatGPT subscription via proxy.cells.md
+author: cells

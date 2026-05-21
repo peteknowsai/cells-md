@@ -97,11 +97,13 @@ const COMBOS: Combo[] = [
   { id: "opus",           harness: "pi", model: "opus",              thinking: "high",   extensions: [],                                    packages: [],                channels: [] },
   { id: "sonnet",         harness: "pi", model: "sonnet",            thinking: "high",   extensions: [],                                    packages: [],                channels: [] },
   { id: "haiku",          harness: "pi", model: "haiku",             thinking: "high",   extensions: [],                                    packages: [],                channels: [] },
-  // harness axis — claude-code runs Anthropic models through the Max sub,
-  // codex runs gpt-5.5 through the ChatGPT sub (both flat subscription cost,
-  // like pi's gpt-5.5); both skip extensions/packages/channels.
+  // harness axis — claude-code runs Anthropic models through the Max sub;
+  // codex and hermes run gpt-5.5 through the ChatGPT sub (all flat
+  // subscription cost, like pi's gpt-5.5); all three skip
+  // extensions/packages/channels.
   { id: "cc-opus",        harness: "claude-code", model: "opus",      thinking: "high",   extensions: [],                                    packages: [],                channels: [] },
   { id: "codex-gpt55",    harness: "codex",       model: "gpt-5.5",   thinking: "low",    extensions: [],                                    packages: [],                channels: [] },
+  { id: "hermes-gpt55",   harness: "hermes",      model: "gpt-5.5",   thinking: "low",    extensions: [],                                    packages: [],                channels: [] },
   // thinking axis — model held at gpt-5.5 (free); baseline covers `low`.
   { id: "think-off",      harness: "pi", model: "gpt-5.5",           thinking: "off",    extensions: [],                                    packages: [],                channels: [] },
   { id: "think-high",     harness: "pi", model: "gpt-5.5",           thinking: "high",   extensions: [],                                    packages: [],                channels: [] },

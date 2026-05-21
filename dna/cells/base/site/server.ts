@@ -216,11 +216,12 @@ let turnProc: Subprocess<"ignore", "pipe", "pipe"> | null = null;
 let turnInFlight = false;
 const pendingTurns: string[] = [];
 
-// AdapterHost shim — adapters read/write codexThreadId + awaitingSwitchAck
-// here, and call writeLine/log/err/onPiSetupAcked on us.
+// AdapterHost shim — adapters read/write codexThreadId / awaitingSwitchAck /
+// hermesSessionId here, and call writeLine/log/err/onPiSetupAcked on us.
 const hostState: AdapterHost = {
   codexThreadId: HARNESS === "codex" ? (CODEX_MAIN_THREAD || null) : null,
   awaitingSwitchAck: null,
+  hermesSessionId: null,
   writeLine: (line) => writeToHarness(line),
   log: (msg) => console.log(`[bridge] ${msg}`),
   err: (msg) => console.error(`[bridge] ${msg}`),
@@ -431,6 +432,25 @@ function persistentSpawnArgs(): { cmd: string[]; env: Record<string, string> } |
       env: { ...baseEnv, IS_SANDBOX: "1" },
     };
   }
+  if (HARNESS === "hermes") {
+    // hermes's TUI-gateway JSON-RPC server — a persistent stdio process, the
+    // same one host-bridge spawns over SSH. `-u`: Python stdout to a pipe is
+    // fully buffered, and a buffered gateway never flushes its gateway.ready
+    // frame, so the handshake would hang. HERMES_PYTHON_SRC_ROOT makes the
+    // gateway's in-process imports resolve. The session is opened by the
+    // adapter handshake (translateOutbound), not here.
+    const H = "/usr/local/lib/hermes-agent";
+    return {
+      cmd: [`${H}/venv/bin/python`, "-u", "-m", "tui_gateway.entry"],
+      env: {
+        ...baseEnv,
+        TERMINAL_CWD: "/root",
+        HERMES_HOME: "/root/.hermes",
+        HERMES_PYTHON_SRC_ROOT: H,
+        PYTHONUNBUFFERED: "1",
+      },
+    };
+  }
   return null;
 }
 
@@ -551,7 +571,7 @@ function onHarnessReady() {
           runTurn((cmd as any).message);
         }
       } else {
-        const translated = ADAPTER.translateInbound?.(cmd);
+        const translated = ADAPTER.translateInbound?.(cmd, hostState);
         if (translated !== null && translated !== undefined) writeToHarness(translated);
       }
     }
@@ -916,7 +936,7 @@ const server = Bun.serve({
         // Persistent: translate inbound to the harness's wire format and
         // write to its stdin. translateInbound returns null for commands
         // the harness can't handle (e.g. abort on claude-code) — drop them.
-        const translated = ADAPTER.translateInbound?.(cmd);
+        const translated = ADAPTER.translateInbound?.(cmd, hostState);
         if (translated === null || translated === undefined) continue;
         if (!writeToHarness(translated)) {
           console.error(`[bridge] harness not running, dropping cmd ${cmd?.type}`);

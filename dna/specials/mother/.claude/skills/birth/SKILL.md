@@ -47,9 +47,15 @@ well exec -s "<EGG_WELL>" -- bash -lc "cd /root && source /etc/profile.d/cells-e
 # ChatGPT token). Without sudo, codex runs as `well` user with HOME=/home/well,
 # misses the cells-routed config, and hits OpenAI's API direct → 401.
 well exec -s "<EGG_WELL>" -- bash -lc "sudo bash -lc 'export HOME=/root; cd /root && source /etc/profile.d/cells-env.sh && timeout 120 codex exec --skip-git-repo-check --dangerously-bypass-approvals-and-sandbox \"say ok\" < /dev/null' && echo CODEX-OK"
+
+# hermes cells — sudo + HOME=/root so hermes reads /root/.hermes/config.yaml
+# (the cells provider that routes OPENAI_CODEX_API_KEY through
+# proxy.cells.md/codex). `hermes -z` is hermes's one-shot mode: it prints
+# just the final response text and exits.
+well exec -s "<EGG_WELL>" -- bash -lc "sudo bash -lc 'export HOME=/root; cd /root && source /etc/profile.d/cells-env.sh && timeout 120 hermes -z \"say ok\"' && echo HERMES-OK"
 ```
 
-Output must end with `PI-OK` / `CLAUDE-OK` / `CODEX-OK`. If not, the
+Output must end with `PI-OK` / `CLAUDE-OK` / `CODEX-OK` / `HERMES-OK`. If not, the
 cell's brain is broken — jump to **Failure**.
 
 ## Step 3 · Fire post-birth tasks in the background, then write outcome

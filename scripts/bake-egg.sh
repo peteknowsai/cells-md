@@ -115,6 +115,16 @@ fi
     echo "[ -n \"\$MAIN_TID\" ] || { echo 'codex-main-thread capture FAILED'; exit 1; }"
     echo "echo \"\$MAIN_TID\" | sudo tee /root/.cell/codex-main-thread > /dev/null"
     echo "echo \"  codex main: \$MAIN_TID\""
+  elif [ "$HARNESS" = "hermes" ]; then
+    echo "# ===hermes settings ==="
+    echo "sudo sed -i \"s/__MODEL__/$MODEL/g; s/__THINKING__/$THINKING/g\" /root/.hermes/config.yaml"
+    echo "! grep -q __ /root/.hermes/config.yaml"
+    # hermes loads its persona from \$HERMES_HOME/SOUL.md (= /root/.hermes/SOUL.md);
+    # the cell's SOUL.md lives at /root/SOUL.md. Symlink so hermes finds it and
+    # edits track. No birth-time session capture — the host-bridge adapter
+    # resumes the latest session (session.most_recent) or creates one at connect.
+    echo "sudo mkdir -p /root/.hermes"
+    echo "sudo ln -sf /root/SOUL.md /root/.hermes/SOUL.md"
   fi
 
   echo "# ===status ==="

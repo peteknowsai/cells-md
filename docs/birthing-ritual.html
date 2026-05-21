@@ -36,8 +36,8 @@
   <table>
     <thead><tr><th>Field</th><th>Values</th><th>What it does</th></tr></thead>
     <tbody>
-      <tr><td><code>harness</code></td><td><code>pi</code> · <code>claude-code</code> · <code>codex</code></td><td>The agent runtime. <code>pi</code> follows the full ritual (steps 1–9); <code>claude-code</code> and <code>codex</code> follow shorter <a href="#claude-code-branch">branches</a> below it.</td></tr>
-      <tr><td><code>model</code></td><td><code>pi</code>: <code>gpt-5.5</code>, <code>gpt-5.5-pro</code>, <code>deepseek-v4-flash</code>, <code>deepseek-v4-pro</code>, or an Anthropic model via API key · <code>claude-code</code>: <code>opus</code>, <code>sonnet</code>, <code>haiku</code> · <code>codex</code>: <code>gpt-5.5</code> (ChatGPT subscription)</td><td>The cell's primary model.</td></tr>
+      <tr><td><code>harness</code></td><td><code>pi</code> · <code>claude-code</code> · <code>codex</code> · <code>hermes</code></td><td>The agent runtime. <code>pi</code> follows the full ritual (steps 1–9); <code>claude-code</code>, <code>codex</code>, and <code>hermes</code> follow shorter <a href="#claude-code-branch">branches</a> below it.</td></tr>
+      <tr><td><code>model</code></td><td><code>pi</code>: <code>gpt-5.5</code>, <code>gpt-5.5-pro</code>, <code>deepseek-v4-flash</code>, <code>deepseek-v4-pro</code>, or an Anthropic model via API key · <code>claude-code</code>: <code>opus</code>, <code>sonnet</code>, <code>haiku</code> · <code>codex</code>: <code>gpt-5.5</code> (ChatGPT subscription) · <code>hermes</code>: <code>gpt-5.5</code> (ChatGPT subscription)</td><td>The cell's primary model.</td></tr>
       <tr><td><code>provider</code></td><td><code>openai-codex</code>, <code>openai</code>, <code>deepseek</code>, <code>anthropic</code></td><td>pi-ai provider ID for the model (pi branch only).</td></tr>
       <tr><td><code>thinking</code></td><td><code>off</code> · <code>minimal</code> · <code>low</code> · <code>medium</code> · <code>high</code> · <code>xhigh</code> · <code>adaptive</code></td><td>Reasoning effort level.</td></tr>
       <tr><td><code>extensions</code></td><td>subset of <code>memory</code>, <code>mentality</code>, <code>wiki</code>, <code>dream</code></td><td>Which in-tree extensions to switch on. May be empty.</td></tr>
@@ -69,7 +69,7 @@
 
   <h2>The ritual</h2>
   <p>Run these in order. Use <code>well_exec</code> for commands that run on the egg, local <code>bash</code> for commands that run on the Mac. If a step's command fails with a network-class error (5xx, <code>ECONNRESET</code>, registry timeout), retry it once after 5s before reporting failure.</p>
-  <p>The blob's <code>harness</code> field picks the branch. A <code>pi</code> cell follows the full ritual — steps 1–9 below. A <code>claude-code</code> cell follows <a href="#claude-code-branch">the claude-code branch</a>, and a <code>codex</code> cell follows <a href="#codex-branch">the codex branch</a> — both shorter rituals that skip extensions, packages, and cells-side channels (a claude-code or codex cell is a coding machine, not the full capability stack — see <code>docs/proposals/claude-code-harness.html</code> and <code>docs/proposals/codex-harness.html</code>).</p>
+  <p>The blob's <code>harness</code> field picks the branch. A <code>pi</code> cell follows the full ritual — steps 1–9 below. A <code>claude-code</code> cell follows <a href="#claude-code-branch">the claude-code branch</a>, a <code>codex</code> cell follows <a href="#codex-branch">the codex branch</a>, and a <code>hermes</code> cell follows <a href="#hermes-branch">the hermes branch</a> — all shorter rituals that skip extensions, packages, and cells-side channels (claude-code, codex, and hermes cells bring their own agent surface rather than the cells-side capability stack — see the harness proposals under <code>docs/proposals/</code>).</p>
 
   <h3>1 · Imprint identity</h3>
   <p>The cell learns its name. Substitute <code>__NAME__</code> across the DNA, and the color chip into the tmux config.</p>
@@ -269,8 +269,67 @@ bash scripts/deploy-cell-worker.sh &lt;name&gt; &lt;egg-well-name&gt;</code></pr
   <h3>x7 · Report + record</h3>
   <p>Same as <code>c7</code> — <code>report_outcome</code> with <code>success: true</code> only if every critical check passed. On success, append the activity-log line and tell the user exactly one line: <em>"Cell <code>&lt;name&gt;</code> is alive. Talk to it with <code>cells talk &lt;name&gt;</code>."</em></p>
 
+  <h2 id="hermes-branch">The hermes branch</h2>
+  <p>When the blob's <code>harness</code> is <code>hermes</code>, follow this branch <em>instead of</em> steps 1–9. Like claude-code and codex it's short by design — but hermes is not a coding machine: it's Nous Research's <code>hermes-agent</code>, a self-improving agent with its own skills, memory, and channels. cells doesn't stack extensions, packages, or cells-side channels onto it — the capability stack <code>pi</code> gets from cells, a hermes cell gets from hermes itself. The egg already ships the <code>hermes</code> CLI and the <code>.hermes/</code> config structure. hermes auto-loads <code>AGENTS.md</code> as its workspace entrypoint — the same file pi and codex load. See <code>docs/proposals/hermes-harness.html</code>.</p>
+
+  <h3>h1 · Imprint identity</h3>
+  <p>Same as the codex branch — substitute <code>__NAME__</code> across the DNA and the tmux color.</p>
+  <pre><code># on the egg
+sed -i 's/__NAME__/&lt;name&gt;/g' \
+  /root/AGENTS.md /root/CLAUDE.md /root/SOUL.md /root/IDENTITY.md \
+  /root/CELLS.md /root/CONTACTS.md /root/HEARTBEAT.md /root/package.json
+
+# on the Mac: compute the cell's color, then substitute on the egg
+read CBG CFG &lt; &lt;(bash scripts/cell-color.sh &lt;name&gt;)
+sed -i "s|__CELL_BG__|$CBG|g; s|__CELL_FG__|$CFG|g; s|__NAME__|&lt;name&gt;|g" /root/.tmux.conf</code></pre>
+
+  <h3>h2 · Apply model config</h3>
+  <p>The model + reasoning effort go into <code>.hermes/config.yaml</code> (<code>model.default</code> and <code>agent.reasoning_effort</code>). That file's <code>providers.cells</code> block points hermes at <code>proxy.cells.md/codex</code> with <code>key_env: OPENAI_CODEX_API_KEY</code> — the egg's env shim exports that to <code>CELLS_PROXY_SECRET</code>, and the proxy swaps it for the real ChatGPT-subscription token. <code>model.api_mode: codex_responses</code> tells hermes to speak the OpenAI Responses API (the codex backend wire protocol). A hermes cell runs on the subscription, never the metered API. The cell's <code>SOUL.md</code> is linked into <code>$HERMES_HOME</code> so hermes loads it as its persona.</p>
+  <pre><code># on the egg
+sed -i 's/__MODEL__/&lt;model&gt;/g'      /root/.hermes/config.yaml
+sed -i 's/__THINKING__/&lt;thinking&gt;/g' /root/.hermes/config.yaml
+
+# validate — no placeholder may survive (a no-op sed = a broken cell)
+! grep -q '__' /root/.hermes/config.yaml
+
+# hermes loads its persona from $HERMES_HOME/SOUL.md
+mkdir -p /root/.hermes
+ln -sf /root/SOUL.md /root/.hermes/SOUL.md</code></pre>
+
+  <h3>h3 · Write the status file</h3>
+  <pre><code># on the egg
+mkdir -p /root/.pi
+echo '{"harness":"hermes","channels":[]}' &gt; /root/.pi/status.json</code></pre>
+
+  <h3>h4 · Register the site service + cloud edge</h3>
+  <p>Same as the codex branch's <code>x4</code> — no channel binding.</p>
+  <pre><code># on the Mac
+bash scripts/register-site-service.sh &lt;name&gt; &lt;egg-well-name&gt;
+well url update --auth public -s &lt;egg-well-name&gt;
+bash scripts/deploy-cell-worker.sh &lt;name&gt; &lt;egg-well-name&gt;</code></pre>
+
+  <h3>h5 · Checkpoint</h3>
+  <pre><code>well_checkpoint  name: &lt;egg-well-name&gt;  comment: "born-&lt;name&gt;"</code></pre>
+
+  <h3>h6 · The end-test</h3>
+  <p>Birth is proven, not assumed. Run every check — collect failures, don't stop at the first.</p>
+  <table>
+    <thead><tr><th>Check</th><th>Pass criteria</th><th>Critical?</th></tr></thead>
+    <tbody>
+      <tr><td>Identity imprinted</td><td><code>grep -c __NAME__</code> across the DNA returns <code>0</code> everywhere</td><td><span class="badge bad">critical</span></td></tr>
+      <tr><td>Config substituted</td><td><code>.hermes/config.yaml</code> has no surviving <code>__…__</code> placeholder</td><td><span class="badge bad">critical</span></td></tr>
+      <tr><td>Env present</td><td><code>/etc/environment</code> has <code>CELLS_PROXY_SECRET</code>; the env shim exports <code>OPENAI_CODEX_API_KEY</code></td><td><span class="badge bad">critical</span></td></tr>
+      <tr><td>hermes answers</td><td><code>cd /root &amp;&amp; source /etc/profile.d/cells-env.sh &amp;&amp; hermes -z "say ok"</code> exits 0 within 120s</td><td><span class="badge bad">critical</span></td></tr>
+      <tr><td>Site serves</td><td><code>curl localhost:8080/</code> on the egg returns <code>200</code></td><td><span class="badge bad">critical</span></td></tr>
+      <tr><td>Worker live</td><td><code>&lt;name&gt;.cells.md/debug</code> responds</td><td><span class="badge warn">degradation</span></td></tr>
+    </tbody>
+  </table>
+
+  <h3>h7 · Report + record</h3>
+  <p>Same as <code>x7</code> — <code>report_outcome</code> with <code>success: true</code> only if every critical check passed. On success, append the activity-log line and tell the user exactly one line: <em>"Cell <code>&lt;name&gt;</code> is alive. Talk to it with <code>cells talk &lt;name&gt;</code>."</em></p>
+
   <h2>If something fails</h2>
-  <p>Stop at the first failed step. Skip straight to step 9 (or <code>c7</code>), <code>report_outcome</code> with <code>success: false</code> and a one-line message naming the step and what broke. Don't try to recover the cell in place — the CLI sweeps the egg on a failed outcome, and a fresh egg is faster than a half-born one.</p>
+  <p>Stop at the first failed step. Skip straight to step 9 (or <code>c7</code> / <code>x7</code> / <code>h7</code>), <code>report_outcome</code> with <code>success: false</code> and a one-line message naming the step and what broke. Don't try to recover the cell in place — the CLI sweeps the egg on a failed outcome, and a fresh egg is faster than a half-born one.</p>
 
 </div>
 </body>

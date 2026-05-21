@@ -1,0 +1,22 @@
+# hermes harness config — __MODEL__ / __THINKING__ substituted at birth
+# (birthing ritual, hermes branch).
+#
+# `provider: cells` resolves to the cells proxy provider registered by the
+# plugin at .hermes/plugins/model-providers/cells/ — a codex_responses
+# (OpenAI Responses API) provider pointed at proxy.cells.md/codex. The proxy
+# swaps the cell's OPENAI_CODEX_API_KEY bearer (= CELLS_PROXY_SECRET) for the
+# real ChatGPT-subscription token, so a hermes cell runs on the subscription,
+# never the metered API.
+#
+# KNOWN BLOCKER (2026-05-20): turns are edge-blocked by the ChatGPT codex
+# backend — HTTP 403 "Your request was blocked", instant — a request-
+# fingerprint mismatch at the proxy/wire boundary, not a config error. The
+# same proxy path serves codex and pi cells fine. See the "wire" section of
+# docs/proposals/hermes-harness.html.
+model:
+  default: __MODEL__
+  provider: cells
+
+agent:
+  # Reasoning effort — low | medium | high | xhigh.
+  reasoning_effort: __THINKING__

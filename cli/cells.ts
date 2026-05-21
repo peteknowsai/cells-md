@@ -148,6 +148,7 @@ const HARNESS_OPTIONS: SelectOption[] = [
   { value: "pi",          label: "pi" },
   { value: "claude-code", label: "claude-code", hint: "(Anthropic models via Max)" },
   { value: "codex",       label: "codex",       hint: "(OpenAI models via ChatGPT sub)" },
+  { value: "hermes",      label: "hermes",      hint: "(Nous Research agent · GPT-5.5 via ChatGPT sub)" },
 ];
 
 const MODEL_OPTIONS: SelectOption[] = [
@@ -221,12 +222,15 @@ function thinkingOptionsFor(modelKey: ModelKey): SelectOption[] {
 function thinkingOptionsForHarness(harness: string, modelKey: ModelKey): SelectOption[] {
   if (harness === "claude-code") return THINKING_OPTIONS_CLAUDE_CODE;
   if (harness === "codex") return THINKING_OPTIONS_CODEX;
+  // hermes runs gpt-5.5 — same reasoning-effort scale as codex.
+  if (harness === "hermes") return THINKING_OPTIONS_CODEX;
   return thinkingOptionsFor(modelKey);
 }
 
 function defaultThinkingForHarness(harness: string, modelKey: ModelKey): string {
   if (harness === "claude-code") return "high";
   if (harness === "codex") return "medium";
+  if (harness === "hermes") return "medium";
   return defaultThinkingFor(modelKey);
 }
 
@@ -235,6 +239,7 @@ function defaultThinkingForHarness(harness: string, modelKey: ModelKey): string 
 function thinkingPromptFor(harness: string): string {
   if (harness === "claude-code") return "Effort?";
   if (harness === "codex") return "Reasoning?";
+  if (harness === "hermes") return "Reasoning?";
   return "Thinking?";
 }
 
@@ -281,7 +286,7 @@ type Cell = {
   hatched_from?: string;
   // Which agent runtime the cell runs — host-bridge reads this to pick the
   // spawn path. Absent on older entries; default to "pi" at read time.
-  harness?: "pi" | "claude-code" | "codex";
+  harness?: "pi" | "claude-code" | "codex" | "hermes";
   // Model fallback chain (per-cell). First entry is the primary; pi-coding-agent
   // advances to the next entry on retry-exhaustion via the patch in
   // apply-pi-patches.sh. Mirrored here so harden-birth can verify the
@@ -1569,6 +1574,13 @@ async function cmdTui(name: string, extra: string[] = []) {
     } else {
       agentInvocation = `if [ -s /root/.cell/codex-main-thread ]; then codex resume "$(cat /root/.cell/codex-main-thread)"; else codex; fi`;
     }
+  } else if (harness === "hermes") {
+    // hermes's own Ink TUI. Bare `hermes` (no subcommand) launches it; extra
+    // args pass through. hermes manages session resume itself — the in-TUI
+    // resume picker, or display.tui_auto_resume_recent in its config.
+    agentInvocation = extra.length
+      ? `hermes ${extra.map(quote).join(" ")}`
+      : `hermes`;
   } else {
     // pi's TUI. Point at the canonical session dir (root-<name>/) — pi
     // auto-loads main.jsonl by default, so TUI lands in the same thread
@@ -2238,15 +2250,15 @@ async function cmdCreate(name: string | undefined, opts: CreateOpts): Promise<vo
       } else if (i === 1) {
         // Coding-machine harnesses run a single subscription-backed model,
         // so the model picker would be a one-option no-op — pin it and
-        // skip to the next step. claude-code → opus (Max sub); codex →
-        // gpt-5.5 (ChatGPT sub).
+        // skip to the next step. claude-code → opus (Max sub); codex and
+        // hermes → gpt-5.5 (ChatGPT sub).
         const harnessSel = answers[0] as string;
         if (harnessSel === "claude-code") {
           answers[1] = "opus";
           i++;
           continue;
         }
-        if (harnessSel === "codex") {
+        if (harnessSel === "codex" || harnessSel === "hermes") {
           answers[1] = "gpt-5.5";
           i++;
           continue;
@@ -2332,8 +2344,8 @@ async function cmdCreate(name: string | undefined, opts: CreateOpts): Promise<vo
     console.error(`cell '${name}' already exists in registry`);
     process.exit(1);
   }
-  if (harness !== "pi" && harness !== "claude-code" && harness !== "codex") {
-    console.error(`unknown harness '${harness}' — choose: pi, claude-code, codex`);
+  if (harness !== "pi" && harness !== "claude-code" && harness !== "codex" && harness !== "hermes") {
+    console.error(`unknown harness '${harness}' — choose: pi, claude-code, codex, hermes`);
     process.exit(1);
   }
   const isAnthropicModel = MODEL_IDS[modelKey].provider === "anthropic";
@@ -2347,6 +2359,13 @@ async function cmdCreate(name: string | undefined, opts: CreateOpts): Promise<vo
     // subscription path — gpt-5.5-pro (provider "openai") is the metered
     // API, which the codex harness deliberately does not use.
     console.error(`the codex harness runs the ChatGPT-subscription model only — use --model=gpt-5.5`);
+    process.exit(1);
+  }
+  if (harness === "hermes" && MODEL_IDS[modelKey].provider !== "openai-codex") {
+    // The hermes harness runs Nous Research's hermes-agent on the ChatGPT
+    // subscription (via proxy.cells.md/codex) — the same subscription path
+    // codex uses. Only the openai-codex provider is that path.
+    console.error(`the hermes harness runs the ChatGPT-subscription model only — use --model=gpt-5.5`);
     process.exit(1);
   }
   if (harness === "pi" && isAnthropicModel) {
@@ -2403,7 +2422,7 @@ async function cmdCreate(name: string | undefined, opts: CreateOpts): Promise<vo
     try {
       await wakePoolMember(c.wellName, c.tier);
       await ensureWellHasIp(c.wellName);
-      if (harness === "claude-code" || harness === "codex") {
+      if (harness === "claude-code" || harness === "codex" || harness === "hermes") {
         await stripAnthropicKeyFromWell(c.wellName);
       }
       return c;
@@ -2974,6 +2993,22 @@ echo "codex: $(codex --version 2>&1 | head -1 || echo MISSING)"`,
   );
   if (!codexInstall.ok) {
     throw new Error(`codex install failed: ${(codexInstall.stderr + codexInstall.stdout).slice(-600)}`);
+  }
+  // 5c. hermes harness bake — install Nous Research's hermes-agent so every
+  //     generic egg ships the hermes harness alongside pi/claude/codex.
+  //     hermes isn't in the wells base image; cells bakes it with Nous's own
+  //     installer (uv-based). --skip-setup skips the interactive wizard,
+  //     --skip-browser skips the Playwright/Chromium download. Pinned to a
+  //     release tag — hermes's TUI-gateway JSON-RPC protocol moves fast, so
+  //     pin to the version the harness was built + verified against.
+  const hermesInstall = await wellExecCapture(
+    wellName,
+    `set -euo pipefail
+curl -fsSL https://raw.githubusercontent.com/NousResearch/hermes-agent/v2026.5.16/scripts/install.sh | sudo bash -s -- --skip-setup --skip-browser --branch v2026.5.16
+echo "hermes: $(hermes --version 2>&1 | head -1 || echo MISSING)"`,
+  );
+  if (!hermesInstall.ok) {
+    throw new Error(`hermes install failed: ${(hermesInstall.stderr + hermesInstall.stdout).slice(-600)}`);
   }
   // 6. Apply pi patches with sudo (writes into /usr/lib/node_modules).
   const patch = await wellExecCapture(wellName, `sudo bash /root/scripts/apply-pi-patches.sh`);

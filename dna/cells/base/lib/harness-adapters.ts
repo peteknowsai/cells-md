@@ -36,6 +36,10 @@ export interface AdapterHost {
   // The id of an outstanding switch_session RPC (pi only); the adapter sets
   // it in startHandshake and clears it when the matching ack arrives.
   awaitingSwitchAck: string | null;
+  // hermes's gateway session id (8-hex), captured from the session.create
+  // response during the handshake; prompt.submit / interrupt carry it.
+  // Null until the handshake completes.
+  hermesSessionId: string | null;
   // Write one already-serialized line to the harness process's stdin.
   writeLine(line: string): boolean;
   log(msg: string): void;
@@ -65,8 +69,9 @@ export interface HarnessAdapter {
   translateOutbound(sess: AdapterHost, line: string): { lines: string[]; ready: boolean };
   // persistent only: translate one inbound client command (pi-RPC-shaped,
   // e.g. {type:"prompt",message}) into the line to write on the process's
-  // stdin. Return null to drop the command.
-  translateInbound?(cmd: any): string | null;
+  // stdin. Return null to drop the command. `sess` carries adapter state —
+  // hermes reads sess.hermesSessionId to address prompt.submit.
+  translateInbound?(cmd: any, sess?: AdapterHost): string | null;
   // per-turn only: the remote command for one prompt. Resumes
   // sess.codexThreadId when set; the prompt arrives as argv, stdin closed.
   buildTurnCmd?(sess: AdapterHost, prompt: string): string;
@@ -549,8 +554,150 @@ function extractCodexJsonText(stdout: string): string | null {
   return text;
 }
 
+// hermes runs Nous Research's TUI-gateway JSON-RPC server — the same stdio
+// server hermes's own TUI drives. Like pi and claude-code it's a persistent
+// harness: one long-lived process, prompts in, an event stream out. Request
+// id for the one handshake RPC (session.create):
+const HERMES_SESSION_RPC = "cells-session";
+
+export const hermesAdapter: HarnessAdapter = {
+  mode: "persistent",
+  // Launch hermes's TUI-gateway server straight from the egg's hermes venv
+  // (no Ink TUI in the middle). `-u` is mandatory — Python stdout to a pipe
+  // is fully buffered, and a buffered gateway never flushes its
+  // `gateway.ready` frame, so the handshake would hang. HERMES_PYTHON_SRC_ROOT
+  // makes the gateway's in-process imports resolve; HOME=/root so hermes
+  // finds /root/.hermes/. bash -lc sources /etc/profile.d/cells-env.sh, which
+  // exports OPENAI_CODEX_API_KEY (= CELLS_PROXY_SECRET) — the proxy bearer.
+  buildRemoteCmd() {
+    const H = "/usr/local/lib/hermes-agent";
+    return (
+      `exec sudo bash -lc 'export HOME=/root TERMINAL_CWD=/root ` +
+      `HERMES_HOME=/root/.hermes HERMES_PYTHON_SRC_ROOT=${H} PYTHONUNBUFFERED=1; ` +
+      `cd /root && exec ${H}/venv/bin/python -u -m tui_gateway.entry'`
+    );
+  },
+  // hermes greets with a `gateway.ready` event unprompted (like claude-code's
+  // system/init) — nothing to send before input. translateOutbound drives
+  // the session handshake and flips `ready` once the session id is captured.
+  startHandshake() {
+    /* no-op — see translateOutbound */
+  },
+  translateOutbound(sess, line) {
+    let evt: any;
+    try { evt = JSON.parse(line); }
+    catch { return { lines: [], ready: false }; }
+
+    // Response to our session.create handshake RPC → capture the gateway
+    // session id; the harness is now ready for prompts.
+    if (evt?.id === HERMES_SESSION_RPC) {
+      const sid = evt?.result?.session_id;
+      if (typeof sid === "string" && sid) {
+        sess.hermesSessionId = sid;
+        sess.log(`hermes gateway session ${sid}`);
+        return { lines: [], ready: true };
+      }
+      sess.err(`hermes session.create failed: ${JSON.stringify(evt?.error ?? evt).slice(0, 200)}`);
+      return { lines: [], ready: false };
+    }
+
+    // Gateway events: {method:"event", params:{type, session_id, payload}}.
+    if (evt?.method === "event" && typeof evt?.params?.type === "string") {
+      const type = evt.params.type as string;
+      const payload = evt.params.payload ?? {};
+      // gateway.ready → open the cell's session, then we're ready.
+      if (type === "gateway.ready") {
+        sess.writeLine(JSON.stringify({
+          jsonrpc: "2.0", id: HERMES_SESSION_RPC,
+          method: "session.create", params: { cols: 80 },
+        }));
+        return { lines: [], ready: false };
+      }
+      // message.delta → one chunk of assistant text.
+      if (type === "message.delta" && typeof payload.text === "string") {
+        return {
+          lines: [JSON.stringify({ type: "message_update", assistantMessageEvent: { type: "text_delta", delta: payload.text } })],
+          ready: false,
+        };
+      }
+      // message.complete → the turn finished. Text already streamed via the
+      // deltas, so emit only the terminal event (or surface the error).
+      if (type === "message.complete") {
+        if (payload?.status === "error") {
+          const error = String(payload?.text || "hermes error").slice(0, 300);
+          return { lines: [JSON.stringify({ type: "response", success: false, error })], ready: false };
+        }
+        return { lines: [JSON.stringify({ type: "agent_end" })], ready: false };
+      }
+      // error → terminal failure for the turn.
+      if (type === "error") {
+        const error = String(payload?.message || "hermes error").slice(0, 300);
+        return { lines: [JSON.stringify({ type: "response", success: false, error })], ready: false };
+      }
+      // message.start, tool.*, status.update, reasoning — nothing the talk
+      // CLI renders today; drop.
+      return { lines: [], ready: false };
+    }
+
+    // A JSON-RPC error response to a prompt.submit (e.g. 4009 session busy).
+    if (evt?.id && evt?.error) {
+      const error = String(evt.error?.message || "hermes rpc error").slice(0, 300);
+      return { lines: [JSON.stringify({ type: "response", success: false, error })], ready: false };
+    }
+    return { lines: [], ready: false };
+  },
+  // The talk CLI speaks pi RPC; hermes's gateway speaks JSON-RPC 2.0.
+  // prompt.submit / session.interrupt address the gateway session id captured
+  // during the handshake. host-bridge translates at write time — after the
+  // handshake — so sess.hermesSessionId is set whenever a prompt reaches here.
+  translateInbound(cmd, sess) {
+    const sid = sess?.hermesSessionId;
+    if (!sid) return null;
+    if (cmd?.type === "prompt" && typeof cmd.message === "string") {
+      return JSON.stringify({
+        jsonrpc: "2.0", id: cmd.id ?? `cells-prompt-${Date.now()}`,
+        method: "prompt.submit", params: { session_id: sid, text: cmd.message },
+      });
+    }
+    if (cmd?.type === "abort") {
+      return JSON.stringify({
+        jsonrpc: "2.0", id: `cells-abort-${Date.now()}`,
+        method: "session.interrupt", params: { session_id: sid },
+      });
+    }
+    return null; // ping / set_model / others — no hermes-gateway equivalent
+  },
+  // agent-comms one-shot. v1 uses hermes's `-z` one-shot mode — a fresh,
+  // context-free turn (the same "no main" path pi/claude/codex fall back to
+  // when mainRef is empty). hermes's own cross-session memory still gives the
+  // sibling continuity; a later revision can branch the live gateway session
+  // for full main-conversation context. `hermes -z` prints just the final
+  // response text on stdout. bash -lc sources cells-env.sh for the proxy key.
+  async forkAndAsk({ prompt, cellName, timeoutMs = 90_000 }) {
+    void cellName;
+    try {
+      const r = await runProcess({
+        cmd: [
+          "bash", "-lc",
+          `export HOME=/root; cd /root && exec hermes -z "$1"`,
+          "hermes-fork",
+          prompt,
+        ],
+        timeoutMs,
+      });
+      if (r.exitCode !== 0) {
+        return { ok: false, error: `hermes -z exit ${r.exitCode}: ${r.stderr.slice(0, 200)}` };
+      }
+      return { ok: true, text: r.stdout.trim() };
+    } catch (e) {
+      return { ok: false, error: String(e).slice(0, 200) };
+    }
+  },
+};
+
 export function getAdapter(harness: string): HarnessAdapter {
   if (harness === "claude-code") return claudeCodeAdapter;
   if (harness === "codex") return codexAdapter;
+  if (harness === "hermes") return hermesAdapter;
   return piAdapter;
 }
