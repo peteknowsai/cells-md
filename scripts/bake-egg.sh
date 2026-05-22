@@ -63,8 +63,12 @@ fi
 # tar-extract is overlay-only (it overwrites and adds, never deletes), and
 # the fresh files still carry their __NAME__/__MODEL__/__THINKING__
 # placeholders — the SSH block below does the substitution on these copies.
+# --no-same-owner: the tarball is built on the Mac, so its entries carry the
+# Mac uid (501). Without this, root's tar restores 501:staff on every
+# extracted file — invisible inside the VM and inconsistent with /root. The
+# flag makes tar assign extracted files to the extracting user (root).
 tar czf - -C "$REPO_ROOT/dna/cells/base" . \
-  | well exec -s "$EGG_WELL" -- bash -c 'sudo bash -c "cd /root && tar xzf -"'
+  | well exec -s "$EGG_WELL" -- bash -c 'sudo bash -c "cd /root && tar --no-same-owner -xzf -"'
 
 # Single SSH session for everything on the egg.
 {

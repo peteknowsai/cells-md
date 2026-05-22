@@ -36,11 +36,14 @@ The last line of output must be `BAKE-OK`. If it isn't, jump to **Failure**.
 Pick by harness — same egg, different CLI:
 
 ```bash
-# pi cells
-well exec -s "<EGG_WELL>" -- bash -lc "cd /root && source /etc/profile.d/cells-env.sh && timeout 30 pi --print 'say ok' && echo PI-OK"
+# pi cells — sudo + HOME=/root so pi reads /root/.pi/. Without sudo, `well
+# exec` lands as the `well` user with HOME=/home/well and the smoke test
+# verifies the wrong config tree (not the one the live cell runs from).
+well exec -s "<EGG_WELL>" -- bash -lc "sudo bash -lc 'export HOME=/root; cd /root && source /etc/profile.d/cells-env.sh && timeout 30 pi --print \"say ok\"' && echo PI-OK"
 
-# claude-code cells
-well exec -s "<EGG_WELL>" -- bash -lc "cd /root && source /etc/profile.d/cells-env.sh && timeout 60 claude --print 'say ok' && echo CLAUDE-OK"
+# claude-code cells — sudo + HOME=/root so claude reads /root/.claude/. Same
+# reason as pi: a bare `well exec` runs as `well` and tests /home/well/.claude.
+well exec -s "<EGG_WELL>" -- bash -lc "sudo bash -lc 'export HOME=/root; cd /root && source /etc/profile.d/cells-env.sh && timeout 60 claude --print \"say ok\"' && echo CLAUDE-OK"
 
 # codex cells — sudo + HOME=/root so codex reads /root/.codex/config.toml
 # (the proxy-routing config that swaps OPENAI_CODEX_API_KEY for the real

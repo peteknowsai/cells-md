@@ -3073,7 +3073,7 @@ echo "bun: $(bun --version 2>&1 | head -1 || echo MISSING)"`,
     `set -euo pipefail
 sudo npm install -g @mariozechner/pi-coding-agent
 sudo bash -lc 'export HOME=/root; cd /root && pi install -l npm:pi-web-access'
-echo "pi: $(pi --version 2>&1 | head -1 || echo MISSING)"`,
+echo "pi: $(sudo bash -lc 'export HOME=/root; pi --version' 2>&1 | head -1 || echo MISSING)"`,
   );
   if (!piInstall.ok) {
     throw new Error(`pi install failed: ${(piInstall.stderr + piInstall.stdout).slice(-600)}`);
@@ -3087,7 +3087,7 @@ echo "pi: $(pi --version 2>&1 | head -1 || echo MISSING)"`,
     wellName,
     `set -euo pipefail
 sudo npm install -g @openai/codex@0.130.0
-echo "codex: $(codex --version 2>&1 | head -1 || echo MISSING)"`,
+echo "codex: $(sudo bash -lc 'export HOME=/root; codex --version' 2>&1 | head -1 || echo MISSING)"`,
   );
   if (!codexInstall.ok) {
     throw new Error(`codex install failed: ${(codexInstall.stderr + codexInstall.stdout).slice(-600)}`);
@@ -3103,7 +3103,7 @@ echo "codex: $(codex --version 2>&1 | head -1 || echo MISSING)"`,
     wellName,
     `set -euo pipefail
 curl -fsSL https://raw.githubusercontent.com/NousResearch/hermes-agent/v2026.5.16/scripts/install.sh | sudo bash -s -- --skip-setup --skip-browser --branch v2026.5.16
-echo "hermes: $(hermes --version 2>&1 | head -1 || echo MISSING)"`,
+echo "hermes: $(sudo bash -lc 'export HOME=/root; hermes --version' 2>&1 | head -1 || echo MISSING)"`,
   );
   if (!hermesInstall.ok) {
     throw new Error(`hermes install failed: ${(hermesInstall.stderr + hermesInstall.stdout).slice(-600)}`);
@@ -5707,7 +5707,7 @@ node -e '
   }
 '
 `.trim();
-  const settings = await wellExecCapture(cellName, updateScript, { user: "cell" });
+  const settings = await wellExecCapture(cellName, updateScript, { user: "root" });
   if (!settings.ok) {
     console.error(`✗ ${cellName}: settings.json update failed — ${settings.stderr.trim()}`);
     return false;
@@ -5736,7 +5736,7 @@ node -e '
 rm -rf /root/.pi/extensions/${extName}
 echo removed
 `.trim();
-  const r = await wellExecCapture(cellName, script, { user: "cell" });
+  const r = await wellExecCapture(cellName, script, { user: "root" });
   if (!r.ok) {
     console.error(`✗ ${cellName}: remove failed — ${r.stderr.trim()}`);
     return false;
@@ -6090,7 +6090,7 @@ function renderExtensionMd(extName: string, meta: ExtensionMeta): string {
 async function wellExecCapture(
   name: string,
   script: string,
-  opts?: { user?: "cell" | "well" },
+  opts?: { user?: "root" | "well" },
 ): Promise<{ ok: boolean; stdout: string; stderr: string }> {
   // Wells's wells (2026-05-09 base) exhibit intermittent SSH resets:
   // `kex_exchange_identification: read: Connection reset by peer` on
@@ -6098,16 +6098,19 @@ async function wellExecCapture(
   // investigating. Retry once with a brief backoff on that specific
   // signature so a single flaky connection doesn't fail the whole bake.
   //
-  // user: defaults to "well" (substrate user, matches `well exec`'s default).
-  // Pass user="cell" for the agent's effective context: root with HOME=/root
-  // so tools that key off HOME (codex via CODEX_HOME, claude via .claude)
-  // find their cell-scoped config. The well user is in NOPASSWD sudoers per
-  // the wells base, so the sudo step is silent. Reads of /root can stay
-  // user="well" — /root is mode 0755.
+  // user: when omitted, no `--user` is passed and `well exec`'s own default
+  // applies — as of the 2026-05-22 wells change (6488eaf) that's `--user
+  // root` with HOME=/root, so a bare call already lands in the cell's
+  // context. Pass user="root" to additionally wrap in an explicit
+  // `sudo … HOME=/root`: redundant belt over the wells default, kept so a
+  // call site's correctness doesn't hinge on the substrate version. Either
+  // way tools that key off HOME (codex via CODEX_HOME, claude via .claude)
+  // find their /root config. The "well" literal just means "pass no
+  // --user"; it no longer implies the command runs as the well user.
   const KEX_RESET = /kex_exchange_identification|Connection reset by peer/i;
   const user = opts?.user ?? "well";
   const args =
-    user === "cell"
+    user === "root"
       ? ["well", "exec", "-s", name, "--", "sudo", "bash", "-lc", `export HOME=/root; ${script}`]
       : ["well", "exec", "-s", name, "--", "bash", "-lc", script];
   for (let attempt = 0; attempt < 2; attempt++) {
@@ -7506,10 +7509,11 @@ export PATH="$HOME/.bun/bin:/usr/local/bin:$PATH"
 cd /root
 bun install --frozen-lockfile
 sudo npm install -g @mariozechner/pi-coding-agent@latest
-# Sanity-check: pi must be runnable from a non-interactive shell.
-which pi >/dev/null && pi --version
-# Pre-load common pi extension into the image (default-checked in the CLI).
-pi install -l npm:pi-web-access
+# Sanity-check pi + pre-load the default extension. Both run under
+# sudo + HOME=/root so the extension lands in /root/.pi/ — the tree the
+# live cell reads. A bare invocation here runs as the well user and
+# would install pi-web-access to /home/well/.pi/, invisible to the cell.
+which pi >/dev/null && sudo bash -lc 'export HOME=/root; pi --version && pi install -l npm:pi-web-access'
 chmod +x /root/bin/cells
 ln -sf /root/bin/cells ~/.local/bin/cells`);
   if (!r.ok) {

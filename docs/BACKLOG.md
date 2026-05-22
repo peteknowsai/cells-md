@@ -5,6 +5,20 @@ Newest at top. Clear an item when it's done (git history keeps the record).
 
 ---
 
+## `cells pool` / `cells egg` with no args silently bake an egg
+
+Both subcommands, run bare, *bake a new generic pool egg* — they spin up a
+real VM as a side effect. There's no read-only "show me the pool" form, so
+anyone (or any agent) reaching for an obvious status command instead grows
+the pool by one VM per call. Surfaced 2026-05-22 when a debugging session
+ran `cells pool` and `cells egg` expecting a listing and created two stray
+eggs.
+
+**Fix:** no-arg `pool`/`egg` should print pool status (counts by
+standing/power, ages); move baking behind an explicit `pool bake` /
+`egg bake` subcommand. Harmless spare eggs get claimed or culled, but the
+footgun shouldn't exist.
+
 ## pi fork-and-ask is slow and gets slower over time
 
 `cells talk` (agent-comms) forks the peer's `main` session read-only so it
