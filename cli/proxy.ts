@@ -855,9 +855,16 @@ async function bridgeWellSsh(body: { wellName: string; script: string }): Promis
   if (typeof body.script !== "string" || body.script.length === 0) {
     return new Response("bad script", { status: 400 });
   }
-  const proc = Bun.spawn(["well", "exec", "-s", body.wellName, "--", "bash", "-c", body.script], {
-    stdio: ["ignore", "pipe", "pipe"],
-  });
+  // Mirror cells.ts wellExecCapture: lift to root with HOME=/root explicitly.
+  // mother's well_exec only ever imprints /root (no user param), and the
+  // birth smoke tests run a harness — pi/claude/codex/hermes all key off
+  // HOME. A plain `well exec` lands as the `well` user unless the substrate
+  // default says otherwise; wrapping here keeps mother correct regardless of
+  // the wells default (and is what left /home/well/.claude on pre-flip cells).
+  const proc = Bun.spawn(
+    ["well", "exec", "-s", body.wellName, "--", "sudo", "bash", "-lc", `export HOME=/root; ${body.script}`],
+    { stdio: ["ignore", "pipe", "pipe"] },
+  );
   const [stdout, stderr] = await Promise.all([
     new Response(proc.stdout).text(),
     new Response(proc.stderr).text(),
