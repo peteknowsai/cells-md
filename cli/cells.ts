@@ -9,6 +9,7 @@ import * as readline from "node:readline/promises";
 import { createHash, randomBytes } from "node:crypto";
 import { poolKey, type Variant } from "./lib/variant-signature";
 import { planReconcileEvictions } from "./lib/reconcile";
+import { needsSeal } from "./lib/hibernate-ready";
 import { SECRETS_PATH, readSecret } from "./lib/secrets";
 import {
   CHANNELS_PATH,
@@ -2859,10 +2860,9 @@ async function ensureHibernateReady(wellName: string): Promise<void> {
       headers: { Authorization: `Bearer ${await wellsToken()}` },
     });
     if (r.ok) ready = (await r.json() as { hibernate_ready?: boolean }).hibernate_ready;
-  } catch { /* unreachable welld → fall through and seal */ }
-  if (ready === true) return;            // already sealed — nothing to do
-  // false (rotted in the pool), or undefined (welld predates the field) — seal.
-  await sealWell(wellName);
+  } catch { /* unreachable welld → ready stays undefined → needsSeal → seal */ }
+  if (!needsSeal(ready)) return;         // already sealed — nothing to do
+  await sealWell(wellName);              // false (pool rot) or undefined (old welld)
 }
 
 // Register the `site` systemd service on a cell via welld's services API.
