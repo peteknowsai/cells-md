@@ -28,10 +28,13 @@ import { getAdapter, type HarnessAdapter, type AdapterHost } from "../dna/cells/
 const PORT = Number(process.env.HOST_BRIDGE_PORT ?? 7880);
 const WELL_API = process.env.WELL_API_URL ?? "http://127.0.0.1:7878";
 const LOG_DIR = join(homedir(), ".cells", "logs");
-// Default 30min — long enough that "talk again after grabbing coffee" still
-// hits a warm session. /prewarm is a no-op when the session is already warm,
-// so birth's prewarm fires this timer too if no talk follows.
-const IDLE_TTL_MS = Number(process.env.HOST_BRIDGE_IDLE_TTL_MS ?? 30 * 60_000);
+// Default 30s — MUST stay shorter than welld's auto_sleep_seconds (60s
+// default) or hibernation breaks fleet-wide: an open ssh socket counts as
+// welld activity, so a 30min TTL means cells you've talked to in the last
+// 30min never hibernate. Wake from hibernation is sub-second, so the
+// "talk again after coffee" optimization isn't worth losing hibernation
+// over. Override via HOST_BRIDGE_IDLE_TTL_MS if a specific workflow needs it.
+const IDLE_TTL_MS = Number(process.env.HOST_BRIDGE_IDLE_TTL_MS ?? 30_000);
 const PREWARM_TIMEOUT_MS = Number(process.env.HOST_BRIDGE_PREWARM_TIMEOUT_MS ?? 30_000);
 
 mkdirSync(LOG_DIR, { recursive: true });
@@ -624,3 +627,19 @@ console.log(`  idle TTL: ${Math.round(IDLE_TTL_MS / 1000)}s`);
 console.log(`  GET  /healthz`);
 console.log(`  POST /prewarm?cell=<name> (Bearer)`);
 console.log(`  WS   /agent?cell=<name>   (Bearer ${(CELLS_PROXY_SECRET as string).slice(0, 10)}...)`);
+
+// Clean shutdown — kill every session's ssh subprocess before we go.
+// Without this, launchd restart (or any signal) orphans the ssh procs:
+// they keep the cell's port-22 open from the Mac, welld counts that as
+// activity, and the cell never hibernates. Once orphaned there's no
+// parent to shut them down — they'd hold the cell warm forever.
+function shutdownAll(signal: NodeJS.Signals) {
+  console.log(`received ${signal}, shutting down ${sessions.size} session(s)`);
+  for (const sess of sessions.values()) {
+    try { sess.shutdown(); } catch {}
+  }
+  process.exit(0);
+}
+process.on("SIGTERM", shutdownAll);
+process.on("SIGINT", shutdownAll);
+process.on("SIGHUP", shutdownAll);
