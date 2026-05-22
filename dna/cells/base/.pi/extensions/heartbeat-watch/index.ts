@@ -27,9 +27,10 @@ const DEBOUNCE_MS = 2000;
 const HEARTBEAT_FILENAME = "HEARTBEAT.md";
 
 function readSelfName(): string {
-  // hostname matches the cell name by convention (set at well-create).
-  // os.hostname() works under Node and Bun. Fall back to env, then "unknown".
-  return os.hostname() || process.env.CELL_NAME || "unknown";
+  // CELL_NAME (set in the cell environment at birth) is the authoritative
+  // registry name. Hostname is only a fallback — it is often the egg id
+  // (e.g. "egg-0f7d66"), which pulse cannot `cells talk`.
+  return process.env.CELL_NAME || os.hostname() || "unknown";
 }
 
 async function postHeartbeat(cell: string, content: string, secret: string): Promise<void> {

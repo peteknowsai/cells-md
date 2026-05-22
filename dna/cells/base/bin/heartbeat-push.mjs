@@ -70,8 +70,10 @@ async function main() {
     return;
   }
 
-  // hostname == cell name == registry name, by convention (set at well-create).
-  const cell = os.hostname() || process.env.CELL_NAME || "unknown";
+  // CELL_NAME (set in the cell environment at birth) is the authoritative
+  // registry name. Hostname is only a fallback — on claude-code cells it is
+  // often the egg id (e.g. "egg-0f7d66"), which pulse cannot `cells talk`.
+  const cell = process.env.CELL_NAME || os.hostname() || "unknown";
   const content = fs.readFileSync(heartbeatPath, "utf-8");
 
   try {
