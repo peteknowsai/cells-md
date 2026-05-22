@@ -1,0 +1,127 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Bridge Direction Flip</title>
+<link rel="stylesheet" href="../_assets/doc.css">
+</head>
+<body>
+<div class="page">
+
+  <div class="doc-header">
+    <div class="crumb">cells <span class="sep">/</span> proposals <span class="sep">/</span> bridge direction flip</div>
+    <div>migration plan</div>
+  </div>
+
+  <h1>Bridge Direction Flip</h1>
+  <p class="subtitle">Collapse the two-hostname-per-cell scheme to one, by reversing who dials the bridge WebSocket.</p>
+
+  <div class="callout">
+    <p><strong>Status — shipped 2026-05-22.</strong> All six phases executed: the doorbell, the flip, the 8-cell rollout, the dead-path strip, the WebSocket Hibernation API, and the cruft sweep. One addition surfaced mid-rollout — a <strong>bridge heartbeat</strong> on the supervisor: a hibernated-then-thawed well leaves the supervisor holding a dead socket Bun never raises a <code>close</code> for, so the supervisor pings every 15s and reconnects after three unanswered beats. Two known follow-ups: <code>nfv-market-pi</code>'s well is substrate-dead (<code>lume restore-state</code> permission-denied — flipped in code, pending well recovery), and several wells wake from hibernation with a skewed clock (a pre-existing wells-substrate issue, independent of this flip).</p>
+  </div>
+
+  <div class="callout">
+    <p>Every cell has <em>two</em> public hostnames. This plan removes one of them — and with it the cloudflared tunnel hop, the proxy's well-routing, and the hostname-shape regex that has already caused outages. Nothing about how a cell is used changes. The work is real but stages cleanly; the fleet is migrated one cell at a time.</p>
+  </div>
+
+  <h2>The problem</h2>
+
+  <p>A cell is two machines in two places:</p>
+  <dl class="kv">
+    <dt>The Worker</dt>
+    <dd><code>&lt;cell&gt;.cells.md</code> — runs on Cloudflare, always awake. The cell's public face: its site, its inbox.</dd>
+    <dt>The well VM</dt>
+    <dd>A little Linux VM on the Mac. Runs the agent. Hibernates when idle.</dd>
+  </dl>
+
+  <p>They keep a WebSocket open between them — the bridge. Today the <strong>Worker dials into the VM</strong>: its Durable Object opens <code>wss://&lt;well&gt;.cells.md/agent</code>. For a cloud Worker to reach a VM on a home network, every inbound dial has to travel:</p>
+
+  <p style="text-align:center"><code>Cloudflare&nbsp;→&nbsp;cloudflared&nbsp;tunnel&nbsp;→&nbsp;cli/proxy.ts&nbsp;→&nbsp;welld&nbsp;→&nbsp;VM:8080</code></p>
+
+  <p>That inbound path is why the VM needs its <em>own</em> second hostname (<code>&lt;well&gt;.cells.md</code>, e.g. <code>cells-pulse.cells.md</code> — distinct from <code>pulse.cells.md</code>), why <code>cli/proxy.ts</code> carries well-routing, and why there is a <code>WELL_HOST_RE</code> regex deciding what counts as a well hostname. That regex matched only <code>egg-*</code> wells and silently 404'd <code>cells-*</code> specials — the bug that broke <code>cells talk pulse</code>. The two-hostname scheme isn't cosmetic; it spawns a whole fragile layer.</p>
+
+  <h2>The fix: reverse the dial</h2>
+
+  <p>Outbound from a home network is trivial — no tunnel, no NAT punching; it's what every web request already does. So: <strong>let the VM dial out to the Worker</strong> instead.</p>
+
+  <p>The supervisor on the VM opens <code>wss://&lt;cell&gt;.cells.md/agent</code> — straight to the Worker, the same hostname the cell already owns. The Worker accepts it. That deletes the second hostname, the tunnel hop for the bridge, the proxy well-routing, and the regex.</p>
+
+  <h3>The catch, and the doorbell</h3>
+
+  <p>The Worker dialing in does a second, load-bearing job: a sleeping VM gets woken by the incoming dial. If the VM dials out instead, a sleeping cell holds no connection — so when a message arrives at the Worker for a sleeping cell, the Worker needs another way to wake it.</p>
+
+  <p>Split the two jobs apart. <strong>Waking</strong> is small — one request to <code>welld</code> (the daemon on the Mac that wakes VMs). <strong>Talking</strong> is the long-lived bridge. Today both ride the same heavy inbound machinery. After the flip:</p>
+
+  <ul>
+    <li><strong>Talking</strong> — the VM dials out. One hostname, no tunnel, no proxy.</li>
+    <li><strong>Waking</strong> — a "doorbell": the Worker calls <code>proxy.cells.md/wake</code>, a tiny bearer-gated endpoint that asks <code>welld</code> to wake the cell. <code>proxy.cells.md</code> already has a Cloudflare-to-Mac path (every cell's LLM calls use it) — the doorbell reuses that wire. No new contraption.</li>
+  </ul>
+
+  <p>Resulting flow for a message to a sleeping cell:</p>
+  <p style="text-align:center"><code>msg&nbsp;→&nbsp;Worker&nbsp;→&nbsp;(cell asleep)&nbsp;→&nbsp;ring&nbsp;proxy.cells.md/wake&nbsp;→&nbsp;welld&nbsp;wakes&nbsp;VM&nbsp;→&nbsp;VM&nbsp;dials&nbsp;in&nbsp;→&nbsp;conversation</code></p>
+
+  <h2>Target architecture</h2>
+  <table>
+    <thead><tr><th>Piece</th><th>Today</th><th>After</th></tr></thead>
+    <tbody>
+      <tr><td>Bridge WS</td><td>Worker DO dials <code>wss://&lt;well&gt;.cells.md/agent</code></td><td>VM supervisor dials <code>wss://&lt;cell&gt;.cells.md/agent</code></td></tr>
+      <tr><td>Worker <code>/agent</code></td><td>n/a</td><td>accepts the inbound WS, hands it to the DO</td></tr>
+      <tr><td>Supervisor <code>/agent</code></td><td><code>Bun.serve</code> listens for the inbound WS</td><td>removed — supervisor is now a WS client</td></tr>
+      <tr><td>Waking a sleeping cell</td><td>the inbound dial wakes it</td><td><code>proxy.cells.md/wake</code> doorbell → welld</td></tr>
+      <tr><td><code>&lt;well&gt;.cells.md</code></td><td>tunnel → proxy → welld</td><td>gone</td></tr>
+      <tr><td>proxy well-routing</td><td><code>isWellHost</code>, <code>WELL_HOST_RE</code>, WS forward</td><td>gone</td></tr>
+    </tbody>
+  </table>
+
+  <h2>Plan of work</h2>
+
+  <h3>Phase 0 — the doorbell <span style="font-weight:400;color:#888">· additive, zero risk</span></h3>
+  <p>Add <code>POST proxy.cells.md/wake</code> to <code>cli/proxy.ts</code> — bearer-gated, body <code>{cell}</code>, resolves the well name and wakes it via <code>welld</code> (the same <code>well start</code> path <code>ensureWellRunningForTalk</code> already uses). Ships and verifies on its own; nothing depends on it yet.</p>
+
+  <h3>Phase 1 — build the flip <span style="font-weight:400;color:#888">· one test cell</span></h3>
+  <ul>
+    <li><strong>Worker</strong> (<code>cli/worker/cell/</code>) — <code>index.ts</code> handles <code>GET /agent</code> upgrades; <code>cell-agent.ts</code> accepts the inbound WS (plain <code>ws.accept()</code> — the DO stays resident, exactly as it does holding the outbound WS today, so no in-memory state has to move). When <code>/inbox/append</code> arrives with no live WS, ring the doorbell and queue the message.</li>
+    <li><strong>Supervisor</strong> (<code>dna/cells/base/site/server.ts</code>) — drop the <code>/agent</code> listener; on boot dial <code>wss://${CELL_NAME}.cells.md/agent</code> with the bearer, reconnect with backoff on drop. The <code>:8080</code> local server (site, <code>/agent-wait</code>) stays.</li>
+    <li>Prove it end-to-end on one cell before touching the fleet.</li>
+  </ul>
+
+  <h3>Phase 2 — roll the fleet <span style="font-weight:400;color:#888">· 8 cells, one at a time</span></h3>
+  <p>The Worker and the supervisor must agree on direction, so each cell cuts over as a tight unit: deploy the new Worker, push the new <code>server.ts</code> DNA, restart the supervisor. That cell's bridge is down for the cutover window (~30–60s); the rest of the fleet is unaffected. Eight cells, sequential.</p>
+
+  <h3>Phase 3 — strip the dead path <span style="font-weight:400;color:#888">· after all cells migrated</span></h3>
+  <p>Remove from <code>cli/proxy.ts</code>: <code>isWellHost</code>, <code>WELL_HOST_RE</code>, <code>handleWellHttp</code>, the well WS forwarding. Remove <code>WELL_HOST</code> from the Worker's <code>wrangler.toml</code> template. Remove the stale <code>mother.cells.md</code> ingress from <code>cells-proxy-config.yml</code>.</p>
+
+  <h3>Phase 4 — hibernation <span style="font-weight:400;color:#888">· shipped</span></h3>
+  <p>Switched the inbound WS to Cloudflare's WebSocket Hibernation API (<code>state.acceptWebSocket</code>) so the DO evicts between messages instead of staying pinned. This required moving <em>all</em> cross-message DO state — not just <code>pendingAgentForks</code> but <code>currentTurn</code>, the <code>wsQueue</code>, and the pending-turn context — into a <code>state.storage</code> snapshot (<code>ensureLoaded</code>/<code>persist</code>), with <code>currentTurn</code> on its own key under a 120&nbsp;KiB guard. <code>setWebSocketAutoResponse</code> answers the heartbeat ping without un-hibernating. The doorbell already handles waking a DO-evicted cell — same path as a hibernated well.</p>
+
+  <h3>Phase 5 — sweep the cruft <span style="font-weight:400;color:#888">· independent, do any time</span></h3>
+  <p>Unrelated to the flip but surfaced by the proxy/tunnel diagnosis — dead artifacts worth clearing while the area is fresh. None of it is load-bearing; each item can be removed on its own.</p>
+  <dl class="kv">
+    <dt>18 orphan <code>cells-front-*</code> Workers</dt>
+    <dd>Cloudflare Workers left behind by deleted/renamed cells. Cross-check against the live registry, then <code>wrangler delete</code> each one with no matching cell. Outward-facing — confirm the list before deleting.</dd>
+    <dt>Broken <code>com.pete.cells-pi-patches</code> launchd job</dt>
+    <dd>Points at <code>proto/mother/dna/scripts/apply-pi-patches.sh</code> — a path that no longer exists; the job exits 127 on every run. <code>launchctl bootout</code> it and remove the plist.</dd>
+    <dt>3 stale <code>~/.cloudflared</code> configs</dt>
+    <dd><code>config.yml</code>, <code>config-dev.yml</code>, <code>splites-config.yml</code> — none referenced by a running tunnel. Delete.</dd>
+    <dt>Stale <code>mother.cells.md</code> ingress</dt>
+    <dd>Already covered by Phase 3 (<code>cells-proxy-config.yml</code>) — listed here only so the cruft inventory is complete.</dd>
+  </dl>
+
+  <h2>Risks</h2>
+  <dl class="kv">
+    <dt>Per-cell cutover gap</dt>
+    <dd>Each cell's bridge is briefly down mid-cutover. Contained to one cell; sequential rollout means a mistake is caught on cell #1, not fleet-wide.</dd>
+    <dt>Wake latency</dt>
+    <dd>A message to a sleeping cell now waits on doorbell → welld wake → VM boot → dial-in. Comparable to today's inbound-dial wake; not a regression.</dd>
+    <dt>Birth path</dt>
+    <dd><code>bake-egg.sh</code> already overlays <code>server.ts</code> and <code>deploy-cell-worker.sh</code> deploys whatever Worker code is in the repo — so cells born after Phase 1 lands are born flipped automatically. Just verify a fresh birth before declaring done.</dd>
+  </dl>
+
+  <div class="callout">
+    <p><strong>Net:</strong> one hostname per cell, the bridge no longer touches the tunnel or the proxy, and the <code>isWellHost</code> regex class of bug is gone for good. Staged so the fleet is never more than one cell at risk.</p>
+  </div>
+
+</div>
+</body>
+</html>

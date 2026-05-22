@@ -228,9 +228,47 @@ const hostState: AdapterHost = {
   onPiSetupAcked: () => onHarnessReady(),
 };
 
-// Active WebSocket clients (typically 0 or 1 — the cell Worker DO).
-type WsClient = { ws: any /* ServerWebSocket */ };
-const wsClients = new Set<WsClient>();
+// ---------------------------------------------------------------------------
+// Bridge WebSocket — outbound to the cell Worker.
+//
+// Post-direction-flip (2026-05-22): the supervisor dials OUT to
+// wss://<cell>.cells.md/agent and the cell Worker's Durable Object accepts.
+// This reverses the pre-flip arrangement (the DO dialed in to
+// <well>.cells.md/agent through the cloudflared tunnel + proxy) and
+// collapses the second hostname, the tunnel hop, and the proxy's
+// well-routing. A hibernated cell holds no connection; the DO rings a
+// doorbell (proxy.cells.md/wake) so welld wakes us, then we dial back in.
+// ---------------------------------------------------------------------------
+
+const BRIDGE_URL = `wss://${NAME}.cells.md/agent`;
+const BRIDGE_RECONNECT_MIN_MS = 1_000;
+const BRIDGE_RECONNECT_MAX_MS = 30_000;
+// A dial that never opens also won't surface close/error for a long time —
+// an OS TCP connect can stall for minutes, and the first dial after a
+// hibernation thaw (before the guest's networking is warm) is exactly when
+// it does. Bound it: abort a dial that hasn't opened within this window, so
+// the `bridgeConnecting` latch can't wedge every reconnect path forever.
+const BRIDGE_CONNECT_TIMEOUT_MS = 12_000;
+// Heartbeat. The well hibernates and thaws; when it does the bridge WS
+// dies, but Bun's WebSocket won't reliably surface a `close` on an idle
+// socket — the supervisor would sit on a zombie connection forever. So
+// every BRIDGE_PING_MS we ping; the DO auto-answers with a pong via
+// setWebSocketAutoResponse (without un-hibernating). We count heartbeats
+// that saw no frame come back — BRIDGE_MAX_MISSED in a row means the
+// socket is dead, reconnect. A *count* (not a wall-clock delta) so a
+// post-thaw clock skew can't mask the staleness.
+const BRIDGE_PING_MS = 15_000;
+const BRIDGE_MAX_MISSED = 3;
+const BRIDGE_PING_FRAME = JSON.stringify({ type: "ping" });
+
+let bridgeWs: WebSocket | null = null;
+let bridgeConnecting = false;
+let bridgeReconnectMs = BRIDGE_RECONNECT_MIN_MS;
+let bridgeReconnectTimer: Timer | null = null;
+// Heartbeat liveness: a frame (any frame, pong included) arrived since the
+// last tick? Cleared each tick; consecutive misses → zombie.
+let bridgeSawFrame = false;
+let bridgeMissedPings = 0;
 
 // ---------------------------------------------------------------------------
 // Lifecycle signaling.
@@ -300,9 +338,15 @@ function cancelPendingSleep() {
   }
 }
 
+// Send one pi-shaped event line up the bridge to the cell Worker DO.
+// (Kept the "broadcast" name through the direction flip — there is now
+// exactly one bridge, so this is a single send when it's up, a no-op
+// when it isn't. A dropped frame is acceptable: the well is hibernating
+// or reconnecting, and pi's session continuity is preserved on the well.)
 function broadcastToClients(line: string) {
-  for (const c of wsClients) {
-    try { c.ws.send(line); } catch (e) { console.error(`[bridge] ws send failed: ${String(e).slice(0, 120)}`); }
+  if (bridgeWs && bridgeWs.readyState === WebSocket.OPEN) {
+    try { bridgeWs.send(line); }
+    catch (e) { console.error(`[bridge] ws send failed: ${String(e).slice(0, 120)}`); }
   }
 }
 
@@ -459,9 +503,7 @@ function spawnHarness() {
   if (ADAPTER.mode === "per-turn") {
     // No persistent process to spawn. Mark ready so prompts flow into runTurn().
     harnessReady = true;
-    for (const c of wsClients) {
-      try { c.ws.send(JSON.stringify({ type: "bridge_ready" })); } catch {}
-    }
+    broadcastToClients(JSON.stringify({ type: "bridge_ready" }));
     if (HARNESS === "codex" && !CODEX_MAIN_THREAD) {
       console.error(`[bridge] codex-main-thread cache missing — first turn creates a fresh thread, conversation won't survive restarts`);
     } else if (HARNESS === "codex") {
@@ -577,9 +619,7 @@ function onHarnessReady() {
     }
     pendingPrompts.length = 0;
   }
-  for (const c of wsClients) {
-    try { c.ws.send(JSON.stringify({ type: "bridge_ready" })); } catch {}
-  }
+  broadcastToClients(JSON.stringify({ type: "bridge_ready" }));
 }
 
 // ---------------------------------------------------------------------------
@@ -729,7 +769,7 @@ const server = Bun.serve({
   // agent_reply arrives (default 120s, capped at 600s). Bun.serve's default
   // idle timeout is 10s — bump it past our hard cap.
   idleTimeout: 0,
-  async fetch(req, srv) {
+  async fetch(req) {
     const url = new URL(req.url);
 
     if (url.pathname === "/health") return new Response("ok");
@@ -769,16 +809,10 @@ const server = Bun.serve({
       });
     }
 
-    // WebSocket bridge endpoint. The cell Worker DO connects here.
-    if (url.pathname === "/agent") {
-      const auth = req.headers.get("authorization") ?? "";
-      if (!SECRET || auth !== `Bearer ${SECRET}`) {
-        return new Response("unauthorized", { status: 401 });
-      }
-      const ok = srv.upgrade(req, { data: { kind: "agent" } });
-      if (ok) return undefined;
-      return new Response("upgrade failed", { status: 500 });
-    }
+    // The bridge WebSocket is no longer served here — post-direction-flip
+    // the supervisor dials OUT to the cell Worker (see connectBridge
+    // below). This server keeps only the local HTTP surface: /health,
+    // /agent-wait, and the in-cell static site preview.
 
     const staticHit = serveStatic(url.pathname);
     if (staticHit) return staticHit;
@@ -796,161 +830,271 @@ const server = Bun.serve({
 
     return new Response("not found", { status: 404 });
   },
-  websocket: {
-    open(ws) {
-      const client: WsClient = { ws };
-      (ws as any).__client = client;
-      wsClients.add(client);
-      console.log(`[bridge] ws client connected (total=${wsClients.size})`);
-      // Greet so client knows we're alive. If the harness is already ready
-      // (post-warm-cell, late client connect), send bridge_ready immediately
-      // so the client doesn't wait.
-      try { ws.send(JSON.stringify({ type: "bridge_hello", cell: NAME, harness: HARNESS })); } catch {}
-      if (harnessReady) {
-        try { ws.send(JSON.stringify({ type: "bridge_ready" })); } catch {}
-      }
-    },
-    message(ws, message) {
-      const text = typeof message === "string" ? message : new TextDecoder().decode(message as Uint8Array);
-      for (const raw of text.split("\n")) {
-        const line = raw.replace(/\r$/, "").trim();
-        if (!line) continue;
-        let cmd: any;
-        try { cmd = JSON.parse(line); }
-        catch (e) { console.error(`[bridge] bad ws json: ${String(e).slice(0, 120)}`); continue; }
-
-        // Bridge-level commands (don't forward to the harness)
-        if (cmd?.type === "ping") {
-          try { ws.send(JSON.stringify({ type: "pong" })); } catch {}
-          continue;
-        }
-
-        // agent_reply — forwarded by our DO when an in_reply_to envelope
-        // landed in our inbox. Match the corr_id against waiting CLIs that
-        // called /agent-wait. If no match, drop silently (timed out or never
-        // registered — Pete might have run cells talk --await on the Mac).
-        if (cmd?.type === "agent_reply") {
-          const corrId = typeof cmd.in_reply_to === "string" ? cmd.in_reply_to : "";
-          const text = typeof cmd.text === "string" ? cmd.text : "";
-          const waiter = corrId ? agentAwaiters.get(corrId) : undefined;
-          if (waiter) {
-            waiter.resolve(text);
-            console.log(`[bridge] agent_reply matched corr=${corrId.slice(0, 10)} → resolved waiter`);
-          } else {
-            console.log(`[bridge] agent_reply for unknown corr=${corrId.slice(0, 10)} — no local waiter`);
-          }
-          continue;
-        }
-
-        // agent_message — a peer cell (or Pete via the Mac path) is asking
-        // us something. Default target="fork": fork main read-only, answer,
-        // discard the fork. The adapter owns the fork mechanic per harness
-        // (pi: --fork; claude/codex: filename-clone + --resume).
-        if (cmd?.type === "agent_message") {
-          const corrId = typeof cmd.corr_id === "string" ? cmd.corr_id : "";
-          const from = typeof cmd.from === "string" ? cmd.from : "unknown";
-          const text = typeof cmd.text === "string" ? cmd.text : "";
-          const target = typeof cmd.target === "string" ? cmd.target : "fork";
-          console.log(`[bridge] agent_message corr=${corrId.slice(0, 10)} from=${from} target=${target} text=${text.slice(0, 100).replace(/\n/g, " ")}`);
-          if (target === "main") {
-            // --main escalation: write into the main thread like Slack/email.
-            // Phase 4 wires this; for now reject so we don't silently fall through.
-            try {
-              ws.send(JSON.stringify({
-                type: "agent_response",
-                in_reply_to: corrId,
-                text: `[error] target="main" not yet implemented (Phase 4)`,
-              }));
-            } catch {}
-            continue;
-          }
-          // Fork path. Wrap in an IIFE so we don't block the WS message loop;
-          // multiple peers can pipeline (the harness adapter itself runs the
-          // fork to completion; concurrency limits land in Phase 5).
-          const cellName = NAME;
-          void (async () => {
-            const t0 = Date.now();
-            const result = await ADAPTER.forkAndAsk({
-              prompt: text,
-              mainRef: getMainRef(),
-              cellName,
-            });
-            const dt = Date.now() - t0;
-            if (result.ok) {
-              console.log(`[bridge] agent_response corr=${corrId.slice(0, 10)} dt=${dt}ms text=${result.text.slice(0, 100).replace(/\n/g, " ")}`);
-              try {
-                ws.send(JSON.stringify({ type: "agent_response", in_reply_to: corrId, text: result.text }));
-              } catch (e) {
-                console.error(`[bridge] failed to send agent_response: ${String(e).slice(0, 160)}`);
-              }
-            } else {
-              console.error(`[bridge] forkAndAsk failed corr=${corrId.slice(0, 10)} dt=${dt}ms: ${result.error}`);
-              try {
-                ws.send(JSON.stringify({
-                  type: "agent_response",
-                  in_reply_to: corrId,
-                  text: `[error] ${result.error}`,
-                }));
-              } catch {}
-            }
-          })();
-          continue;
-        }
-
-        // Signal busy at prompt-receive time — uniform across harnesses. pi
-        // also emits agent_start through passthrough (no-op duplicate); claude
-        // and codex don't have an analogue, so this is their only busy signal.
-        // Also synthesize agent_start for non-pi so the cell Worker DO opens
-        // a turn (DO gates message_update accumulation on currentTurn, which
-        // is only created by agent_start). Without this, claude/codex text
-        // streams in but the DO drops every event silently.
-        if (cmd?.type === "prompt") {
-          cancelPendingSleep();
-          void signalLifecycle("busy");
-          if (HARNESS !== "pi") {
-            broadcastToClients(JSON.stringify({ type: "agent_start" }));
-          }
-        }
-
-        // Buffer prompts that arrive before the harness is fully ready (pi
-        // setup race; claude's first-output delay). Without this, a prompt
-        // can hit a half-configured process and the response is silently lost.
-        if (!harnessReady && cmd?.type === "prompt") {
-          console.log(`[bridge] queuing prompt (harness not ready yet)`);
-          pendingPrompts.push(cmd);
-          try {
-            ws.send(JSON.stringify({ type: "response", id: cmd.id, command: "prompt", success: true }));
-          } catch {}
-          continue;
-        }
-
-        // Per-turn (codex): every prompt spawns a fresh `codex exec`. Pi-only
-        // commands (abort, set_model, …) have no per-turn equivalent — drop.
-        if (ADAPTER.mode === "per-turn") {
-          if (cmd?.type === "prompt" && typeof cmd.message === "string") {
-            runTurn(cmd.message);
-          }
-          continue;
-        }
-
-        // Persistent: translate inbound to the harness's wire format and
-        // write to its stdin. translateInbound returns null for commands
-        // the harness can't handle (e.g. abort on claude-code) — drop them.
-        const translated = ADAPTER.translateInbound?.(cmd, hostState);
-        if (translated === null || translated === undefined) continue;
-        if (!writeToHarness(translated)) {
-          console.error(`[bridge] harness not running, dropping cmd ${cmd?.type}`);
-        }
-      }
-    },
-    close(ws) {
-      const client = (ws as any).__client as WsClient | undefined;
-      if (client) wsClients.delete(client);
-      console.log(`[bridge] ws client disconnected (total=${wsClients.size})`);
-    },
-  },
 });
 
+// ---------------------------------------------------------------------------
+// Bridge client — dial the cell Worker and pump frames both ways.
+// ---------------------------------------------------------------------------
+
+// Handle one inbound bridge frame (already line-split). The vocabulary is
+// pi's RPC dialect plus bridge-control (ping) and agent-comms (agent_reply,
+// agent_message). Replies go back up via broadcastToClients → bridgeWs.
+function handleBridgeFrame(line: string) {
+  let cmd: any;
+  try { cmd = JSON.parse(line); }
+  catch (e) { console.error(`[bridge] bad ws json: ${String(e).slice(0, 120)}`); return; }
+
+  // Bridge-level commands (don't forward to the harness). The DO answers
+  // our heartbeat ping via setWebSocketAutoResponse, so a `ping` from the
+  // DO is unusual — but honor it anyway. A `pong` is our own heartbeat
+  // coming back; lastBridgeRecvAt was already refreshed in the message
+  // listener, so just drop it.
+  if (cmd?.type === "ping") {
+    broadcastToClients(JSON.stringify({ type: "pong" }));
+    return;
+  }
+  if (cmd?.type === "pong") return;
+
+  // agent_reply — forwarded by our DO when an in_reply_to envelope landed
+  // in our inbox. Match the corr_id against waiting CLIs that called
+  // /agent-wait. If no match, drop silently (timed out or never registered
+  // — Pete might have run cells talk --await on the Mac).
+  if (cmd?.type === "agent_reply") {
+    const corrId = typeof cmd.in_reply_to === "string" ? cmd.in_reply_to : "";
+    const text = typeof cmd.text === "string" ? cmd.text : "";
+    const waiter = corrId ? agentAwaiters.get(corrId) : undefined;
+    if (waiter) {
+      waiter.resolve(text);
+      console.log(`[bridge] agent_reply matched corr=${corrId.slice(0, 10)} → resolved waiter`);
+    } else {
+      console.log(`[bridge] agent_reply for unknown corr=${corrId.slice(0, 10)} — no local waiter`);
+    }
+    return;
+  }
+
+  // agent_message — a peer cell (or Pete via the Mac path) is asking us
+  // something. Default target="fork": fork main read-only, answer, discard
+  // the fork. The adapter owns the fork mechanic per harness (pi: --fork;
+  // claude/codex: filename-clone + --resume).
+  if (cmd?.type === "agent_message") {
+    const corrId = typeof cmd.corr_id === "string" ? cmd.corr_id : "";
+    const from = typeof cmd.from === "string" ? cmd.from : "unknown";
+    const text = typeof cmd.text === "string" ? cmd.text : "";
+    const target = typeof cmd.target === "string" ? cmd.target : "fork";
+    console.log(`[bridge] agent_message corr=${corrId.slice(0, 10)} from=${from} target=${target} text=${text.slice(0, 100).replace(/\n/g, " ")}`);
+    if (target === "main") {
+      // --main escalation: write into the main thread like Slack/email.
+      // Phase 4 wires this; for now reject so we don't silently fall through.
+      broadcastToClients(JSON.stringify({
+        type: "agent_response",
+        in_reply_to: corrId,
+        text: `[error] target="main" not yet implemented (Phase 4)`,
+      }));
+      return;
+    }
+    // Fork path. Wrap in an IIFE so we don't block the frame loop; multiple
+    // peers can pipeline (the harness adapter runs the fork to completion).
+    const cellName = NAME;
+    void (async () => {
+      const t0 = Date.now();
+      const result = await ADAPTER.forkAndAsk({
+        prompt: text,
+        mainRef: getMainRef(),
+        cellName,
+      });
+      const dt = Date.now() - t0;
+      if (result.ok) {
+        console.log(`[bridge] agent_response corr=${corrId.slice(0, 10)} dt=${dt}ms text=${result.text.slice(0, 100).replace(/\n/g, " ")}`);
+        broadcastToClients(JSON.stringify({ type: "agent_response", in_reply_to: corrId, text: result.text }));
+      } else {
+        console.error(`[bridge] forkAndAsk failed corr=${corrId.slice(0, 10)} dt=${dt}ms: ${result.error}`);
+        broadcastToClients(JSON.stringify({
+          type: "agent_response",
+          in_reply_to: corrId,
+          text: `[error] ${result.error}`,
+        }));
+      }
+    })();
+    return;
+  }
+
+  // Signal busy at prompt-receive time — uniform across harnesses. pi also
+  // emits agent_start through passthrough (no-op duplicate); claude and
+  // codex don't have an analogue, so this is their only busy signal. Also
+  // synthesize agent_start for non-pi so the cell Worker DO opens a turn
+  // (DO gates message_update accumulation on currentTurn, which is only
+  // created by agent_start). Without this, claude/codex text streams in
+  // but the DO drops every event silently.
+  if (cmd?.type === "prompt") {
+    cancelPendingSleep();
+    void signalLifecycle("busy");
+    if (HARNESS !== "pi") {
+      broadcastToClients(JSON.stringify({ type: "agent_start" }));
+    }
+  }
+
+  // Buffer prompts that arrive before the harness is fully ready (pi setup
+  // race; claude's first-output delay). Without this, a prompt can hit a
+  // half-configured process and the response is silently lost.
+  if (!harnessReady && cmd?.type === "prompt") {
+    console.log(`[bridge] queuing prompt (harness not ready yet)`);
+    pendingPrompts.push(cmd);
+    broadcastToClients(JSON.stringify({ type: "response", id: cmd.id, command: "prompt", success: true }));
+    return;
+  }
+
+  // Per-turn (codex): every prompt spawns a fresh `codex exec`. Pi-only
+  // commands (abort, set_model, …) have no per-turn equivalent — drop.
+  if (ADAPTER.mode === "per-turn") {
+    if (cmd?.type === "prompt" && typeof cmd.message === "string") {
+      runTurn(cmd.message);
+    }
+    return;
+  }
+
+  // Persistent: translate inbound to the harness's wire format and write
+  // to its stdin. translateInbound returns null for commands the harness
+  // can't handle (e.g. abort on claude-code) — drop them.
+  const translated = ADAPTER.translateInbound?.(cmd, hostState);
+  if (translated === null || translated === undefined) return;
+  if (!writeToHarness(translated)) {
+    console.error(`[bridge] harness not running, dropping cmd ${cmd?.type}`);
+  }
+}
+
+function scheduleBridgeReconnect() {
+  if (bridgeReconnectTimer) return;
+  const delay = bridgeReconnectMs;
+  bridgeReconnectTimer = setTimeout(() => {
+    bridgeReconnectTimer = null;
+    connectBridge();
+  }, delay);
+  // Exponential backoff, capped. Reset to the floor on a clean connect.
+  bridgeReconnectMs = Math.min(bridgeReconnectMs * 2, BRIDGE_RECONNECT_MAX_MS);
+}
+
+// Dial the cell Worker's /agent endpoint and hold the connection. On drop
+// (well hibernated, Worker redeployed, transient network) reconnect with
+// exponential backoff — when the cell is hibernating the dial fails fast
+// and the doorbell is what actually brings us back.
+function connectBridge() {
+  if (bridgeWs || bridgeConnecting) return;
+  if (!SECRET) {
+    console.error("[bridge] no CELLS_PROXY_SECRET — cannot dial bridge");
+    return;
+  }
+  bridgeConnecting = true;
+  let ws: WebSocket;
+  try {
+    ws = new WebSocket(BRIDGE_URL, { headers: { authorization: `Bearer ${SECRET}` } } as any);
+  } catch (e) {
+    bridgeConnecting = false;
+    console.error(`[bridge] dial failed: ${String(e).slice(0, 160)}`);
+    scheduleBridgeReconnect();
+    return;
+  }
+  console.log(`[bridge] dialing ${BRIDGE_URL}`);
+  // One dial settles exactly once — via open, close, error, or the connect
+  // timeout. `settled` keeps a slow event arriving after a timeout abort
+  // (or the reverse) from resurrecting a dead socket or double-reconnecting.
+  let settled = false;
+  const connectTimer = setTimeout(() => {
+    if (settled) return;
+    settled = true;
+    bridgeConnecting = false;
+    console.error(`[bridge] dial stalled — no open in ${BRIDGE_CONNECT_TIMEOUT_MS}ms; aborting + retrying`);
+    try { ws.close(); } catch {}
+    scheduleBridgeReconnect();
+  }, BRIDGE_CONNECT_TIMEOUT_MS);
+  ws.addEventListener("open", () => {
+    if (settled) { try { ws.close(); } catch {} return; }  // timed out — discard
+    settled = true;
+    clearTimeout(connectTimer);
+    bridgeConnecting = false;
+    bridgeWs = ws;
+    bridgeReconnectMs = BRIDGE_RECONNECT_MIN_MS;
+    bridgeSawFrame = true;
+    bridgeMissedPings = 0;
+    console.log(`[bridge] connected to ${BRIDGE_URL}`);
+    // Greet, and if the harness is already ready (warm cell, fast dial)
+    // send bridge_ready immediately so the DO doesn't wait.
+    try { ws.send(JSON.stringify({ type: "bridge_hello", cell: NAME, harness: HARNESS })); } catch {}
+    if (harnessReady) {
+      try { ws.send(JSON.stringify({ type: "bridge_ready" })); } catch {}
+    }
+  });
+  ws.addEventListener("message", (ev: any) => {
+    bridgeSawFrame = true;
+    const text = typeof ev.data === "string" ? ev.data : new TextDecoder().decode(ev.data as Uint8Array);
+    for (const raw of text.split("\n")) {
+      const line = raw.replace(/\r$/, "").trim();
+      if (line) handleBridgeFrame(line);
+    }
+  });
+  ws.addEventListener("close", () => {
+    clearTimeout(connectTimer);
+    const wasLive = bridgeWs === ws;
+    if (wasLive) bridgeWs = null;
+    // The connect timeout already abandoned this dial — don't double-reconnect.
+    if (settled && !wasLive) return;
+    settled = true;
+    bridgeConnecting = false;
+    console.log(`[bridge] disconnected from ${BRIDGE_URL}`);
+    scheduleBridgeReconnect();
+  });
+  ws.addEventListener("error", (e: any) => {
+    console.error(`[bridge] ws error: ${String((e as any)?.message ?? e).slice(0, 160)}`);
+    if (settled) return;  // open succeeded, or already abandoned — `close` covers it
+    // error before open with no `close` to follow — settle and retry here.
+    settled = true;
+    clearTimeout(connectTimer);
+    bridgeConnecting = false;
+    scheduleBridgeReconnect();
+  });
+}
+
+// Bridge heartbeat, every BRIDGE_PING_MS:
+//   - Bridge up: did a frame arrive since the last tick? Yes → healthy,
+//     reset the miss counter. No → another miss. BRIDGE_MAX_MISSED misses
+//     in a row means the socket is a zombie (typically a connection that
+//     died while the well was hibernated and never surfaced a `close`) —
+//     force it closed and reconnect. Then ping, so the next tick has a
+//     pong to see.
+//   - No bridge and nothing in flight: dial — belt-and-suspenders in case
+//     a `close` event was missed entirely.
+function bridgeHeartbeat() {
+  const ws = bridgeWs;
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    if (bridgeSawFrame) bridgeMissedPings = 0;
+    else bridgeMissedPings++;
+    bridgeSawFrame = false;
+    if (bridgeMissedPings >= BRIDGE_MAX_MISSED) {
+      console.error(`[bridge] ${bridgeMissedPings} heartbeats unanswered — zombie socket, reconnecting`);
+      bridgeWs = null;
+      bridgeMissedPings = 0;
+      try { ws.close(4000, "heartbeat-timeout"); } catch {}
+      connectBridge();
+      return;
+    }
+    // Pinging a dead socket also helps: the failed write surfaces the
+    // drop and fires `close`, so we don't only depend on the miss count.
+    try { ws.send(BRIDGE_PING_FRAME); } catch { /* close event will follow */ }
+  } else if (ws) {
+    // bridgeWs set but not OPEN — a half-dead socket whose `close` never
+    // landed. Drop it and redial; without this branch the heartbeat would
+    // neither ping nor reconnect and the bridge would stay wedged.
+    console.error(`[bridge] socket stuck at readyState=${ws.readyState} — reconnecting`);
+    bridgeWs = null;
+    bridgeMissedPings = 0;
+    try { ws.close(); } catch {}
+    connectBridge();
+  } else if (!bridgeConnecting && !bridgeReconnectTimer) {
+    connectBridge();
+  }
+}
+
 console.log(`${NAME} site listening on :${server.port} (harness=${HARNESS})`);
+connectBridge();
+setInterval(bridgeHeartbeat, BRIDGE_PING_MS);
 spawnHarness();
 startSitePublishing();

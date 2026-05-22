@@ -474,81 +474,19 @@ function forwardableHeaders(upstream: Headers): Headers {
   return h;
 }
 
-// ───────────────────── well-host fallthrough ─────────────────────
+// ───────────────────── well-host routing — removed ─────────────────────
 //
-// The cloudflared tunnel routes `*.cells.md → cells proxy:8787` because the
-// cells proxy is the catch-all for known cell-shaped hostnames (mother,
-// pulse, proxy). Well-shaped hostnames (`egg-<hex>.cells.md`, served by
-// welld at 127.0.0.1:7878) ride the same tunnel and land here too — the
-// per-cell Cloudflare Worker DO opens `wss://<wellname>.cells.md/agent` to
-// push Slack-driven prompts into the live well. Without this fallthrough
-// that WS upgrade 404s and slack→cell is silently broken fleet-wide.
+// Until the bridge-direction flip (2026-05-22) the proxy carried a whole
+// well-routing layer: `<well>.cells.md` hostnames (egg-*, cells-*) rode
+// the *.cells.md tunnel into here and were forwarded — HTTP and WS — to
+// welld at 127.0.0.1:7878, so the per-cell Worker DO could dial the
+// bridge in at `wss://<well>.cells.md/agent`.
 //
-// Per the wells/cells V1 boundary, the namespace authority for "what's a
-// well?" is welld — we just forward anything matching the well-name shape
-// and let welld validate. Two well-name shapes: pool/egg wells (`egg-<hex>`)
-// and special wells (`cells-<name>`, e.g. cells-pulse / cells-mother). Both
-// need the fallthrough once the special runs the agent-comms bridge — its
-// CF Worker DO opens `wss://cells-<name>.cells.md/agent`. The special's
-// *cell* host (`pulse.cells.md`, `mother.cells.md`) is unaffected: those
-// are matched by the bespoke handlers above, before this fallthrough.
-const WELLD_HTTP = "http://127.0.0.1:7878";
-const WELLD_WS = "ws://127.0.0.1:7878";
-const WELL_HOST_RE = /^(egg-[a-z0-9]+|cells-[a-z0-9-]+)\.cells\.md(:\d+)?$/i;
-
-function isWellHost(host: string): boolean {
-  return WELL_HOST_RE.test(host);
-}
-
-async function handleWellHttp(req: Request): Promise<Response> {
-  const url = new URL(req.url);
-  const upstreamUrl = `${WELLD_HTTP}${url.pathname}${url.search}`;
-  try {
-    const upstream = await fetch(upstreamUrl, {
-      method: req.method,
-      headers: req.headers, // welld dispatches on the original Host
-      body: req.body,
-      // @ts-expect-error Bun streams bodies through fetch with duplex:'half'
-      duplex: req.body ? "half" : undefined,
-      redirect: "manual",
-    });
-    return new Response(upstream.body, {
-      status: upstream.status,
-      statusText: upstream.statusText,
-      headers: forwardableHeaders(upstream.headers),
-    });
-  } catch (e) {
-    return new Response(`welld unreachable: ${String(e).slice(0, 200)}`, { status: 502 });
-  }
-}
-
-// WS forwarding state, parked on `ws.data` for the lifetime of the upgrade.
-// `queued` buffers downstream→upstream frames that arrive before the
-// upstream socket finishes its handshake (the cell Worker DO sends nothing
-// before the server speaks first today, but the queue keeps us safe for
-// future protocols).
-type WellWsData = {
-  upstreamUrl: string;
-  fwdHeaders: Record<string, string>;
-  upstream: WebSocket | null;
-  upstreamReady: boolean;
-  queued: (string | ArrayBufferLike | Uint8Array)[];
-};
-
-function buildWellWsData(req: Request, host: string): WellWsData {
-  const url = new URL(req.url);
-  const upstreamUrl = `${WELLD_WS}${url.pathname}${url.search}`;
-  const fwdHeaders: Record<string, string> = { host };
-  const pass = ["authorization", "cookie", "origin", "sec-websocket-protocol"];
-  for (const h of pass) {
-    const v = req.headers.get(h);
-    if (v) fwdHeaders[h] = v;
-  }
-  for (const [k, v] of req.headers) {
-    if (k.toLowerCase().startsWith("x-")) fwdHeaders[k] = v;
-  }
-  return { upstreamUrl, fwdHeaders, upstream: null, upstreamReady: false, queued: [] };
-}
+// Post-flip the bridge runs the other way: the well's supervisor dials
+// OUT to `wss://<cell>.cells.md/agent` (its own Worker). Nothing dials
+// `<well>.cells.md` anymore, so the isWellHost / WELL_HOST_RE /
+// handleWellHttp / WS-forwarding code is all gone. A request to a
+// `<well>.cells.md` host now falls through to the 404 below.
 
 // ───────────────────── proxy (api path) ─────────────────────
 
@@ -1073,6 +1011,51 @@ async function handleBridgeProxy(req: Request): Promise<Response> {
   }
 }
 
+// ───────────────────────────── doorbell ───────────────────────────────
+//
+// proxy.cells.md/wake — wake a sleeping cell's well on demand.
+//
+// Background: today a sleeping well is woken as a side effect of the cell
+// Worker DO dialing the bridge in (`wss://<well>.cells.md/agent` traverses
+// the tunnel → proxy → welld, and welld wakes the VM to serve it). After
+// the bridge-direction flip the VM dials OUT, so a sleeping cell holds no
+// connection and nothing wakes it when a message lands at the Worker.
+// This endpoint splits waking off as its own primitive: the Worker rings
+// the doorbell, the proxy wakes the well, the VM boots and dials in.
+//
+// Bearer-gated (same CELLS_PROXY_SECRET as every other proxy route); body
+// {cell}. Resolves the well name and runs `well start -s` — the exact path
+// `cells wake` / `ensureWellRunningForTalk` use, which handles both
+// hibernated (resume from saved RAM) and cold-stopped wells and blocks
+// until SSH-accept is ready.
+async function handleWake(req: Request): Promise<Response> {
+  const auth = checkClientAuth(req);
+  if (!auth.ok) return new Response(`unauthorized: ${auth.reason}`, { status: 401 });
+  if (req.method !== "POST") return new Response("method", { status: 405 });
+
+  let body: { cell?: string };
+  try {
+    body = await req.json();
+  } catch {
+    return new Response("bad json", { status: 400 });
+  }
+  const cell = (body.cell ?? "").trim();
+  if (!cell || !/^[a-z0-9-]+$/.test(cell)) return new Response("missing or bad cell", { status: 400 });
+
+  const wellName = await wellNameForCell(cell);
+  const startedAt = Date.now();
+  const proc = Bun.spawn(["well", "start", "-s", wellName], { stdio: ["ignore", "pipe", "pipe"] });
+  const exit = await proc.exited;
+  const elapsed = Date.now() - startedAt;
+  if (exit !== 0) {
+    const stderr = await new Response(proc.stderr).text();
+    console.error(`[wake] ${cell} (${wellName}) failed in ${elapsed}ms: ${stderr.slice(0, 200)}`);
+    return new Response(`wake failed: ${stderr.slice(0, 200)}`, { status: 502 });
+  }
+  console.log(`[${new Date().toISOString()}] wake ${cell} (${wellName}) ok in ${elapsed}ms`);
+  return new Response(null, { status: 204 });
+}
+
 // ───────────────────── dashboard / cell page data ─────────────────────
 
 type CellInfo = {
@@ -1227,9 +1210,9 @@ async function dashboardHtml(): Promise<Response> {
 // would 401 until the first auth.json refresh).
 await refreshValidBearers();
 
-const server = Bun.serve<WellWsData>({
+const server = Bun.serve({
   port: PORT,
-  async fetch(req, server) {
+  async fetch(req) {
     const host = hostOf(req);
     const url = new URL(req.url);
 
@@ -1246,6 +1229,9 @@ const server = Bun.serve<WellWsData>({
       if (url.pathname === "/heartbeat-changed") {
         return handleHeartbeatChanged(req);
       }
+      if (url.pathname === "/wake") {
+        return handleWake(req);
+      }
       if (url.pathname === "/peers") {
         return handlePeers(req);
       }
@@ -1258,71 +1244,12 @@ const server = Bun.serve<WellWsData>({
       return handleApiProxy(req);
     }
 
-    // <well>.cells.md (egg-* or cells-*) → welld at 127.0.0.1:7878. The
-    // per-cell CF Worker DO hits this for the wss://<wellname>.cells.md/agent
-    // bridge; welld
-    // already dispatches by Host and bridges to the guest's :8080 (HTTP
-    // and WS). We're just a hop so cloudflared's `*.cells.md → :8787`
-    // catch-all can reach welld. See the well-host fallthrough block above.
-    if (isWellHost(host)) {
-      if (req.headers.get("upgrade")?.toLowerCase() === "websocket") {
-        const ok = server.upgrade<WellWsData>(req, { data: buildWellWsData(req, host) });
-        if (ok) return undefined as unknown as Response;
-        return new Response("ws upgrade failed", { status: 426 });
-      }
-      return handleWellHttp(req);
-    }
-
-    // slack.cells.md → handled by Cloudflare Worker (cells-front-slack).
-    // <cell>.cells.md → handled by per-cell Cloudflare Worker.
-    // Neither reaches the subscriptions proxy in v2.
+    // slack.cells.md   → Cloudflare Worker (cells-front-slack).
+    // <cell>.cells.md  → per-cell Cloudflare Worker.
+    // <well>.cells.md  → nothing — the bridge dials <cell>.cells.md now.
+    // None of these reach the subscriptions proxy.
 
     return new Response("unknown host", { status: 404 });
-  },
-  websocket: {
-    // Downstream (CF Worker DO) is now upgraded. Open the matching upstream
-    // WS to welld, then bridge in both directions. Pre-handshake frames
-    // from downstream queue until the upstream open event fires.
-    open(ws) {
-      const data = ws.data;
-      let upstream: WebSocket;
-      try {
-        upstream = new WebSocket(data.upstreamUrl, { headers: data.fwdHeaders } as any);
-      } catch (e) {
-        console.error(`[well-ws] upstream construct: ${String(e).slice(0, 200)}`);
-        try { ws.close(1011, "upstream construct failed"); } catch {}
-        return;
-      }
-      data.upstream = upstream;
-      upstream.addEventListener("open", () => {
-        data.upstreamReady = true;
-        for (const frame of data.queued) {
-          try { upstream.send(frame as any); } catch {}
-        }
-        data.queued.length = 0;
-      });
-      upstream.addEventListener("message", (ev: MessageEvent) => {
-        try { ws.send(ev.data as any); } catch {}
-      });
-      upstream.addEventListener("close", (ev: CloseEvent) => {
-        try { ws.close(ev.code || 1000, ev.reason || ""); } catch {}
-      });
-      upstream.addEventListener("error", (ev) => {
-        console.error(`[well-ws] upstream error: ${String((ev as any)?.message ?? ev).slice(0, 200)}`);
-        try { ws.close(1011, "upstream error"); } catch {}
-      });
-    },
-    message(ws, msg) {
-      const data = ws.data;
-      if (data.upstreamReady && data.upstream && data.upstream.readyState === 1 /* OPEN */) {
-        try { data.upstream.send(msg as any); } catch {}
-      } else {
-        data.queued.push(msg as any);
-      }
-    },
-    close(ws) {
-      try { ws.data.upstream?.close(); } catch {}
-    },
   },
 });
 
@@ -1334,7 +1261,7 @@ console.log(`    proxy.cells.md/codex/*      → OpenAI Codex proxy (Bearer auth
 console.log(`    proxy.cells.md/_proxy/health`);
 console.log(`    proxy.cells.md/bridge/*     → back-channel for in-well cells (Bearer auth)`);
 console.log(`    proxy.cells.md/heartbeat-changed → pulse heartbeat inbox (Bearer auth)`);
-console.log(`    <well>.cells.md/*           → welld (HTTP + WS) at 127.0.0.1:7878`);
+console.log(`    proxy.cells.md/wake         → wake a sleeping cell's well (Bearer auth)`);
 console.log(`    (slack.cells.md and <cell>.cells.md handled by Cloudflare Workers)`);
 console.log(`  upstreams: ${UPSTREAM}, ${CODEX_UPSTREAM}`);
 console.log(`  auth file: ${AUTH_PATH}`);

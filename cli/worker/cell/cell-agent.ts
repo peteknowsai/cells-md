@@ -1,12 +1,17 @@
 /**
  * CellAgent — per-cell Durable Object.
  *
- * Holds a persistent outbound WebSocket to the well's site server at
- * wss://${WELL_HOST}/agent. That inbound TCP keeps the well warm
- * continuously. Same connection serves as the bidirectional bridge:
+ * Holds the bridge WebSocket to the cell's well. Post-direction-flip
+ * (2026-05-22) the well's supervisor dials IN to wss://<cell>.cells.md/agent
+ * and this DO accepts the connection; before the flip the DO dialed out to
+ * the well. Either way the connection is the bidirectional bridge:
  *
  *   - DO → well:  pi RPC commands ({type:"prompt"}, {type:"switch_session"})
  *   - well → DO:  pi RPC events (agent_start, message_update, agent_end, …)
+ *
+ * A hibernating cell holds no connection. When a message arrives for a
+ * sleeping cell the DO rings the doorbell (proxy.cells.md/wake), queues the
+ * frame, and flushes the queue once the supervisor dials back in.
  *
  * For each pi turn, the DO maintains one Slack message that it edits
  * as events arrive. agent_start posts the initial message; deltas are
@@ -15,9 +20,14 @@
  * No tool calls required of pi. The DO renders whatever pi emits into
  * Slack-mrkdwn and ships it.
  *
- * Liveness: a 25s alarm checks the WS, reconnects if dead, and pings
- * the well. Each reconnect is also activity that keeps the well
- * warm if it had drifted.
+ * The bridge WS uses the Cloudflare WebSocket Hibernation API
+ * (state.acceptWebSocket), so the DO can be evicted from memory during
+ * idle stretches — between turns, and through the long forkAndAsk wait an
+ * agent_message triggers — while the socket stays open. Everything that
+ * must outlive an eviction (currentTurn, the wsQueue, the agent-fork reply
+ * map, pending-turn context) lives in a single PersistedState snapshot:
+ * ensureLoaded() rehydrates it, persist() mirrors every mutation back. A
+ * 25s alarm runs only while a final Slack/email delivery is stranded.
  */
 
 import { gateHtml } from "../../shared/clerk-gate";
@@ -32,7 +42,6 @@ import {
 
 interface Env {
   CELL_NAME: string;
-  WELL_HOST: string;
   CELLS_PROXY_SECRET: string;
   CELL_AGENT: DurableObjectNamespace;
   // Clerk publishable key — embedded in the served HTML so the Clerk
@@ -55,7 +64,6 @@ const ALARM_INTERVAL_MS = 25_000;
 const FLUSH_INTERVAL_MS = 400;
 const FLUSH_BACKOFF_DECAY_MS = 60_000; // decay 429 backoff after 60s clean
 const FLUSH_BACKOFF_CAP_MS = 5_000;
-const IDLE_WINDOW_MS = 60_000;         // close WS and let well hibernate after 60s idle
 // Slack enforces 40,000 chars on chat.postMessage and chat.update; we
 // cap our rendered chunks at 35k to leave headroom for the
 // "…continued ↓" footer + a small streaming delta between flushes.
@@ -120,33 +128,58 @@ type TurnState = {
   overflow: { ts: string; text: string }[];
 };
 
+// Everything the DO carries between events. The bridge WS uses the
+// Cloudflare Hibernation API (state.acceptWebSocket) so the DO can be
+// evicted from memory during idle stretches — between turns, and during
+// the long forkAndAsk wait an agent_message triggers. Anything that must
+// survive that eviction lives in this snapshot, persisted to
+// state.storage under DO_STATE_KEY and reloaded on the next event.
+type PersistedState = {
+  pendingChannel: string;
+  pendingThreadTs: string;
+  pendingKind: ChannelKind;
+  pendingEmailTo: string;
+  pendingEmailMsgId: string;
+  pendingEmailSubject: string;
+  // Frames buffered while no bridge WS is up (cell hibernating); flushed
+  // in order when the supervisor dials in.
+  wsQueue: string[];
+  // Outstanding agent forks: corr_id → reply context. Populated when an
+  // inbound kind:"agent" arrives and we hand it to the supervisor; drained
+  // when the supervisor's agent_response matches. Stored as entries since
+  // a Map doesn't survive JSON.
+  agentForks: [string, { reply_to: string; from: string; thread_id: string }][];
+  flushBackoffMs: number;
+  last429At: number;
+};
+
+// The small cross-event snapshot lives under one key; currentTurn gets its
+// own key because a turn with large tool output can grow past DO storage's
+// 128 KiB per-value cap. TURN_PERSIST_CAP leaves headroom under that.
+const DO_STATE_KEY = "do-state";
+const DO_TURN_KEY = "do-turn";
+const TURN_PERSIST_CAP = 120 * 1024;
+
 export class CellAgent {
   private state: DurableObjectState;
   private env: Env;
-  private ws: WebSocket | null = null;
-  private wsConnecting = false;
+  // Dedup guard so a burst of inbound messages rings the doorbell once.
+  // Request-scoped — fine to lose on eviction.
+  private doorbellInFlight = false;
+  // Hydrated from storage on first use (loaded === true thereafter). After a
+  // hibernation eviction the DO is recreated, loaded resets to false, and
+  // the next entry point reloads the snapshot.
+  private loaded = false;
   private currentTurn: TurnState | null = null;
-  // Pending prompt sent before agent_start arrives — used to seed turn channel
   private pendingChannel = "";
   private pendingThreadTs = "";
-  // Email-only pending context, used so startTurn can copy onto TurnState
-  // before the first delta arrives. Reset each handleAppend so a slack
-  // turn following an email turn doesn't inherit stale fields.
   private pendingKind: ChannelKind = "slack";
   private pendingEmailTo = "";
   private pendingEmailMsgId = "";
   private pendingEmailSubject = "";
-  // Last in-memory activity timestamp. Persisted via storage on every bump
-  // so the alarm (which may run in a separate invocation) can read it.
-  private lastActivity = 0;
-  // Slack 429 self-heal. flushBackoffMs replaces FLUSH_INTERVAL_MS while
-  // active; decays back when no 429 has been seen for FLUSH_BACKOFF_DECAY_MS.
+  private wsQueue: string[] = [];
   private flushBackoffMs = FLUSH_INTERVAL_MS;
   private last429At = 0;
-  // Outstanding agent forks: corr_id → reply context. Populated when an
-  // inbound kind:"agent" arrives and we hand it off to the supervisor;
-  // drained when the supervisor's agent_response event matches. In-memory
-  // only — a DO restart drops them, sender will time out cleanly.
   private pendingAgentForks: Map<string, { reply_to: string; from: string; thread_id: string }> = new Map();
 
   constructor(state: DurableObjectState, env: Env) {
@@ -154,13 +187,80 @@ export class CellAgent {
     this.env = env;
   }
 
-  private async bumpActivity() {
-    this.lastActivity = Date.now();
-    await this.state.storage.put("lastActivity", this.lastActivity);
+  // Hydrate cross-event state from storage. Idempotent and cheap after the
+  // first call — a warm DO keeps the in-memory copy authoritative (persist()
+  // mirrors every mutation back), so we only hit storage once per lifetime.
+  private async ensureLoaded(): Promise<void> {
+    if (this.loaded) return;
+    this.loaded = true;
+    const [p, turn] = await Promise.all([
+      this.state.storage.get<PersistedState>(DO_STATE_KEY),
+      this.state.storage.get<TurnState>(DO_TURN_KEY),
+    ]);
+    if (turn) {
+      this.currentTurn = turn;
+      // A persisted setTimeout handle is meaningless after eviction — null
+      // it so scheduleFlush re-arms on the next event.
+      this.currentTurn.flushTimer = null;
+    }
+    if (!p) return;
+    this.pendingChannel = p.pendingChannel ?? "";
+    this.pendingThreadTs = p.pendingThreadTs ?? "";
+    this.pendingKind = p.pendingKind ?? "slack";
+    this.pendingEmailTo = p.pendingEmailTo ?? "";
+    this.pendingEmailMsgId = p.pendingEmailMsgId ?? "";
+    this.pendingEmailSubject = p.pendingEmailSubject ?? "";
+    this.wsQueue = Array.isArray(p.wsQueue) ? p.wsQueue : [];
+    this.pendingAgentForks = new Map(Array.isArray(p.agentForks) ? p.agentForks : []);
+    this.flushBackoffMs = p.flushBackoffMs ?? FLUSH_INTERVAL_MS;
+    this.last429At = p.last429At ?? 0;
+  }
+
+  // Mirror the in-memory snapshot to storage. Called after any handler that
+  // mutates cross-event state, so a hibernation eviction loses nothing.
+  // currentTurn rides its own key (it can grow large); if it would exceed
+  // the per-value cap we drop the persisted copy — that single oversized
+  // turn won't survive an eviction, but the turn finishes fine on a warm DO
+  // and the rest of the snapshot stays durable.
+  private async persist(): Promise<void> {
+    const snap: PersistedState = {
+      pendingChannel: this.pendingChannel,
+      pendingThreadTs: this.pendingThreadTs,
+      pendingKind: this.pendingKind,
+      pendingEmailTo: this.pendingEmailTo,
+      pendingEmailMsgId: this.pendingEmailMsgId,
+      pendingEmailSubject: this.pendingEmailSubject,
+      wsQueue: this.wsQueue,
+      agentForks: [...this.pendingAgentForks.entries()],
+      flushBackoffMs: this.flushBackoffMs,
+      last429At: this.last429At,
+    };
+    const writes: Promise<unknown>[] = [this.state.storage.put(DO_STATE_KEY, snap)];
+    if (this.currentTurn) {
+      const turn = { ...this.currentTurn, flushTimer: null };
+      if (JSON.stringify(turn).length <= TURN_PERSIST_CAP) {
+        writes.push(this.state.storage.put(DO_TURN_KEY, turn));
+      } else {
+        console.warn(`[${this.env.CELL_NAME}] currentTurn over ${TURN_PERSIST_CAP}B — not persisting (won't survive eviction)`);
+        writes.push(this.state.storage.delete(DO_TURN_KEY));
+      }
+    } else {
+      writes.push(this.state.storage.delete(DO_TURN_KEY));
+    }
+    await Promise.all(writes);
+  }
+
+  // The bridge WS, retrieved from the hibernation manager. getWebSockets()
+  // returns the live socket even after the DO was evicted and recreated —
+  // there is exactly one per cell.
+  private bridgeWs(): WebSocket | null {
+    const all = this.state.getWebSockets();
+    return all.length > 0 ? all[0]! : null;
   }
 
   async fetch(req: Request): Promise<Response> {
     const url = new URL(req.url);
+    if (url.pathname === "/agent") return this.acceptBridge(req);
     if (req.method === "POST" && url.pathname === "/append") return this.handleAppend(req);
     if (req.method === "POST" && url.pathname === "/site-publish") return this.handleSitePublish(req);
     if (req.method === "GET" && url.pathname === "/debug") return this.handleDebug();
@@ -174,50 +274,30 @@ export class CellAgent {
     return new Response("not found", { status: 404 });
   }
 
-  // ---- alarm-driven liveness ----
+  // ---- alarm-driven delivery retry ----
+  //
+  // Post-flip the alarm has exactly one job: re-attempt a stranded final
+  // Slack/email delivery. The bridge connection is the supervisor's
+  // responsibility now (it dials in and reconnects on drop), and well
+  // hibernation is welld's call — so the DO no longer reconnects, pings,
+  // or idle-closes. endTurn arms this alarm only when delivery fails.
 
   async alarm() {
-    // First: any pending delivery from a stranded final flush takes
-    // priority. Retry before touching the WS or considering idle close.
+    await this.ensureLoaded();
     if (this.currentTurn?.pendingDelivery) {
       await this.retryPendingDelivery();
-      // If retry confirmed delivery, drop the alarm chain — we're done.
-      if (!this.currentTurn?.pendingDelivery) {
-        try { this.ws?.close(1000, "delivered"); } catch {}
-        this.ws = null;
-        return;
+      if (this.currentTurn?.pendingDelivery) {
+        // Still stranded — reschedule and try again next tick.
+        await this.state.storage.setAlarm(Date.now() + ALARM_INTERVAL_MS);
       }
-      // Still pending — reschedule and let the next tick try again.
-      await this.state.storage.setAlarm(Date.now() + ALARM_INTERVAL_MS);
-      return;
     }
-
-    const last = (await this.state.storage.get<number>("lastActivity")) ?? 0;
-    const idleFor = Date.now() - last;
-    const midTurn = this.currentTurn !== null && !this.currentTurn.ended;
-    if (idleFor > IDLE_WINDOW_MS && !midTurn) {
-      // Idle long enough AND no turn in flight — close the WS and stop
-      // the alarm chain so the well is allowed to hibernate. The next
-      // /append will reopen.
-      console.log(`[${this.env.CELL_NAME}] idle ${Math.round(idleFor / 1000)}s, closing ws so well can hibernate`);
-      try { this.ws?.close(1000, "idle"); } catch {}
-      this.ws = null;
-      return;
-    }
-    try {
-      await this.ensureConnection();
-    } catch (e) {
-      console.error(`[${this.env.CELL_NAME}] alarm reconnect error: ${String(e).slice(0, 200)}`);
-    }
-    if (this.ws && this.ws.readyState === WebSocket.OPEN) {
-      try { this.ws.send(JSON.stringify({ type: "ping" })); } catch {}
-    }
-    await this.state.storage.setAlarm(Date.now() + ALARM_INTERVAL_MS);
+    await this.persist();
   }
 
   // ---- inbound from cell Worker /inbox/append ----
 
   private async handleAppend(req: Request): Promise<Response> {
+    await this.ensureLoaded();
     let body: any;
     try { body = await req.json(); } catch { return new Response("bad json", { status: 400 }); }
 
@@ -261,25 +341,18 @@ export class CellAgent {
     this.pendingEmailTo = kind === "email" ? user : "";
     this.pendingEmailMsgId = kind === "email" ? threadTs : "";
     this.pendingEmailSubject = kind === "email" ? subject : "";
-    await this.bumpActivity();
 
-    await this.ensureConnection();
-    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
-      console.error(`[${this.env.CELL_NAME}] ws not connected, dropping prompt`);
-      return new Response("ws not connected", { status: 503 });
-    }
-    this.ws.send(JSON.stringify({
+    // Send if the supervisor is connected; otherwise queue and ring the
+    // doorbell — the cell is hibernating and welld will wake it, the
+    // supervisor will dial in, and acceptBridge flushes the queue.
+    await this.sendOrQueue(JSON.stringify({
       type: "prompt",
       message,
       ...(images && images.length ? { images } : {}),
       streamingBehavior: "steer",
     }));
 
-    const existing = await this.state.storage.getAlarm();
-    if (existing === null) {
-      await this.state.storage.setAlarm(Date.now() + ALARM_INTERVAL_MS);
-    }
-
+    await this.persist();
     return new Response(null, { status: 202 });
   }
 
@@ -321,19 +394,13 @@ export class CellAgent {
       console.log(
         `[${this.env.CELL_NAME}] inbound agent_reply from=${env.from} in_reply_to=${env.in_reply_to.slice(0, 10)} text=${env.text.slice(0, 100).replace(/\n/g, " ")}`
       );
-      await this.ensureConnection();
-      if (this.ws && this.ws.readyState === WebSocket.OPEN) {
-        try {
-          this.ws.send(JSON.stringify({
-            type: "agent_reply",
-            in_reply_to: env.in_reply_to,
-            from: env.from,
-            text: env.text,
-          }));
-        } catch (e) {
-          console.error(`[${this.env.CELL_NAME}] failed to forward agent_reply: ${String(e).slice(0, 160)}`);
-        }
-      }
+      await this.sendOrQueue(JSON.stringify({
+        type: "agent_reply",
+        in_reply_to: env.in_reply_to,
+        from: env.from,
+        text: env.text,
+      }));
+      await this.persist();
       return new Response(null, { status: 202 });
     }
 
@@ -348,16 +415,10 @@ export class CellAgent {
       });
     }
 
-    await this.bumpActivity();
-    await this.ensureConnection();
-    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
-      this.pendingAgentForks.delete(env.corr_id);
-      return new Response("ws not connected", { status: 503 });
-    }
-
     // The supervisor speaks pi's RPC vocabulary; agent_message is a new
     // frame type that bypasses the prompt path (different routing target).
-    this.ws.send(JSON.stringify({
+    // Queue + doorbell if the cell is asleep — same as the prompt path.
+    await this.sendOrQueue(JSON.stringify({
       type: "agent_message",
       from: env.from,
       corr_id: env.corr_id,
@@ -367,10 +428,7 @@ export class CellAgent {
       text: env.text,
     }));
 
-    const existing = await this.state.storage.getAlarm();
-    if (existing === null) {
-      await this.state.storage.setAlarm(Date.now() + ALARM_INTERVAL_MS);
-    }
+    await this.persist();
     return new Response(null, { status: 202 });
   }
 
@@ -383,6 +441,7 @@ export class CellAgent {
       return;
     }
     this.pendingAgentForks.delete(corrId);
+    await this.persist();
     if (!pending.reply_to) return; // fire-and-forget — no callback to make
 
     const reply: AgentEnvelope = {
@@ -418,11 +477,13 @@ export class CellAgent {
   }
 
   private async handleDebug(): Promise<Response> {
+    await this.ensureLoaded();
     const siteMeta = await this.state.storage.get<SiteMeta>("site:__meta__");
+    const ws = this.bridgeWs();
     return Response.json({
       cell: this.env.CELL_NAME,
-      well: this.env.WELL_HOST,
-      wsState: this.ws ? this.ws.readyState : null,
+      wsState: ws ? ws.readyState : null,
+      queued: this.wsQueue.length,
       site: siteMeta
         ? { files: siteMeta.paths.length, paths: siteMeta.paths, publishedAt: siteMeta.publishedAt }
         : null,
@@ -529,62 +590,131 @@ export class CellAgent {
     });
   }
 
-  // ---- WebSocket to well ----
+  // ---- bridge WebSocket (inbound from the well's supervisor) ----
 
-  private async ensureConnection(): Promise<void> {
-    if (this.ws && this.ws.readyState === WebSocket.OPEN) return;
-    if (this.wsConnecting) return;
-    this.wsConnecting = true;
+  // Accept the inbound bridge WS. The supervisor on the well dials
+  // wss://<cell>.cells.md/agent (bearer-checked in index.ts before this is
+  // reached). We complete the upgrade with a WebSocketPair and hand the
+  // server end to the Hibernation API (state.acceptWebSocket) — the runtime
+  // owns the socket and routes frames to webSocketMessage/Close/Error, so
+  // the DO can be evicted from memory between events and recreated on the
+  // next one. Queued frames (buffered while the cell slept) flush here.
+  private async acceptBridge(req: Request): Promise<Response> {
+    if (req.headers.get("upgrade")?.toLowerCase() !== "websocket") {
+      return new Response("expected websocket", { status: 426 });
+    }
+    await this.ensureLoaded();
+    const pair = new WebSocketPair();
+    const client = pair[0];
+    const server = pair[1];
+    this.state.acceptWebSocket(server);
+    // Auto-answer the supervisor's heartbeat ping without un-hibernating
+    // the DO — the runtime matches the exact frame and replies for us.
+    this.state.setWebSocketAutoResponse(
+      new WebSocketRequestResponsePair(
+        JSON.stringify({ type: "ping" }),
+        JSON.stringify({ type: "pong" }),
+      ),
+    );
+    // Replace any stale socket — a reconnecting supervisor must not leave
+    // the DO holding two.
+    for (const old of this.state.getWebSockets()) {
+      if (old !== server) { try { old.close(1000, "replaced"); } catch {} }
+    }
+
+    // Flush frames queued while the cell was hibernating.
+    if (this.wsQueue.length) {
+      console.log(`[${this.env.CELL_NAME}] bridge connected — flushing ${this.wsQueue.length} queued frame(s)`);
+      for (const frame of this.wsQueue) {
+        try { server.send(frame); } catch (e) {
+          console.error(`[${this.env.CELL_NAME}] queue flush send failed: ${String(e).slice(0, 120)}`);
+        }
+      }
+      this.wsQueue = [];
+      await this.persist();
+    } else {
+      console.log(`[${this.env.CELL_NAME}] bridge connected`);
+    }
+
+    return new Response(null, { status: 101, webSocket: client });
+  }
+
+  // ---- Hibernation API handlers — the runtime calls these, even on a DO
+  // instance recreated after eviction. ensureLoaded() rehydrates the
+  // snapshot; persist() mirrors mutations back so the next eviction is safe.
+
+  async webSocketMessage(_ws: WebSocket, message: string | ArrayBuffer) {
+    await this.ensureLoaded();
+    const data = typeof message === "string" ? message : "";
+    if (data) {
+      for (const raw of data.split("\n")) {
+        const line = raw.trim();
+        if (line) this.onPiEvent(line);
+      }
+    }
+    await this.persist();
+  }
+
+  async webSocketClose(ws: WebSocket, code: number, _reason: string, _wasClean: boolean) {
+    await this.ensureLoaded();
+    console.log(`[${this.env.CELL_NAME}] bridge ws closed (${code})`);
+    try { ws.close(code < 4000 ? code : 1000, "closed"); } catch {}
+    // If a turn was streaming when the WS dropped, the user sees a frozen
+    // Slack message with no clue why. Finalize it with a footer so they
+    // know to retry. Pi's session continuity is preserved on the well —
+    // the next /append starts a clean new turn.
+    const t = this.currentTurn;
+    if (t && !t.ended) {
+      t.disconnected = true;
+      t.ended = true;
+      if (t.flushTimer != null) { clearTimeout(t.flushTimer); t.flushTimer = null; }
+      if (t.kind === "email") await this.flushEmail();
+      else await this.flushSlack(true);
+    }
+    await this.persist();
+  }
+
+  webSocketError(_ws: WebSocket, error: unknown) {
+    console.error(`[${this.env.CELL_NAME}] bridge ws error: ${String(error).slice(0, 120)}`);
+  }
+
+  // Send a frame to the supervisor if connected; otherwise queue it and
+  // ring the doorbell so welld wakes the cell and the supervisor dials in.
+  private async sendOrQueue(frame: string): Promise<void> {
+    const ws = this.bridgeWs();
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      try { ws.send(frame); return; }
+      catch (e) { console.error(`[${this.env.CELL_NAME}] bridge send failed, queueing: ${String(e).slice(0, 120)}`); }
+    }
+    this.wsQueue.push(frame);
+    await this.ringDoorbell();
+  }
+
+  // Ring proxy.cells.md/wake so welld wakes a hibernating cell. The
+  // supervisor boots, dials wss://<cell>.cells.md/agent, and acceptBridge
+  // flushes wsQueue. Deduped so a burst of inbound messages wakes once.
+  private async ringDoorbell(): Promise<void> {
+    if (this.doorbellInFlight) return;
+    this.doorbellInFlight = true;
     try {
-      const url = `https://${this.env.WELL_HOST}/agent`;
-      const resp = await fetch(url, {
+      const res = await fetch("https://proxy.cells.md/wake", {
+        method: "POST",
         headers: {
-          upgrade: "websocket",
+          "content-type": "application/json",
           authorization: `Bearer ${this.env.CELLS_PROXY_SECRET}`,
         },
+        body: JSON.stringify({ cell: this.env.CELL_NAME }),
+        signal: AbortSignal.timeout(40_000),
       });
-      if (resp.status !== 101 || !resp.webSocket) {
-        console.error(`[${this.env.CELL_NAME}] ws upgrade failed: ${resp.status}`);
-        return;
+      if (!res.ok) {
+        console.error(`[${this.env.CELL_NAME}] doorbell -> ${res.status}: ${(await res.text()).slice(0, 150)}`);
+      } else {
+        console.log(`[${this.env.CELL_NAME}] doorbell rang — supervisor will dial in`);
       }
-      const ws = resp.webSocket;
-      ws.accept();
-      ws.addEventListener("message", (ev: any) => {
-        const data = typeof ev.data === "string" ? ev.data : "";
-        if (!data) return;
-        for (const raw of data.split("\n")) {
-          const line = raw.trim();
-          if (!line) continue;
-          this.onPiEvent(line);
-        }
-      });
-      ws.addEventListener("close", () => {
-        console.log(`[${this.env.CELL_NAME}] ws closed`);
-        if (this.ws === ws) this.ws = null;
-        // If a turn was streaming when the WS dropped, the user sees a
-        // frozen Slack message with no clue why. Finalize it with a
-        // footer so they know to retry. Pi's session continuity is
-        // preserved on the well — the next /append starts a clean
-        // new turn.
-        const t = this.currentTurn;
-        if (t && !t.ended) {
-          t.disconnected = true;
-          t.ended = true;
-          if (t.flushTimer != null) {
-            clearTimeout(t.flushTimer);
-            t.flushTimer = null;
-          }
-          if (t.kind === "email") void this.flushEmail();
-          else void this.flushSlack(true);
-        }
-      });
-      ws.addEventListener("error", (e: any) => {
-        console.error(`[${this.env.CELL_NAME}] ws error: ${String(e).slice(0, 120)}`);
-      });
-      this.ws = ws;
-      console.log(`[${this.env.CELL_NAME}] ws connected to ${this.env.WELL_HOST}`);
+    } catch (e) {
+      console.error(`[${this.env.CELL_NAME}] doorbell failed: ${String(e).slice(0, 150)}`);
     } finally {
-      this.wsConnecting = false;
+      this.doorbellInFlight = false;
     }
   }
 
@@ -596,10 +726,6 @@ export class CellAgent {
     const type = ev?.type;
 
     if (type === "bridge_hello" || type === "pong" || type === "response") return;
-
-    // Any pi event counts as activity — extends the idle window so a long
-    // turn doesn't get cut off mid-flight.
-    void this.bumpActivity();
 
     // agent_response — supervisor's reply to an agent_message we forwarded.
     // Look up the pending corr_id and POST a kind:"agent" envelope back to
@@ -700,7 +826,9 @@ export class CellAgent {
     };
     // Email turns don't pre-flush — they only emit on agent_end. Skipping
     // the speculative first flush avoids an empty placeholder send.
-    if (this.currentTurn.kind === "slack") void this.flushSlack(false);
+    if (this.currentTurn.kind === "slack") {
+      void (async () => { await this.flushSlack(false); await this.persist(); })();
+    }
   }
 
   private endTurn() {
@@ -711,18 +839,17 @@ export class CellAgent {
       clearTimeout(t.flushTimer);
       t.flushTimer = null;
     }
-    // Final delivery + drop the WS bridge as soon as the cell side is done.
-    // The cell can hibernate even if Slack/email delivery is still being
-    // retried; the alarm chain handles those retries until confirmed.
+    // Final delivery. Post-flip the DO does NOT close the bridge — the
+    // supervisor owns the connection and well hibernation is welld's call.
+    // The cell can hibernate (and this DO evict) while Slack/email delivery
+    // is still being retried; the alarm chain handles those retries.
     void (async () => {
       const delivered = t.kind === "email"
         ? await this.flushEmail()
         : await this.flushSlack(true);
-      // If a new turn arrived during the final flush, leave the WS alone —
-      // it's now serving the new turn. The next agent_end will close.
+      // If a new turn arrived during the final flush, leave it be — the
+      // alarm/persist below would clobber it. The new turn owns state now.
       if (this.currentTurn !== t) return;
-      try { this.ws?.close(1000, "turn-complete"); } catch {}
-      this.ws = null;
       if (delivered) {
         // Clean exit — drop the alarm chain. handleAppend re-arms on next
         // inbound. Storing alarm=null cancels any scheduled fire.
@@ -731,12 +858,12 @@ export class CellAgent {
         // Delivery stranded (429s, upstream failure). Keep the alarm
         // running so retryPendingDelivery() fires on the next tick.
         t.pendingDelivery = true;
-        await this.state.storage.put("pendingDelivery", true);
         const existing = await this.state.storage.getAlarm();
         if (existing === null) {
           await this.state.storage.setAlarm(Date.now() + ALARM_INTERVAL_MS);
         }
       }
+      await this.persist();
     })();
   }
 
@@ -751,7 +878,6 @@ export class CellAgent {
       : await this.flushSlack(true);
     if (delivered) {
       t.pendingDelivery = false;
-      try { await this.state.storage.delete("pendingDelivery"); } catch {}
     }
   }
 
@@ -777,7 +903,13 @@ export class CellAgent {
     const delay = Math.max(0, this.currentTurn.lastFlushAt + this.currentFlushInterval() - now);
     this.currentTurn.flushTimer = setTimeout(() => {
       if (this.currentTurn) this.currentTurn.flushTimer = null;
-      void this.flushSlack(false);
+      void (async () => {
+        await this.flushSlack(false);
+        // flushSlack sets slackTs / overflow / lastFlushAt — persist so a
+        // hibernation eviction doesn't lose the parent-message handle and
+        // re-post a duplicate on the next flush.
+        await this.persist();
+      })();
     }, delay) as unknown as number;
   }
 

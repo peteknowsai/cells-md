@@ -4,12 +4,15 @@
  * One Worker per cell, named at birth (cells-front-bob, cells-front-pete, …).
  *
  * Control-plane routes (Bearer CELLS_PROXY_SECRET):
+ *   GET  /agent         — the well's supervisor dials in here; the
+ *                         per-cell Durable Object accepts and holds the
+ *                         WebSocket. That WS is the bidirectional bridge
+ *                         for prompts (down) and pi RPC events (up).
  *   POST /inbox/append  — receive Slack events from the Slack Worker.
- *                         Forwarded into the per-cell Durable Object,
- *                         which holds a persistent outbound WebSocket
- *                         to the well at wss://${WELL_HOST}/agent.
- *                         That WS is the bidirectional bridge for
- *                         prompts (down) and pi RPC events (up).
+ *                         Forwarded into the per-cell Durable Object. If
+ *                         the cell is hibernating the DO rings the
+ *                         doorbell (proxy.cells.md/wake) and queues the
+ *                         message until the supervisor dials back in.
  *   POST /site/publish  — the cell's site server pushes a full snapshot
  *                         of its public/ dir here; the DO stores it.
  *   POST /image/upload  — relay an image to Cloudflare Images. The CF
@@ -35,7 +38,6 @@ export { CellAgent } from "./cell-agent";
 
 export interface Env {
   CELL_NAME: string;
-  WELL_HOST: string;
   CELL_AGENT: DurableObjectNamespace;
   CHANNELS: KVNamespace;
   CELLS_PROXY_SECRET: string;
@@ -100,10 +102,11 @@ export default {
     const url = new URL(req.url);
     const path = url.pathname;
 
-    // Control plane — Slack inbox, site publish, image upload, debug.
-    // Bearer-gated: only the Slack Worker and the cell's own site server
-    // reach these.
+    // Control plane — bridge WS, Slack inbox, site publish, image upload,
+    // debug. Bearer-gated: only the cell's own supervisor and the Slack
+    // Worker reach these.
     if (
+      path === "/agent" ||
       path === "/inbox/append" ||
       path === "/site/publish" ||
       path === "/image/upload" ||
@@ -112,6 +115,16 @@ export default {
       const auth = req.headers.get("authorization") ?? "";
       if (auth !== `Bearer ${env.CELLS_PROXY_SECRET}`) {
         return new Response("unauthorized", { status: 401 });
+      }
+
+      // Bridge WebSocket — the well's supervisor dials in here and the
+      // CellAgent DO accepts it (post-direction-flip). Forward the upgrade
+      // request straight to the DO, which holds the connection.
+      if (path === "/agent") {
+        if (req.headers.get("upgrade")?.toLowerCase() !== "websocket") {
+          return new Response("expected websocket upgrade", { status: 426 });
+        }
+        return doStub(env).fetch(req);
       }
 
       if (req.method === "POST" && path === "/inbox/append") {
