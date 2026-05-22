@@ -2616,6 +2616,19 @@ async function cmdCreate(name: string | undefined, opts: CreateOpts): Promise<vo
     process.exit(1);
   }
 
+  // Guarantee the cell can hibernate before we register it as alive — no
+  // cell reaches the registry that the hibernation system can't manage
+  // (hibernation model, invariant 4).
+  try {
+    await ensureHibernateReady(eggWell);
+  } catch (e) {
+    console.error(
+      `birth failed: '${name}' not hibernate-ready (${e instanceof Error ? e.message : String(e)}) — sweeping egg ${eggWell}`,
+    );
+    await sweepEgg(eggWell);
+    process.exit(1);
+  }
+
   // ── 6. Success: registry + pool bookkeeping ──
   await markPoolMemberLive(eggWell);
   const reg = await loadRegistry();
@@ -2828,6 +2841,28 @@ async function sealWell(wellName: string): Promise<void> {
     const body = (await r.text()).slice(0, 400);
     throw new Error(`seal '${wellName}' failed: ${r.status} ${body}`);
   }
+}
+
+// Birth guarantees a hibernate-ready cell (hibernation model, invariant 4 —
+// docs/proposals/hibernation-model.html). bakePoolMember seals every egg, but
+// an egg can rot in the pool between bake and claim: a welld transition storm
+// cleared hibernate_ready on egg-0f7d66 while it waited. So re-verify at claim.
+// If welld reports the well hibernate-ready, done. Otherwise — or if welld is
+// too old to report the field at all — seal now. sealWell throws on failure;
+// the caller sweeps the egg and fails the birth rather than registering a cell
+// the hibernation system can never manage.
+async function ensureHibernateReady(wellName: string): Promise<void> {
+  const base = process.env.WELL_API_URL ?? "http://127.0.0.1:7878";
+  let ready: boolean | undefined;
+  try {
+    const r = await fetch(`${base}/v1/wells/${encodeURIComponent(wellName)}`, {
+      headers: { Authorization: `Bearer ${await wellsToken()}` },
+    });
+    if (r.ok) ready = (await r.json() as { hibernate_ready?: boolean }).hibernate_ready;
+  } catch { /* unreachable welld → fall through and seal */ }
+  if (ready === true) return;            // already sealed — nothing to do
+  // false (rotted in the pool), or undefined (welld predates the field) — seal.
+  await sealWell(wellName);
 }
 
 // Register the `site` systemd service on a cell via welld's services API.
@@ -3474,6 +3509,13 @@ echo "name-subst: $(grep -lc __NAME__ AGENTS.md SOUL.md package.json .tmux.conf 
     throw new Error(`name substitution failed: ${sub.stderr.slice(0, 300)}`);
   }
   console.log(`  substituted __NAME__ → ${spec.name} + tmux color (${bg}/${fg})`);
+
+  // 7c. Seal — make the well hibernate-capable (hibernation model,
+  //     invariant 4). Specials are pinned and won't hibernate in practice,
+  //     but capability is not policy: a sealed special survives a future
+  //     `cells unpin` instead of failing welld's hibernate gate. The pool
+  //     bake flow seals; the special bake flow never did.
+  await ensureHibernateReady(spec.wellName);
 
   // 8. Pin always-on. (provisionCellInWell already called disableAutoSleep
   //    via the bake flow; this is the same operation — kept explicit so the

@@ -42,7 +42,7 @@
       <tr><td>1</td><td><strong>One truth for VM state: lume.</strong> welld's <code>runtime.json</code> and in-memory state are caches — never trusted blind. Every actuator reconciles against <code>lume.list()</code> before acting.</td><td>Mostly shipped — wells wired the watchdog reconcile + the <code>startWell</code> persist fix. One gap left (the <code>egg-0f7d66</code> in-memory staleness).</td></tr>
       <tr><td>2</td><td><strong>One decider for hibernation: welld.</strong> The cell reports <em>state</em> (<code>busy</code>/<code>idle</code>) and never commands. welld's watchdog is the sole trigger, and enforces the pin in one place.</td><td><strong>Not done — scoped below.</strong></td></tr>
       <tr><td>3</td><td><strong>One owner for the bridge: cells, self-healing.</strong> The supervisor owns bridge liveness — heartbeat detection + bounded reconnect. The doorbell wakes the well; the supervisor redials.</td><td>Shipped — connect-timeout + settle-once, verified, on <code>main</code> (<code>646c20a</code>).</td></tr>
-      <tr><td>4</td><td><strong>Every cell born hibernate-ready.</strong> Birth guarantees seal — no cell can exist that the hibernation system can't manage.</td><td><strong>Not done — scoped below.</strong></td></tr>
+      <tr><td>4</td><td><strong>Every cell born hibernate-ready.</strong> Birth guarantees seal — no cell can exist that the hibernation system can't manage.</td><td>Shipped 2026-05-22 — birth guards both paths (pool + special); fleet audited, all cells hibernate-ready.</td></tr>
     </tbody>
   </table>
 
@@ -74,6 +74,10 @@
   </dl>
 
   <h2>Invariant 4 — every cell born hibernate-ready</h2>
+
+  <div class="callout">
+    <p><strong>Shipped 2026-05-22.</strong> <code>ensureHibernateReady()</code> guards both birth paths — the pool claim and the special birth. Fleet audited: all eight cell wells are hibernate-ready (<code>mother</code> and <code>pulse</code>, the only two that weren't, are sealed). The scope below is the record of what was built.</p>
+  </div>
 
   <p><code>bakePoolMember</code> already seals each pool egg and fails loud if the seal fails — so a pool egg that finishes baking <em>is</em> sealed. The gap is downstream: a cell can still reach <code>status:&nbsp;alive</code> un-hibernate-ready — an egg baked before the seal-at-bake code, or one whose <code>hibernate_ready</code> was clobbered by a later substrate event — and nothing re-checks at birth. <code>nfv-market-cc</code> is the live proof: claimed, registered, alive, and unable to hibernate.</p>
 
