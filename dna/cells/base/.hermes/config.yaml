@@ -8,14 +8,17 @@
 # real ChatGPT-subscription token, so a hermes cell runs on the subscription,
 # never the metered API.
 #
-# KNOWN BLOCKER (2026-05-20): turns are edge-blocked by the ChatGPT codex
-# backend — HTTP 403 "Your request was blocked", instant — a request-
-# fingerprint mismatch at the proxy/wire boundary, not a config error. The
-# same proxy path serves codex and pi cells fine. See the "wire" section of
-# docs/proposals/hermes-harness.html.
+# `api_mode: codex_responses` is load-bearing: hermes's runtime provider
+# resolution re-derives api_mode from the provider name + base URL and does
+# NOT consult the registered ProviderProfile's api_mode. Without this line
+# `cells` falls through to the chat_completions default — the codex backend
+# has no /chat/completions surface, so every turn 403s. The runtime honours
+# an explicit model.api_mode only when model.provider matches, hence both
+# keys.
 model:
   default: __MODEL__
   provider: cells
+  api_mode: codex_responses
 
 agent:
   # Reasoning effort — low | medium | high | xhigh.
