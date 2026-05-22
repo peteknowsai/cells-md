@@ -37,7 +37,7 @@ import { getAdapter, type AdapterHost, type HarnessAdapter } from "../lib/harnes
 const PORT = Number(process.env.PORT ?? 8080);
 const NAME = process.env.CELL_NAME ?? "unknown";
 const SECRET = process.env.CELLS_PROXY_SECRET ?? "";
-const HOME = process.env.HOME ?? "/home/well";
+const HOME = process.env.HOME ?? "/root";
 
 // Wells bridge gateway (from inside the VM). host.well resolves to the host
 // 192.168.64.1; welld serves cooperation endpoints on :7879.

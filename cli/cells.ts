@@ -2161,8 +2161,8 @@ type CreateOpts = {
 const DEFAULT_SEED = "introduce yourself in one sentence and tell me what you can help with";
 
 // Env vars injected when invoking mother (and any host-side scripts it shells
-// out to). Cells run on local wells (welld daemon on :7878, agent user `well`,
-// home /home/well). The SPRITES_* names are kept as the env-var contract for
+// out to). Cells run on local wells (welld daemon on :7878; the agent runs as
+// root, HOME=/root). The SPRITES_* names are kept as the env-var contract for
 // scripts and mother's tools — they were established when wells was a wells
 // drop-in. Internally, everything points at welld.
 function wellsEnv(): Record<string, string> {
@@ -2175,8 +2175,6 @@ function wellsEnv(): Record<string, string> {
     WELL_API_URL: "http://localhost:7878",
     WELL_TOKEN: readFileSync(tokenPath, "utf-8").trim(),
     WELL_BINARY: "well",
-    AGENT_USER: "well",
-    AGENT_HOME: "/home/well",
   };
 }
 
@@ -2885,7 +2883,7 @@ async function ensureHibernateReady(wellName: string): Promise<void> {
 async function registerSiteService(wellName: string, cellName: string): Promise<void> {
   const inner =
     `cd /root/site && . /etc/profile.d/cells-env.sh; ` +
-    `export HOME=/root PATH="/home/well/.bun/bin:$PATH"; ` +
+    `export HOME=/root PATH="/root/.bun/bin:$PATH"; ` +
     `export CELL_NAME='${cellName}'; export PORT=8080; ` +
     `exec bun run server.ts`;
   // Escape single quotes for the outer `sudo bash -c '...'` wrap.
@@ -3056,7 +3054,6 @@ async function provisionCellInWell(wellName: string): Promise<void> {
   const bunInstall = await wellExecCapture(
     wellName,
     `set -euo pipefail
-sudo chmod 0755 /home/well
 sudo bash -lc 'cd /root && bun install --frozen-lockfile --ignore-scripts'
 echo "bun: $(bun --version 2>&1 | head -1 || echo MISSING)"`,
   );
@@ -7199,21 +7196,18 @@ async function cmdBake(opts: BakeOpts) {
     //     Also bun for the well user (cells's CLI uses bun; pi tooling does
     //     too in places). Bun's installer is a one-liner curl|bash that
     //     drops a tarball at ~/.bun. Both are best-effort idempotent.
-    console.log(`→ install pi globally + bun for well user`);
+    console.log(`→ install pi globally + bun for root`);
     const installTools = await wellExecCapture(
       sourceName,
       `set -euo pipefail
 sudo npm install -g @mariozechner/pi-coding-agent
-# Bun installer wants to run as the target user with their HOME set.
-if [ ! -x /home/well/.bun/bin/bun ]; then
-  sudo -u well bash -lc 'curl -fsSL https://bun.sh/install | bash'
+# Bun for root: the agent runs as root (HOME=/root), so install into
+# /root/.bun. cells-env.sh puts /root/.bun/bin on the cell's PATH.
+if [ ! -x /root/.bun/bin/bun ]; then
+  sudo bash -lc 'export HOME=/root; curl -fsSL https://bun.sh/install | bash'
 fi
-# Ubuntu's useradd defaults /home/well to 0750 — cell user (cells-env.sh's
-# PATH assumes /home/well/.bun/bin) can't traverse. Open it to 0755 so
-# cell can exec bun. The bun binary itself stays well:well.
-sudo chmod 0755 /home/well
 echo "pi: $(/usr/bin/pi --version 2>&1 | head -1 || /usr/local/bin/pi --version 2>&1 | head -1 || echo MISSING)"
-echo "bun: $(/home/well/.bun/bin/bun --version 2>&1 | head -1 || echo MISSING)"`,
+echo "bun: $(/root/.bun/bin/bun --version 2>&1 | head -1 || echo MISSING)"`,
     );
     if (!installTools.ok) {
       throw new Error(`install pi+bun failed: ${installTools.stderr.slice(0, 400) || installTools.stdout.slice(0, 400)}`);
@@ -7394,7 +7388,7 @@ async function waitForCloudInit(name: string): Promise<void> {
   while (Date.now() < deadlineMs) {
     const r = await wellExecCapture(
       name,
-      "test -f /etc/.well-ready && test -s /home/well/.ssh/authorized_keys && echo ready || echo not-ready",
+      "test -f /etc/.well-ready && { test -s /root/.ssh/authorized_keys || test -s /home/well/.ssh/authorized_keys; } && echo ready || echo not-ready",
     ).catch((e) => ({ ok: false, stdout: "", stderr: String(e) }));
     if (r.ok && r.stdout.trim() === "ready") {
       return;
@@ -7545,15 +7539,13 @@ if [ -n "\${CELLS_PROXY_SECRET:-}" ]; then
   export OPENAI_CODEX_API_KEY="\$CELLS_PROXY_SECRET"
   unset ANTHROPIC_API_KEY
 fi
-# /root/bin on PATH for the cells CLI. Bun was installed for the well
-# user at bake time (~/.bun for well = /home/well/.bun); /home/well is
-# mode 0755 so cell can execute. Include both \$HOME/.bun/bin (well's
-# own login shells) and the absolute /home/well/.bun/bin (cell's login
-# shells, where \$HOME=/root — \$HOME/.bun is empty). /root/.local/bin is
+# /root/bin on PATH for the cells CLI. Bun is installed for root at
+# /root/.bun (= \$HOME/.bun, since the agent runs as root) and also ships
+# system-wide at /usr/local/bin/bun from ubuntu-base. /root/.local/bin is
 # where the claude CLI installs itself — the claude-code harness and its
 # agent-comms forkAndAsk shell out to \`claude\`, so it has to resolve on
 # a plain login-shell PATH.
-export PATH="\$HOME/.bun/bin:/home/well/.bun/bin:/root/bin:/root/.local/bin:\$PATH"
+export PATH="\$HOME/.bun/bin:/root/bin:/root/.local/bin:\$PATH"
 
 # Cell identity. The substrate hostname is the well's egg-id (e.g.
 # egg-403c69) — unfriendly and *not* the cell name. The real name is the

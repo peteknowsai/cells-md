@@ -38,10 +38,11 @@ fi
 # Inner (root) script:
 #   1. cd into /root/site (server.ts lives there).
 #   2. Source /etc/profile.d/cells-env.sh (env shim re-exports secret).
-#   3. Prepend /home/well/.bun/bin to PATH (bun installed there at bake).
+#   3. Prepend /root/.bun/bin to PATH (bun installed there for root at bake;
+#      also at /usr/local/bin/bun system-wide from ubuntu-base).
 #   4. Export HOME, CELL_NAME, PORT.
 #   5. exec bun in foreground; if it crashes systemd restarts it.
-INNER='cd /root/site && . /etc/profile.d/cells-env.sh; export HOME=/root PATH="/home/well/.bun/bin:$PATH"; export CELL_NAME='"'$NAME'"'; export PORT=8080; exec bun run server.ts'
+INNER='cd /root/site && . /etc/profile.d/cells-env.sh; export HOME=/root PATH="/root/.bun/bin:$PATH"; export CELL_NAME='"'$NAME'"'; export PORT=8080; exec bun run server.ts'
 SCRIPT="sudo bash -c $(printf '%q' "$INNER")"
 
 PAYLOAD=$(jq -n --arg s "$SCRIPT" '{cmd:"bash",args:["-lc",$s],workdir:"/root"}')
