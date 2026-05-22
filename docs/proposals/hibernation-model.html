@@ -1,0 +1,109 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Hibernation: One Truth, One Decider</title>
+<link rel="stylesheet" href="../_assets/doc.css">
+</head>
+<body>
+<div class="page">
+
+  <div class="doc-header">
+    <div class="crumb">cells <span class="sep">/</span> proposals <span class="sep">/</span> hibernation model</div>
+    <div>design + scope</div>
+  </div>
+
+  <h1>Hibernation: One Truth, One Decider</h1>
+  <p class="subtitle">A comprehensive model for when cells sleep — and the two pieces of work left to get there.</p>
+
+  <div class="callout">
+    <p><strong>Why this doc.</strong> Cells-not-sleeping was chased as a string of separate bugs — a welld state desync, a bridge that wouldn't reconnect after a thaw, an always-on cell that could hibernate itself. They are not separate. Every one is the same shape, and the fix is an architecture, not another patch.</p>
+  </div>
+
+  <h2>The pattern behind every bug</h2>
+
+  <p>Two failure shapes, over and over:</p>
+
+  <dl class="kv">
+    <dt>State tracked in more than one place</dt>
+    <dd>Whether a VM is running lives in <em>lume</em> (the truth), in welld's <code>runtime.json</code>, and in welld's in-memory cache. They drift, and an actuator trusts the stale copy. → the desync that pinned a cell awake; <code>startWell</code> never persisting <code>alive_running</code>; the in-memory staleness still snagging <code>egg-0f7d66</code>.</dd>
+    <dt>A decision owned by more than one party</dt>
+    <dd>"Should this cell sleep?" is decided <em>both</em> by the cell — which imperatively <code>POST</code>s <code>/sleep</code> — and by welld — watchdog plus the never-sleep pin. The two disagree. → the pin getting bypassed; the cooperative-sleep change that would have hibernated the always-on cells.</dd>
+  </dl>
+
+  <p>Plus two structural gaps that let the above bite harder: the bridge had no clear owner for its own liveness, and birth didn't guarantee a cell could even hibernate.</p>
+
+  <h2>The model — four invariants</h2>
+
+  <table>
+    <thead><tr><th>#</th><th>Invariant</th><th>Status</th></tr></thead>
+    <tbody>
+      <tr><td>1</td><td><strong>One truth for VM state: lume.</strong> welld's <code>runtime.json</code> and in-memory state are caches — never trusted blind. Every actuator reconciles against <code>lume.list()</code> before acting.</td><td>Mostly shipped — wells wired the watchdog reconcile + the <code>startWell</code> persist fix. One gap left (the <code>egg-0f7d66</code> in-memory staleness).</td></tr>
+      <tr><td>2</td><td><strong>One decider for hibernation: welld.</strong> The cell reports <em>state</em> (<code>busy</code>/<code>idle</code>) and never commands. welld's watchdog is the sole trigger, and enforces the pin in one place.</td><td><strong>Not done — scoped below.</strong></td></tr>
+      <tr><td>3</td><td><strong>One owner for the bridge: cells, self-healing.</strong> The supervisor owns bridge liveness — heartbeat detection + bounded reconnect. The doorbell wakes the well; the supervisor redials.</td><td>Shipped — connect-timeout + settle-once, verified, on <code>main</code> (<code>646c20a</code>).</td></tr>
+      <tr><td>4</td><td><strong>Every cell born hibernate-ready.</strong> Birth guarantees seal — no cell can exist that the hibernation system can't manage.</td><td><strong>Not done — scoped below.</strong></td></tr>
+    </tbody>
+  </table>
+
+  <div class="callout">
+    <p><strong>The one move that matters.</strong> Invariant 2. Stop letting a cell command its own hibernation. <code>busy</code> and <code>idle</code> are the cell's entire vocabulary; welld decides and actuates. That single change collapses the whole second bug class — the pin bypass, the cell/welld tug-of-war, and the hazard class the reverted cooperative-sleep change exposed all disappear at once.</p>
+  </div>
+
+  <h2>Invariant 2 — welld is the sole decider</h2>
+
+  <p>Today the cell has two channels to welld: <code>/lifecycle&nbsp;{busy|idle}</code> (a hint) and <code>/sleep</code> (an imperative command). The command is the problem — it bypasses the pin, because welld's <code>/sleep</code> handler hibernates unconditionally while the pin (<code>auto_sleep_seconds&nbsp;===&nbsp;null</code>) is honored only by the watchdog. Collapse the two channels to one: the cell reports state, welld owns the decision.</p>
+
+  <h3>Cells side — <code>dna/cells/base/site/server.ts</code></h3>
+  <ul>
+    <li>Delete <code>signalSleep()</code>, <code>scheduleSleepAfterGrace()</code>, <code>cancelPendingSleep()</code>, <code>pendingSleepTimer</code>, <code>SLEEP_GRACE_MS</code>, and the <code>POST /sleep</code> call.</li>
+    <li>Keep <code>signalLifecycle("busy"|"idle")</code> — unchanged. <code>onTranslatedLine</code>: <code>agent_end</code> → <code>signalLifecycle("idle")</code> only; <code>agent_start</code> / prompt-receive → <code>signalLifecycle("busy")</code>.</li>
+    <li>Net: the cell's hibernation vocabulary is two words. It never says "sleep."</li>
+  </ul>
+
+  <h3>Wells side — <code>daemon/welld.ts</code> (wells team)</h3>
+  <ul>
+    <li>Delete the <code>/sleep</code> route. The watchdog is already the decider — it consumes the <code>busy</code>/<code>idle</code> set, the <code>lastTouched</code> timer, <code>auto_sleep_seconds</code>, and the pin.</li>
+    <li>To keep fast cooperative sleep without the cell commanding it: on <code>/lifecycle&nbsp;{idle}</code>, record <code>idle_since</code>. The watchdog sleeps an idle-signalled cell after a short grace (≈8&nbsp;s) instead of the full <code>auto_sleep_seconds</code> — still gated by the pin, seal-readiness, and the activity probe. The <code>idle</code> signal becomes a hint that lets welld sleep <em>sooner</em>, not a command that sleeps it <em>regardless</em>.</li>
+  </ul>
+
+  <dl class="kv">
+    <dt>Effort</dt><dd>Cells side ~1&nbsp;hr (deletion + test). Wells side is the wells team's call — delete the endpoint, optional idle-hint fast path.</dd>
+    <dt>Risk</dt><dd>Low. The watchdog is already proven in production (it hibernates idle cells correctly today). This removes a code path; it adds none.</dd>
+    <dt>Payoff</dt><dd>The pin becomes airtight. Tuning "how aggressively to pack cells per box" becomes a single knob — <code>auto_sleep_seconds</code> — instead of a negotiation between two deciders.</dd>
+  </dl>
+
+  <h2>Invariant 4 — every cell born hibernate-ready</h2>
+
+  <p><code>bakePoolMember</code> already seals each pool egg and fails loud if the seal fails — so a pool egg that finishes baking <em>is</em> sealed. The gap is downstream: a cell can still reach <code>status:&nbsp;alive</code> un-hibernate-ready — an egg baked before the seal-at-bake code, or one whose <code>hibernate_ready</code> was clobbered by a later substrate event — and nothing re-checks at birth. <code>nfv-market-cc</code> is the live proof: claimed, registered, alive, and unable to hibernate.</p>
+
+  <h3>The guard — <code>cli/cells.ts</code>, the pool-claim path</h3>
+  <ul>
+    <li>After claiming a pool egg and before <code>reg.cells.push</code> (≈ line&nbsp;2620), assert <code>hibernate_ready === true</code> on the claimed well via <code>GET /v1/wells/&lt;well&gt;</code>.</li>
+    <li>If false: call <code>sealWell()</code> then — a mid-life seal is ~8&nbsp;s and proven to work (it sealed <code>egg-0f7d66</code> cleanly). If the seal fails, reject the egg back to the pool as defective rather than registering a cell that can't hibernate.</li>
+    <li>No cell reaches <code>alive</code> that the hibernation system can't manage.</li>
+  </ul>
+
+  <h3>One-time cleanup</h3>
+  <p>A fleet audit: scan every live cell, flag any with <code>hibernate_ready&nbsp;=&nbsp;false</code>, seal it. <code>nfv-market-cc</code> is one such cell today; there may be other pre-seal-code survivors.</p>
+
+  <dl class="kv">
+    <dt>Effort</dt><dd>~2&nbsp;hr including the audit.</dd>
+    <dt>Risk</dt><dd>Low. <code>sealWell</code> mid-life is already proven in production.</dd>
+  </dl>
+
+  <h2>Sequencing</h2>
+  <ol>
+    <li><strong>Invariant 4 first</strong> — it's self-contained, cells-only, and stops the bleed (no new unsealed cells, existing ones cleaned up).</li>
+    <li><strong>Invariant 2 next</strong> — cells-side deletion can land immediately (removing <code>/sleep</code> emission is safe on its own; the watchdog already covers the case). The wells-side <code>/sleep</code> removal + idle-hint fast path is coordinated with the wells team — they already have the <code>/sleep</code>-ignores-pin report.</li>
+    <li><strong>Invariant 1's last gap</strong> — the <code>egg-0f7d66</code> in-memory staleness — is the wells team's, already handed over with evidence.</li>
+  </ol>
+
+  <div class="callout">
+    <p><strong>End state.</strong> One truth for whether a VM runs (lume). One decider for whether a cell sleeps (welld's watchdog), enforcing the pin in one place. One owner for the bridge (the supervisor, self-healing). Every cell hibernate-ready from birth. Hibernation stops being a source of bugs and becomes a single tunable knob.</p>
+  </div>
+
+</div>
+<script src="../_assets/doc.js"></script>
+</body>
+</html>
