@@ -3152,10 +3152,23 @@ async function bakePoolMember(): Promise<string> {
   // create time (Pi3 deleted that path). Instead, sealWell() is called
   // after provisionCellInWell to flip the well to a hibernate-legal
   // disk-only state. ~6-8s cost is paid by /seal instead of /v1/wells.
-  await directWellCreate(wellName, {
-    fromImage: "ubuntu-base",
-    env,
-  });
+  // A create failure can still leave a partial bundle dir behind in
+  // welld's state dir — best-effort destroy so cells doesn't leak it.
+  // (welld can't yet reap a never-registered well's dir; tracked in the
+  // wells findings doc. This at least cleans registered-then-failed
+  // wells and makes the abort intent explicit — every other birth step
+  // below already does this.)
+  try {
+    await directWellCreate(wellName, {
+      fromImage: "ubuntu-base",
+      env,
+    });
+  } catch (e) {
+    await directWellDestroy(wellName).catch(() => {});
+    throw new Error(
+      `bakePoolMember well create failed for '${wellName}': ${e instanceof Error ? e.message : String(e)}`,
+    );
+  }
   await setWellAuthPublic(wellName);
   // Disable wells's auto-hibernate watchdog up front. v1 cells stay
   // alive_running until explicit lifecycle ops. Without this, the
@@ -3403,9 +3416,16 @@ async function cmdBirthSpecial(rawArgs: string[]): Promise<void> {
   }
   const env = { ...baseEnv, CELL_NAME: spec.name };
 
-  // 3. Create the well (named, not egg-<hex>).
+  // 3. Create the well (named, not egg-<hex>). A create failure can
+  //    leave a partial bundle dir in welld's state dir — best-effort
+  //    destroy so we don't leak it (same abort shape as steps 4/5).
   console.log(`  creating well ${spec.wellName}…`);
-  await directWellCreate(spec.wellName, { fromImage: "ubuntu-base", env });
+  try {
+    await directWellCreate(spec.wellName, { fromImage: "ubuntu-base", env });
+  } catch (e) {
+    await directWellDestroy(spec.wellName).catch(() => {});
+    throw new Error(`well create failed for ${spec.wellName}: ${e instanceof Error ? e.message : String(e)}`);
+  }
   await setWellAuthPublic(spec.wellName);
   await disableAutoSleep(spec.wellName);
 
