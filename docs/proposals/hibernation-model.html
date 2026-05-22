@@ -40,7 +40,7 @@
     <thead><tr><th>#</th><th>Invariant</th><th>Status</th></tr></thead>
     <tbody>
       <tr><td>1</td><td><strong>One truth for VM state: lume.</strong> welld's <code>runtime.json</code> and in-memory state are caches — never trusted blind. Every actuator reconciles against <code>lume.list()</code> before acting.</td><td>Mostly shipped — wells wired the watchdog reconcile + the <code>startWell</code> persist fix. One gap left (the <code>egg-0f7d66</code> in-memory staleness).</td></tr>
-      <tr><td>2</td><td><strong>One decider for hibernation: welld.</strong> The cell reports <em>state</em> (<code>busy</code>/<code>idle</code>) and never commands. welld's watchdog is the sole trigger, and enforces the pin in one place.</td><td><strong>Not done — scoped below.</strong></td></tr>
+      <tr><td>2</td><td><strong>One decider for hibernation: welld.</strong> The cell reports <em>state</em> (<code>busy</code>/<code>idle</code>) and never commands. welld's watchdog is the sole trigger, and enforces the pin in one place.</td><td>Shipped 2026-05-22 (cells side) — <code>/sleep</code> deleted; the cell signals only <code>busy</code>/<code>idle</code>. welld-side <code>/sleep</code>-route removal + idle-hint fast path: flagged to wells.</td></tr>
       <tr><td>3</td><td><strong>One owner for the bridge: cells, self-healing.</strong> The supervisor owns bridge liveness — heartbeat detection + bounded reconnect. The doorbell wakes the well; the supervisor redials.</td><td>Shipped — connect-timeout + settle-once, verified, on <code>main</code> (<code>646c20a</code>).</td></tr>
       <tr><td>4</td><td><strong>Every cell born hibernate-ready.</strong> Birth guarantees seal — no cell can exist that the hibernation system can't manage.</td><td>Shipped 2026-05-22 — birth guards both paths (pool + special); fleet audited, all cells hibernate-ready.</td></tr>
     </tbody>
@@ -51,6 +51,10 @@
   </div>
 
   <h2>Invariant 2 — welld is the sole decider</h2>
+
+  <div class="callout">
+    <p><strong>Cells side shipped 2026-05-22.</strong> The <code>/sleep</code> path is deleted from the supervisor — the cell's whole hibernation vocabulary is now <code>signalLifecycle("busy"|"idle")</code>. Rolled to all 7 live cells. Two welld-side items are flagged to the wells team: delete the now-unused <code>/sleep</code> route, and add the <code>/lifecycle&nbsp;{idle}</code> fast path so post-turn sleep returns to ~8&nbsp;s instead of waiting the full watchdog cadence. The scope below is the record of what was built.</p>
+  </div>
 
   <p>Today the cell has two channels to welld: <code>/lifecycle&nbsp;{busy|idle}</code> (a hint) and <code>/sleep</code> (an imperative command). The command is the problem — it bypasses the pin, because welld's <code>/sleep</code> handler hibernates unconditionally while the pin (<code>auto_sleep_seconds&nbsp;===&nbsp;null</code>) is honored only by the watchdog. Collapse the two channels to one: the cell reports state, welld owns the decision.</p>
 

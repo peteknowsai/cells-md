@@ -273,29 +273,28 @@ let bridgeMissedPings = 0;
 // ---------------------------------------------------------------------------
 // Lifecycle signaling.
 //
-// Two complementary signals to welld's bridge gateway (host.well:7879):
+// The cell reports *state* to welld's bridge gateway (host.well:7879) — it
+// never commands hibernation:
 //
-//   POST /lifecycle {state:"busy"|"idle"}   informational hint. busy =
-//                                            don't try to hibernate me;
-//                                            idle = no agent in flight.
-//                                            Welld may use this with WS
-//                                            bridge state for eligibility.
+//   POST /lifecycle {state:"busy"|"idle"}   busy = an agent turn is in
+//                                            flight; idle = none. welld's
+//                                            watchdog is the SOLE decider of
+//                                            when an idle cell hibernates —
+//                                            it alone weighs this signal
+//                                            against the never-sleep pin,
+//                                            seal-readiness and activity.
 //
-//   POST /sleep                              explicit "release my RAM
-//                                            now." Fired after agent_end
-//                                            once a short grace window
-//                                            elapses with no new turn —
-//                                            gives WS clients time to
-//                                            drain the final stream.
+// One signal, one decider (hibernation model, invariant 2). The cell used to
+// also POST /sleep — an imperative "hibernate me now" — but welld's /sleep
+// hibernated unconditionally, bypassing the pin, so a pinned always-on cell
+// could hibernate itself. Removed: welld owns the decision; the cell's whole
+// hibernation vocabulary is busy/idle.
 //
-// Fire-and-forget; failures are logged and swallowed so older welld
-// builds (or transient bridge hiccups) don't break the cell.
+// Fire-and-forget; failures are logged and swallowed so older welld builds
+// (or transient hiccups) don't break the cell.
 // ---------------------------------------------------------------------------
 
-const SLEEP_GRACE_MS = 1500;
-
 let lastLifecycleState: "busy" | "idle" | null = null;
-let pendingSleepTimer: Timer | null = null;
 
 async function signalLifecycle(state: "busy" | "idle") {
   if (lastLifecycleState === state) return;
@@ -309,32 +308,6 @@ async function signalLifecycle(state: "busy" | "idle") {
     });
   } catch (e) {
     console.error(`[bridge] lifecycle ${state} signal failed: ${String(e).slice(0, 120)}`);
-  }
-}
-
-async function signalSleep() {
-  try {
-    await fetch(`${HOST_WELL}/sleep`, {
-      method: "POST",
-      signal: AbortSignal.timeout(2000),
-    });
-  } catch (e) {
-    console.error(`[bridge] sleep signal failed: ${String(e).slice(0, 120)}`);
-  }
-}
-
-function scheduleSleepAfterGrace() {
-  if (pendingSleepTimer) clearTimeout(pendingSleepTimer);
-  pendingSleepTimer = setTimeout(() => {
-    pendingSleepTimer = null;
-    void signalSleep();
-  }, SLEEP_GRACE_MS);
-}
-
-function cancelPendingSleep() {
-  if (pendingSleepTimer) {
-    clearTimeout(pendingSleepTimer);
-    pendingSleepTimer = null;
   }
 }
 
@@ -360,9 +333,7 @@ function onTranslatedLine(line: string) {
     const evt = JSON.parse(line);
     if (evt?.type === "agent_end") {
       void signalLifecycle("idle");
-      scheduleSleepAfterGrace();
     } else if (evt?.type === "agent_start") {
-      cancelPendingSleep();
       void signalLifecycle("busy");
     }
   } catch { /* not JSON — already broadcast */ }
@@ -926,7 +897,6 @@ function handleBridgeFrame(line: string) {
   // created by agent_start). Without this, claude/codex text streams in
   // but the DO drops every event silently.
   if (cmd?.type === "prompt") {
-    cancelPendingSleep();
     void signalLifecycle("busy");
     if (HARNESS !== "pi") {
       broadcastToClients(JSON.stringify({ type: "agent_start" }));
