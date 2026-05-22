@@ -81,15 +81,22 @@ async function readWranglerOauthToken(): Promise<string | null> {
   } catch { return null; }
 }
 
-// Verify a bearer token against the CF API. Used to detect a dead
-// CLOUDFLARE_API_TOKEN before we waste a real call on it. OAuth tokens
-// don't respond to this endpoint (returns success:false even for valid
-// ones), so callers MUST only invoke this on API tokens.
-async function verifyCfApiToken(token: string): Promise<boolean> {
+// Verify a bearer token by hitting the exact account-scoped operation we
+// know we need (listing KV namespaces). Two reasons over /user/tokens/verify:
+//   (1) Cloudflare's verify endpoint 401s account-scoped tokens that lack
+//       any user-scope permission (e.g. User > User Details > Read), giving
+//       false negatives for least-privilege tokens — which CF itself
+//       recommends. Testing a scoped op we actually use sidesteps that.
+//   (2) Testing the real op also catches scope misconfiguration end-to-end:
+//       a token that exists but lacks KV permissions fails here too.
+// OAuth tokens 401 against this account-scoped path (no account binding),
+// so callers MUST only invoke this on API tokens, same as before.
+async function verifyCfApiToken(token: string, accountId: string): Promise<boolean> {
   try {
-    const r = await fetch("https://api.cloudflare.com/client/v4/user/tokens/verify", {
-      headers: { Authorization: `Bearer ${token}` },
-    });
+    const r = await fetch(
+      `https://api.cloudflare.com/client/v4/accounts/${accountId}/storage/kv/namespaces?per_page=1`,
+      { headers: { Authorization: `Bearer ${token}` } },
+    );
     if (!r.ok) return false;
     const j = (await r.json()) as { success?: boolean };
     return !!j.success;
@@ -115,7 +122,7 @@ async function cfCreds(): Promise<{ accountId: string; token: string } | null> {
   // 401'd every KV write — the fallback path was unreachable.
   const apiToken = process.env.CLOUDFLARE_API_TOKEN
     ?? (await readSecretsKey("CLOUDFLARE_API_TOKEN"));
-  if (apiToken && await verifyCfApiToken(apiToken)) {
+  if (apiToken && await verifyCfApiToken(apiToken, accountId)) {
     _cfCredsCache = { accountId, token: apiToken };
     return _cfCredsCache;
   }
