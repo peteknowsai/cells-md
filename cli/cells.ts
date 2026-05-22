@@ -4974,7 +4974,19 @@ async function captureGreeting(
   });
 
   ws.addEventListener("close", () => {
-    if (!doneDef.settled) doneDef.reject(new Error("ws closed before agent_end"));
+    if (doneDef.settled) return;
+    // `agent_end` is pi's terminal event. The claude-code / codex / hermes
+    // harnesses stream their reply through a translation layer that closes
+    // the bridge socket on a clean finish without emitting a pi-shaped
+    // `agent_end`. So a close *after* we've accumulated greeting text is a
+    // normal completion, not a failure — resolve with what streamed. Only
+    // an empty greeting at close time is a real failure.
+    if (greeting.length > 0) {
+      if (released) process.stdout.write("\n");
+      doneDef.resolve(greeting);
+    } else {
+      doneDef.reject(new Error("ws closed before any greeting streamed"));
+    }
   });
   ws.addEventListener("error", (e: any) => {
     if (!doneDef.settled) doneDef.reject(new Error(`ws error: ${String(e?.message ?? e).slice(0, 200)}`));
