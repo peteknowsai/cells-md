@@ -26,14 +26,14 @@ The exhaustive surface. For workflows and gotchas, see `SKILL.md` next to this f
 | `cells refresh-extensions <args>` | Re-sync a cell's extensions from the DNA. |
 | `cells heartbeat <args>` | Heartbeat ops — pulse digest, schedule, recent fires. |
 | `cells pi` | Open the mother Pi TUI (alias for `cells talk mother`). |
-| `cells schedule-* / unschedule-*` | Install/remove launchd jobs: `pi-patches`, `host-bridge`, `pulse`, `pool-refill`, `pool-reconcile`. |
+| `cells schedule-* / unschedule-*` | Install/remove launchd jobs: `pi-patches`, `host-bridge`, `pulse`, `pool-reconcile`. `schedule-pool-refill` is retired — it now refuses; `unschedule-pool-refill` stays, to remove a stale plist. |
 
 ## `cells birth` flags
 
 | Flag | Values | Notes |
 |---|---|---|
-| `--harness=` | `pi`, `claude-code`, `codex` | `pi` = full agent; `claude-code` = Anthropic-model coding machine (Max sub); `codex` = OpenAI-model coding machine (ChatGPT sub). Default `pi`. |
-| `--model=` | `gpt-5.5`, `gpt-5.5-pro`, `deepseek-v4-flash`, `deepseek-v4-pro`, `opus`, `sonnet`, `haiku` | `claude-code` requires an Anthropic model (opus/sonnet/haiku). `codex` requires `gpt-5.5` (the ChatGPT-subscription model — not the metered API). `pi` + Anthropic model needs `ANTHROPIC_API_KEY` in secrets. |
+| `--harness=` | `pi`, `claude-code`, `codex`, `hermes` | `pi` = full agent; `claude-code` = Anthropic-model coding machine (Max sub); `codex` = OpenAI-model coding machine (ChatGPT sub); `hermes` = Nous hermes-agent coding machine (ChatGPT sub, device-flow login — proxy can't front it). Default `pi`. |
+| `--model=` | `gpt-5.5`, `gpt-5.5-pro`, `deepseek-v4-flash`, `deepseek-v4-pro`, `opus`, `sonnet`, `haiku` | `claude-code` requires an Anthropic model (opus/sonnet/haiku). `codex` and `hermes` require `gpt-5.5` (the ChatGPT-subscription model — not the metered API). `pi` + Anthropic model needs `ANTHROPIC_API_KEY` in secrets. |
 | `--thinking=` | `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, `adaptive` | `adaptive` is opus-only. `gpt-5.5-pro` rejects sub-medium. Anthropic models disable thinking below `high`. |
 | `--extensions=` | subset of `memory`, `mentality`, `wiki`, `dream` | `pi` only. Comma-separated. Empty = none. |
 | `--packages=` | subset of `pi-web-access`, … | `pi` only. |
@@ -46,15 +46,15 @@ The exhaustive surface. For workflows and gotchas, see `SKILL.md` next to this f
 | Command | What it does |
 |---|---|
 | `cells pool list` | Show pool members + states. |
-| `cells pool refill` | Bake fresh generic eggs up to the per-variant target depths (variant-aware; sums to ≥ `V1_POOL_TARGET_DEPTH = 10`). |
-| `cells pool drain [-y]` | Destroy all warm (unclaimed) members. `-y` to confirm. |
+| `cells pool refill` | Bake fresh generic eggs up to the target depth (`V1_POOL_TARGET_DEPTH = 5`). |
+| `cells pool drain [-y]` | Destroy all `open` (unclaimed) members. `-y` to confirm. |
 | `cells pool create` | Bake one generic egg. Args are ignored — the V1 pool is uniform (all eggs are `variant_signature: v1-generic`). `cells pool` no-args is an alias. |
 | `cells pool cull <id>` | Destroy one pool member by short id. |
-| `cells pool reconcile` | Diff `pool.json` vs welld; evict stale entries (welld-unknown, or tier-4 reporting non-running). |
+| `cells pool reconcile` | Diff `pool.json` vs welld; evict stale entries (welld-unknown, or tier-4 reporting non-running) **and cull** `open` members above target depth, oldest first. Never touches `claimed`/`live`. |
 
-Pool member fields are orthogonal:
-- **`state`** — `warm` (claimable) → `claimed` (in-flight birth) → `live` (now a cell) → `culling` (being destroyed)
-- **`tier`** — `4` (awake / running VM) or `2` (asleep / hibernated VM). V1 ships pure-asleep: every warm member is tier 2. `V1_HOT_POOL_TARGET = 0` (2026-05-15).
+Pool member fields are orthogonal — two axes, never conflated (the old `warm`/`hot`/`cold` trio collided three temperature words across both axes; retired):
+- **`state`** (standing) — `open` (built, claimable) → `claimed` (in-flight birth) → `live` (now a cell, kept as a breadcrumb) → `culling` (being destroyed). `pool.json`'s old `state:"warm"` is migrated to `open` on read.
+- **`tier`** (power) — `4` (running VM, in RAM, instant claim) or `2` (hibernated VM, ~0.5s wake on claim). V1 ships pure-hibernated: every `open` member is tier 2. `V1_RUNNING_POOL_TARGET = 0`.
 
 Pool RAM cost: ~0 (every asleep egg released its host VZ XPC process). vCPU cost: ~0. Disk cost: ~1.5 GB per asleep egg (RAM image + base disk).
 
@@ -78,6 +78,8 @@ cells talk <name>
           claudeCodeAdapter → claude --print       (stream-json over stdio, persistent)
           codexAdapter      → codex exec --json    (per-turn — one process per prompt,
                                                     resumed by thread id)
+          hermesAdapter     → hermes TUI-gateway   (JSON-RPC 2.0 over stdio, persistent;
+                                                    addressed by a gateway session id)
       → translates harness events ↔ the talk CLI's pi-shaped event protocol
 
 cells birth <name>
@@ -101,6 +103,9 @@ LLM routing (all roads go through proxy.cells.md or a direct key)
                        opus/sonnet/haiku via direct ANTHROPIC_API_KEY (paid).
   → claude-code cells: opus/sonnet/haiku via proxy.cells.md → Anthropic Max subscription.
   → codex cells:       gpt-5.5 via proxy.cells.md/codex → OpenAI ChatGPT subscription.
+  → hermes cells:      gpt-5.5 direct to chatgpt.com — hermes hardwires its codex
+                       provider to OAuth, so the proxy can't front it; the cell logs
+                       in to ChatGPT via device flow at birth instead.
 ```
 
 ### Daemons (launchd)
@@ -110,8 +115,7 @@ LLM routing (all roads go through proxy.cells.md or a direct key)
 | `md.cells.welld` | `:7878` | Substrate primitives — well create/destroy/exec/checkpoint/hibernate. Wells team's domain. |
 | `com.pete.cells-host-bridge` | `:7880` | Spawns the harness over SSH on `cells talk`; one session per cell, 30 min idle TTL. |
 | `com.pete.cells-proxy` | `proxy.cells.md` (via cloudflared) | Subscription LLM proxy — swaps `CELLS_PROXY_SECRET` for the real Max / codex OAuth tokens. |
-| `com.pete.cells-pool-refill` | — | Refills the pool every 10 min. |
-| `com.pete.cells-pool-reconcile` | — | Reconciles `pool.json` vs welld every 5 min (available; not auto-installed). |
+| `com.pete.cells-pool-reconcile` | — | Reconciles `pool.json` vs welld + culls excess every 5 min (available; not auto-installed). |
 | `com.pete.cells-tunnel` | `*.cells.md` (cloudflared) | Public DNS for `proxy.cells.md` and the per-cell Workers. |
 | `com.pete.cells-dashboard` | `:7881` | Pool + cells observability. Optional. |
 
@@ -135,14 +139,14 @@ Restart any of them after editing its `.ts`: `launchctl kickstart -k gui/$(id -u
 | Path | Contents |
 |---|---|
 | `cli/cells.ts` | The CLI — `cmdCreate` (birth), `cmdDestroyOne` (kill), `cmdPool`, `cmdTalk`, `streamCellBridge`, `runPiWithOutcome`, pool internals (`bakePoolMember`, `claimGenericEgg`, `wakePoolMember`, `refillPoolToDepth`, `reconcilePool`). |
-| `cli/host-bridge.ts` | The talk daemon — `CellSession`, `HarnessAdapter` (`piAdapter` / `claudeCodeAdapter` / `codexAdapter`), `resolveCellTarget`. |
+| `cli/host-bridge.ts` | The talk daemon — `CellSession`, `HarnessAdapter` (`piAdapter` / `claudeCodeAdapter` / `codexAdapter` / `hermesAdapter`), `resolveCellTarget`. |
 | `cli/proxy.ts` | The subscription proxy — harness-agnostic. Handles Anthropic Max + ChatGPT-codex OAuth refresh. |
 | `cli/worker/cell/` | Per-cell Cloudflare Worker (Bearer control plane + public site route) + Durable Object (`handleSitePublish`, `serveSite`, channel inbox). |
 | `cli/lib/channels.ts` | Slack/email channel binding logic. |
 | `cli/lib/reconcile.ts` | Pool eviction planner — pure logic, no IO; testable kernel of `reconcilePool`. |
 | `dna/cells/base/` | The generic egg DNA — `AGENTS.md`/`CLAUDE.md` (harness entrypoints), `SOUL.md`/`CELLS.md`/`TOOLS.md` (identity), `.pi/` + `.claude/` + `.codex/` config (placeholder templates), `site/`, `scripts/`, `bin/publish-image`. |
 | `dna/specials/mother/` | Mother — `.pi/prompts/cell-create.md` + `cell-destroy.md`, `.pi/skills/birth/`, `state/memory/`. |
-| `docs/birthing-ritual.html` | The ritual mother follows — pi steps `p1`–`p9`, claude-code branch `c1`–`c7`, codex branch `x1`–`x6`. |
+| `docs/birthing-ritual.html` | The ritual mother follows — one branch per harness: claude-code `c1`–`c7`, codex `x1`–`x7`, hermes `h1`–`h7` (plus the pi branch). |
 | `scripts/eval-birth.ts` | Targeted birth eval (one combo × N, asserts loudly). |
 | `scripts/harden-birth.ts` | Matrix-sweep birth eval (writes a run record). |
 | `scripts/bind-channel.sh`, `register-site-service.sh`, `deploy-cell-worker.sh` | Birth-ritual helper scripts. |
@@ -167,7 +171,7 @@ Wells's boot-admission gate (delivered welld 1.0.0, 2026-05-15) paces `create`/`
 
 - **Knob**: `WELL_MAX_CONCURRENT_BOOTS` (default 3) — boots in flight cap. Auto-collapses to 1 when committed vCPU exceeds `WELL_BOOT_VCPU_RATIO × host_cores` (default ratio 2).
 - **Observability**: `curl -s http://127.0.0.1:7878/healthz | jq .boot_gate` → `{inFlight, waiting, limit}`. `waiting > 0` is expected under load — boots queue and self-pace. Not a fault.
-- **Cells doesn't pace its own bakes** — fires them at the gate and lets wells pace. After making the pool pure-asleep, the gate auto-relaxed (less CPU pressure).
+- **Cells doesn't pace its own bakes** — fires them at the gate and lets wells pace. After making the pool pure-hibernated, the gate auto-relaxed (less CPU pressure).
 
 ## Comms with the wells team
 

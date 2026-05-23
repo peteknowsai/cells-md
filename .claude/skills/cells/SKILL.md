@@ -15,9 +15,9 @@ This skill is the **judgment layer** — when to birth a cell, which harness to 
 |---|---|
 | **cell** | The user-facing agent. Has a name, a harness, a model, a public page. Persists across hibernation. |
 | **well** | The Linux VM the cell runs in (substrate-owned by the wells team). Cell name ≠ well name — a pool-born cell keeps its `egg-<hex>` well name internally. |
-| **harness** | The agent runtime inside the cell. `pi` = full agent with packages/extensions/channels. `claude-code` = Anthropic-model coding machine on the Max subscription. `codex` = OpenAI-model coding machine on the ChatGPT subscription. Coding-machine harnesses skip the cells-side capability stack. |
+| **harness** | The agent runtime inside the cell. `pi` = full agent with packages/extensions/channels. `claude-code` = Anthropic-model coding machine on the Max subscription. `codex` = OpenAI-model coding machine on the ChatGPT subscription. `hermes` = Nous hermes-agent coding machine — logs in to ChatGPT directly via device flow (the proxy can't front it). The three coding-machine harnesses skip the cells-side capability stack. |
 | **egg** | A pre-baked generic VM in the pool. Birth *claims* an egg and *configures* it — birth never installs anything. |
-| **pool** | The warm reservoir of eggs at `~/.cells/pool.json`. V1 ships pure-asleep (every egg hibernated, ~0 RAM/CPU); refill is automatic on consume. Depth target 10. |
+| **pool** | The reservoir of `open` (built, unclaimed) eggs at `~/.cells/pool.json`. V1 ships pure-hibernated (every egg hibernated, ~0 RAM/CPU). Depth target **5**; refill is on-birth only — there is no scheduled refiller (see gotcha 11). |
 | **mother** | An LLM (pi) that runs the birthing ritual (`docs/birthing-ritual.html`) for each new cell. In the birth path, not the kill path. |
 | **proxy.cells.md** | The subscription LLM proxy on the Mac — swaps `CELLS_PROXY_SECRET` for the real Anthropic Max / ChatGPT-codex OAuth tokens. Lets every cell talk to LLMs without holding any real credential. |
 
@@ -26,7 +26,7 @@ This skill is the **judgment layer** — when to birth a cell, which harness to 
 **Wells owns substrate primitives. Cells owns the pool and the agent.** This split is load-bearing — getting it wrong reintroduces deleted architecture.
 
 - **Wells owns**: `create`, `start`, `stop`, `hibernate`, `wake`, `seal`, `destroy`, `exec`, `checkpoint`, image management. The raw VM lifecycle. Has its own `wells` skill.
-- **Cells owns**: the warm egg pool (`~/.cells/pool.json`), the bake flow, refill, reconciliation, the birth ritual, the harnesses, `cells talk`, the per-cell Worker, the cell's public site.
+- **Cells owns**: the egg pool (`~/.cells/pool.json`), the bake flow, refill, reconciliation, the birth ritual, the harnesses, `cells talk`, the per-cell Worker, the cell's public site.
 - **Pool state is gone from wells.** `~/.wells/pool/` doesn't exist; pool modules were deleted in the V1 boundary cleanup. Don't reintroduce them on either side.
 - **VM creates / boots are paced by wells's admission gate** (`WELL_MAX_CONCURRENT_BOOTS`, default 3 → collapses to 1 under vCPU pressure). You don't hand-pace a birth burst — fire the calls, they self-pace. A parked boot just waits.
 
@@ -40,6 +40,7 @@ cells birth <name>                                          # interactive 6-ques
 cells birth <name> --harness=pi --model=gpt-5.5 --thinking=low
 cells birth <name> --harness=claude-code --model=opus --thinking=high
 cells birth <name> --harness=codex --model=gpt-5.5 --thinking=low
+cells birth <name> --harness=hermes --model=gpt-5.5 --thinking=medium
 ```
 Birth = claim an egg from the pool → build a JSON config blob → mother runs the birthing ritual on it → drop into talk. **~90–140s** end-to-end (cold-consume = ~95s, the 0.55s wake is invisible against the ritual time). On failure the egg is swept (a fresh egg beats a half-born one). Use `--seed=off` for scripted births to skip the post-birth greeting message.
 
@@ -93,9 +94,9 @@ cells pool                      # alias for `cells pool create` — bakes ONE ge
 cells pool cull <id>            # destroy one member by short id
 ```
 
-The V1 pool is **pure-asleep** (`V1_HOT_POOL_TARGET = 0`, 2026-05-15): every member is a tier-2 hibernated VM, ~0 RAM, ~0 CPU. Disk-only. Refill is automatic on consume (fire-and-forget after every birth) + scheduled every 10 min via launchd.
+The V1 pool is **pure-hibernated** (`V1_RUNNING_POOL_TARGET = 0`): every member is a tier-2 hibernated VM, ~0 RAM, ~0 CPU. Disk-only. **Depth target is 5** (`V1_POOL_TARGET_DEPTH`). Refill is **on-birth only** — every successful `cells birth` fires a fire-and-forget refill back to depth. There is **no scheduled refiller**: the launchd loop was retired (it raced the on-birth refill and ran the pool away to 42 against a target of 5). `cells pool reconcile` now also *culls* — destroys `open` members above target depth, oldest first.
 
-After changing the DNA under `dna/cells/base/`, run `cells pool drain -y && cells pool refill` so warm eggs carry the new shape — existing eggs are frozen at bake time.
+After changing the DNA under `dna/cells/base/`, run `cells pool drain -y && cells pool refill` so open eggs carry the new shape — existing eggs are frozen at bake time.
 
 ### The birth eval loop
 ```
@@ -124,14 +125,15 @@ Combos live in each script's `COMBOS` list. Baseline `smoke` = `pi · gpt-5.5 ·
 8. **Smoke-test a `.ts` change**: `bun build <file> --target=bun`. `cli/cells.ts` needs `--external react-devtools-core --external ink` (an `ink` optional dep won't resolve otherwise — that error is not your code).
 9. **Welld bounces happen.** The wells team announces them via `/comms wells`. Acknowledge before they bounce (or hold if you have a birth in flight); a bounce mid-birth = HTTP 500 and a burned bake. The handshake is **~2-minute heads-up, then ack**.
 10. **Wells substrate is the wells team's domain.** lume errors, welld degraded, VM creates timing out, DHCP / network issues — message them via `/comms wells`. Don't shim around their bugs in cells code.
+11. **No scheduled pool refiller.** Refill is on-birth only. `cells schedule-pool-refill` *refuses* — if you find a `com.pete.cells-pool-refill` plist installed, it's stale; remove it with `cells unschedule-pool-refill`. A pool that keeps growing past 5 is a stale refiller plist still firing.
 
 ## Read into the repo
 
 - `reference.md` (next to this file) — exhaustive CLI surface, on-disk state, repo layout, DNA placeholders, daemon ports.
 - `STATUS.md`, `BOARD.md`, `PLAN.md` — running state of the project (where we are now, what's open).
 - `docs/birthing-ritual.html` — the ritual mother follows. Reading this is the fastest way to understand what a birth actually *does*.
-- `docs/proposals/cells-pool-asleep.html` — why the pool is pure-asleep (2026-05-15).
+- `docs/proposals/cells-pool-asleep.html` — why the pool is pure-hibernated.
 - `docs/proposals/cell-web-presence.html` — how `<name>.cells.md` and `publish-image` work.
-- `docs/proposals/claude-code-harness.html`, `codex-harness.html` — the two coding-machine harnesses.
+- `docs/proposals/claude-code-harness.html`, `codex-harness.html`, `hermes-harness.html` — the three coding-machine harnesses.
 - `cli/cells.ts` (the CLI), `cli/host-bridge.ts` (talk daemon), `cli/proxy.ts` (subscription proxy).
 - `dna/cells/base/` — the generic egg DNA; what every cell ships with.
