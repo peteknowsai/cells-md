@@ -3697,12 +3697,20 @@ async function installPulseLoop(wellName: string): Promise<void> {
   //      file. Seed it with the header so the first save lands cleanly,
   //      and so an empty pulse cell is observably wired up.
   //
+  //   4. Timezone set to America/Denver — cron evaluates crontab lines
+  //      against system local time. Pete is in Mountain time, and most
+  //      cells write schedules in local prose ("4am local"). DST is
+  //      handled natively by the tz database; no manual switch needed.
+  //
   // Everything runs as root via sudo — the wrapper, the cron daemon,
   // and the cron lines all share the same identity the cell supervisor
   // and claude session run under. Runtime dirs default to /root/.cells/
   // via pulse-core's resolvePaths (homedir).
   const script = `set -euo pipefail
 sudo mkdir -p /root/.cells/logs /root/.cells/pulse-inbox /root/.cells/state
+# Pin pulse cell to Pete's local timezone so cron evaluates schedules in
+# the same frame the cells declare them in. Idempotent.
+sudo timedatectl set-timezone America/Denver 2>/dev/null || true
 sudo tee /etc/systemd/system/pulse.service >/dev/null <<'__SERVICE_EOF__'
 ${service}__SERVICE_EOF__
 sudo tee /usr/local/bin/pulse-wrapper >/dev/null <<'__WRAPPER_EOF__'
@@ -3721,11 +3729,15 @@ __CRON_EOF__
 fi
 # Make sure the cron daemon is on. Ubuntu ships it; on some minimal
 # images it isn't enabled by default. The Debian package is "cron";
-# leave a graceful fallback for distros that use "cronie".
+# leave a graceful fallback for distros that use "cronie". restart
+# (not just enable --now) so a TZ change above is picked up by a
+# cron that was already running.
 if systemctl list-unit-files | grep -q '^cron\\.service'; then
-  sudo systemctl enable --now cron
+  sudo systemctl enable cron
+  sudo systemctl restart cron
 elif systemctl list-unit-files | grep -q '^crond\\.service'; then
-  sudo systemctl enable --now crond
+  sudo systemctl enable crond
+  sudo systemctl restart crond
 else
   sudo apt-get update -qq && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends cron
   sudo systemctl enable --now cron

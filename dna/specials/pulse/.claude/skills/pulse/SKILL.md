@@ -33,7 +33,15 @@ crontab in sync with each cell's HEARTBEAT.md.
 
    For each entry, read `content` — a cell's HEARTBEAT.md prose — and
    turn it into a cron schedule, an array of `{cron, message}`:
-   - `cron` is a 5-field crontab (`min hour dom mon dow`), local time.
+   - `cron` is a 5-field crontab (`min hour dom mon dow`). **It is
+     evaluated in your cell's local timezone (`America/Denver`, which
+     handles MDT/MST DST natively).** Prose that says "local" means
+     Mountain time — emit the local hour directly (`8am local` →
+     `0 8 * * *`). Prose that explicitly says "UTC" must be converted:
+     subtract 6 in MDT (Mar–Nov) or 7 in MST (Nov–Mar). Prefer the
+     summer (MDT) offset and add a note in the message if the wake is
+     timing-sensitive year-round (e.g. *"refresh at 9 UTC = 3am
+     Mountain in summer / 2am winter"* → `0 3 * * *`).
    - `message` is the terse, second-person wake instruction sent to the
      cell — e.g. *"good morning — summarize today's calendar"*, not
      *"the user wants you to…"*.
