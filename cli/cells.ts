@@ -3835,19 +3835,22 @@ async function wakePoolMember(wellName: string, tier: 2 | 4 = 2): Promise<void> 
   }
 }
 
-// Poll SSH until the well answers a noop, up to timeoutMs. Closes the gap
-// between welld returning 200 on /wake and the guest's networking stack
-// actually being routable — virtio-net link-up, host ARP refresh, and any
-// systemd reconciliation can take 1-5s after VZ restores the snapshot,
-// and a single immediate SSH races that window. Wells team confirmed
-// 2026-05-23 that /wake's post-condition is "restore complete," not
-// "guest reachable" — fixing the contract at the welld layer is on
-// their plate, but cells stays robust regardless by polling here.
+// Poll SSH until the well answers a noop, up to timeoutMs. Defence-in-depth
+// behind wells's wake post-condition (welld 42b225d, 2026-05-23): welld's
+// /wake now blocks up to 10s waiting for TCP port 22 to SYN-ACK before
+// returning. So in the happy path our first SSH attempt succeeds immediately
+// (~1s round-trip, zero overhead). This loop only does real work if (a)
+// wells's wake-probe regresses, or (b) we hit the narrow gap between TCP
+// being reachable (their check) and SSH key-exchange being ready (our
+// check) — sub-second in practice.
 //
+// Timeout was 15s pre-welld-42b225d when this layer was load-bearing;
+// dropped to 5s since the upstream wake post-condition makes a 10s+ wait
+// here genuinely pathological (likely the well is broken, not waking).
 // Poll interval is short (500ms) so a guest that's ready in 1s costs ~1
-// SSH round-trip, not a wasted 14s wait. Returns silently on first
-// success; throws with the last error if the deadline lapses.
-async function waitForSshReady(wellName: string, timeoutMs = 15_000): Promise<void> {
+// SSH round-trip, not a wasted wait. Returns silently on first success;
+// throws with the last error if the deadline lapses.
+async function waitForSshReady(wellName: string, timeoutMs = 5_000): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   let lastErr = "no attempt yet";
   let attempts = 0;
