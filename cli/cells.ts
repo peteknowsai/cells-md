@@ -3253,6 +3253,34 @@ async function bakePoolMember(): Promise<string> {
   }
   // Tier 4: leave the well running with pi pre-configured.
 
+  // Wake-validate round-trip: /hibernate returning 200 only proves the
+  // snapshot was written. It does NOT prove the snapshot wakes back up
+  // into a routable, SSH-able VM. An egg that fails to wake is poison in
+  // the pool — claim picks it blind, birth fails with a stale-IP "no route
+  // to host", and the user thinks the pool's broken even though four good
+  // eggs sit behind it. So the egg has to actually round-trip before we
+  // mark it "open".
+  //
+  // Tier 2: /wake → IP → SSH `true` → /hibernate (back to steady state).
+  // Tier 4: SSH `true` (well never left running; nothing to re-hibernate).
+  //
+  // On failure: log forensics under ~/.cells/logs/bake-failures/, destroy
+  // the well (skipped if CELLS_BAKE_KEEP_FAILURES=1 — for the stress
+  // harness so we can inspect failed wells post-hoc), and throw so the
+  // caller knows this bake didn't produce a pool member.
+  try {
+    await validateBakedEgg(wellName, tier);
+  } catch (e) {
+    const err = e instanceof Error ? e : new Error(String(e));
+    await captureBakeFailure(wellName, tier, err);
+    if (process.env.CELLS_BAKE_KEEP_FAILURES !== "1") {
+      await directWellDestroy(wellName).catch(() => {});
+    } else {
+      console.warn(`! CELLS_BAKE_KEEP_FAILURES=1 — leaving '${wellName}' alive for inspection`);
+    }
+    throw new Error(`bake validation failed for '${wellName}': ${err.message}`);
+  }
+
   await withPoolLock(async () => {
     const file = await loadPool();
     file.members.push({
@@ -3789,6 +3817,100 @@ async function wakePoolMember(wellName: string, tier: 2 | 4 = 2): Promise<void> 
     throw new Error(
       `wake '${wellName}' failed: ${r.status} ${(await r.text()).slice(0, 300)}`,
     );
+  }
+}
+
+// Wake-validate a just-baked egg. Goal: prove the freshly-cooked state can
+// actually be resumed, BEFORE we mark it "open" and let claim hand it out.
+// Mirrors what birth does on claim (wake + ensure IP + SSH-touch) so a pass
+// here is a strong guarantee the next real birth will succeed.
+//
+// Steady state on success:
+//   Tier 2: hibernated (we wake, probe, then re-hibernate).
+//   Tier 4: running (no state change — we only probe SSH).
+// Throws on any failure with a message naming the failed step.
+async function validateBakedEgg(wellName: string, tier: 2 | 4): Promise<void> {
+  const base = process.env.WELL_API_URL ?? "http://127.0.0.1:7878";
+
+  if (tier === 2) {
+    // Wake the just-hibernated egg. wakePoolMember POSTs /wake and waits
+    // for welld to acknowledge — but doesn't itself wait for the VM to be
+    // network-reachable; that's ensureWellHasIp's job below.
+    await wakePoolMember(wellName, 2);
+  }
+
+  // welld must hand us an IP. ensureWellHasIp will cycle (stop/start) if
+  // the well doesn't already have one — same recovery path birth uses.
+  await ensureWellHasIp(wellName);
+
+  // The real proof: run a noop over SSH. If the IP welld reported isn't
+  // reachable (stale DHCP, ARP miss, VM dead-on-wake), this surfaces it
+  // here instead of at the user's first birth attempt.
+  const probe = await wellExecCapture(wellName, "true", { user: "root" });
+  if (!probe.ok) {
+    throw new Error(
+      `ssh probe failed: ${(probe.stderr + probe.stdout).slice(0, 300).trim()}`,
+    );
+  }
+
+  if (tier === 2) {
+    // Re-hibernate so the pool member ends up in its expected steady
+    // state — same disk-only snapshot we just validated, ready for the
+    // next /wake. /hibernate failure here is a real failure of the
+    // validation: we know the wake worked, but we can no longer trust
+    // the re-snapshot's wake-ability.
+    const rh = await fetch(`${base}/v1/wells/${encodeURIComponent(wellName)}/hibernate`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${await wellsToken()}` },
+    });
+    if (!rh.ok) {
+      throw new Error(
+        `post-validate re-hibernate failed: ${rh.status} ${(await rh.text()).slice(0, 200)}`,
+      );
+    }
+  }
+}
+
+// Forensic dump for a bake that completed the cook but failed wake-validate.
+// Lands under ~/.cells/logs/bake-failures/<well>-<ts>.json so we can pattern-
+// match across many bakes without standing up a daemon (per the "agent-first,
+// not static services" rule — pattern-watching belongs in pulse-cc or its own
+// agent loop, not in the bake hot path). Best-effort: never throws — the
+// caller is already in a failure branch and needs to clean up.
+async function captureBakeFailure(
+  wellName: string,
+  tier: 2 | 4,
+  err: Error,
+): Promise<void> {
+  try {
+    const dir = join(homedir(), ".cells", "logs", "bake-failures");
+    await mkdir(dir, { recursive: true });
+    const ts = new Date().toISOString();
+    const out: Record<string, unknown> = {
+      well_name: wellName,
+      tier,
+      ts,
+      error: err.message,
+      stack: err.stack,
+    };
+    // welld's snapshot at failure time — status, IP, age, uuid. Lets us
+    // see whether welld thinks the well is up/down/wedged.
+    try {
+      const base = process.env.WELL_API_URL ?? "http://127.0.0.1:7878";
+      const r = await fetch(`${base}/v1/wells/${encodeURIComponent(wellName)}`, {
+        headers: { Authorization: `Bearer ${await wellsToken()}` },
+      });
+      out.welld_http_status = r.status;
+      out.welld_info = await r.json().catch(() => null);
+    } catch (e) {
+      out.welld_info_err = String(e);
+    }
+    const safeStamp = ts.replace(/[:.]/g, "-");
+    const path = join(dir, `${wellName}-${safeStamp}.json`);
+    await writeFile(path, JSON.stringify(out, null, 2) + "\n");
+    console.warn(`! bake-failure log: ${path}`);
+  } catch {
+    // Best-effort. Failing to write a log shouldn't escalate.
   }
 }
 
