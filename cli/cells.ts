@@ -2484,6 +2484,14 @@ async function cmdCreate(name: string | undefined, opts: CreateOpts): Promise<vo
     try {
       await wakePoolMember(c.wellName, c.tier);
       await ensureWellHasIp(c.wellName);
+      // Wait for SSH-ready before any post-wake SSH work. /wake returning
+      // 200 only means "VZ restore complete," not "guest reachable" — the
+      // guest's networking stack can take 1-5s more to fully come up.
+      // Without this poll, stripAnthropicKeyFromWell below races that
+      // window on roughly 1-in-many wakes and birth fails with "no route
+      // to host" on the freshly-allocated IP. Bake-validate uses the
+      // same helper so the symmetry is intentional.
+      await waitForSshReady(c.wellName);
       if (harness === "claude-code" || harness === "codex" || harness === "hermes") {
         await stripAnthropicKeyFromWell(c.wellName);
       }
@@ -3827,6 +3835,37 @@ async function wakePoolMember(wellName: string, tier: 2 | 4 = 2): Promise<void> 
   }
 }
 
+// Poll SSH until the well answers a noop, up to timeoutMs. Closes the gap
+// between welld returning 200 on /wake and the guest's networking stack
+// actually being routable — virtio-net link-up, host ARP refresh, and any
+// systemd reconciliation can take 1-5s after VZ restores the snapshot,
+// and a single immediate SSH races that window. Wells team confirmed
+// 2026-05-23 that /wake's post-condition is "restore complete," not
+// "guest reachable" — fixing the contract at the welld layer is on
+// their plate, but cells stays robust regardless by polling here.
+//
+// Poll interval is short (500ms) so a guest that's ready in 1s costs ~1
+// SSH round-trip, not a wasted 14s wait. Returns silently on first
+// success; throws with the last error if the deadline lapses.
+async function waitForSshReady(wellName: string, timeoutMs = 15_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  let lastErr = "no attempt yet";
+  let attempts = 0;
+  while (Date.now() < deadline) {
+    attempts++;
+    const r = await wellExecCapture(wellName, "true", { user: "root" });
+    if (r.ok) return;
+    lastErr = (r.stderr + r.stdout).slice(0, 200).trim();
+    // Short sleep between attempts. 500ms is a good middle ground: fast
+    // enough that a ready-in-1s guest costs only 1-2 round trips, slow
+    // enough not to hammer welld/SSH if the guest is genuinely down.
+    await new Promise((res) => setTimeout(res, 500));
+  }
+  throw new Error(
+    `ssh never ready for '${wellName}' within ${timeoutMs}ms (${attempts} attempts); last: ${lastErr}`,
+  );
+}
+
 // Wake-validate a just-baked egg. Goal: prove the freshly-cooked state can
 // actually be resumed, BEFORE we mark it "open" and let claim hand it out.
 // Mirrors what birth does on claim (wake + ensure IP + SSH-touch) so a pass
@@ -3850,15 +3889,11 @@ async function validateBakedEgg(wellName: string, tier: 2 | 4): Promise<void> {
   // the well doesn't already have one — same recovery path birth uses.
   await ensureWellHasIp(wellName);
 
-  // The real proof: run a noop over SSH. If the IP welld reported isn't
-  // reachable (stale DHCP, ARP miss, VM dead-on-wake), this surfaces it
-  // here instead of at the user's first birth attempt.
-  const probe = await wellExecCapture(wellName, "true", { user: "root" });
-  if (!probe.ok) {
-    throw new Error(
-      `ssh probe failed: ${(probe.stderr + probe.stdout).slice(0, 300).trim()}`,
-    );
-  }
+  // The real proof: SSH a noop. Use the polling probe so a guest that's
+  // still finishing its network init in the ~1-5s after VZ restore
+  // doesn't get incorrectly marked as broken. Only a genuinely wedged
+  // wake (qemu crash, hibernate.bin rot, vmnet anomaly) blows past 15s.
+  await waitForSshReady(wellName);
 
   if (tier === 2) {
     // Re-hibernate so the pool member ends up in its expected steady
