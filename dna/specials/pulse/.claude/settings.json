@@ -3,8 +3,6 @@
   "effortLevel": "high",
   "env": {
     "ANTHROPIC_BASE_URL": "https://proxy.cells.md",
-    "ANTHROPIC_CUSTOM_HEADERS": "x-cell-name: pulse-cc",
-    "PULSE_RUNTIME_DIR": "/var/cells/pulse",
-    "CELLS_BRIDGE_URL": "https://proxy.cells.md/bridge"
+    "ANTHROPIC_CUSTOM_HEADERS": "x-cell-name: pulse"
   }
 }

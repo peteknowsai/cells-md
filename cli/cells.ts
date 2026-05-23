@@ -131,7 +131,6 @@ const RESERVED_NAMES = new Set([
   "create", "birth", "talk", "list", "sleep", "stop", "wake",
   "checkpoint", "destroy", "kill", "dream", "tui", "sync", "doctor",
   "schedule-pi-patches", "unschedule-pi-patches",
-  "schedule-pulse", "unschedule-pulse",
   "schedule-host-bridge", "unschedule-host-bridge",
   "refresh-extensions", "heartbeat", "pulse",
   "channel", "channels",
@@ -3325,7 +3324,7 @@ async function bakePoolMember(): Promise<string> {
 type SpecialSpec = {
   name: "mother" | "pulse";
   wellName: string;
-  harness: "pi";
+  harness: "pi" | "claude-code";
   // NOTE: model/provider/thinking are deliberately NOT here. Runtime model
   // config lives in dna/specials/<name>/.pi/settings.json — single source of
   // truth. The registry's modelChain is *derived* from that file at bake
@@ -3342,7 +3341,7 @@ const SPECIALS: Record<"mother" | "pulse", SpecialSpec> = {
   pulse: {
     name: "pulse",
     wellName: "cells-pulse",
-    harness: "pi",
+    harness: "claude-code",
   },
 };
 
@@ -3529,9 +3528,67 @@ async function cmdBirthSpecial(rawArgs: string[]): Promise<void> {
     throw new Error(`chown after overlay failed: ${chown.stderr.slice(0, 300)}`);
   }
 
+  // 6b. Write /root/.pi/status.json with the chosen harness. The cell
+  //     supervisor (dna/cells/base/site/server.ts) reads this on boot to
+  //     pick which harness to spawn for the always-on session — without
+  //     it the supervisor falls back to "pi". bake-egg.sh writes this for
+  //     pool births; specials skip that path so we write it here.
+  const statusJson = JSON.stringify({ harness: spec.harness, channels: [] });
+  const statusWrite = await wellExecCapture(
+    spec.wellName,
+    `sudo mkdir -p /root/.pi && echo '${statusJson}' | sudo tee /root/.pi/status.json > /dev/null`,
+  );
+  if (!statusWrite.ok) {
+    throw new Error(`status.json write failed: ${statusWrite.stderr.slice(0, 200)}`);
+  }
+  console.log(`  wrote /root/.pi/status.json (harness=${spec.harness})`);
+
+  // 6c. Register the `site` systemd unit + deploy the per-cell Cloudflare
+  //     Worker. The pool/mother-driven birth ritual does these as part of
+  //     post-birth-async work (see dna/specials/mother/.claude/skills/birth/);
+  //     specials skip that ritual, so we run them here, synchronously,
+  //     because the next step (installPulseLoop) starts pulse.service —
+  //     which immediately injects /pulse messages into the cell's main
+  //     session via <name>.cells.md. Without the worker the inject 404s;
+  //     without the site service localhost:8080 (the supervisor) isn't up.
+  //     Pulse needs both running before installPulseLoop fires.
+  //
+  //     Scoped to `pulse` today — mother was set up by hand pre-this-code
+  //     and a rerun via --rebuild should still apply cleanly when needed.
+  if (spec.name === "pulse") {
+    // Pass welld auth/URL into the child scripts — they default to
+    // hosted-sprites and look up WELL_TOKEN in secrets.json which the
+    // local-welld path doesn't populate (token lives at ~/.wells/token).
+    const scriptEnv = { ...process.env, ...wellsEnv() };
+
+    console.log(`  registering site service in ${spec.wellName}…`);
+    const siteReg = Bun.spawn(
+      ["bash", join(REPO_ROOT, "scripts/register-site-service.sh"), spec.name, spec.wellName],
+      { stdio: ["ignore", "inherit", "inherit"], env: scriptEnv },
+    );
+    if ((await siteReg.exited) !== 0) {
+      throw new Error(`register-site-service.sh failed for ${spec.wellName}`);
+    }
+    console.log(`  ✓ site service registered (well-site.service)`);
+
+    // Public well URL — supervisor dials out, but the worker uses the
+    // url for the bridge connect-back. Idempotent if already public.
+    await setWellAuthPublic(spec.wellName);
+
+    console.log(`  deploying Cloudflare Worker pulse.cells.md…`);
+    const workerDeploy = Bun.spawn(
+      ["bash", join(REPO_ROOT, "scripts/deploy-cell-worker.sh"), spec.name, spec.wellName],
+      { stdio: ["ignore", "inherit", "inherit"], env: scriptEnv },
+    );
+    if ((await workerDeploy.exited) !== 0) {
+      throw new Error(`deploy-cell-worker.sh failed for ${spec.name}`);
+    }
+    console.log(`  ✓ worker deployed`);
+  }
+
   // 7. Cell-specific kicker.
   if (spec.name === "pulse") {
-    await installPulseTimer(spec.wellName);
+    await installPulseLoop(spec.wellName);
   }
   if (spec.name === "mother") {
     // Strip in-well-incompatible extensions:
@@ -3613,37 +3670,37 @@ echo "name-subst: $(grep -lc __NAME__ AGENTS.md SOUL.md package.json .tmux.conf 
   console.log(`  next: cells talk ${spec.name}`);
 }
 
-// Push the systemd units shipped in dna/specials/pulse/systemd/ into the
-// pulse well and enable the timer. The well is pinned (auto_sleep_seconds=null)
-// so the timer keeps firing forever. Idempotent — safe to re-run on --rebuild.
-async function installPulseTimer(wellName: string): Promise<void> {
-  console.log(`  installing systemd pulse.timer in ${wellName}…`);
+// Push the systemd unit + wrapper shipped in dna/specials/pulse/systemd/
+// into the pulse well and enable the always-on loop. The wrapper paces
+// tick cadence (default 5min) by injecting "/pulse" into the cell's own
+// main session via the agent-comms fork rail. Idempotent — safe to
+// re-run on --rebuild.
+async function installPulseLoop(wellName: string): Promise<void> {
+  console.log(`  installing systemd pulse.service in ${wellName}…`);
   const unitsDir = join(SPECIALS_DIR, "pulse", "systemd");
-  const timer = await readFile(join(unitsDir, "pulse.timer"), "utf-8");
   const service = await readFile(join(unitsDir, "pulse.service"), "utf-8");
-  const wrapper = await readFile(join(unitsDir, "pulse-pi-wrapper"), "utf-8");
+  const wrapper = await readFile(join(unitsDir, "pulse-wrapper"), "utf-8");
 
-  // System-wide units (not user units — pulse runs as root, same as the
-  // pi process the unit invokes).
+  // System-wide unit (not user unit — the wrapper runs as root, same
+  // identity the cell supervisor and claude session run under). Runtime
+  // dirs default to /root/.cells/ via pulse-core's resolvePaths (homedir).
   const script = `set -euo pipefail
-sudo mkdir -p /var/cells/pulse/logs /var/cells/pulse/pi-agent
-sudo tee /etc/systemd/system/pulse.timer >/dev/null <<'__TIMER_EOF__'
-${timer}__TIMER_EOF__
+sudo mkdir -p /root/.cells/logs /root/.cells/pulse-inbox /root/.cells/state
 sudo tee /etc/systemd/system/pulse.service >/dev/null <<'__SERVICE_EOF__'
 ${service}__SERVICE_EOF__
-sudo tee /usr/local/bin/pulse-pi-wrapper >/dev/null <<'__WRAPPER_EOF__'
+sudo tee /usr/local/bin/pulse-wrapper >/dev/null <<'__WRAPPER_EOF__'
 ${wrapper}__WRAPPER_EOF__
-sudo chmod 0644 /etc/systemd/system/pulse.timer /etc/systemd/system/pulse.service
-sudo chmod 0755 /usr/local/bin/pulse-pi-wrapper
+sudo chmod 0644 /etc/systemd/system/pulse.service
+sudo chmod 0755 /usr/local/bin/pulse-wrapper
 sudo systemctl daemon-reload
-sudo systemctl enable --now pulse.timer
-sudo systemctl status --no-pager pulse.timer | head -5 || true`;
+sudo systemctl enable --now pulse.service
+sudo systemctl status --no-pager pulse.service | head -8 || true`;
 
   const r = await wellExecCapture(wellName, script);
   if (!r.ok) {
-    throw new Error(`installPulseTimer failed: ${(r.stderr + r.stdout).slice(-400)}`);
+    throw new Error(`installPulseLoop failed: ${(r.stderr + r.stdout).slice(-400)}`);
   }
-  console.log(`  ✓ pulse.timer enabled (60s tick)`);
+  console.log(`  ✓ pulse.service enabled (always-on, 5min tick)`);
 }
 
 // Ensure a (supposedly running) well actually has a DHCP-assigned IP.
@@ -3932,7 +3989,7 @@ function inferBakeFailureStage(msg: string): string {
 // Forensic dump for a bake that failed at any stage. Lands under
 // ~/.cells/logs/bake-failures/<well>-<ts>.json so we can pattern-match across
 // many bakes without standing up a daemon (per the "agent-first, not static
-// services" rule — pattern-watching belongs in pulse-cc or its own agent loop,
+// services" rule — pattern-watching belongs in pulse or its own agent loop,
 // not in the bake hot path). Best-effort: never throws — the caller is
 // already in a failure branch and needs to clean up.
 //
@@ -4478,45 +4535,30 @@ async function deleteCellWorker(name: string): Promise<void> {
   }
 }
 
+// Tell pulse to forget a destroyed cell — drops its schedule cache, prunes
+// lastFire entries, and clears any orphan inbox files. Runs deterministically
+// inside the pulse well via pulse-core's `forget` subcommand; no agent path,
+// no LLM, no fork. Best-effort — if the pulse cell is down or absent (early
+// in setup, between rebirth steps), the next pulse tick can still wake a
+// ghost once, the wake will 404, and the cell's next pulse-cache write will
+// re-prune via saveSchedule's own pruning logic. So a single miss is recoverable.
 async function evictPulseStateForCell(name: string): Promise<void> {
-  const cachePath = join(homedir(), ".cells", "pulse-cache", `${name}.json`);
-  if (existsSync(cachePath)) {
-    try { await unlink(cachePath); } catch { /* best-effort */ }
-  }
-  // Inbox files dropped by heartbeat-watch. Match `<name>-<ts>.md` in both
-  // the live inbox and the processed/ archive so destroyed cells don't
-  // leave orphan posts behind.
-  for (const sub of ["", "processed"]) {
-    const dir = join(homedir(), ".cells", "pulse-inbox", sub);
-    if (!existsSync(dir)) continue;
-    try {
-      const files = await readdir(dir);
-      for (const f of files) {
-        if (f.startsWith(`${name}-`) && f.endsWith(".md")) {
-          try { await unlink(join(dir, f)); } catch { /* best-effort */ }
-        }
-      }
-    } catch { /* best-effort */ }
-  }
-  const statePath = join(homedir(), ".cells", "pulse.json");
-  if (!existsSync(statePath)) return;
+  // Resolve the pulse cell's well name (default "pulse"; overridable via
+  // env for ops that run a renamed pulse cell during cutover).
+  const pulseCellName = process.env.CELLS_PULSE_CELL ?? "pulse";
+  let pulseWell: string;
   try {
-    const state = JSON.parse(await readFile(statePath, "utf-8"));
-    if (!state.lastFire || typeof state.lastFire !== "object") return;
-    const cellPrefix = `${name}:`;
-    let pruned = 0;
-    for (const k of Object.keys(state.lastFire)) {
-      if (k.startsWith(cellPrefix)) {
-        delete state.lastFire[k];
-        pruned++;
-      }
-    }
-    if (pruned > 0) {
-      const tmp = statePath + ".tmp";
-      await writeFile(tmp, JSON.stringify(state, null, 2));
-      await rename(tmp, statePath);
-    }
-  } catch { /* corrupt state — leave alone, pulse will read or repair on next run */ }
+    pulseWell = await wellNameForCell(pulseCellName);
+  } catch {
+    return; // pulse cell not in registry — nothing to evict
+  }
+  const r = await wellExecCapture(
+    pulseWell,
+    `node /root/bin/pulse-core.mjs forget ${name}`,
+  ).catch(() => null);
+  if (!r || !r.ok) {
+    console.warn(`! pulse forget ${name} failed (pulse may be down) — schedule may need manual cleanup`);
+  }
 }
 
 async function cmdChannel(args: string[]) {
@@ -5623,82 +5665,6 @@ async function cmdUnscheduleHostBridge() {
   console.log("✓ unscheduled");
 }
 
-const PULSE_LABEL = "com.pete.cells-pulse";
-
-function pulsePlistPath(): string {
-  return join(homedir(), "Library/LaunchAgents", `${PULSE_LABEL}.plist`);
-}
-
-function buildPulsePlist(): string {
-  const launcher = join(PULSE_ROOT, "bin", "pulse-run");
-  const logsDir = join(homedir(), ".cells", "logs");
-  const path = `${homedir()}/.bun/bin:${homedir()}/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin`;
-  return `<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-  <key>Label</key>
-  <string>${PULSE_LABEL}</string>
-  <key>ProgramArguments</key>
-  <array>
-    <string>${launcher}</string>
-  </array>
-  <key>EnvironmentVariables</key>
-  <dict>
-    <key>PATH</key>
-    <string>${path}</string>
-    <key>HOME</key>
-    <string>${homedir()}</string>
-  </dict>
-  <key>StartInterval</key>
-  <integer>60</integer>
-  <key>StandardOutPath</key>
-  <string>${logsDir}/pulse.log</string>
-  <key>StandardErrorPath</key>
-  <string>${logsDir}/pulse.err</string>
-  <key>RunAtLoad</key>
-  <true/>
-</dict>
-</plist>
-`;
-}
-
-async function cmdSchedulePulse() {
-  const launcher = join(PULSE_ROOT, "bin", "pulse-run");
-  if (!existsSync(launcher)) {
-    console.error(`✗ launcher missing: ${launcher}`);
-    process.exit(1);
-  }
-  const logsDir = join(homedir(), ".cells", "logs");
-  await mkdir(logsDir, { recursive: true });
-  await mkdir(dirname(pulsePlistPath()), { recursive: true });
-  await writeFile(pulsePlistPath(), buildPulsePlist());
-  console.log(`✓ wrote plist: ${pulsePlistPath()}`);
-
-  const uid = process.getuid?.() ?? 501;
-
-  await Bun.spawn(["launchctl", "bootout", `gui/${uid}/${PULSE_LABEL}`], {
-    stdin: "ignore",
-    stdout: "ignore",
-    stderr: "ignore",
-  }).exited;
-
-  const proc = Bun.spawn(["launchctl", "bootstrap", `gui/${uid}`, pulsePlistPath()], {
-    stdin: "ignore",
-    stdout: "inherit",
-    stderr: "inherit",
-  });
-  const code = await proc.exited;
-  if (code !== 0) {
-    console.error("✗ launchctl bootstrap failed");
-    process.exit(1);
-  }
-
-  console.log(`✓ scheduled: pulse ticks every 60s (print mode)`);
-  console.log(`  logs: ${logsDir}/pulse.log (stdout), pulse.err (stderr)`);
-  console.log(`  unschedule with: cells unschedule-pulse`);
-}
-
 // ───── pool refill — on-birth, no scheduled loop ─────
 //
 // The pool refills itself: every successful `cells birth` claims one egg
@@ -5834,22 +5800,6 @@ async function cmdUnschedulePoolReconcile() {
   if (existsSync(poolReconcilePlistPath())) {
     await unlink(poolReconcilePlistPath());
     console.log(`✓ removed ${poolReconcilePlistPath()}`);
-  } else {
-    console.log("(no plist found)");
-  }
-  console.log("✓ unscheduled");
-}
-
-async function cmdUnschedulePulse() {
-  const uid = process.getuid?.() ?? 501;
-  await Bun.spawn(["launchctl", "bootout", `gui/${uid}/${PULSE_LABEL}`], {
-    stdin: "ignore",
-    stdout: "inherit",
-    stderr: "inherit",
-  }).exited;
-  if (existsSync(pulsePlistPath())) {
-    await unlink(pulsePlistPath());
-    console.log(`✓ removed ${pulsePlistPath()}`);
   } else {
     console.log("(no plist found)");
   }
@@ -6041,7 +5991,7 @@ async function cmdHeartbeat(args: string[]) {
 
   if (args[0] === "--tail") {
     if (!existsSync(stateJson)) {
-      console.error("(no pulse state — has pulse run yet? `cells schedule-pulse`)");
+      console.error("(no pulse state — has pulse run yet? `cells birth-special pulse`)");
       return;
     }
     const state = JSON.parse(await readFile(stateJson, "utf-8"));
@@ -6059,7 +6009,7 @@ async function cmdHeartbeat(args: string[]) {
   }
 
   if (!existsSync(heartbeatsMd)) {
-    console.error("(no digest yet — has pulse run? try `cells schedule-pulse`)");
+    console.error("(no digest yet — has pulse run? try `cells birth-special pulse`)");
     return;
   }
 
@@ -7895,8 +7845,6 @@ switch (sub) {
   case "unschedule-pi-patches": await cmdUnschedulePiPatches(); break;
   case "schedule-host-bridge":  await cmdScheduleHostBridge(); break;
   case "unschedule-host-bridge":await cmdUnscheduleHostBridge(); break;
-  case "schedule-pulse":        await cmdSchedulePulse(); break;
-  case "unschedule-pulse":      await cmdUnschedulePulse(); break;
   case "schedule-pool-refill":   await cmdSchedulePoolRefill(); break;
   case "unschedule-pool-refill": await cmdUnschedulePoolRefill(); break;
   case "schedule-pool-reconcile":   await cmdSchedulePoolReconcile(); break;
@@ -7949,8 +7897,6 @@ switch (sub) {
     console.log("  cells see <name>            open https://<name>.cells.md in the browser");
     console.log("  cells schedule-pi-patches   install launchd watcher (re-applies pi patches when pi-ai is reinstalled)");
     console.log("  cells unschedule-pi-patches remove launchd watcher");
-    console.log("  cells schedule-pulse        install launchd plist (pulse ticks every 60s)");
-    console.log("  cells unschedule-pulse      remove pulse launchd plist");
     console.log("  cells unschedule-pool-refill remove a stale pool-refill launchd plist (refill is on-birth now)");
     console.log("  cells schedule-pool-reconcile   install launchd plist (pool reconcile every 5min)");
     console.log("  cells unschedule-pool-reconcile remove pool reconcile launchd plist");

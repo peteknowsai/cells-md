@@ -3,7 +3,7 @@
  * pulse-core — CLI over the pulse-core operations.
  *
  * The claude-code-harness counterpart to the pi `pulse-tools` extension:
- * pulse-cc's /loop runs a pulse by shelling out to these subcommands. Every
+ * pulse's /pulse skill runs a tick by shelling out to these subcommands. Every
  * command prints its result as JSON on stdout; errors go to stderr with a
  * non-zero exit. `save-schedule` and `write-log` read their JSON argument
  * from stdin — the rest take no input.
@@ -18,11 +18,11 @@
 
 import * as fs from "node:fs";
 import {
-  resolvePaths, begin, end, drainInbox, saveSchedule,
+  resolvePaths, begin, end, drainInbox, saveSchedule, forgetCell,
   fireDue, bootstrapInbox, dailyLogDue, writeLogEntry, renderDigest,
 } from "../lib/pulse-core.mjs";
 
-const USAGE = "usage: pulse-core.mjs begin|drain|save-schedule|fire|bootstrap|daily-log-check|write-log|render|end";
+const USAGE = "usage: pulse-core.mjs begin|drain|save-schedule|forget <cell>|fire|bootstrap|daily-log-check|write-log|render|end";
 
 // save-schedule / write-log take a JSON argument piped on stdin.
 function readStdinJSON() {
@@ -55,6 +55,12 @@ try {
     case "render": result = renderDigest(paths); break;
     case "save-schedule": result = saveSchedule(paths, readStdinJSON()); break;
     case "write-log": result = writeLogEntry(paths, readStdinJSON()); break;
+    case "forget": {
+      const cell = process.argv[3];
+      if (!cell) { process.stderr.write(`pulse-core forget: missing cell argument\n${USAGE}\n`); process.exit(2); }
+      result = forgetCell(paths, { cell });
+      break;
+    }
     default:
       process.stderr.write(`pulse-core: unknown command ${cmd ? `"${cmd}"` : "(none)"}\n${USAGE}\n`);
       process.exit(2);

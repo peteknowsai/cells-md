@@ -96,7 +96,7 @@ tar czf - -C "$REPO_ROOT/dna/cells/base" . \
   echo "sudo sed -i 's|__CELL_BG__|$CBG|g; s|__CELL_FG__|$CFG|g; s|__NAME__|$NAME|g' /root/.tmux.conf"
   # Canonical cell name in /etc/environment — the one identity source every
   # shell sees (cells-env.sh sources it). The anatomy-heading heuristic is a
-  # fragile fallback: a cell cloned off another (e.g. pulse-cc off pulse)
+  # fragile fallback: a cell cloned off another (e.g. cellA off cellB)
   # carries the wrong name in AGENTS.md/CLAUDE.md. `cells talk` builds
   # reply_to from CELL_NAME — get it wrong and replies route to the wrong
   # cell (or 404). No quotes: PAM's /etc/environment parser is not a shell.

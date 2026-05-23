@@ -1,22 +1,23 @@
 [Unit]
-Description=Pulse — one pulse tick (drain inbox, fire due, render digest)
-After=network-online.target
-Wants=network-online.target
+Description=pulse — cells family scheduler (paces tick cadence via fork-injection)
+After=network-online.target well-site.service
+Wants=network-online.target well-site.service
 
 [Service]
-Type=oneshot
+# Always-on agent loop, not a timer + oneshot — one long-lived unit
+# whose job is to keep the pulse agent ticking. The loop body lives
+# in pulse-wrapper.
+Type=simple
 WorkingDirectory=/root
 EnvironmentFile=/etc/environment
-Environment=PULSE_RUNTIME_DIR=/var/cells/pulse
-Environment=CELLS_BRIDGE_URL=https://proxy.cells.md/bridge
-Environment=PI_CODING_AGENT_DIR=/var/cells/pulse/pi-agent
-# OPENAI_CODEX_API_KEY is picked up from /etc/environment (CELLS_PROXY_SECRET
-# is re-exported under that name by /etc/profile.d/cells-env.sh; systemd doesn't
-# read profile.d, so we set it explicitly here too).
-ExecStartPre=/bin/mkdir -p /var/cells/pulse/pi-agent /var/cells/pulse/logs
-# Wrapper sources /etc/profile.d/cells-env.sh so pi sees OPENAI_CODEX_API_KEY
-# (systemd doesn't read profile.d). Installed by cells.ts:installPulseTimer.
-ExecStart=/usr/local/bin/pulse-pi-wrapper
-StandardOutput=append:/var/cells/pulse/logs/pulse.log
-StandardError=append:/var/cells/pulse/logs/pulse.err
-TimeoutStartSec=120s
+ExecStartPre=/bin/mkdir -p /root/.cells/logs /root/.cells/pulse-inbox /root/.cells/state
+ExecStart=/usr/local/bin/pulse-wrapper
+# The wrapper is meant to run forever; if it ever falls over (OOM, a
+# claude crash that takes the loop down, a reboot), bring it straight back.
+Restart=always
+RestartSec=10
+StandardOutput=append:/root/.cells/logs/pulse.service.log
+StandardError=append:/root/.cells/logs/pulse.service.log
+
+[Install]
+WantedBy=multi-user.target

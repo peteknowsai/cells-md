@@ -1,12 +1,15 @@
 {
-  "extensions": [
-    ".pi/extensions/use-codex/index.ts",
-    ".pi/extensions/pulse-tools/index.ts"
-  ],
+  "extensions": [],
   "enabledModels": [
+    "anthropic/claude-opus-4-7",
     "openai-codex/gpt-5.5"
   ],
-  "defaultProvider": "openai-codex",
-  "defaultModel": "gpt-5.5",
-  "defaultThinkingLevel": "medium"
+  "defaultProvider": "anthropic",
+  "defaultModel": "claude-opus-4-7",
+  "defaultThinkingLevel": "high",
+  "modelChain": ["anthropic/claude-opus-4-7:high", "openai-codex/gpt-5.5:high"],
+  "harnessChain": [
+    { "harness": "claude-code", "model": "anthropic/claude-opus-4-7", "thinking": "high" },
+    { "harness": "pi",          "model": "openai-codex/gpt-5.5",      "thinking": "high" }
+  ]
 }

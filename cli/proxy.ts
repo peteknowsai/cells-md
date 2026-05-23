@@ -737,9 +737,9 @@ async function handleHeartbeatChanged(req: Request): Promise<Response> {
 
     // Two destinations during the Phase 3 transition:
     //   - default: Mac path (~/.cells/pulse-inbox/) — legacy pulse-on-Mac.
-    //   - CELLS_USE_PULSE_CELL=1: bridge into the active pulse cell's well
-    //     at /var/cells/pulse/pulse-inbox/. Which cell is CELLS_PULSE_CELL
-    //     (default `pulse`; set `pulse-cc` for the claude-code pulse).
+    //   - CELLS_USE_PULSE_CELL=1: bridge into the pulse cell's well at
+    //     /root/.cells/pulse-inbox/. CELLS_PULSE_CELL names the cell
+    //     (default `pulse`).
     const useCell = process.env.CELLS_USE_PULSE_CELL === "1";
     const tsMs = Date.now();
     const filename = `${cell}-${tsMs}.md`;
@@ -915,13 +915,13 @@ async function bridgeTalk(body: { cell: string; message: string }): Promise<Resp
 async function bridgeInboxPulse(body: { cell: string; content: string }): Promise<Response> {
   if (!body.cell || !/^[a-z0-9-]+$/.test(body.cell)) return new Response("bad cell", { status: 400 });
   if (typeof body.content !== "string") return new Response("bad content", { status: 400 });
-  // The active pulse — pi `pulse` by default, `pulse-cc` (claude-code)
-  // when CELLS_PULSE_CELL says so. Resolved to a well name per call.
+  // The active pulse cell — defaults to `pulse`; override via
+  // CELLS_PULSE_CELL env. Resolved to a well name per call.
   const pulseWell = await wellNameForCell(process.env.CELLS_PULSE_CELL ?? "pulse");
   const script = `set -euo pipefail
-sudo mkdir -p /var/cells/pulse/pulse-inbox
+sudo mkdir -p /root/.cells/pulse-inbox
 TS=$(date +%s%N)
-F=/var/cells/pulse/pulse-inbox/${body.cell}-$TS.md
+F=/root/.cells/pulse-inbox/${body.cell}-$TS.md
 sudo tee "$F" >/dev/null <<'__INBOX_EOF__'
 ${body.content}
 __INBOX_EOF__

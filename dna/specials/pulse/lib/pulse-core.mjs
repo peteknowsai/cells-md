@@ -396,6 +396,53 @@ export function saveSchedule(p, { cell, items: rawItems, sourcePath }) {
 }
 
 /**
+ * Drop all schedule state for a cell — used when the cell is destroyed so
+ * pulse stops trying to wake a ghost. Idempotent: returns ok:true with zeros
+ * even when there was nothing to forget.
+ *
+ *   - deletes pulse-cache/<cell>.json (the schedule cache)
+ *   - prunes lastFire entries with the cell prefix from pulse.json
+ *   - removes <cell>-*.md files from the live inbox and processed/ archive
+ *     so the dead cell can't surface again on a future drain or in log.md
+ *
+ * @returns {{ok: true, cell: string, hadSchedule: boolean, prunedLastFires: number, removedInbox: number, removedProcessed: number}}
+ */
+export function forgetCell(p, { cell }) {
+  ensureDirs(p);
+  const cachePath = path.join(cacheDir(p), `${cell}.json`);
+  const hadSchedule = fs.existsSync(cachePath);
+  if (hadSchedule) fs.unlinkSync(cachePath);
+
+  const state = readState(p);
+  const cellPrefix = `${cell}:`;
+  let prunedLastFires = 0;
+  for (const k of Object.keys(state.lastFire)) {
+    if (k.startsWith(cellPrefix)) {
+      delete state.lastFire[k];
+      prunedLastFires++;
+    }
+  }
+  if (prunedLastFires > 0) writeState(p, state);
+
+  const filePrefix = `${cell}-`;
+  let removedInbox = 0;
+  let removedProcessed = 0;
+  for (const [dir, isProcessed] of [[inboxDir(p), false], [processedDir(p), true]]) {
+    if (!fs.existsSync(dir)) continue;
+    for (const name of fs.readdirSync(dir)) {
+      if (!name.startsWith(filePrefix) || !name.endsWith(".md")) continue;
+      try {
+        fs.unlinkSync(path.join(dir, name));
+        if (isProcessed) removedProcessed++; else removedInbox++;
+      } catch { /* best-effort */ }
+    }
+  }
+
+  appendTrace(p, `forget_cell cell=${cell} hadSchedule=${hadSchedule} prunedLastFires=${prunedLastFires} removedInbox=${removedInbox} removedProcessed=${removedProcessed}`);
+  return { ok: true, cell, hadSchedule, prunedLastFires, removedInbox, removedProcessed };
+}
+
+/**
  * Evaluate every cached schedule against the last FIRE_WINDOW_MS. For each
  * item due AND not already fired this minute, fire it (bridge in-well,
  * `cells talk` on Mac) and record the result.
