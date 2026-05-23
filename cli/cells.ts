@@ -1727,14 +1727,21 @@ async function cmdExec(name: string, rest: string[]) {
   }
   await requireCell(name);
   const wellName = await wellNameForCell(name);
-  // bash -lc joins the args into one command line and sources cells-env.sh;
-  // sudo -H makes HOME=/root — the agent's home. stdio is inherited so
-  // output streams live and the caller can pipe into stdin.
-  const remote = cmdParts.join(" ");
+  // Preserve argv boundaries end-to-end. The old `cmdParts.join(" ")` +
+  // `bash -lc <joined>` re-shell-parsed every arg, so a quoted arg like
+  // `cells exec c -- echo 'a "b c" d'` lost its inner quoting on the
+  // way through. `well exec --` itself passes args verbatim — the bug
+  // was in the cells-side join.
+  //
+  // Fix: use bash's positional form. `bash -lc 'cd /root; "$@"' bash <args…>`
+  // sets $0=bash and $1..=our cmdParts, then "$@" re-expands them as
+  // distinct words exactly as received. The -l still sources cells-env.sh;
+  // sudo -H still anchors HOME=/root.
   const proc = Bun.spawn(
     [
       "well", "exec", "-s", wellName, "--",
-      "sudo", "-H", "bash", "-lc", `cd /root; ${remote}`,
+      "sudo", "-H", "bash", "-lc", 'cd /root; "$@"', "bash",
+      ...cmdParts,
     ],
     { stdin: "inherit", stdout: "inherit", stderr: "inherit" },
   );
