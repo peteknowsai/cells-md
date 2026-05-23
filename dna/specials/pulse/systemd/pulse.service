@@ -1,5 +1,5 @@
 [Unit]
-Description=pulse — cells family scheduler (paces tick cadence via fork-injection)
+Description=pulse — cells family scheduler (translates HEARTBEAT.md prose into /etc/cron.d/pulse-schedules; cron fires the wakes)
 After=network-online.target well-site.service
 Wants=network-online.target well-site.service
 

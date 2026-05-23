@@ -3,13 +3,15 @@
  *
  * Runs a real heartbeat through the whole flow with the real components: a
  * cell's HEARTBEAT.md edit → the claude-code heartbeat-push hook → an HTTP
- * POST → an inbox file → pulse-core drain → save-schedule → fire → a wake
- * delivered to the target cell.
+ * POST → an inbox file → pulse-core drain → save-schedule, which writes
+ * the cell's block into /etc/cron.d/pulse-schedules (path overridable for
+ * the test).
  *
- * Only the two HTTP endpoints are stand-ins, and each does exactly what the
- * real component does: the subscriptions proxy's /heartbeat-changed drops
- * <cell>-<ts>.md into the inbox; the bridge's /talk delivers a wake. The
- * hook and pulse-core (drain, cron eval, fire, render) are the real code.
+ * Only the proxy's /heartbeat-changed endpoint is a stand-in, and it does
+ * exactly what the real component does: drop <cell>-<ts>.md into the
+ * inbox. The hook and pulse-core (drain, save-schedule, render) are the
+ * real code. Cron is not exercised here — Linux cron firing the line is
+ * tested by the live-pulse migration check.
  *
  *   node dna/specials/pulse/lib/heartbeat-e2e.test.mjs
  */
@@ -56,15 +58,15 @@ const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "hb-e2e-"));
 const cellRoot = path.join(tmp, "cell");
 const runtimeDir = path.join(tmp, "pulse-rt");
 const stateDir = path.join(tmp, "pulse-state");
+const cronFile = path.join(tmp, "pulse-schedules");
 const inboxDir = path.join(runtimeDir, "pulse-inbox");
 fs.mkdirSync(cellRoot, { recursive: true });
 fs.mkdirSync(inboxDir, { recursive: true });
 
 const SECRET = "e2e-test-secret";
 const CELL = os.hostname() || "unknown"; // the hook derives the cell name from hostname
-const delivered = []; // wakes the bridge stand-in receives
 
-// Stand-in for the two HTTP endpoints pulse depends on.
+// Stand-in for the heartbeat-changed endpoint pulse depends on.
 const server = http.createServer((req, res) => {
   let body = "";
   req.on("data", (c) => { body += c; });
@@ -78,10 +80,6 @@ const server = http.createServer((req, res) => {
       // proxy handlePulseProxy: drop <cell>-<ts>.md into the inbox
       const tsMs = Date.parse(payload.ts) || Date.now();
       fs.writeFileSync(path.join(inboxDir, `${payload.cell}-${tsMs}.md`), payload.content ?? "");
-      res.writeHead(200); res.end("ok");
-    } else if (req.url === "/talk") {
-      // bridge /talk: deliver a wake message to the cell
-      delivered.push({ cell: payload.cell, message: payload.message });
       res.writeHead(200); res.end("ok");
     } else {
       res.writeHead(404); res.end("nope");
@@ -114,7 +112,7 @@ try {
     ...process.env,
     PULSE_RUNTIME_DIR: runtimeDir,
     PULSE_STATE_DIR: stateDir,
-    CELLS_BRIDGE_URL: base,
+    PULSE_CRON_FILE: cronFile,
     CELLS_PROXY_SECRET: SECRET,
   };
 
@@ -124,7 +122,7 @@ try {
   check("drain: content survived the round-trip", drained[0] && drained[0].content === heartbeat);
 
   // 4 — parse the prose into a schedule (the test stands in for the LLM here)
-  //     and save it. "every minute" -> "* * * * *", so it is due right now.
+  //     and save it. saveSchedule now also installs the crontab block.
   const saveOut = await run("save-schedule", "node", [CLI, "save-schedule"], {
     env: pulseEnv,
     input: JSON.stringify({
@@ -135,12 +133,13 @@ try {
   });
   check("save-schedule: ok", !!saveOut && JSON.parse(saveOut).ok === true);
 
-  // 5 — fire: the every-minute schedule is due, so pulse wakes the cell
-  const fireOut = JSON.parse((await run("fire", "node", [CLI, "fire"], { env: pulseEnv })) || "{}");
-  check("fire: one wake fired ok", fireOut.count === 1 && fireOut.fires && fireOut.fires[0] && fireOut.fires[0].result === "ok");
-  check("fire -> bridge: wake delivered to the cell", delivered.length === 1 && delivered[0] && delivered[0].cell === CELL);
-  check("fire -> bridge: wake carried the schedule message",
-    delivered[0] && delivered[0].message === "refresh the dataset");
+  // 5 — verify the crontab file got the cell's block
+  check("save-schedule: crontab file written", fs.existsSync(cronFile));
+  const cronContents = fs.readFileSync(cronFile, "utf-8");
+  check("save-schedule: crontab has BEGIN/END for the cell",
+    cronContents.includes(`# BEGIN pulse:${CELL}`) && cronContents.includes(`# END pulse:${CELL}`));
+  check("save-schedule: crontab line carries the spec",
+    cronContents.includes("* * * * * root") && cronContents.includes("refresh the dataset"));
 
   // 6 — render the digest
   await run("render", "node", [CLI, "render"], { env: pulseEnv });

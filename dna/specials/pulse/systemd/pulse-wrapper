@@ -36,8 +36,9 @@ CELL="${CELL_NAME:-pulse}"
 # immediately. The fork runs on its own (capped server-side by the
 # adapter's forkAndAsk timeout — 300s for claude-code). The wrapper
 # doesn't wait, doesn't care about the response — pulse work is
-# observable via state files (pulse.json, pulse-cache/, log.md) and
-# the cell's supervisor logs, not via the cells-talk reply.
+# observable via state files (pulse.json, pulse-cache/, heartbeats.md)
+# and /etc/cron.d/pulse-schedules, not via the cells-talk reply. Wakes
+# themselves are fired by the Linux cron daemon, not by this loop.
 while :; do
   start=$(date +%s)
   if /root/bin/cells talk "$CELL" "$TICK_PROMPT" >>"$LOG" 2>&1; then

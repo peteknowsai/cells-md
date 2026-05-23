@@ -783,7 +783,7 @@ async function handleHeartbeatChanged(req: Request): Promise<Response> {
 //   POST /bridge/well/ssh       — exec a script in a well via `well exec`, return {ok, stdout, stderr}
 //   POST /bridge/mac_exec       — exec a bash script on the Mac (cwd=cells repo); logged to ~/.cells/logs/mac_exec.log
 //   POST /bridge/birth/outcome  — receive {birthId, success, message} from mother
-//   POST /bridge/talk           — fire `cells talk <cell> <msg>` (used by pulse)
+//   POST /bridge/talk           — fire `cells talk <cell> <msg>` (used by cron on the pulse cell)
 //   POST /bridge/inbox/pulse    — push a HEARTBEAT.md payload into pulse-cell's well
 //
 // All routes Bearer-auth via CELLS_PROXY_SECRET. Birth outcomes are

@@ -3676,14 +3676,31 @@ echo "name-subst: $(grep -lc __NAME__ AGENTS.md SOUL.md package.json .tmux.conf 
 // main session via the agent-comms fork rail. Idempotent — safe to
 // re-run on --rebuild.
 async function installPulseLoop(wellName: string): Promise<void> {
-  console.log(`  installing systemd pulse.service in ${wellName}…`);
+  console.log(`  installing systemd pulse.service + cron substrate in ${wellName}…`);
   const unitsDir = join(SPECIALS_DIR, "pulse", "systemd");
   const service = await readFile(join(unitsDir, "pulse.service"), "utf-8");
   const wrapper = await readFile(join(unitsDir, "pulse-wrapper"), "utf-8");
 
-  // System-wide unit (not user unit — the wrapper runs as root, same
-  // identity the cell supervisor and claude session run under). Runtime
-  // dirs default to /root/.cells/ via pulse-core's resolvePaths (homedir).
+  // Pulse cell needs three system surfaces in place before the loop comes up:
+  //
+  //   1. /etc/systemd/system/pulse.service + /usr/local/bin/pulse-wrapper
+  //      — the always-on tick loop that injects "run one pulse tick" into
+  //        the cell's main claude session every 5 min.
+  //
+  //   2. cron daemon enabled — pulse no longer fires wakes itself; it
+  //      translates each cell's prose schedule into crontab lines and
+  //      lets Linux cron run them. Ubuntu ships the cron package, but
+  //      we make sure it's enabled and running.
+  //
+  //   3. /etc/cron.d/pulse-schedules header — pulse-core writes per-cell
+  //      blocks (# BEGIN pulse:<cell> … # END pulse:<cell>) into this
+  //      file. Seed it with the header so the first save lands cleanly,
+  //      and so an empty pulse cell is observably wired up.
+  //
+  // Everything runs as root via sudo — the wrapper, the cron daemon,
+  // and the cron lines all share the same identity the cell supervisor
+  // and claude session run under. Runtime dirs default to /root/.cells/
+  // via pulse-core's resolvePaths (homedir).
   const script = `set -euo pipefail
 sudo mkdir -p /root/.cells/logs /root/.cells/pulse-inbox /root/.cells/state
 sudo tee /etc/systemd/system/pulse.service >/dev/null <<'__SERVICE_EOF__'
@@ -3692,15 +3709,37 @@ sudo tee /usr/local/bin/pulse-wrapper >/dev/null <<'__WRAPPER_EOF__'
 ${wrapper}__WRAPPER_EOF__
 sudo chmod 0644 /etc/systemd/system/pulse.service
 sudo chmod 0755 /usr/local/bin/pulse-wrapper
+# Seed the crontab file pulse-core will manage. Idempotent — only writes
+# the header if no file exists; preserves any blocks from a prior install.
+if [ ! -f /etc/cron.d/pulse-schedules ]; then
+  sudo tee /etc/cron.d/pulse-schedules >/dev/null <<'__CRON_EOF__'
+# pulse-schedules — managed by pulse-core. Hand-edits will be overwritten.
+SHELL=/bin/bash
+PATH=/root/bin:/root/.local/bin:/usr/local/bin:/usr/bin:/bin
+__CRON_EOF__
+  sudo chmod 0644 /etc/cron.d/pulse-schedules
+fi
+# Make sure the cron daemon is on. Ubuntu ships it; on some minimal
+# images it isn't enabled by default. The Debian package is "cron";
+# leave a graceful fallback for distros that use "cronie".
+if systemctl list-unit-files | grep -q '^cron\\.service'; then
+  sudo systemctl enable --now cron
+elif systemctl list-unit-files | grep -q '^crond\\.service'; then
+  sudo systemctl enable --now crond
+else
+  sudo apt-get update -qq && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends cron
+  sudo systemctl enable --now cron
+fi
 sudo systemctl daemon-reload
 sudo systemctl enable --now pulse.service
-sudo systemctl status --no-pager pulse.service | head -8 || true`;
+sudo systemctl status --no-pager pulse.service | head -8 || true
+sudo systemctl status --no-pager cron 2>/dev/null | head -4 || sudo systemctl status --no-pager crond | head -4 || true`;
 
   const r = await wellExecCapture(wellName, script);
   if (!r.ok) {
     throw new Error(`installPulseLoop failed: ${(r.stderr + r.stdout).slice(-400)}`);
   }
-  console.log(`  ✓ pulse.service enabled (always-on, 5min tick)`);
+  console.log(`  ✓ pulse.service enabled (always-on, 5min tick) + cron daemon armed`);
 }
 
 // Ensure a (supposedly running) well actually has a DHCP-assigned IP.
@@ -4538,10 +4577,15 @@ async function deleteCellWorker(name: string): Promise<void> {
 // Tell pulse to forget a destroyed cell — drops its schedule cache, prunes
 // lastFire entries, and clears any orphan inbox files. Runs deterministically
 // inside the pulse well via pulse-core's `forget` subcommand; no agent path,
-// no LLM, no fork. Best-effort — if the pulse cell is down or absent (early
-// in setup, between rebirth steps), the next pulse tick can still wake a
-// ghost once, the wake will 404, and the cell's next pulse-cache write will
-// re-prune via saveSchedule's own pruning logic. So a single miss is recoverable.
+// no LLM, no fork. The `forget` call drops the cell's pulse-cache row AND
+// strips its block from /etc/cron.d/pulse-schedules, so cron stops firing
+// at it. Best-effort — if the pulse cell is down or absent (early in setup,
+// between rebirth steps) the call fails and *both* the cache row and the
+// crontab block survive; cron will keep firing `cells talk <dead-cell>`
+// until manual cleanup. Recovery: once the pulse cell is back, run
+//   cells exec pulse "node /root/bin/pulse-core.mjs forget <name>"
+// from the host. The warning below surfaces the failure so it doesn't go
+// silent.
 async function evictPulseStateForCell(name: string): Promise<void> {
   // Resolve the pulse cell's well name (default "pulse"; overridable via
   // env for ops that run a renamed pulse cell during cutover).
@@ -5983,28 +6027,31 @@ async function cmdRefreshExtensions(args: string[]) {
  *
  *   cells heartbeat              print state/heartbeats.md (the digest)
  *   cells heartbeat <cell>       print just one cell's schedule rows
- *   cells heartbeat --tail       stream pulse.json log[] (latest fires first)
+ *   cells heartbeat --tail       stream cron-fires.log from the pulse cell
+ *
+ * --tail used to read pulse.json's log[] but pulse no longer fires wakes
+ * itself — Linux cron does, and every crontab line tees to
+ * /root/.cells/logs/cron-fires.log on the pulse cell. So --tail now shells
+ * into the pulse cell and tails that file.
  */
 async function cmdHeartbeat(args: string[]) {
   const heartbeatsMd = join(PULSE_ROOT, "state", "heartbeats.md");
-  const stateJson = join(homedir(), ".cells", "pulse.json");
 
   if (args[0] === "--tail") {
-    if (!existsSync(stateJson)) {
-      console.error("(no pulse state — has pulse run yet? `cells birth-special pulse`)");
+    const pulseCellName = process.env.CELLS_PULSE_CELL ?? "pulse";
+    let pulseWell: string;
+    try {
+      pulseWell = await wellNameForCell(pulseCellName);
+    } catch {
+      console.error(`(no pulse cell in registry — name="${pulseCellName}". Try \`cells birth-special pulse\`.)`);
       return;
     }
-    const state = JSON.parse(await readFile(stateJson, "utf-8"));
-    const log: Array<{ ts: string; cell: string; id: string; result: string; exit?: number }> = state.log ?? [];
-    if (log.length === 0) {
-      console.log("(no fires logged yet)");
-      return;
-    }
-    // Newest first.
-    for (const e of [...log].reverse()) {
-      const tail = e.result === "ok" ? "ok" : `fail (exit ${e.exit ?? "?"})`;
-      console.log(`${e.ts}  ${e.cell.padEnd(12)} ${e.id.padEnd(20)} ${tail}`);
-    }
+    const r = await wellExecCapture(
+      pulseWell,
+      "tail -n 100 /root/.cells/logs/cron-fires.log 2>/dev/null || echo '(no fires logged yet)'",
+    );
+    process.stdout.write(r.stdout);
+    if (r.stderr) process.stderr.write(r.stderr);
     return;
   }
 
@@ -6747,7 +6794,7 @@ async function setupPulseVault(): Promise<void> {
     await cp(settingsSrc, join(vault, "pi", "settings.json"));
   }
 
-  // state/ — pulse's vault-readable surfaces (heartbeats.md, log.md). Symlink
+  // state/ — pulse's vault-readable surface (heartbeats.md). Symlink
   // so changes show up live in Obsidian without re-running sync.
   const stateLink = join(vault, "state");
   try { await unlink(stateLink); } catch { /* not present */ }
@@ -7904,7 +7951,7 @@ switch (sub) {
     console.log("                              push DNA extension(s) onto existing cell(s) (default: heartbeat-watch)");
     console.log("                              --restart kicks pi on the cell so new extensions load (otherwise dormant until next pi start)");
     console.log("                              --remove deletes the extension dir + drops it from settings.json (inverse of push)");
-    console.log("  cells heartbeat [name|--tail]  show pulse digest, one cell's schedule, or recent fires");
+    console.log("  cells heartbeat [name|--tail]  show pulse digest, one cell's schedule, or tail cron-fires.log");
     console.log("  cells channel link <cell> <channel-id> [--kind=slack]");
     console.log("                              bind a Slack channel to a cell (mirrors to Cloudflare KV for the Slack Worker)");
     console.log("  cells channel unlink <cell> [<channel-id>]  remove one or all bindings for a cell");

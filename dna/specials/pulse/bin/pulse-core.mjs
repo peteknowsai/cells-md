@@ -3,28 +3,30 @@
  * pulse-core — CLI over the pulse-core operations.
  *
  * The claude-code-harness counterpart to the pi `pulse-tools` extension:
- * pulse's /pulse skill runs a tick by shelling out to these subcommands. Every
- * command prints its result as JSON on stdout; errors go to stderr with a
- * non-zero exit. `save-schedule` and `write-log` read their JSON argument
- * from stdin — the rest take no input.
+ * pulse's /pulse skill runs a tick by shelling out to these subcommands.
+ * Every command prints its result as JSON on stdout; errors go to stderr
+ * with a non-zero exit. `save-schedule` reads its JSON argument from
+ * stdin — the rest take no input (except `forget`, which takes a cell
+ * name as argv).
  *
- * Paths come from pulse-core's resolvePaths(): $PULSE_RUNTIME_DIR and
- * $PULSE_STATE_DIR, defaulting under ~/.cells.
+ * Paths come from pulse-core's resolvePaths(): $PULSE_RUNTIME_DIR,
+ * $PULSE_STATE_DIR, $PULSE_CRON_FILE, defaulting under ~/.cells with the
+ * crontab at /etc/cron.d/pulse-schedules.
  *
- *   pulse-core.mjs begin|drain|fire|bootstrap|daily-log-check|render|end
+ *   pulse-core.mjs begin|drain|bootstrap|render|sync-crontab|end
+ *   pulse-core.mjs forget <cell>
  *   echo '{"cell":"x","items":[{"cron":"0 8 * * *","message":"…"}],"sourcePath":"…"}' | pulse-core.mjs save-schedule
- *   echo '{"date":"2026-05-20","body":"…"}' | pulse-core.mjs write-log
  */
 
 import * as fs from "node:fs";
 import {
   resolvePaths, begin, end, drainInbox, saveSchedule, forgetCell,
-  fireDue, bootstrapInbox, dailyLogDue, writeLogEntry, renderDigest,
+  bootstrapInbox, syncCrontab, renderDigest,
 } from "../lib/pulse-core.mjs";
 
-const USAGE = "usage: pulse-core.mjs begin|drain|save-schedule|forget <cell>|fire|bootstrap|daily-log-check|write-log|render|end";
+const USAGE = "usage: pulse-core.mjs begin|drain|save-schedule|forget <cell>|bootstrap|sync-crontab|render|end";
 
-// save-schedule / write-log take a JSON argument piped on stdin.
+// save-schedule takes a JSON argument piped on stdin.
 function readStdinJSON() {
   let raw = "";
   try { raw = fs.readFileSync(0, "utf-8"); } catch { raw = ""; }
@@ -49,12 +51,10 @@ try {
     case "begin": result = begin(paths); break;
     case "end": result = end(paths); break;
     case "drain": result = drainInbox(paths); break;
-    case "fire": result = await fireDue(paths); break;
     case "bootstrap": result = await bootstrapInbox(paths); break;
-    case "daily-log-check": result = dailyLogDue(paths); break;
+    case "sync-crontab": result = syncCrontab(paths); break;
     case "render": result = renderDigest(paths); break;
     case "save-schedule": result = saveSchedule(paths, readStdinJSON()); break;
-    case "write-log": result = writeLogEntry(paths, readStdinJSON()); break;
     case "forget": {
       const cell = process.argv[3];
       if (!cell) { process.stderr.write(`pulse-core forget: missing cell argument\n${USAGE}\n`); process.exit(2); }

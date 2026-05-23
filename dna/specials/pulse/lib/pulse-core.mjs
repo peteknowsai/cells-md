@@ -1,70 +1,73 @@
 /**
  * pulse-core — the harness-neutral guts of pulse.
  *
- * All of pulse's deterministic logic — the concurrency sentinel, inbox
- * drain, schedule cache, cron evaluation, firing, digest rendering, and
- * daily-log bookkeeping — with no harness coupling. pi wraps these as pi
- * tools (.pi/extensions/pulse-tools); claude-code drives them from a CLI
- * (bin/pulse-core) inside its /loop. One source of truth, two harnesses.
+ * Pulse no longer fires wakes itself. Linux cron does. Pulse's job is to
+ * translate each cell's prose schedule into crontab lines and keep the
+ * cell's block in /etc/cron.d/pulse-schedules in sync. The Linux cron
+ * daemon evaluates the file every minute and runs the lines.
  *
- * Paths are injected via resolvePaths(), never derived from __dirname, so
- * the module runs unchanged whether it's imported by a pi extension or
- * executed by plain `node` on a claude-code cell. Build a PulsePaths once
- * at startup and thread it into every operation.
+ * That makes pulse-core a thin layer:
+ *
+ *   - begin / end                    a 5-minute sentinel so two ticks
+ *                                    can't translate the same inbox
+ *   - drainInbox                     surface new HEARTBEAT.md pushes
+ *   - saveSchedule                   write pulse-cache/<cell>.json AND
+ *                                    rewrite the cell's crontab block
+ *   - forgetCell                     drop cache + crontab block when a
+ *                                    cell is destroyed
+ *   - bootstrapInbox                 first-run seeding from the vault
+ *   - renderDigest                   refresh heartbeats.md (the digest
+ *                                    is now schedule-only; cron owns the
+ *                                    firing record)
+ *   - syncCrontab                    rebuild /etc/cron.d/pulse-schedules
+ *                                    from pulse-cache (one-time migration
+ *                                    + a manual recovery handle)
+ *
+ * The LLM only ever reasons about one thing: parsing inbox prose into
+ * cron items. Everything else is pure compute.
+ *
+ * Paths are injected via resolvePaths(), never derived from __dirname,
+ * so the module runs unchanged whether it's imported by a pi extension
+ * or executed by plain `node` on a claude-code cell. Build a PulsePaths
+ * once at startup and thread it into every operation.
  *
  * Durable state (all under runtimeDir):
- *   pulse.json              {lastPulse, currentPulse, lastFire, log[]}
+ *   pulse.json              {lastPulse, currentPulse}
  *   pulse-inbox/            HEARTBEAT.md pushes from cells
  *   pulse-inbox/processed/  drained inbox archive
  *   pulse-cache/<cell>.json parsed schedule per cell
  *   logs/pulse-trace.log    one line per operation
- *   logs/fires.log          per-fire detail (rotated)
  *
- * Vault-readable surfaces (under stateDir):
+ * System surface:
+ *   /etc/cron.d/pulse-schedules  the crontab file cron reads
+ *
+ * Vault-readable surface (under stateDir):
  *   heartbeats.md   digest table (renderDigest)
- *   log.md          daily narrative (writeLogEntry)
- *
- * The LLM only ever touches two things, and both live in the *wrapper*,
- * not here: parsing inbox prose into a cron schedule, and writing the
- * daily-log paragraph. Every operation in this module is pure compute.
- *
- * Lifted verbatim from .pi/extensions/pulse-tools/index.ts — the logic is
- * unchanged; only the pi-tool registration and __dirname path resolution
- * were stripped out.
  */
 
-import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
-import { parseCron, cronNext, cronPrev } from "./cron.mjs";
+import { parseCron, cronNext } from "./cron.mjs";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { homedir } from "node:os";
 
 // ---------- tunables ----------
 
-// Window pulse looks back when deciding "is this cron item due now?"
-const FIRE_WINDOW_MS = 60_000;
 // How long a currentPulse sentinel is live before a new pulse steals it.
 const SENTINEL_MAX_MS = 5 * 60_000;
-// Cap on log[] entries kept in pulse.json (older roll out).
-const LOG_MAX_ENTRIES = 500;
-// fires.log rolls when it exceeds this size (one rotation, .1 archive).
-const FIRES_LOG_MAX_BYTES = 5 * 1024 * 1024;
-// Consecutive failures that flag a schedule as failing in the digest.
-const FAILURE_STREAK_THRESHOLD = 3;
 
-// In-well, fire scheduled wakes via proxy.cells.md/bridge/talk; on Mac
-// (legacy), shell out to `cells talk`. Selected by CELLS_BRIDGE_URL.
-const BRIDGE_URL = process.env.CELLS_BRIDGE_URL ?? null;
+// Per-fire log file each crontab line tees to — for forensics, not for pulse.
+const CRON_FIRE_LOG = "/root/.cells/logs/cron-fires.log";
 
 // ---------- paths ----------
 
 /**
  * @typedef {object} PulsePaths
  * @property {string} runtimeDir    pulse.json, pulse-inbox/, pulse-cache/, logs/
- * @property {string} stateDir      heartbeats.md, log.md (vault-readable surface)
+ * @property {string} stateDir      heartbeats.md (vault-readable surface)
  * @property {string} registryPath  cells.json (bootstrap source)
  * @property {string} vaultDir      cell HEARTBEAT.md mirror root (bootstrap source)
+ * @property {string} cronFile      /etc/cron.d/pulse-schedules — the crontab file
  */
 
 /**
@@ -73,9 +76,7 @@ const BRIDGE_URL = process.env.CELLS_BRIDGE_URL ?? null;
  *
  *   runtimeDir: opts.runtimeDir ?? $PULSE_RUNTIME_DIR ?? ~/.cells
  *   stateDir:   opts.stateDir   ?? $PULSE_STATE_DIR   ?? <runtimeDir>/state
- *
- * The pi wrapper passes stateDir derived from __dirname (keeping pi-pulse
- * byte-identical); the claude-code CLI lets it fall to env + defaults.
+ *   cronFile:   opts.cronFile   ?? $PULSE_CRON_FILE   ?? /etc/cron.d/pulse-schedules
  *
  * @param {Partial<PulsePaths>} [opts]
  * @returns {PulsePaths}
@@ -87,7 +88,8 @@ export function resolvePaths(opts = {}) {
   const stateDir = opts.stateDir ?? process.env.PULSE_STATE_DIR ?? path.join(runtimeDir, "state");
   const registryPath = opts.registryPath ?? path.join(cellsDir, "cells.json");
   const vaultDir = opts.vaultDir ?? path.join(home, "Obsidian", "cells");
-  return { runtimeDir, stateDir, registryPath, vaultDir };
+  const cronFile = opts.cronFile ?? process.env.PULSE_CRON_FILE ?? "/etc/cron.d/pulse-schedules";
+  return { runtimeDir, stateDir, registryPath, vaultDir, cronFile };
 }
 
 // Sub-paths derived from a PulsePaths. Kept as functions so PulsePaths
@@ -98,9 +100,7 @@ const processedDir = (p) => path.join(inboxDir(p), "processed");
 const cacheDir = (p) => path.join(p.runtimeDir, "pulse-cache");
 const logsDir = (p) => path.join(p.runtimeDir, "logs");
 const traceLog = (p) => path.join(logsDir(p), "pulse-trace.log");
-const firesLog = (p) => path.join(logsDir(p), "fires.log");
 const heartbeatsMd = (p) => path.join(p.stateDir, "heartbeats.md");
-const logMd = (p) => path.join(p.stateDir, "log.md");
 
 // ---------- helpers ----------
 
@@ -116,7 +116,7 @@ function sha(s) {
 
 // Stable, human-readable id: slug from message + 6-char hash of
 // (cron, normalized message). Same prose -> same id even after an LLM
-// re-parse, so lastFire keys stay stable.
+// re-parse — keeps the cron block stable across translations.
 function deriveId(cron, message) {
   const normMsg = message.toLowerCase().replace(/[^a-z0-9 ]/g, "").replace(/\s+/g, " ").trim();
   const slug = normMsg.replace(/\s+/g, "-").slice(0, 24).replace(/-+$/, "") || "wake";
@@ -132,11 +132,6 @@ function formatLocal(iso) {
   return d.toLocaleString("en-CA", { hour12: false }).replace(",", "");
 }
 
-// Local-TZ "today" for the daily-log header — rolls over at local midnight.
-function localDate(d = new Date()) {
-  return d.toLocaleDateString("en-CA");
-}
-
 // Append a trace line to logs/pulse-trace.log. Best-effort, never throws.
 function appendTrace(p, line) {
   try {
@@ -145,62 +140,23 @@ function appendTrace(p, line) {
   } catch { /* swallow — trace logging is best-effort */ }
 }
 
-// Append a per-fire entry to fires.log, capturing the side-channel reply.
-// Rotates when oversized.
-function appendFireLog(p, cell, id, message, r) {
-  try {
-    fs.mkdirSync(logsDir(p), { recursive: true });
-    const fl = firesLog(p);
-    if (fs.existsSync(fl)) {
-      const stat = fs.statSync(fl);
-      if (stat.size > FIRES_LOG_MAX_BYTES) {
-        const rotated = fl + ".1";
-        if (fs.existsSync(rotated)) fs.unlinkSync(rotated);
-        fs.renameSync(fl, rotated);
-      }
-    }
-    const head = `=== ${new Date().toISOString()}  ${cell}:${id}  ${r.ok ? "ok" : `fail exit=${r.exit}`} ===`;
-    const body = [
-      `> ${message}`,
-      r.stdout && r.stdout.trim() ? `[stdout]\n${r.stdout.trim()}` : "",
-      r.stderr && r.stderr.trim() ? `[stderr]\n${r.stderr.trim()}` : "",
-    ].filter(Boolean).join("\n");
-    fs.appendFileSync(fl, `${head}\n${body}\n\n`);
-  } catch { /* best-effort */ }
-}
-
-// Count consecutive failures (newest-backwards) for a <cell>:<id> key.
-function failureStreak(log, cell, id) {
-  let n = 0;
-  for (let i = log.length - 1; i >= 0; i--) {
-    const e = log[i];
-    if (e.cell !== cell || e.id !== id) continue;
-    if (e.result === "ok") return n;
-    n++;
-  }
-  return n;
-}
-
 function readState(p) {
   if (!fs.existsSync(statePath(p))) {
-    return { lastPulse: null, currentPulse: null, lastFire: {}, log: [] };
+    return { lastPulse: null, currentPulse: null };
   }
   try {
     const raw = JSON.parse(fs.readFileSync(statePath(p), "utf-8"));
     return {
       lastPulse: raw.lastPulse ?? null,
       currentPulse: raw.currentPulse ?? null,
-      lastFire: raw.lastFire ?? {},
-      log: Array.isArray(raw.log) ? raw.log : [],
     };
   } catch {
-    return { lastPulse: null, currentPulse: null, lastFire: {}, log: [] };
+    return { lastPulse: null, currentPulse: null };
   }
 }
 
 function writeState(p, state) {
   ensureDirs(p);
-  if (state.log.length > LOG_MAX_ENTRIES) state.log = state.log.slice(-LOG_MAX_ENTRIES);
   const tmp = statePath(p) + ".tmp";
   fs.writeFileSync(tmp, JSON.stringify(state, null, 2));
   fs.renameSync(tmp, statePath(p));
@@ -220,31 +176,109 @@ function listSchedules(p) {
   return out;
 }
 
-function shellOut(cmd, args) {
-  return new Promise((resolve) => {
-    const proc = spawn(cmd, args, { stdio: ["ignore", "pipe", "pipe"] });
-    let stdout = "";
-    let stderr = "";
-    proc.stdout.on("data", (d) => { stdout += d.toString(); });
-    proc.stderr.on("data", (d) => { stderr += d.toString(); });
-    proc.on("close", (code) => resolve({ ok: code === 0, exit: code ?? -1, stdout, stderr }));
-    proc.on("error", (e) => resolve({ ok: false, exit: -1, stdout, stderr: stderr || e.message }));
-  });
+// ---------- crontab management ----------
+
+// Header lines for /etc/cron.d/pulse-schedules. Cron reads /etc/cron.d
+// files with no shell profile sourced, so we need explicit SHELL + PATH
+// and have to source cells-env.sh inside each line to pick up
+// CELLS_PROXY_SECRET and friends.
+const CRON_HEADER = [
+  "# pulse-schedules — managed by pulse-core. Hand-edits will be overwritten.",
+  "SHELL=/bin/bash",
+  "PATH=/root/bin:/root/.local/bin:/usr/local/bin:/usr/bin:/bin",
+  "",
+].join("\n");
+
+const BLOCK_BEGIN = (cell) => `# BEGIN pulse:${cell}`;
+const BLOCK_END = (cell) => `# END pulse:${cell}`;
+
+// POSIX-safe single-quote a string for embedding in a shell command.
+// Single-quote, replace each ' with '\'', single-quote.
+function shellQuote(s) {
+  return `'${String(s).replace(/'/g, `'\\''`)}'`;
 }
 
-async function fireViaBridge(cell, message) {
-  const secret = process.env.CELLS_PROXY_SECRET ?? process.env.OPENAI_CODEX_API_KEY ?? "";
+// Build one /etc/cron.d line. /etc/cron.d entries have a user field
+// before the command (unlike user crontabs).
+function cronLine(cell, item) {
+  const cmd =
+    `. /etc/profile.d/cells-env.sh && ` +
+    `/root/bin/cells talk ${shellQuote(cell)} ${shellQuote(item.message)} ` +
+    `>> ${CRON_FIRE_LOG} 2>&1`;
+  // Per-cell-id label as a trailing comment for easier grep + audit.
+  return `${item.cron} root ${cmd}  # ${cell}:${item.id}`;
+}
+
+// Read /etc/cron.d/pulse-schedules; if missing or unreadable, return the
+// header so the caller starts from a known-good state.
+function readCronFile(cronFile) {
   try {
-    const r = await fetch(`${BRIDGE_URL}/talk`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json", Authorization: `Bearer ${secret}` },
-      body: JSON.stringify({ cell, message }),
-    });
-    if (!r.ok) return { ok: false, exit: r.status, stdout: "", stderr: await r.text() };
-    return { ok: true, exit: 0, stdout: "", stderr: "" };
-  } catch (e) {
-    return { ok: false, exit: 1, stdout: "", stderr: e instanceof Error ? e.message : String(e) };
+    return fs.readFileSync(cronFile, "utf-8");
+  } catch {
+    return CRON_HEADER;
   }
+}
+
+function writeCronFile(cronFile, contents) {
+  fs.mkdirSync(path.dirname(cronFile), { recursive: true });
+  // /etc/cron.d entries must be mode 0644 and not have a "." in the
+  // basename. We write atomically via tmp+rename — cron picks up the
+  // file mtime on its next scan, no reload needed.
+  const tmp = cronFile + ".tmp";
+  fs.writeFileSync(tmp, contents);
+  fs.chmodSync(tmp, 0o644);
+  fs.renameSync(tmp, cronFile);
+}
+
+// Strip an existing pulse:<cell> block. Returns {found, contents}.
+function stripCellBlock(contents, cell) {
+  const begin = BLOCK_BEGIN(cell);
+  const end = BLOCK_END(cell);
+  const lines = contents.split("\n");
+  const out = [];
+  let inBlock = false;
+  let found = false;
+  for (const line of lines) {
+    if (line === begin) { inBlock = true; found = true; continue; }
+    if (inBlock && line === end) { inBlock = false; continue; }
+    if (inBlock) continue;
+    out.push(line);
+  }
+  return { found, contents: out.join("\n") };
+}
+
+// Ensure contents starts with our header. Idempotent.
+function ensureHeader(contents) {
+  if (contents.startsWith("# pulse-schedules")) return contents;
+  return CRON_HEADER + (contents.startsWith("\n") ? contents.slice(1) : contents);
+}
+
+// Rewrite the cell's block in /etc/cron.d/pulse-schedules. Atomic: tmp +
+// rename so cron never sees a half-written file. Idempotent: items=[]
+// removes the block entirely.
+function installCrontabForCell(p, { cell, items }) {
+  let contents = ensureHeader(readCronFile(p.cronFile));
+  const stripped = stripCellBlock(contents, cell);
+  contents = stripped.contents.replace(/\n+$/, "") + "\n";
+  if (items.length > 0) {
+    const block = [
+      BLOCK_BEGIN(cell),
+      ...items.map((it) => cronLine(cell, it)),
+      BLOCK_END(cell),
+      "",
+    ].join("\n");
+    contents += "\n" + block;
+  }
+  writeCronFile(p.cronFile, contents);
+  return { ok: true, cell, count: items.length };
+}
+
+function removeCrontabForCell(p, { cell }) {
+  const contents = readCronFile(p.cronFile);
+  const { found, contents: stripped } = stripCellBlock(ensureHeader(contents), cell);
+  if (!found) return { ok: true, cell, removed: false };
+  writeCronFile(p.cronFile, stripped.replace(/\n+$/, "") + "\n");
+  return { ok: true, cell, removed: true };
 }
 
 // ---------- operations ----------
@@ -336,11 +370,11 @@ export function drainInbox(p) {
 }
 
 /**
- * Write a parsed schedule to pulse-cache/<cell>.json AND move the source
- * inbox file to processed/. Items are {cron, message} (any id is ignored —
- * the tool derives a deterministic slug+hash so the same prose always
- * yields the same id). lastFire entries for ids no longer scheduled are
- * pruned. Returns {ok:false, error} on an invalid cron string.
+ * Write a parsed schedule to pulse-cache/<cell>.json AND install the
+ * cell's block in /etc/cron.d/pulse-schedules. Items are {cron, message}
+ * (any id is ignored — the tool derives a deterministic slug+hash so the
+ * same prose always yields the same id). Also moves the source inbox
+ * file to processed/. Returns {ok:false, error} on an invalid cron string.
  *
  * @param {PulsePaths} p
  * @param {{cell: string, items: Array<{cron: string, message: string}>, sourcePath?: string}} params
@@ -375,24 +409,23 @@ export function saveSchedule(p, { cell, items: rawItems, sourcePath }) {
   const sched = { items, updatedAt: new Date().toISOString(), ...(contentHash ? { contentHash } : {}) };
   fs.writeFileSync(path.join(cacheDir(p), `${cell}.json`), JSON.stringify(sched, null, 2));
 
-  // Prune lastFire entries for this cell whose ids are no longer scheduled.
-  const state = readState(p);
-  const activeKeys = new Set(items.map((it) => `${cell}:${it.id}`));
-  const cellPrefix = `${cell}:`;
-  let pruned = 0;
-  for (const k of Object.keys(state.lastFire)) {
-    if (k.startsWith(cellPrefix) && !activeKeys.has(k)) {
-      delete state.lastFire[k];
-      pruned++;
-    }
+  // Push the schedule into cron. Best-effort: if /etc/cron.d isn't
+  // writable (running under tests outside root, dev box, etc.) we still
+  // want save-schedule to succeed — the cache is the source of truth and
+  // syncCrontab can replay later. So we catch and surface the error in
+  // the result rather than aborting the save.
+  let cronErr;
+  try {
+    installCrontabForCell(p, { cell, items });
+  } catch (e) {
+    cronErr = e instanceof Error ? e.message : String(e);
   }
-  if (pruned > 0) writeState(p, state);
 
   if (sourcePath && fs.existsSync(sourcePath)) {
     fs.renameSync(sourcePath, path.join(processedDir(p), path.basename(sourcePath)));
   }
-  appendTrace(p, `save_schedule cell=${cell} items=${items.length} pruned=${pruned}`);
-  return { ok: true, cell, count: items.length, pruned };
+  appendTrace(p, `save_schedule cell=${cell} items=${items.length}${cronErr ? ` cron_err=${cronErr}` : ""}`);
+  return { ok: true, cell, count: items.length, ...(cronErr ? { cronError: cronErr } : {}) };
 }
 
 /**
@@ -401,11 +434,11 @@ export function saveSchedule(p, { cell, items: rawItems, sourcePath }) {
  * even when there was nothing to forget.
  *
  *   - deletes pulse-cache/<cell>.json (the schedule cache)
- *   - prunes lastFire entries with the cell prefix from pulse.json
+ *   - removes the cell's block from /etc/cron.d/pulse-schedules
  *   - removes <cell>-*.md files from the live inbox and processed/ archive
- *     so the dead cell can't surface again on a future drain or in log.md
+ *     so the dead cell can't surface again on a future drain
  *
- * @returns {{ok: true, cell: string, hadSchedule: boolean, prunedLastFires: number, removedInbox: number, removedProcessed: number}}
+ * @returns {{ok: true, cell: string, hadSchedule: boolean, cronRemoved: boolean, removedInbox: number, removedProcessed: number}}
  */
 export function forgetCell(p, { cell }) {
   ensureDirs(p);
@@ -413,16 +446,14 @@ export function forgetCell(p, { cell }) {
   const hadSchedule = fs.existsSync(cachePath);
   if (hadSchedule) fs.unlinkSync(cachePath);
 
-  const state = readState(p);
-  const cellPrefix = `${cell}:`;
-  let prunedLastFires = 0;
-  for (const k of Object.keys(state.lastFire)) {
-    if (k.startsWith(cellPrefix)) {
-      delete state.lastFire[k];
-      prunedLastFires++;
-    }
+  let cronRemoved = false;
+  let cronErr;
+  try {
+    const r = removeCrontabForCell(p, { cell });
+    cronRemoved = !!r.removed;
+  } catch (e) {
+    cronErr = e instanceof Error ? e.message : String(e);
   }
-  if (prunedLastFires > 0) writeState(p, state);
 
   const filePrefix = `${cell}-`;
   let removedInbox = 0;
@@ -438,58 +469,33 @@ export function forgetCell(p, { cell }) {
     }
   }
 
-  appendTrace(p, `forget_cell cell=${cell} hadSchedule=${hadSchedule} prunedLastFires=${prunedLastFires} removedInbox=${removedInbox} removedProcessed=${removedProcessed}`);
-  return { ok: true, cell, hadSchedule, prunedLastFires, removedInbox, removedProcessed };
+  appendTrace(p, `forget_cell cell=${cell} hadSchedule=${hadSchedule} cronRemoved=${cronRemoved} removedInbox=${removedInbox} removedProcessed=${removedProcessed}${cronErr ? ` cron_err=${cronErr}` : ""}`);
+  return { ok: true, cell, hadSchedule, cronRemoved, removedInbox, removedProcessed, ...(cronErr ? { cronError: cronErr } : {}) };
 }
 
 /**
- * Evaluate every cached schedule against the last FIRE_WINDOW_MS. For each
- * item due AND not already fired this minute, fire it (bridge in-well,
- * `cells talk` on Mac) and record the result.
+ * Rebuild /etc/cron.d/pulse-schedules from every pulse-cache/<cell>.json.
+ * Used at first install and as a manual recovery handle. Idempotent.
  *
- * @returns {Promise<{fires: Array<object>, count: number}>}
+ * @returns {{ok: true, cells: number, items: number}}
  */
-export async function fireDue(p) {
-  const state = readState(p);
+export function syncCrontab(p) {
+  ensureDirs(p);
+  // Reset the file to header-only, then re-install every cached cell.
+  writeCronFile(p.cronFile, CRON_HEADER);
   const schedules = listSchedules(p);
-  const now = new Date();
-  const windowStart = new Date(now.getTime() - FIRE_WINDOW_MS);
-
-  const fires = [];
-
+  let items = 0;
   for (const { cell, schedule } of schedules) {
-    for (const item of schedule.items) {
-      let fireTime = null;
-      try {
-        const prev = cronPrev(item.cron, now);
-        if (prev && prev >= windowStart && prev <= now) fireTime = prev;
-      } catch { continue; }
-
-      if (!fireTime) continue;
-
-      const key = `${cell}:${item.id}`;
-      const last = state.lastFire[key];
-      // Don't double-fire the same scheduled instant.
-      if (last && new Date(last).getTime() === fireTime.getTime()) continue;
-
-      const r = BRIDGE_URL
-        ? await fireViaBridge(cell, item.message)
-        : await shellOut("cells", ["talk", cell, item.message]);
-      const result = r.ok ? "ok" : "fail";
-      state.lastFire[key] = fireTime.toISOString();
-      state.log.push({
-        ts: now.toISOString(),
-        cell, id: item.id, message: item.message,
-        result, ...(r.ok ? {} : { exit: r.exit }),
-      });
-      fires.push({ cell, id: item.id, message: item.message, result, ...(r.ok ? {} : { exit: r.exit }) });
-      appendFireLog(p, cell, item.id, item.message, r);
-    }
+    const itemsForCell = (schedule.items ?? []).map((it) => ({
+      id: it.id ?? deriveId(it.cron, it.message),
+      cron: it.cron,
+      message: it.message,
+    }));
+    installCrontabForCell(p, { cell, items: itemsForCell });
+    items += itemsForCell.length;
   }
-
-  writeState(p, state);
-  appendTrace(p, `fire_due fires=${fires.length}`);
-  return { fires, count: fires.length };
+  appendTrace(p, `sync_crontab cells=${schedules.length} items=${items}`);
+  return { ok: true, cells: schedules.length, items };
 }
 
 /**
@@ -519,57 +525,15 @@ export async function bootstrapInbox(p) {
 }
 
 /**
- * Whether log.md is missing today's entry (today = LOCAL date). When
- * needed, returns the last 24h of fires for the caller's LLM to summarize.
- *
- * @returns {{needed: boolean, today: string, fires?: Array<object>}}
- */
-export function dailyLogDue(p) {
-  ensureDirs(p);
-  const today = localDate();
-  let existing = "";
-  if (fs.existsSync(logMd(p))) existing = fs.readFileSync(logMd(p), "utf-8");
-  const hasToday = new RegExp(`^## ${today}\\b`, "m").test(existing);
-  if (hasToday) return { needed: false, today };
-
-  const state = readState(p);
-  const cutoff = Date.now() - 24 * 3600_000;
-  const fires = state.log.filter((e) => new Date(e.ts).getTime() >= cutoff);
-  return { needed: true, today, fires };
-}
-
-/**
- * Prepend a daily narrative entry to stateDir/log.md. body is a short
- * markdown paragraph with no headers (the H2 date is added here).
- *
- * @param {PulsePaths} p
- * @param {{date: string, body: string}} params
- */
-export function writeLogEntry(p, { date, body }) {
-  ensureDirs(p);
-  const existing = fs.existsSync(logMd(p))
-    ? fs.readFileSync(logMd(p), "utf-8")
-    : "# Pulse log\n\nDaily narrative, newest first. Written by pulse once per 24h (local time).\n\n";
-  // Preserve any preamble between the H1 and the first H2.
-  const headerMatch = existing.match(/^([\s\S]*?)(\n## |\n*$)/);
-  const preamble = headerMatch ? headerMatch[1].trimEnd() + "\n\n" : existing;
-  const rest = existing.slice(preamble.length);
-  const entry = `## ${date}\n\n${body.trim()}\n\n`;
-  fs.writeFileSync(logMd(p), preamble + entry + rest);
-  appendTrace(p, `write_log_entry date=${date} bytes=${body.length}`);
-  return { ok: true, date, bytes: body.length };
-}
-
-/**
  * Rewrite stateDir/heartbeats.md — a markdown table of every cell's
- * schedule, last-fire, next-fire, plus the recent-20 fires. Pure compute
- * over the cache + state.
+ * schedule + next-fire time. Pure compute over the cache. Cron now owns
+ * the firing record, so there is no recent-fires section here; for fire
+ * forensics, tail /root/.cells/logs/cron-fires.log on the pulse cell.
  *
- * @returns {{rows: number, flagged: number, recent: number}}
+ * @returns {{rows: number}}
  */
 export function renderDigest(p) {
   ensureDirs(p);
-  const state = readState(p);
   const schedules = listSchedules(p);
   const now = new Date();
 
@@ -578,17 +542,16 @@ export function renderDigest(p) {
     "",
     `_Generated ${formatLocal(now.toISOString())} (local) · ${now.toISOString()} (UTC)._`,
     "",
-    "| cell | id | cron | message | last fire | next fire |",
-    "|---|---|---|---|---|---|",
+    "_Cron fires these — see \`/root/.cells/logs/cron-fires.log\` on the pulse cell for the firing record._",
+    "",
+    "| cell | id | cron | message | next fire |",
+    "|---|---|---|---|---|",
   ];
 
-  // Row: [cellLabel, id, cron, message, lastFire, nextFire, nextMs]
+  // Row: [cell, id, cron, message, nextFire, nextMs]
   const rows = [];
-  let flagged = 0;
   for (const { cell, schedule } of schedules) {
     for (const item of schedule.items) {
-      const key = `${cell}:${item.id}`;
-      const last = state.lastFire[key] ?? null;
       let nextLocal = "—";
       let nextMs = Number.MAX_SAFE_INTEGER;
       try {
@@ -598,36 +561,21 @@ export function renderDigest(p) {
           nextMs = n.getTime();
         }
       } catch { /* invalid cron — leave dash */ }
-      const streak = failureStreak(state.log, cell, item.id);
-      const flag = streak >= FAILURE_STREAK_THRESHOLD ? ` ⚠️×${streak}` : "";
-      if (flag) flagged++;
       const msg = item.message.length > 60 ? item.message.slice(0, 57) + "..." : item.message;
-      rows.push([`${cell}${flag}`, item.id, item.cron, msg.replace(/\|/g, "\\|"), formatLocal(last), nextLocal, nextMs]);
+      rows.push([cell, item.id, item.cron, msg.replace(/\|/g, "\\|"), nextLocal, nextMs]);
     }
   }
   // Sort by next fire (soonest first).
-  rows.sort((a, b) => a[6] - b[6]);
+  rows.sort((a, b) => a[5] - b[5]);
   for (const r of rows) {
-    lines.push(`| ${r[0]} | ${r[1]} | \`${r[2]}\` | ${r[3]} | ${r[4]} | ${r[5]} |`);
+    lines.push(`| ${r[0]} | ${r[1]} | \`${r[2]}\` | ${r[3]} | ${r[4]} |`);
   }
-  if (rows.length === 0) lines.push("| _(no schedules cached)_ | | | | | |");
-
-  if (flagged > 0) {
-    lines.push("", `> ⚠️ ${flagged} schedule(s) failing repeatedly (${FAILURE_STREAK_THRESHOLD}+ consecutive fails). Check \`logs/fires.log\`.`);
-  }
-
-  lines.push("", "## Recent fires (last 20)", "");
-  const recent = state.log.slice(-20).reverse();
-  if (recent.length === 0) {
-    lines.push("_(none)_");
-  } else {
-    lines.push("| time | cell | id | result |", "|---|---|---|---|");
-    for (const e of recent) {
-      lines.push(`| ${formatLocal(e.ts)} | ${e.cell} | ${e.id} | ${e.result}${e.exit !== undefined ? ` (exit ${e.exit})` : ""} |`);
-    }
-  }
+  if (rows.length === 0) lines.push("| _(no schedules cached)_ | | | | |");
 
   fs.writeFileSync(heartbeatsMd(p), lines.join("\n") + "\n");
-  appendTrace(p, `render_digest rows=${rows.length} flagged=${flagged} recent=${recent.length}`);
-  return { rows: rows.length, flagged, recent: recent.length };
+  appendTrace(p, `render_digest rows=${rows.length}`);
+  return { rows: rows.length };
 }
+
+// Exported for tests + the CLI's sync-crontab subcommand.
+export { installCrontabForCell, removeCrontabForCell };
