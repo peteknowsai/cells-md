@@ -330,7 +330,12 @@ export const claudeCodeAdapter: HarnessAdapter = {
   // Claude resumes by uuid embedded in the filename. Clone main's JSONL to
   // a new uuid filename, --resume that, capture stdout, delete the clone.
   // bash -lc to source /etc/profile.d/cells-env.sh for proxy auth.
-  async forkAndAsk({ prompt, mainRef, cellName, timeoutMs = 90_000 }) {
+  //
+  // 300s default: tight enough that a wedged fork doesn't tie up the
+  // supervisor forever, generous enough that real pulse ticks (drain →
+  // prose-parse-each-entry → fire → render) finish even on heavy days
+  // when several cells just edited their HEARTBEAT.md.
+  async forkAndAsk({ prompt, mainRef, cellName, timeoutMs = 300_000 }) {
     if (!mainRef) {
       // No main exists — run a fresh session. The cell has no context to
       // draw on, so the answer is generic. Better than failing.

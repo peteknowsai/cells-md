@@ -23,30 +23,31 @@ export PATH="/root/bin:/root/.local/bin:/usr/local/bin:${PATH:-/usr/bin:/bin}"
 # default used everywhere else in the cell substrate. Logs land alongside.
 LOG=/root/.cells/logs/pulse.log
 TICK_INTERVAL="${PULSE_TICK_INTERVAL:-300}"
-# Fork-and-ask runs main + /pulse work. Headroom for prose-parsing +
-# daily-log on slow days; well below TICK_INTERVAL so a slow tick that
-# overruns interval still leaves room for the wrapper to inject the next.
-TICK_TIMEOUT="${PULSE_TICK_TIMEOUT:-240}"
 
 TICK_PROMPT='Run exactly one pulse tick now: read .claude/skills/pulse/SKILL.md and follow it start to finish, then stop. No narration.'
 
-echo "[$(date -u +%FT%TZ)] pulse loop started (interval=${TICK_INTERVAL}s timeout=${TICK_TIMEOUT}s)" >>"$LOG"
+echo "[$(date -u +%FT%TZ)] pulse loop started (interval=${TICK_INTERVAL}s)" >>"$LOG"
 
 # Self-name comes from CELL_NAME (baked into /etc/environment at birth).
 # Falls back to "pulse" — the canonical name for this special.
 CELL="${CELL_NAME:-pulse}"
 
+# Fire-and-forget: the wrapper injects the tick message and returns
+# immediately. The fork runs on its own (capped server-side by the
+# adapter's forkAndAsk timeout — 300s for claude-code). The wrapper
+# doesn't wait, doesn't care about the response — pulse work is
+# observable via state files (pulse.json, pulse-cache/, log.md) and
+# the cell's supervisor logs, not via the cells-talk reply.
 while :; do
   start=$(date +%s)
-  if timeout "${TICK_TIMEOUT}s" /root/bin/cells talk "$CELL" --await --timeout="${TICK_TIMEOUT}s" \
-       "$TICK_PROMPT" >>"$LOG" 2>&1; then
+  if /root/bin/cells talk "$CELL" "$TICK_PROMPT" >>"$LOG" 2>&1; then
     :
   else
     rc=$?
     echo "[$(date -u +%FT%TZ)] tick injection exited non-zero (rc=$rc)" >>"$LOG"
   fi
-  # Sleep the remainder of the interval — a tick that overran shortens
-  # (or skips) the wait so the loop self-corrects back toward cadence.
+  # Sleep the remainder of the interval. The injection itself returns
+  # in ~1s (just a POST), so this is effectively a fixed cadence.
   elapsed=$(( $(date +%s) - start ))
   remaining=$(( TICK_INTERVAL - elapsed ))
   if [ "$remaining" -gt 0 ]; then
