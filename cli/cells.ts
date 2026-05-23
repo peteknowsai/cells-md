@@ -3167,152 +3167,151 @@ async function bakePoolMember(): Promise<string> {
   const runningCount = await countRunningPoolMembers();
   const tier: 2 | 4 = runningCount < V1_RUNNING_POOL_TARGET ? 4 : 2;
 
-  // From ubuntu-base (the wells-team-owned substrate) — NOT cell-base.
-  // The cells-shaped layers (pi, DNA at /root, cells-env.sh, pi binary +
-  // patches) get applied via provisionCellInWell over SSH right after
-  // firstboot. ubuntu user (NOPASSWD sudo) + /home/well/.ssh come
-  // pre-baked from ubuntu-base (wells-stable-2026-05-12h); the agent
-  // sudoes from ubuntu to root.
-  // Post-Piece-3 (2026-05-13): we no longer pass hibernate_ready at
-  // create time (Pi3 deleted that path). Instead, sealWell() is called
-  // after provisionCellInWell to flip the well to a hibernate-legal
-  // disk-only state. ~6-8s cost is paid by /seal instead of /v1/wells.
-  // A create failure can still leave a partial bundle dir behind in
-  // welld's state dir — best-effort destroy so cells doesn't leak it.
-  // (welld can't yet reap a never-registered well's dir; tracked in the
-  // wells findings doc. This at least cleans registered-then-failed
-  // wells and makes the abort intent explicit — every other birth step
-  // below already does this.)
   try {
-    await directWellCreate(wellName, {
-      fromImage: "ubuntu-base",
-      env,
-    });
-  } catch (e) {
-    await directWellDestroy(wellName).catch(() => {});
-    throw new Error(
-      `bakePoolMember well create failed for '${wellName}': ${e instanceof Error ? e.message : String(e)}`,
-    );
-  }
-  await setWellAuthPublic(wellName);
-  // Disable wells's auto-hibernate watchdog up front. v1 cells stay
-  // alive_running until explicit lifecycle ops. Without this, the
-  // watchdog can race the bake-time hibernate decision.
-  await disableAutoSleep(wellName);
-
-  // Wait for well-firstboot (identity injection: hostname, machine-id,
-  // ssh host keys, /etc/environment, authorized_keys). Without this,
-  // hibernating mid-firstboot leaves wake-resumed wells in a broken
-  // state and adds ~30s to the first birth.
-  try {
-    await waitForCloudInit(wellName);
-  } catch (e) {
-    await directWellDestroy(wellName);
-    throw new Error(
-      `bakePoolMember waitForCloudInit failed for '${wellName}': ${e instanceof Error ? e.message : String(e)}`,
-    );
-  }
-
-  // Per-egg provisioning: lift ubuntu-base → fully-formed cell.
-  try {
-    await provisionCellInWell(wellName);
-  } catch (e) {
-    await directWellDestroy(wellName);
-    throw new Error(
-      `bakePoolMember provisioning failed for '${wellName}': ${e instanceof Error ? e.message : String(e)}`,
-    );
-  }
-
-  // Seal the well: halt, restart without cidata, flip hibernate_ready.
-  // Required post-Piece-3 (2026-05-13) — wells's createWell no longer
-  // does this inline. Without /seal, the /hibernate gate refuses every
-  // freshly-baked well. The disk-only steady state captured here is the
-  // POST-provision state, so wake-from-hibernate restores the
-  // provisioned cell — strictly cleaner than pre-Pi3 (where warming
-  // ran inside create, before provisioning had a chance to land).
-  try {
-    await sealWell(wellName);
-  } catch (e) {
-    await directWellDestroy(wellName);
-    throw new Error(
-      `bakePoolMember seal failed for '${wellName}': ${e instanceof Error ? e.message : String(e)}`,
-    );
-  }
-
-  // (Bridge readiness was previously asserted here against an in-cell
-  // well-site.service. With the host-bridge architecture, pi is spawned
-  // on-demand via SSH at talk time — there's no in-cell bridge to wait
-  // for. waitForCloudInit above is sufficient: it confirms firstboot
-  // identity injection + SSH readiness, which is everything host-bridge
-  // needs to connect.)
-
-  // Tier decision happened pre-create above. Now act on it: Tier 2 →
-  // hibernate the now-sealed well; Tier 4 → leave running with pi
-  // configured (sealed but live; sleep can still seal-and-hibernate it
-  // later if the user cells sleep's it).
-  if (tier === 2) {
-    const base = process.env.WELL_API_URL ?? "http://127.0.0.1:7878";
-    const hibRes = await fetch(
-      `${base}/v1/wells/${encodeURIComponent(wellName)}/hibernate`,
-      {
-        method: "POST",
-        headers: { Authorization: `Bearer ${await wellsToken()}` },
-      },
-    );
-    if (!hibRes.ok) {
-      await directWellDestroy(wellName);
+    // From ubuntu-base (the wells-team-owned substrate) — NOT cell-base.
+    // The cells-shaped layers (pi, DNA at /root, cells-env.sh, pi binary +
+    // patches) get applied via provisionCellInWell over SSH right after
+    // firstboot. ubuntu user (NOPASSWD sudo) + /home/well/.ssh come
+    // pre-baked from ubuntu-base (wells-stable-2026-05-12h); the agent
+    // sudoes from ubuntu to root.
+    // Post-Piece-3 (2026-05-13): we no longer pass hibernate_ready at
+    // create time (Pi3 deleted that path). Instead, sealWell() is called
+    // after provisionCellInWell to flip the well to a hibernate-legal
+    // disk-only state. ~6-8s cost is paid by /seal instead of /v1/wells.
+    //
+    // Per-step catches just rewrap the underlying error with a "<step>
+    // failed for <well>" prefix so captureBakeFailure can infer the stage.
+    // They do NOT destroy the well — the top-level catch below does that
+    // AFTER forensics capture, which matters for stages like seal where
+    // the failed-state disk.img + qemu PIDs are the diagnostic.
+    try {
+      await directWellCreate(wellName, { fromImage: "ubuntu-base", env });
+    } catch (e) {
       throw new Error(
-        `hibernate '${wellName}' failed: ${hibRes.status} ${(await hibRes.text()).slice(0, 300)}`,
+        `bakePoolMember well create failed for '${wellName}': ${e instanceof Error ? e.message : String(e)}`,
       );
     }
-  }
-  // Tier 4: leave the well running with pi pre-configured.
+    await setWellAuthPublic(wellName);
+    // Disable wells's auto-hibernate watchdog up front. v1 cells stay
+    // alive_running until explicit lifecycle ops. Without this, the
+    // watchdog can race the bake-time hibernate decision.
+    await disableAutoSleep(wellName);
 
-  // Wake-validate round-trip: /hibernate returning 200 only proves the
-  // snapshot was written. It does NOT prove the snapshot wakes back up
-  // into a routable, SSH-able VM. An egg that fails to wake is poison in
-  // the pool — claim picks it blind, birth fails with a stale-IP "no route
-  // to host", and the user thinks the pool's broken even though four good
-  // eggs sit behind it. So the egg has to actually round-trip before we
-  // mark it "open".
-  //
-  // Tier 2: /wake → IP → SSH `true` → /hibernate (back to steady state).
-  // Tier 4: SSH `true` (well never left running; nothing to re-hibernate).
-  //
-  // On failure: log forensics under ~/.cells/logs/bake-failures/, destroy
-  // the well (skipped if CELLS_BAKE_KEEP_FAILURES=1 — for the stress
-  // harness so we can inspect failed wells post-hoc), and throw so the
-  // caller knows this bake didn't produce a pool member.
-  try {
-    await validateBakedEgg(wellName, tier);
+    // Wait for well-firstboot (identity injection: hostname, machine-id,
+    // ssh host keys, /etc/environment, authorized_keys). Without this,
+    // hibernating mid-firstboot leaves wake-resumed wells in a broken
+    // state and adds ~30s to the first birth.
+    try {
+      await waitForCloudInit(wellName);
+    } catch (e) {
+      throw new Error(
+        `bakePoolMember waitForCloudInit failed for '${wellName}': ${e instanceof Error ? e.message : String(e)}`,
+      );
+    }
+
+    // Per-egg provisioning: lift ubuntu-base → fully-formed cell.
+    try {
+      await provisionCellInWell(wellName);
+    } catch (e) {
+      throw new Error(
+        `bakePoolMember provisioning failed for '${wellName}': ${e instanceof Error ? e.message : String(e)}`,
+      );
+    }
+
+    // Seal the well: halt, restart without cidata, flip hibernate_ready.
+    // Required post-Piece-3 (2026-05-13) — wells's createWell no longer
+    // does this inline. Without /seal, the /hibernate gate refuses every
+    // freshly-baked well. The disk-only steady state captured here is the
+    // POST-provision state, so wake-from-hibernate restores the
+    // provisioned cell — strictly cleaner than pre-Pi3 (where warming
+    // ran inside create, before provisioning had a chance to land).
+    try {
+      await sealWell(wellName);
+    } catch (e) {
+      throw new Error(
+        `bakePoolMember seal failed for '${wellName}': ${e instanceof Error ? e.message : String(e)}`,
+      );
+    }
+
+    // (Bridge readiness was previously asserted here against an in-cell
+    // well-site.service. With the host-bridge architecture, pi is spawned
+    // on-demand via SSH at talk time — there's no in-cell bridge to wait
+    // for. waitForCloudInit above is sufficient: it confirms firstboot
+    // identity injection + SSH readiness, which is everything host-bridge
+    // needs to connect.)
+
+    // Tier decision happened pre-create above. Now act on it: Tier 2 →
+    // hibernate the now-sealed well; Tier 4 → leave running with pi
+    // configured (sealed but live; sleep can still seal-and-hibernate it
+    // later if the user cells sleep's it).
+    if (tier === 2) {
+      const base = process.env.WELL_API_URL ?? "http://127.0.0.1:7878";
+      const hibRes = await fetch(
+        `${base}/v1/wells/${encodeURIComponent(wellName)}/hibernate`,
+        {
+          method: "POST",
+          headers: { Authorization: `Bearer ${await wellsToken()}` },
+        },
+      );
+      if (!hibRes.ok) {
+        throw new Error(
+          `bakePoolMember hibernate failed for '${wellName}': ${hibRes.status} ${(await hibRes.text()).slice(0, 300)}`,
+        );
+      }
+    }
+    // Tier 4: leave the well running with pi pre-configured.
+
+    // Wake-validate round-trip: /hibernate returning 200 only proves the
+    // snapshot was written. It does NOT prove the snapshot wakes back up
+    // into a routable, SSH-able VM. An egg that fails to wake is poison in
+    // the pool — claim picks it blind, birth fails with a stale-IP "no route
+    // to host", and the user thinks the pool's broken even though four good
+    // eggs sit behind it. So the egg has to actually round-trip before we
+    // mark it "open".
+    //
+    // Tier 2: /wake → IP → SSH `true` → /hibernate (back to steady state).
+    // Tier 4: SSH `true` (well never left running; nothing to re-hibernate).
+    try {
+      await validateBakedEgg(wellName, tier);
+    } catch (e) {
+      throw new Error(
+        `bakePoolMember validation failed for '${wellName}': ${e instanceof Error ? e.message : String(e)}`,
+      );
+    }
+
+    await withPoolLock(async () => {
+      const file = await loadPool();
+      file.members.push({
+        id: wellName.slice("egg-".length),
+        well_name: wellName,
+        variant_signature: V1_POOL_VARIANT_SIGNATURE,
+        state: "open",
+        tier,
+        born_at: new Date().toISOString(),
+        claimed_at: null,
+        claimed_by: null,
+        max_age_at: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString(),
+      } as any);
+      await savePool(file);
+    });
+
+    return wellName;
   } catch (e) {
+    // Unified failure path: capture forensics BEFORE destroy so the failed
+    // state (disk.img file handles, lingering qemu PIDs, welld view of the
+    // well) is still inspectable. captureBakeFailure infers the failed stage
+    // from the error message and grabs stage-appropriate diagnostics — see
+    // its body for the seal-specific lsof + Virtualization-PID capture asked
+    // for by wells 2026-05-23.
     const err = e instanceof Error ? e : new Error(String(e));
     await captureBakeFailure(wellName, tier, err);
-    if (process.env.CELLS_BAKE_KEEP_FAILURES !== "1") {
-      await directWellDestroy(wellName).catch(() => {});
-    } else {
+    if (process.env.CELLS_BAKE_KEEP_FAILURES === "1") {
       console.warn(`! CELLS_BAKE_KEEP_FAILURES=1 — leaving '${wellName}' alive for inspection`);
+    } else {
+      await directWellDestroy(wellName).catch(() => {});
     }
-    throw new Error(`bake validation failed for '${wellName}': ${err.message}`);
+    throw err;
   }
-
-  await withPoolLock(async () => {
-    const file = await loadPool();
-    file.members.push({
-      id: wellName.slice("egg-".length),
-      well_name: wellName,
-      variant_signature: V1_POOL_VARIANT_SIGNATURE,
-      state: "open",
-      tier,
-      born_at: new Date().toISOString(),
-      claimed_at: null,
-      claimed_by: null,
-      max_age_at: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString(),
-    } as any);
-    await savePool(file);
-  });
-
-  return wellName;
 }
 
 // ─── Specials: mother + pulse ──────────────────────────────────────────────
@@ -3916,12 +3915,30 @@ async function validateBakedEgg(wellName: string, tier: 2 | 4): Promise<void> {
   }
 }
 
-// Forensic dump for a bake that completed the cook but failed wake-validate.
-// Lands under ~/.cells/logs/bake-failures/<well>-<ts>.json so we can pattern-
-// match across many bakes without standing up a daemon (per the "agent-first,
-// not static services" rule — pattern-watching belongs in pulse-cc or its own
-// agent loop, not in the bake hot path). Best-effort: never throws — the
-// caller is already in a failure branch and needs to clean up.
+// Infer which bakePoolMember stage threw from the rewrapped error message.
+// Every per-step catch in bakePoolMember tags its rethrow with a recognizable
+// "<step> failed" phrase; this just maps phrase → short stage tag so the JSON
+// log groups cleanly.
+function inferBakeFailureStage(msg: string): string {
+  if (/well create failed/i.test(msg)) return "create";
+  if (/waitForCloudInit failed/i.test(msg)) return "firstboot";
+  if (/provisioning failed/i.test(msg)) return "provision";
+  if (/seal failed/i.test(msg)) return "seal";
+  if (/hibernate failed/i.test(msg)) return "hibernate";
+  if (/validation failed/i.test(msg)) return "validate";
+  return "unknown";
+}
+
+// Forensic dump for a bake that failed at any stage. Lands under
+// ~/.cells/logs/bake-failures/<well>-<ts>.json so we can pattern-match across
+// many bakes without standing up a daemon (per the "agent-first, not static
+// services" rule — pattern-watching belongs in pulse-cc or its own agent loop,
+// not in the bake hot path). Best-effort: never throws — the caller is
+// already in a failure branch and needs to clean up.
+//
+// MUST run BEFORE directWellDestroy: stage-specific diagnostics like the seal
+// stage's lsof on disk.img + live com.apple.Virtualization PIDs only have
+// signal while the failed-state files and processes still exist.
 async function captureBakeFailure(
   wellName: string,
   tier: 2 | 4,
@@ -3931,13 +3948,16 @@ async function captureBakeFailure(
     const dir = join(homedir(), ".cells", "logs", "bake-failures");
     await mkdir(dir, { recursive: true });
     const ts = new Date().toISOString();
+    const stage = inferBakeFailureStage(err.message);
     const out: Record<string, unknown> = {
       well_name: wellName,
       tier,
       ts,
+      stage,
       error: err.message,
       stack: err.stack,
     };
+
     // welld's snapshot at failure time — status, IP, age, uuid. Lets us
     // see whether welld thinks the well is up/down/wedged.
     try {
@@ -3950,10 +3970,38 @@ async function captureBakeFailure(
     } catch (e) {
       out.welld_info_err = String(e);
     }
+
+    // Stage-specific diagnostics. Today: just seal. Wells 2026-05-23 asked
+    // for `lsof -nP <disk.img>` + any live com.apple.Virtualization PIDs at
+    // the moment of "disk still held within 60000ms" to distinguish a halt-
+    // before-VZ-released-handle race from a post-welld-bounce orphan VZ XPC.
+    if (stage === "seal") {
+      const diskImg = `/Users/pete/.lume/${wellName}/disk.img`;
+      try {
+        const lsof = Bun.spawn(["lsof", "-nP", diskImg], { stdout: "pipe", stderr: "pipe" });
+        const o = await new Response(lsof.stdout).text();
+        const e2 = await new Response(lsof.stderr).text();
+        await lsof.exited;
+        out.lsof_disk_img = o.trim() || e2.trim() || "(no output — file may not exist)";
+      } catch (e) {
+        out.lsof_err = String(e);
+      }
+      try {
+        const pg = Bun.spawn(["pgrep", "-fl", "com.apple.Virtualization"], {
+          stdout: "pipe",
+          stderr: "pipe",
+        });
+        out.virtualization_procs = (await new Response(pg.stdout).text()).trim();
+        await pg.exited;
+      } catch (e) {
+        out.virtualization_procs_err = String(e);
+      }
+    }
+
     const safeStamp = ts.replace(/[:.]/g, "-");
     const path = join(dir, `${wellName}-${safeStamp}.json`);
     await writeFile(path, JSON.stringify(out, null, 2) + "\n");
-    console.warn(`! bake-failure log: ${path}`);
+    console.warn(`! bake-failure log: ${path} (stage=${stage})`);
   } catch {
     // Best-effort. Failing to write a log shouldn't escalate.
   }
