@@ -2661,17 +2661,6 @@ async function cmdCreate(name: string | undefined, opts: CreateOpts): Promise<vo
   });
   await saveRegistry(reg);
 
-  // Undo the bake-time auto-sleep pin. The egg sat in the pool with
-  // auto_sleep_seconds=null (race protection during bake/provisioning);
-  // now that the cell is registered, restore welld-default sleep so the
-  // cell hibernates after idle. Pinned-awake is opt-in via `cells pin`.
-  // Best-effort — failure here just means the cell stays pinned (which
-  // is the safer side of the bake mitigation, and `cells unpin` is
-  // available as a backstop).
-  await resetAutoSleepToDefault(eggWell).catch((e) =>
-    console.warn(`! resetAutoSleepToDefault '${eggWell}' failed: ${e instanceof Error ? e.message : String(e)}`),
-  );
-
   // Kick host-bridge to spawn ssh+pi now so the first talk connects warm.
   void prewarmHostBridge(name);
 
@@ -2875,15 +2864,22 @@ async function sealWell(wellName: string): Promise<void> {
 // too old to report the field at all — seal now. sealWell throws on failure;
 // the caller sweeps the egg and fails the birth rather than registering a cell
 // the hibernation system can never manage.
-async function ensureHibernateReady(wellName: string): Promise<void> {
+// Read welld's hibernate_ready bit for a well. Returns undefined if welld
+// is unreachable or too old to expose the field; callers pair with
+// needsSeal() to map undefined → "seal anyway, strictly safe direction."
+async function readHibernateReady(wellName: string): Promise<boolean | undefined> {
   const base = process.env.WELL_API_URL ?? "http://127.0.0.1:7878";
-  let ready: boolean | undefined;
   try {
     const r = await fetch(`${base}/v1/wells/${encodeURIComponent(wellName)}`, {
       headers: { Authorization: `Bearer ${await wellsToken()}` },
     });
-    if (r.ok) ready = (await r.json() as { hibernate_ready?: boolean }).hibernate_ready;
-  } catch { /* unreachable welld → ready stays undefined → needsSeal → seal */ }
+    if (r.ok) return (await r.json() as { hibernate_ready?: boolean }).hibernate_ready;
+  } catch { /* unreachable welld → undefined → caller decides */ }
+  return undefined;
+}
+
+async function ensureHibernateReady(wellName: string): Promise<void> {
+  const ready = await readHibernateReady(wellName);
   if (!needsSeal(ready)) return;         // already sealed — nothing to do
   await sealWell(wellName);              // false (pool rot) or undefined (old welld)
 }
@@ -3191,9 +3187,12 @@ async function bakePoolMember(): Promise<string> {
       );
     }
     await setWellAuthPublic(wellName);
-    // Disable wells's auto-hibernate watchdog up front. v1 cells stay
-    // alive_running until explicit lifecycle ops. Without this, the
-    // watchdog can race the bake-time hibernate decision.
+    // Pin auto-sleep off for the duration of the bake — welld's watchdog
+    // can otherwise race the bake-time hibernate decision (auto-hibernating
+    // mid-provision is a known failure shape).  We restore the welld default
+    // (auto_sleep_seconds=60) AFTER validation, so the egg lands in the pool
+    // with normal idle-hibernation behavior — if anything wakes it later,
+    // it auto-hibernates on idle instead of pinning warm forever.
     await disableAutoSleep(wellName);
 
     // Wait for well-firstboot (identity injection: hostname, machine-id,
@@ -3277,6 +3276,13 @@ async function bakePoolMember(): Promise<string> {
         `bakePoolMember validation failed for '${wellName}': ${e instanceof Error ? e.message : String(e)}`,
       );
     }
+
+    // Lift the bake-time pin.  Bake + validate done; the egg can now
+    // follow normal welld idle-hibernation behavior.  Without this the
+    // egg sits in the pool with auto_sleep_seconds=null forever and any
+    // wake (e.g. a future variant-pool promote, traffic, manual /wake)
+    // strands it warm — burning host RAM for an unclaimed pool member.
+    await resetAutoSleepToDefault(wellName);
 
     await withPoolLock(async () => {
       const file = await loadPool();
@@ -4214,6 +4220,8 @@ type ReconcileReport = {
   welld_known: number;
   evicted: { id: string; well_name: string; reason: string }[];
   culled: { id: string; well_name: string }[];
+  resealed: { id: string; well_name: string }[];
+  unrecoverable: { id: string; well_name: string; reason: string }[];
   pool_size_after: number;
   refill_triggered: boolean;
   errors: string[];
@@ -4228,6 +4236,8 @@ async function reconcilePool(
     welld_known: 0,
     evicted: [],
     culled: [],
+    resealed: [],
+    unrecoverable: [],
     pool_size_after: 0,
     refill_triggered: false,
     errors: [],
@@ -4330,8 +4340,50 @@ async function reconcilePool(
   }
   report.pool_size_after -= report.culled.length;
 
+  // hibernate_ready recheck: covers welld transition-storm clears that
+  // leave a successfully-sealed pool member with hibernate_ready=false
+  // (see the existing note at sealWell's ensureHibernateReady — we
+  // observed this on egg-0f7d66 once, and again on egg-711295
+  // 2026-05-24 after the wells bounce earlier that day).  When this
+  // happens, claim → ensureHibernateReady would re-seal at birth time,
+  // but the egg in the meantime is poison: it can't be hibernated, so
+  // /hibernate-driven flows (sleep, cull, restart) fail against it.
+  // Re-seal here instead, before any of those callers hit it.  Re-seal
+  // throws if the well is genuinely unrecoverable; treat that as an
+  // eviction.
+  {
+    const file = await loadPool();
+    const open = file.members.filter(
+      (m) => m.state === "open" && m.variant_signature === V1_POOL_VARIANT_SIGNATURE,
+    );
+    for (const m of open) {
+      try {
+        const ready = await readHibernateReady(m.well_name);
+        if (!needsSeal(ready)) continue;
+        await sealWell(m.well_name);
+        report.resealed.push({ id: m.id, well_name: m.well_name });
+      } catch (e) {
+        const reason = e instanceof Error ? e.message : String(e);
+        await directWellDestroy(m.well_name).catch(() => {});
+        await withPoolLock(async () => {
+          const f = await loadPool();
+          f.members = f.members.filter((x) => x.id !== m.id);
+          await savePool(f);
+        });
+        report.unrecoverable.push({ id: m.id, well_name: m.well_name, reason });
+        report.pool_size_after -= 1;
+      }
+    }
+  }
+
   // Background refill — fire and forget, don't make the caller wait.
-  if (report.evicted.length > 0 && !opts.skipRefill) {
+  // Trigger when ANY shrink happened (stale eviction, over-target cull,
+  // unrecoverable reseal eviction) so the pool gets back to depth.
+  const shrank =
+    report.evicted.length > 0 ||
+    report.culled.length > 0 ||
+    report.unrecoverable.length > 0;
+  if (shrank && !opts.skipRefill) {
     report.refill_triggered = true;
     refillPoolToDepth().catch((e) => {
       if (!opts.silent) {
@@ -4340,10 +4392,18 @@ async function reconcilePool(
     });
   }
 
-  if (!opts.silent && (report.evicted.length > 0 || report.culled.length > 0)) {
+  if (
+    !opts.silent &&
+    (report.evicted.length > 0 ||
+      report.culled.length > 0 ||
+      report.resealed.length > 0 ||
+      report.unrecoverable.length > 0)
+  ) {
     const parts: string[] = [];
     if (report.evicted.length > 0) parts.push(`evicted ${report.evicted.length} stale`);
     if (report.culled.length > 0) parts.push(`culled ${report.culled.length} over-target`);
+    if (report.resealed.length > 0) parts.push(`resealed ${report.resealed.length}`);
+    if (report.unrecoverable.length > 0) parts.push(`dropped ${report.unrecoverable.length} unrecoverable`);
     console.error(
       `pool reconcile: ${parts.join(", ")} member(s); ` +
         `pool ${report.pool_size_before} → ${report.pool_size_after}` +
