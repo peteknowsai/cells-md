@@ -1830,110 +1830,156 @@ async function cmdUnpin(name: string) {
 
 // ───── menubar ─────
 //
-// `cells menubar install`    — drop a SwiftBar plugin into ~/Library/Application
-//                              Support/SwiftBar/Plugins. Plugin is a 1-line .sh
-//                              that execs `cells menubar render`.
-// `cells menubar render`     — emit SwiftBar plugin text on stdout. Invoked
-//                              every few seconds by SwiftBar itself.
-// `cells menubar uninstall`  — remove the plugin.
-// `cells menubar status`     — show whether the plugin is installed.
+// Native macOS status item, built from cli/menubar/swift/main.swift. No
+// SwiftBar dependency.
 //
-// SwiftBar plugin filename convention: <name>.<interval>.<ext>. We use 10s.
+// `cells menubar install`    — build the .app, drop it at
+//                              ~/.cells/menubar/CellsMenubar.app, and install
+//                              a LaunchAgent that auto-starts it at login.
+// `cells menubar uninstall`  — unload the agent and remove both files.
+// `cells menubar status`     — report whether the app + agent are installed
+//                              and the agent is loaded.
+// `cells menubar build`      — rebuild the .app in place (handy after editing
+//                              the Swift source).
+
+const MENUBAR_APP_PATH = join(homedir(), ".cells", "menubar", "CellsMenubar.app");
+const MENUBAR_AGENT_LABEL = "md.cells.menubar";
+const MENUBAR_AGENT_PLIST = join(homedir(), "Library", "LaunchAgents", `${MENUBAR_AGENT_LABEL}.plist`);
 
 async function cmdMenubar(args: string[]) {
   const sub = args[0] ?? "status";
-  if (sub === "render") {
-    const here = dirname(fileURLToPath(import.meta.url));
-    await import(join(here, "menubar/render.ts"));
-    return;
-  }
   if (sub === "install")   { await cmdMenubarInstall();   return; }
   if (sub === "uninstall") { await cmdMenubarUninstall(); return; }
   if (sub === "status")    { await cmdMenubarStatus();    return; }
+  if (sub === "build")     { await buildMenubarApp();     return; }
   console.error(`unknown menubar subcommand: ${sub}`);
-  console.error("usage: cells menubar [install|uninstall|status|render]");
+  console.error("usage: cells menubar [install|uninstall|status|build]");
   process.exit(1);
 }
 
-function menubarPluginPath(): string {
-  return join(
-    homedir(),
-    "Library",
-    "Application Support",
-    "SwiftBar",
-    "Plugins",
-    "cells.10s.sh",
-  );
+// Resolved cells entrypoint we want the menubar app's actions (Open shell /
+// TUI) to call. Prefer the user's stable shim at ~/.local/bin/cells so a
+// project-folder rename doesn't break the installed agent.
+function resolveCellsBin(): string {
+  const preferred = join(homedir(), ".local", "bin", "cells");
+  return existsSync(preferred) ? preferred : (process.argv[1] ?? preferred);
+}
+
+async function buildMenubarApp(): Promise<string> {
+  const outDir = dirname(MENUBAR_APP_PATH);
+  await mkdir(outDir, { recursive: true });
+  const buildScript = join(REPO_ROOT, "cli", "menubar", "swift", "build.sh");
+  const proc = Bun.spawn(["bash", buildScript, outDir], {
+    stdout: "inherit",
+    stderr: "inherit",
+  });
+  const code = await proc.exited;
+  if (code !== 0) {
+    console.error(`menubar build failed (swiftc exit ${code})`);
+    process.exit(1);
+  }
+  return MENUBAR_APP_PATH;
+}
+
+// Old-world SwiftBar plugin + helper. Predates the native app. If present on
+// install or uninstall, scrub them so we don't end up with two cells icons in
+// the menubar.
+const LEGACY_SWIFTBAR_PLUGIN = join(
+  homedir(), "Library", "Application Support", "SwiftBar", "Plugins", "cells.10s.sh",
+);
+const LEGACY_RUN_HELPER = join(homedir(), ".cells", "menubar", "run.sh");
+
+async function cleanLegacySwiftBar() {
+  for (const p of [LEGACY_SWIFTBAR_PLUGIN, LEGACY_RUN_HELPER]) {
+    if (existsSync(p)) {
+      await unlink(p);
+      console.log(`✓ removed legacy ${p}`);
+    }
+  }
 }
 
 async function cmdMenubarInstall() {
-  // Check SwiftBar is installed. We don't auto-install — Homebrew prompts for
-  // a password, and silently doing that from a CLI is rude.
-  if (!existsSync("/Applications/SwiftBar.app")) {
-    console.error("SwiftBar not found at /Applications/SwiftBar.app");
-    console.error("install it with: brew install --cask swiftbar");
+  await buildMenubarApp();
+  await cleanLegacySwiftBar();
+
+  // LaunchAgent: KeepAlive restarts on crash, RunAtLoad starts it now and at
+  // every login. CELLS_BIN is read by the Swift app to resolve shell/tui
+  // actions back to the right `cells` entrypoint.
+  const cellsBin = resolveCellsBin();
+  const exec = join(MENUBAR_APP_PATH, "Contents", "MacOS", "CellsMenubar");
+  const plist =
+    `<?xml version="1.0" encoding="UTF-8"?>\n` +
+    `<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n` +
+    `<plist version="1.0">\n` +
+    `<dict>\n` +
+    `  <key>Label</key><string>${MENUBAR_AGENT_LABEL}</string>\n` +
+    `  <key>ProgramArguments</key>\n` +
+    `  <array><string>${exec}</string></array>\n` +
+    `  <key>EnvironmentVariables</key>\n` +
+    `  <dict><key>CELLS_BIN</key><string>${cellsBin}</string></dict>\n` +
+    `  <key>RunAtLoad</key><true/>\n` +
+    `  <key>KeepAlive</key><true/>\n` +
+    `  <key>StandardOutPath</key><string>${join(homedir(), ".cells", "menubar", "stdout.log")}</string>\n` +
+    `  <key>StandardErrorPath</key><string>${join(homedir(), ".cells", "menubar", "stderr.log")}</string>\n` +
+    `</dict>\n` +
+    `</plist>\n`;
+  await mkdir(dirname(MENUBAR_AGENT_PLIST), { recursive: true });
+  await writeFile(MENUBAR_AGENT_PLIST, plist);
+
+  // Reload the agent — unload (ignore failure if not loaded) then load.
+  await Bun.spawn(["launchctl", "unload", MENUBAR_AGENT_PLIST], {
+    stdout: "ignore", stderr: "ignore",
+  }).exited;
+  const load = Bun.spawn(["launchctl", "load", MENUBAR_AGENT_PLIST], {
+    stdout: "inherit", stderr: "inherit",
+  });
+  const lcode = await load.exited;
+  if (lcode !== 0) {
+    console.error(`launchctl load failed (exit ${lcode})`);
     process.exit(1);
   }
-  const pluginsDir = dirname(menubarPluginPath());
-  await mkdir(pluginsDir, { recursive: true });
-  // Resolve the absolute path to the cells CLI entrypoint. SwiftBar runs the
-  // plugin under a sparse environment with no project-aware PATH, so we
-  // need an absolute path. Prefer ~/.local/bin/cells (the user's stable
-  // entry point) over the resolved-symlink target so a rename of the project
-  // directory doesn't break the plugin.
-  const preferred = join(homedir(), ".local", "bin", "cells");
-  const cellsBin = existsSync(preferred) ? preferred : (process.argv[1] ?? preferred);
-  const script =
-    `#!/usr/bin/env bash\n` +
-    `# Cells menubar — auto-generated by 'cells menubar install'.\n` +
-    `# Refresh interval encoded in the filename (cells.10s.sh = every 10s).\n` +
-    `exec ${cellsBin} menubar render\n`;
-  await writeFile(menubarPluginPath(), script, { mode: 0o755 });
-  // The action-runner helper: SwiftBar invokes this with "<subcommand> <name>"
-  // (e.g. "shell mother"), it opens Ghostty and runs `cells <args>` with a
-  // hold-open trailer so output stays visible if the command exits fast.
-  // Written here (not checked in) because it carries the absolute cells path
-  // resolved at install time.
-  const helperPath = join(homedir(), ".cells", "menubar", "run.sh");
-  await mkdir(dirname(helperPath), { recursive: true });
-  // The bash here uses single-quoted $'s so TS doesn't interpolate them; it
-  // composes the inner command via printf %q so cellsBin + args are safely
-  // quoted, then hands it to `bash -lc` inside Ghostty.
-  const helperLines = [
-    `#!/usr/bin/env bash`,
-    `# Cells menubar action runner — auto-generated by 'cells menubar install'.`,
-    `# Usage: run.sh <cells-subcommand> [args...]`,
-    `set -u`,
-    `CELLS=${JSON.stringify(cellsBin)}`,
-    `quoted=$(printf '%q ' "$CELLS" "$@")`,
-    `inner="$quoted; status=\\$?; echo; if [ \\$status -ne 0 ]; then echo \\"(exited \\$status)\\"; fi; read -n 1 -s -r -p \\"[any key to close]\\"; echo"`,
-    `exec /usr/bin/open -na "Ghostty.app" --args -e bash -lc "$inner"`,
-    ``,
-  ];
-  await writeFile(helperPath, helperLines.join("\n"), { mode: 0o755 });
-  console.log(`✓ installed ${menubarPluginPath()}`);
-  console.log(`✓ installed ${helperPath}`);
-  // Best-effort: nudge SwiftBar to pick up the new plugin. If it isn't
-  // running, this also launches it.
-  Bun.spawn(["open", "-a", "SwiftBar"], { stdout: "ignore", stderr: "ignore" });
-  console.log("✓ SwiftBar refreshed (or launched if it wasn't running)");
+
+  console.log(`✓ built  ${MENUBAR_APP_PATH}`);
+  console.log(`✓ agent  ${MENUBAR_AGENT_PLIST} (loaded)`);
+  console.log(`✓ cells bin → ${cellsBin}`);
 }
 
 async function cmdMenubarUninstall() {
-  const path = menubarPluginPath();
-  if (!existsSync(path)) {
-    console.log(`not installed (no file at ${path})`);
-    return;
+  let removed = false;
+  if (existsSync(MENUBAR_AGENT_PLIST)) {
+    await Bun.spawn(["launchctl", "unload", MENUBAR_AGENT_PLIST], {
+      stdout: "ignore", stderr: "ignore",
+    }).exited;
+    await unlink(MENUBAR_AGENT_PLIST);
+    console.log(`✓ removed ${MENUBAR_AGENT_PLIST}`);
+    removed = true;
   }
-  await unlink(path);
-  console.log(`✓ removed ${path}`);
+  if (existsSync(MENUBAR_APP_PATH)) {
+    await rm(MENUBAR_APP_PATH, { recursive: true, force: true });
+    console.log(`✓ removed ${MENUBAR_APP_PATH}`);
+    removed = true;
+  }
+  // Also kill any process still running from a previous copy (e.g. one
+  // launched by hand without the LaunchAgent).
+  await Bun.spawn(["pkill", "-f", "CellsMenubar"], {
+    stdout: "ignore", stderr: "ignore",
+  }).exited;
+  await cleanLegacySwiftBar();
+  if (!removed) console.log("not installed");
 }
 
 async function cmdMenubarStatus() {
-  const path = menubarPluginPath();
-  const installed = existsSync(path);
-  console.log(`plugin: ${installed ? "installed" : "not installed"} (${path})`);
-  console.log(`SwiftBar.app: ${existsSync("/Applications/SwiftBar.app") ? "present" : "missing"}`);
+  const appPresent = existsSync(MENUBAR_APP_PATH);
+  const plistPresent = existsSync(MENUBAR_AGENT_PLIST);
+  let loaded = false;
+  if (plistPresent) {
+    const proc = Bun.spawn(["launchctl", "list", MENUBAR_AGENT_LABEL], {
+      stdout: "pipe", stderr: "pipe",
+    });
+    loaded = (await proc.exited) === 0;
+  }
+  console.log(`app:    ${appPresent ? "installed" : "missing"} (${MENUBAR_APP_PATH})`);
+  console.log(`agent:  ${plistPresent ? (loaded ? "loaded" : "installed (not loaded)") : "missing"} (${MENUBAR_AGENT_PLIST})`);
 }
 
 // First-line diagnostic for "auth feels broken." See docs/oauth-refresh.md.
@@ -3629,9 +3675,16 @@ ls .pi/extensions/`;
   //     run an equivalent here. Without this, codex-proxy + similar
   //     extensions read `__NAME__` from package.json and the proxy logs
   //     calls as "unknown" or "__NAME__" instead of the cell name.
+  // Capture stderr separately so a failed/missing cell-color.sh doesn't
+  // leak its "bash: ... No such file" message into the color tokens (it did:
+  // a missing script baked `fg=/root/scripts/cell-color.sh:,bg=bash:` into
+  // .tmux.conf and broke status-style rendering on shell open).
   const cellColor = await wellExecCapture(spec.wellName,
-    `bash /root/scripts/cell-color.sh ${spec.name} 2>&1 || echo "#888888 #ffffff"`).catch(() => null);
-  const [bg = "#888888", fg = "#ffffff"] = (cellColor?.stdout ?? "").trim().split(/\s+/);
+    `bash /root/scripts/cell-color.sh ${spec.name} 2>/dev/null`).catch(() => null);
+  const tokens = (cellColor?.stdout ?? "").trim().split(/\s+/);
+  const isHexColor = (s: string) => /^#[0-9a-fA-F]{6}$/.test(s);
+  const bg = isHexColor(tokens[0] ?? "") ? tokens[0] : "#888888";
+  const fg = isHexColor(tokens[1] ?? "") ? tokens[1] : "#ffffff";
   const subScript = `set -euo pipefail
 cd /root
 for f in AGENTS.md SOUL.md IDENTITY.md CELLS.md CONTACTS.md HEARTBEAT.md package.json .tmux.conf; do
