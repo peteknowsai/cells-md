@@ -58,7 +58,12 @@ crontab in sync with each cell's HEARTBEAT.md.
    heartbeats digest (schedule + next-fire times only; cron owns the
    firing record).
 
-4. **End.** `node bin/pulse-core.mjs end` — clears the sentinel, stamps
+4. **Dashboard.** `node bin/pulse-core.mjs render-dashboard` — rebuilds
+   `~/site/public/index.html` so `pulse.cells.md` shows current status
+   (last tick, active schedules, recent fires, inbox depth). The site
+   server auto-publishes the change to the Worker.
+
+5. **End.** `node bin/pulse-core.mjs end` — clears the sentinel, stamps
    the tick.
 
 Stop after `end` returns. Don't summarize, don't echo the schedule.

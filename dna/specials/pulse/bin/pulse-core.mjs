@@ -13,7 +13,7 @@
  * $PULSE_STATE_DIR, $PULSE_CRON_FILE, defaulting under ~/.cells with the
  * crontab at /etc/cron.d/pulse-schedules.
  *
- *   pulse-core.mjs begin|drain|bootstrap|render|sync-crontab|end
+ *   pulse-core.mjs begin|drain|bootstrap|render|render-dashboard|sync-crontab|end
  *   pulse-core.mjs forget <cell>
  *   echo '{"cell":"x","items":[{"cron":"0 8 * * *","message":"…"}],"sourcePath":"…"}' | pulse-core.mjs save-schedule
  */
@@ -21,10 +21,10 @@
 import * as fs from "node:fs";
 import {
   resolvePaths, begin, end, drainInbox, saveSchedule, forgetCell,
-  bootstrapInbox, syncCrontab, renderDigest,
+  bootstrapInbox, syncCrontab, renderDigest, renderDashboard,
 } from "../lib/pulse-core.mjs";
 
-const USAGE = "usage: pulse-core.mjs begin|drain|save-schedule|forget <cell>|bootstrap|sync-crontab|render|end";
+const USAGE = "usage: pulse-core.mjs begin|drain|save-schedule|forget <cell>|bootstrap|sync-crontab|render|render-dashboard|end";
 
 // save-schedule takes a JSON argument piped on stdin.
 function readStdinJSON() {
@@ -54,6 +54,7 @@ try {
     case "bootstrap": result = await bootstrapInbox(paths); break;
     case "sync-crontab": result = syncCrontab(paths); break;
     case "render": result = renderDigest(paths); break;
+    case "render-dashboard": result = renderDashboard(paths); break;
     case "save-schedule": result = saveSchedule(paths, readStdinJSON()); break;
     case "forget": {
       const cell = process.argv[3];

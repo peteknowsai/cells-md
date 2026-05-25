@@ -43,6 +43,9 @@
  *
  * Vault-readable surface (under stateDir):
  *   heartbeats.md   digest table (renderDigest)
+ *
+ * Public-facing surface (under siteDir):
+ *   index.html      pulse.cells.md dashboard (renderDashboard)
  */
 
 import { createHash } from "node:crypto";
@@ -57,7 +60,15 @@ import { homedir } from "node:os";
 const SENTINEL_MAX_MS = 5 * 60_000;
 
 // Per-fire log file each crontab line tees to — for forensics, not for pulse.
+// The literal target string baked into cron entries: those lines run inside
+// the pulse cell, where ~/.cells resolves to /root/.cells. Kept as a literal
+// (not derived from runtimeDir) so saveSchedule produces correct lines even
+// when invoked from a host-side test with an overridden runtimeDir.
 const CRON_FIRE_LOG = "/root/.cells/logs/cron-fires.log";
+
+// Read-side: same file when running on the pulse cell, but derived from
+// runtimeDir so tests can point it at a fixture.
+const cronFireLog = (p) => path.join(p.runtimeDir, "logs", "cron-fires.log");
 
 // ---------- paths ----------
 
@@ -68,6 +79,7 @@ const CRON_FIRE_LOG = "/root/.cells/logs/cron-fires.log";
  * @property {string} registryPath  cells.json (bootstrap source)
  * @property {string} vaultDir      cell HEARTBEAT.md mirror root (bootstrap source)
  * @property {string} cronFile      /etc/cron.d/pulse-schedules — the crontab file
+ * @property {string} siteDir       site/public/ — the cell's web presence
  */
 
 /**
@@ -77,6 +89,7 @@ const CRON_FIRE_LOG = "/root/.cells/logs/cron-fires.log";
  *   runtimeDir: opts.runtimeDir ?? $PULSE_RUNTIME_DIR ?? ~/.cells
  *   stateDir:   opts.stateDir   ?? $PULSE_STATE_DIR   ?? <runtimeDir>/state
  *   cronFile:   opts.cronFile   ?? $PULSE_CRON_FILE   ?? /etc/cron.d/pulse-schedules
+ *   siteDir:    opts.siteDir    ?? $PULSE_SITE_DIR    ?? ~/site/public
  *
  * @param {Partial<PulsePaths>} [opts]
  * @returns {PulsePaths}
@@ -89,7 +102,8 @@ export function resolvePaths(opts = {}) {
   const registryPath = opts.registryPath ?? path.join(cellsDir, "cells.json");
   const vaultDir = opts.vaultDir ?? path.join(home, "Obsidian", "cells");
   const cronFile = opts.cronFile ?? process.env.PULSE_CRON_FILE ?? "/etc/cron.d/pulse-schedules";
-  return { runtimeDir, stateDir, registryPath, vaultDir, cronFile };
+  const siteDir = opts.siteDir ?? process.env.PULSE_SITE_DIR ?? path.join(home, "site", "public");
+  return { runtimeDir, stateDir, registryPath, vaultDir, cronFile, siteDir };
 }
 
 // Sub-paths derived from a PulsePaths. Kept as functions so PulsePaths
@@ -101,6 +115,7 @@ const cacheDir = (p) => path.join(p.runtimeDir, "pulse-cache");
 const logsDir = (p) => path.join(p.runtimeDir, "logs");
 const traceLog = (p) => path.join(logsDir(p), "pulse-trace.log");
 const heartbeatsMd = (p) => path.join(p.stateDir, "heartbeats.md");
+const siteIndexHtml = (p) => path.join(p.siteDir, "index.html");
 
 // ---------- helpers ----------
 
@@ -575,6 +590,245 @@ export function renderDigest(p) {
   fs.writeFileSync(heartbeatsMd(p), lines.join("\n") + "\n");
   appendTrace(p, `render_digest rows=${rows.length}`);
   return { rows: rows.length };
+}
+
+// ---------- dashboard ----------
+
+function htmlEscape(s) {
+  return String(s)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
+
+// "5m ago", "2h ago", "—" if no input
+function relTime(iso, now) {
+  if (!iso) return "—";
+  const ms = now.getTime() - new Date(iso).getTime();
+  if (!Number.isFinite(ms) || ms < 0) return "just now";
+  const s = Math.floor(ms / 1000);
+  if (s < 60) return `${s}s ago`;
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m}m ago`;
+  const h = Math.floor(m / 60);
+  if (h < 48) return `${h}h ago`;
+  const d = Math.floor(h / 24);
+  return `${d}d ago`;
+}
+
+function readRecentFires(p, maxLines = 20) {
+  let raw;
+  try { raw = fs.readFileSync(cronFireLog(p), "utf8"); } catch { return []; }
+  const lines = raw.split(/\n+/).filter((l) => l.trim());
+  const tail = lines.slice(-maxLines).reverse();
+  return tail.map((line) => {
+    try {
+      const j = JSON.parse(line);
+      const corr = j?.data?.corr_id;
+      return {
+        ok: !!j.ok,
+        cell: j?.data?.sent_to ?? "?",
+        corr: corr ? String(corr).slice(-10) : "",
+        ts: ulidTime(corr),
+      };
+    } catch {
+      return { ok: false, cell: "?", corr: "", ts: null, raw: line.slice(0, 80) };
+    }
+  });
+}
+
+// Decode the timestamp from a ULID's first 10 base32 chars (Crockford).
+// Returns null on malformed input.
+function ulidTime(ulid) {
+  if (typeof ulid !== "string" || ulid.length < 10) return null;
+  const ALPHA = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";
+  let ms = 0;
+  for (let i = 0; i < 10; i++) {
+    const c = ALPHA.indexOf(ulid[i].toUpperCase());
+    if (c < 0) return null;
+    ms = ms * 32 + c;
+  }
+  return new Date(ms).toISOString();
+}
+
+/**
+ * Render the pulse.cells.md status dashboard.
+ *
+ * Reads current pulse state, schedules, inbox depth, and recent
+ * cron-fires log entries, then writes a self-contained HTML file at
+ * <siteDir>/index.html. The cell's site server already debounce-
+ * publishes any change under public/ up to the Worker, so dropping a
+ * new file here propagates to pulse.cells.md within a second or two.
+ *
+ * Static page — all dynamic content is baked in at render time. The
+ * skill calls this once per tick (after `render`) so the page reflects
+ * the latest pulse state with no client-side fetches.
+ */
+export function renderDashboard(p) {
+  ensureDirs(p);
+  const now = new Date();
+  const state = readState(p);
+  const lastPulse = state.lastPulse ?? null;
+  const currentPulse = state.currentPulse ?? null;
+
+  const schedules = listSchedules(p);
+  const rows = [];
+  for (const { cell, schedule } of schedules) {
+    for (const item of schedule.items) {
+      let next = null;
+      let nextMs = Number.MAX_SAFE_INTEGER;
+      try {
+        const n = cronNext(item.cron, now);
+        if (n) { next = n; nextMs = n.getTime(); }
+      } catch { /* invalid cron */ }
+      rows.push({ cell, id: item.id, cron: item.cron, message: item.message, next, nextMs });
+    }
+  }
+  rows.sort((a, b) => a.nextMs - b.nextMs);
+
+  let inboxDepth = 0;
+  try {
+    inboxDepth = fs.readdirSync(inboxDir(p))
+      .filter((f) => f.endsWith(".md") && !f.startsWith("."))
+      .length;
+  } catch { /* inbox dir absent → 0 */ }
+
+  const fires = readRecentFires(p, 20);
+  const cellCount = new Set(rows.map((r) => r.cell)).size;
+
+  const html = renderDashboardHTML({
+    now, lastPulse, currentPulse, rows, fires, inboxDepth, cellCount,
+  });
+
+  const out = siteIndexHtml(p);
+  fs.mkdirSync(path.dirname(out), { recursive: true });
+  fs.writeFileSync(out, html);
+  appendTrace(p, `render_dashboard rows=${rows.length} fires=${fires.length} inbox=${inboxDepth}`);
+  return { rows: rows.length, fires: fires.length, inbox: inboxDepth, cells: cellCount };
+}
+
+function renderDashboardHTML({ now, lastPulse, currentPulse, rows, fires, inboxDepth, cellCount }) {
+  const generated = formatLocal(now.toISOString());
+  const lastPulseRel = relTime(lastPulse, now);
+  const lastPulseLocal = lastPulse ? formatLocal(lastPulse) : "never";
+
+  const scheduleRows = rows.map((r) => `
+    <tr>
+      <td><b>${htmlEscape(r.cell)}</b></td>
+      <td><code>${htmlEscape(r.cron)}</code></td>
+      <td class="num">${r.next ? htmlEscape(formatLocal(r.next.toISOString())) : "—"}</td>
+      <td>${htmlEscape(r.message)}</td>
+    </tr>`).join("");
+
+  const fireRows = fires.map((f) => `
+    <tr class="${f.ok ? "" : "err"}">
+      <td class="num">${f.ts ? htmlEscape(formatLocal(f.ts)) : "—"}</td>
+      <td><b>${htmlEscape(f.cell)}</b></td>
+      <td>${f.ok ? "ok" : "fail"}</td>
+      <td class="dim"><code>${htmlEscape(f.corr)}</code></td>
+    </tr>`).join("");
+
+  const tickStatus = currentPulse ? `tick in flight since ${formatLocal(currentPulse)}` : `idle`;
+
+  return `<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>pulse</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E%F0%9F%A7%AC%3C/text%3E%3C/svg%3E">
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body { font: 15px/1.5 ui-sans-serif, system-ui, sans-serif;
+         max-width: 960px; margin: 2.5em auto; padding: 0 1.25em;
+         color: #ddd; background: #111; }
+  h1 { font-size: 1.8em; margin: 0 0 0.1em; }
+  h2 { font-size: 1.1em; margin: 2.2em 0 0.5em; color: #fff; border-bottom: 1px solid #333; padding-bottom: 0.3em; }
+  .sub { color: #888; margin: 0 0 1.8em; font-size: 0.9em; }
+  .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+           gap: 0.6em; margin: 1.5em 0 0.5em; }
+  .stat { background: #1a1a1a; border: 1px solid #2a2a2a; border-radius: 6px;
+          padding: 0.7em 0.9em; }
+  .stat .k { font-size: 0.75em; color: #888; text-transform: uppercase; letter-spacing: 0.05em; }
+  .stat .v { font-size: 1.3em; color: #fff; margin-top: 0.2em; font-variant-numeric: tabular-nums; }
+  .stat .v.sm { font-size: 1em; }
+  table { border-collapse: collapse; width: 100%; font-size: 13.5px; }
+  th, td { padding: 0.45em 0.6em; text-align: left; border-bottom: 1px solid #222; vertical-align: top; }
+  th { color: #999; font-weight: normal; font-size: 0.8em; text-transform: uppercase; letter-spacing: 0.04em; }
+  td.num { font-variant-numeric: tabular-nums; white-space: nowrap; color: #ccc; }
+  td.dim { color: #777; }
+  tr.err td { color: #f88; }
+  code { background: #8881; padding: 0.1em 0.4em; border-radius: 3px; font-size: 0.92em; }
+  .empty { color: #666; font-style: italic; padding: 0.6em; }
+  pre.diagram { background: #1a1a1a; border: 1px solid #2a2a2a; border-radius: 6px;
+                padding: 1em 1.2em; overflow-x: auto; color: #ccc;
+                font: 12.5px/1.45 ui-monospace, "SF Mono", Menlo, monospace; }
+  .prose { color: #bbb; }
+  .prose code { color: #ddd; }
+  a { color: #6cf; }
+</style>
+<body>
+  <h1>🧬 pulse</h1>
+  <p class="sub">Family scheduler. Compiles each cell's <code>HEARTBEAT.md</code> into a crontab. Linux cron fires; pulse just keeps the file in sync. Generated ${htmlEscape(generated)}.</p>
+
+  <div class="stats">
+    <div class="stat"><div class="k">last tick</div><div class="v">${htmlEscape(lastPulseRel)}</div></div>
+    <div class="stat"><div class="k">scheduled</div><div class="v">${rows.length} <span style="color:#888;font-size:0.7em">across ${cellCount} cells</span></div></div>
+    <div class="stat"><div class="k">inbox</div><div class="v">${inboxDepth}</div></div>
+    <div class="stat"><div class="k">status</div><div class="v sm">${htmlEscape(tickStatus)}</div></div>
+  </div>
+
+  <h2>active schedules</h2>
+  ${rows.length === 0 ? '<div class="empty">no schedules cached — fleet is quiet.</div>' : `
+  <table>
+    <thead><tr><th>cell</th><th>cron (mountain)</th><th>next fire</th><th>message</th></tr></thead>
+    <tbody>${scheduleRows}</tbody>
+  </table>`}
+
+  <h2>recent fires</h2>
+  ${fires.length === 0 ? '<div class="empty">nothing fired yet.</div>' : `
+  <table>
+    <thead><tr><th>time</th><th>cell</th><th>result</th><th>corr</th></tr></thead>
+    <tbody>${fireRows}</tbody>
+  </table>`}
+
+  <h2>how pulse works</h2>
+  <pre class="diagram">fleet cell edits HEARTBEAT.md
+   │  (PostToolUse hook)
+   ▼
+proxy /heartbeat-changed
+   │
+   ▼
+~/.cells/pulse-inbox/  ← Mac-side queue, survives pulse hibernating
+   │  every ~60s
+   ▼
+[cells-pulse cell] claude --print runs the pulse skill:
+   drain inbox → translate prose → cron lines
+   save-schedule → writes /etc/cron.d/pulse-schedules
+   render → refresh state/heartbeats.md digest
+   render-dashboard → writes this page
+   │
+   ▼
+/etc/cron.d/pulse-schedules  ← Linux cron evaluates every minute
+   │  matched lines fire
+   ▼
+cells talk &lt;cell&gt; "&lt;msg&gt;"
+   │
+   ▼
+/root/.cells/logs/cron-fires.log</pre>
+
+  <div class="prose">
+    <p><b>Push for schedule updates, pull for firing.</b> When a cell edits its <code>HEARTBEAT.md</code>, a hook pushes the change to pulse via the proxy. Pulse drains that inbox every ~60s, parses prose like <i>"every weekday at 8am"</i> into a 5-field crontab line, and writes it into <code>/etc/cron.d/pulse-schedules</code>. From there Linux <b>cron</b> is the fire engine — pulse is just the prose-to-cron compiler.</p>
+
+    <p><b>Cron is evaluated in Mountain time.</b> Pulse's cell is pinned to <code>America/Denver</code>, so <code>0 8 * * *</code> means 8am MDT/MST and DST is handled by the OS. Prose with explicit UTC times gets converted.</p>
+
+    <p><b>State survives hibernation.</b> The inbox is Mac-side (<code>~/.cells/pulse-inbox/</code>); cells can push schedule updates even while pulse-cc is asleep, and pulse drains the backlog when it wakes. Per-cell parsed schedules live at <code>pulse-cache/&lt;cell&gt;.json</code>; the firing record is the cron-fires log inside the pulse cell.</p>
+
+    <p class="sub" style="margin-top:2em"><a href="https://mother.cells.md/">← fleet</a></p>
+  </div>
+</body>
+`;
 }
 
 // Exported for tests + the CLI's sync-crontab subcommand.
