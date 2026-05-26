@@ -49,7 +49,7 @@
  */
 
 import { createHash } from "node:crypto";
-import { parseCron, cronNext } from "./cron.mjs";
+import { parseCron, cronNext, cronPrev } from "./cron.mjs";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { homedir } from "node:os";
@@ -215,11 +215,15 @@ function shellQuote(s) {
 
 // Build one /etc/cron.d line. /etc/cron.d entries have a user field
 // before the command (unlike user crontabs).
+//
+// Wraps `cells talk` in cron-fire.sh, which times the call end-to-end
+// and emits an enriched JSON line per fire (latency_ms, exit, etc.) so
+// the dashboard can spot slow/failed acks. cron-fire.sh handles its
+// own >> log redirection.
 function cronLine(cell, item) {
   const cmd =
     `. /etc/profile.d/cells-env.sh && ` +
-    `/root/bin/cells talk ${shellQuote(cell)} ${shellQuote(item.message)} ` +
-    `>> ${CRON_FIRE_LOG} 2>&1`;
+    `/root/bin/cron-fire.sh ${shellQuote(cell)} ${shellQuote(item.id)} ${shellQuote(item.message)}`;
   // Per-cell-id label as a trailing comment for easier grep + audit.
   return `${item.cron} root ${cmd}  # ${cell}:${item.id}`;
 }
@@ -617,25 +621,118 @@ function relTime(iso, now) {
   return `${d}d ago`;
 }
 
-function readRecentFires(p, maxLines = 20) {
+// Parse one line of cron-fires.log.
+//
+// Two formats coexist on this log:
+//   Legacy (raw `cells talk` output): {"ok":true,"command":"talk","data":{"corr_id":"…","sent_to":"<cell>"}}
+//   Enriched (cron-fire.sh wrapper):  {"v":1,"cell":"<cell>","id":"<schedule-id>","start_ms":…,"end_ms":…,"latency_ms":…,"exit":<int>,"talk":{…}}
+//
+// Returns a normalized record or null if the line is unparseable.
+function parseFireLine(line) {
+  let j;
+  try { j = JSON.parse(line); } catch { return null; }
+
+  // Enriched format — has a version + latency.
+  if (j?.v === 1 && typeof j.start_ms === "number") {
+    const corr = j?.talk?.data?.corr_id ?? null;
+    return {
+      v: 1,
+      cell: j.cell ?? j?.talk?.data?.sent_to ?? "?",
+      id: j.id ?? null,
+      ts: new Date(j.start_ms).toISOString(),
+      latency_ms: typeof j.latency_ms === "number" ? j.latency_ms : null,
+      exit: typeof j.exit === "number" ? j.exit : null,
+      ok: j.exit === 0,
+      corr: corr ? String(corr).slice(-10) : "",
+    };
+  }
+
+  // Legacy format — ULID gives us approximate fire time, no latency.
+  if (j?.command === "talk" && j?.data) {
+    const corr = j.data.corr_id ?? null;
+    return {
+      v: 0,
+      cell: j.data.sent_to ?? "?",
+      id: null,
+      ts: ulidTime(corr),
+      latency_ms: null,
+      exit: j.ok ? 0 : null,
+      ok: !!j.ok,
+      corr: corr ? String(corr).slice(-10) : "",
+    };
+  }
+
+  return null;
+}
+
+function readFireLog(p) {
   let raw;
   try { raw = fs.readFileSync(cronFireLog(p), "utf8"); } catch { return []; }
-  const lines = raw.split(/\n+/).filter((l) => l.trim());
-  const tail = lines.slice(-maxLines).reverse();
-  return tail.map((line) => {
+  const records = [];
+  for (const line of raw.split(/\n+/)) {
+    if (!line.trim()) continue;
+    const rec = parseFireLine(line);
+    if (rec) records.push(rec);
+  }
+  return records;
+}
+
+function readRecentFires(p, maxLines = 20) {
+  const all = readFireLog(p);
+  return all.slice(-maxLines).reverse();
+}
+
+// For each scheduled item, find its most recent expected fire time
+// (via cronPrev) and check whether the fire log carries a matching
+// entry within ±matchWindowMs. Used by the dashboard to flag misses.
+//
+// Returns the same `rows` shape it was given, with each row enriched:
+//   lastExpected: ISO | null
+//   lastActual:   ISO | null  (timestamp from log, if matched)
+//   matchedFire:  Fire | null
+//   status:       "fired" | "missed" | "pending" | "none"
+//
+// "pending" means the last expected fire is so recent (within
+// pendingWindowMs) that the cron line may still be running. "none"
+// means the cron expression is invalid or has never had a fire yet.
+function annotateSchedulesWithStatus(rows, fires, now, opts = {}) {
+  const matchWindow = opts.matchWindowMs ?? 5 * 60_000;
+  const pendingWindow = opts.pendingWindowMs ?? 3 * 60_000;
+  const annotated = [];
+  for (const r of rows) {
+    let lastExpected = null;
     try {
-      const j = JSON.parse(line);
-      const corr = j?.data?.corr_id;
-      return {
-        ok: !!j.ok,
-        cell: j?.data?.sent_to ?? "?",
-        corr: corr ? String(corr).slice(-10) : "",
-        ts: ulidTime(corr),
-      };
-    } catch {
-      return { ok: false, cell: "?", corr: "", ts: null, raw: line.slice(0, 80) };
+      const prev = cronPrev(r.cron, now);
+      if (prev) lastExpected = prev;
+    } catch { /* invalid cron */ }
+
+    let matched = null;
+    if (lastExpected) {
+      const lo = lastExpected.getTime() - matchWindow;
+      const hi = lastExpected.getTime() + matchWindow;
+      for (const f of fires) {
+        if (f.cell !== r.cell) continue;
+        if (!f.ts) continue;
+        const t = new Date(f.ts).getTime();
+        if (t >= lo && t <= hi) { matched = f; break; }
+      }
     }
-  });
+
+    let status;
+    if (!lastExpected) status = "none";
+    else if (matched) status = "fired";
+    else if (now.getTime() - lastExpected.getTime() < pendingWindow) status = "pending";
+    else status = "missed";
+
+    annotated.push({
+      ...r,
+      lastExpected: lastExpected ? lastExpected.toISOString() : null,
+      lastActual: matched?.ts ?? null,
+      matchedFire: matched,
+      status,
+    });
+  }
+  return annotated;
 }
 
 // Decode the timestamp from a ULID's first 10 base32 chars (Crockford).
@@ -694,37 +791,69 @@ export function renderDashboard(p) {
       .length;
   } catch { /* inbox dir absent → 0 */ }
 
-  const fires = readRecentFires(p, 20);
+  // All fire-log records for missed-fire matching; recent slice for the table.
+  const allFires = readFireLog(p);
+  const fires = allFires.slice(-20).reverse();
   const cellCount = new Set(rows.map((r) => r.cell)).size;
 
+  const annotatedRows = annotateSchedulesWithStatus(rows, allFires, now);
+  const missedCount = annotatedRows.filter((r) => r.status === "missed").length;
+
   const html = renderDashboardHTML({
-    now, lastPulse, currentPulse, rows, fires, inboxDepth, cellCount,
+    now, lastPulse, currentPulse, rows: annotatedRows, fires, inboxDepth, cellCount, missedCount,
   });
 
   const out = siteIndexHtml(p);
   fs.mkdirSync(path.dirname(out), { recursive: true });
   fs.writeFileSync(out, html);
-  appendTrace(p, `render_dashboard rows=${rows.length} fires=${fires.length} inbox=${inboxDepth}`);
-  return { rows: rows.length, fires: fires.length, inbox: inboxDepth, cells: cellCount };
+  appendTrace(p, `render_dashboard rows=${rows.length} fires=${fires.length} inbox=${inboxDepth} missed=${missedCount}`);
+  return { rows: rows.length, fires: fires.length, inbox: inboxDepth, cells: cellCount, missed: missedCount };
 }
 
-function renderDashboardHTML({ now, lastPulse, currentPulse, rows, fires, inboxDepth, cellCount }) {
+function statusBadge(status) {
+  if (status === "fired")   return `<span class="badge ok">✓ fired</span>`;
+  if (status === "missed")  return `<span class="badge missed">✗ missed</span>`;
+  if (status === "pending") return `<span class="badge pending">· pending</span>`;
+  return `<span class="badge dim">—</span>`;
+}
+
+function formatLatency(ms) {
+  if (ms == null) return "—";
+  if (ms < 1000) return `${ms}ms`;
+  return `${(ms / 1000).toFixed(1)}s`;
+}
+
+function latencyClass(ms) {
+  if (ms == null) return "dim";
+  if (ms > 120_000) return "slow";  // >2min — talk likely hit timeout
+  if (ms > 30_000)  return "warn";  // >30s — sluggish but ok
+  return "";
+}
+
+function renderDashboardHTML({ now, lastPulse, currentPulse, rows, fires, inboxDepth, cellCount, missedCount }) {
   const generated = formatLocal(now.toISOString());
   const lastPulseRel = relTime(lastPulse, now);
-  const lastPulseLocal = lastPulse ? formatLocal(lastPulse) : "never";
 
-  const scheduleRows = rows.map((r) => `
-    <tr>
+  const scheduleRows = rows.map((r) => {
+    const lastActualCell = r.matchedFire?.ts
+      ? `${htmlEscape(formatLocal(r.matchedFire.ts))}${r.matchedFire.latency_ms != null ? ` <span class="dim">(${htmlEscape(formatLatency(r.matchedFire.latency_ms))})</span>` : ""}`
+      : (r.lastExpected ? `<span class="dim">expected ${htmlEscape(formatLocal(r.lastExpected))}</span>` : "—");
+    return `
+    <tr class="${r.status === "missed" ? "err" : ""}">
+      <td>${statusBadge(r.status)}</td>
       <td><b>${htmlEscape(r.cell)}</b></td>
       <td><code>${htmlEscape(r.cron)}</code></td>
       <td class="num">${r.next ? htmlEscape(formatLocal(r.next.toISOString())) : "—"}</td>
+      <td class="num">${lastActualCell}</td>
       <td>${htmlEscape(r.message)}</td>
-    </tr>`).join("");
+    </tr>`;
+  }).join("");
 
   const fireRows = fires.map((f) => `
     <tr class="${f.ok ? "" : "err"}">
       <td class="num">${f.ts ? htmlEscape(formatLocal(f.ts)) : "—"}</td>
       <td><b>${htmlEscape(f.cell)}</b></td>
+      <td class="num ${latencyClass(f.latency_ms)}">${htmlEscape(formatLatency(f.latency_ms))}</td>
       <td>${f.ok ? "ok" : "fail"}</td>
       <td class="dim"><code>${htmlEscape(f.corr)}</code></td>
     </tr>`).join("");
@@ -759,6 +888,15 @@ function renderDashboardHTML({ now, lastPulse, currentPulse, rows, fires, inboxD
   td.num { font-variant-numeric: tabular-nums; white-space: nowrap; color: #ccc; }
   td.dim { color: #777; }
   tr.err td { color: #f88; }
+  td.warn { color: #fc6; }
+  td.slow { color: #f88; }
+  .badge { display: inline-block; padding: 0.05em 0.55em; border-radius: 999px;
+           font-size: 0.78em; letter-spacing: 0.02em; white-space: nowrap;
+           border: 1px solid currentColor; }
+  .badge.ok { color: #6f9; }
+  .badge.missed { color: #f88; }
+  .badge.pending { color: #fc6; }
+  .badge.dim { color: #555; }
   code { background: #8881; padding: 0.1em 0.4em; border-radius: 3px; font-size: 0.92em; }
   .empty { color: #666; font-style: italic; padding: 0.6em; }
   pre.diagram { background: #1a1a1a; border: 1px solid #2a2a2a; border-radius: 6px;
@@ -776,20 +914,20 @@ function renderDashboardHTML({ now, lastPulse, currentPulse, rows, fires, inboxD
     <div class="stat"><div class="k">last tick</div><div class="v">${htmlEscape(lastPulseRel)}</div></div>
     <div class="stat"><div class="k">scheduled</div><div class="v">${rows.length} <span style="color:#888;font-size:0.7em">across ${cellCount} cells</span></div></div>
     <div class="stat"><div class="k">inbox</div><div class="v">${inboxDepth}</div></div>
-    <div class="stat"><div class="k">status</div><div class="v sm">${htmlEscape(tickStatus)}</div></div>
+    <div class="stat"><div class="k">${missedCount > 0 ? "<span style='color:#f88'>misses (24h)</span>" : "misses (24h)"}</div><div class="v ${missedCount > 0 ? "" : "sm"}" style="${missedCount > 0 ? "color:#f88" : ""}">${missedCount}</div></div>
   </div>
 
   <h2>active schedules</h2>
   ${rows.length === 0 ? '<div class="empty">no schedules cached — fleet is quiet.</div>' : `
   <table>
-    <thead><tr><th>cell</th><th>cron (mountain)</th><th>next fire</th><th>message</th></tr></thead>
+    <thead><tr><th>status</th><th>cell</th><th>cron (mountain)</th><th>next fire</th><th>last fire</th><th>message</th></tr></thead>
     <tbody>${scheduleRows}</tbody>
   </table>`}
 
   <h2>recent fires</h2>
   ${fires.length === 0 ? '<div class="empty">nothing fired yet.</div>' : `
   <table>
-    <thead><tr><th>time</th><th>cell</th><th>result</th><th>corr</th></tr></thead>
+    <thead><tr><th>time</th><th>cell</th><th>latency</th><th>result</th><th>corr</th></tr></thead>
     <tbody>${fireRows}</tbody>
   </table>`}
 
@@ -813,8 +951,8 @@ proxy /heartbeat-changed
 /etc/cron.d/pulse-schedules  ← Linux cron evaluates every minute
    │  matched lines fire
    ▼
-cells talk &lt;cell&gt; "&lt;msg&gt;"
-   │
+cron-fire.sh wraps:  cells talk --await &lt;cell&gt; "&lt;msg&gt;"
+   │  times the call, logs latency + exit code
    ▼
 /root/.cells/logs/cron-fires.log</pre>
 
@@ -824,6 +962,8 @@ cells talk &lt;cell&gt; "&lt;msg&gt;"
     <p><b>Cron is evaluated in Mountain time.</b> Pulse's cell is pinned to <code>America/Denver</code>, so <code>0 8 * * *</code> means 8am MDT/MST and DST is handled by the OS. Prose with explicit UTC times gets converted.</p>
 
     <p><b>State survives hibernation.</b> The inbox is Mac-side (<code>~/.cells/pulse-inbox/</code>); cells can push schedule updates even while pulse-cc is asleep, and pulse drains the backlog when it wakes. Per-cell parsed schedules live at <code>pulse-cache/&lt;cell&gt;.json</code>; the firing record is the cron-fires log inside the pulse cell.</p>
+
+    <p><b>Latency is the cell's response time.</b> <code>cells talk</code> waits for the receiving cell to actually <i>ack</i> the message (default 180s timeout). A small latency means the cell was running and responsive. A latency near 180s usually means the talk timed out — the cell may have been hibernating and failed to wake. The "missed" status above means cron should have fired but no log entry showed up at all.</p>
 
     <p class="sub" style="margin-top:2em"><a href="https://mother.cells.md/">← fleet</a></p>
   </div>
