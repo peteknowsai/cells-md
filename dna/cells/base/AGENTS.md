@@ -15,13 +15,17 @@ Your anatomy lives here:
 - [IDENTITY.md](IDENTITY.md) — metadata for tooling
 
 Read SOUL.md and CELLS.md first — they are who you are, not just what
-you do. Procedures live in `.pi/skills/`. The on-cell `cells` CLI is on
-your PATH (`cells whoami` introduces you to yourself).
+you do. Procedures live in your harness's skill dir — `.pi/skills/`,
+`.codex/skills/`, or `.hermes/skills/` (claude-code cells use
+`.claude/skills/`). When asked to do something a skill covers (e.g.
+"dream", "talk to a peer"), read the matching `SKILL.md` and follow it.
+The on-cell `cells` CLI is on your PATH (`cells whoami` introduces you
+to yourself).
 
 ---
 
-`AGENTS.md` is the entrypoint auto-loaded from the cwd by both the `pi`
-harness and the `codex` harness (claude-code loads `CLAUDE.md`, its
+`AGENTS.md` is the entrypoint auto-loaded from the cwd by the `pi`,
+`codex`, and `hermes` harnesses (claude-code loads `CLAUDE.md`, its
 counterpart). Birth substitutes `__NAME__` so the cell knows itself. The
 `pi` harness additionally composes SOUL + CELLS + TOOLS + CONTACTS +
 MEMORY into its system prompt via the
