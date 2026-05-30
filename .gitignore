@@ -32,6 +32,7 @@ NEEDS_PETE.md
 .claude/hooks/
 .claude/loops/
 .claude/sent-pings/
+.claude/worktrees/
 
 # Gemini Antigravity CLI config symlink (per-machine)
 .antigravitycli/
