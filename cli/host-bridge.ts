@@ -24,6 +24,8 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { existsSync, readFileSync, mkdirSync, openSync, writeSync } from "node:fs";
 import { getAdapter, type HarnessAdapter, type AdapterHost } from "../dna/cells/base/lib/harness-adapters";
+import { loadRegistrySafe } from "./lib/registry";
+import { loadPool } from "./lib/pool";
 
 const PORT = Number(process.env.HOST_BRIDGE_PORT ?? 7880);
 const WELL_API = process.env.WELL_API_URL ?? "http://127.0.0.1:7878";
@@ -85,20 +87,17 @@ async function resolveCellTarget(cellName: string): Promise<CellTarget | null> {
   let wellName = cellName;
   let harness = "pi";
   try {
-    const reg = JSON.parse(readFileSync(join(homedir(), ".cells", "cells.json"), "utf8"));
-    const cell = reg?.cells?.find((c: any) => c.name === cellName);
+    const reg = await loadRegistrySafe();
+    const cell = reg.cells.find((c) => c.name === cellName);
     if (typeof cell?.harness === "string") harness = cell.harness;
     // Specials (mother, pulse) live in deterministic wells (cells-<name>) —
     // no hatched_from, so resolve directly.
     if (cell?.special) {
       wellName = `cells-${cellName}`;
     } else if (cell?.hatched_from) {
-      // Prefer pool.json; fall back to legacy eggs.json (one-shot until cells.ts migrates).
-      let poolRaw: any = null;
-      try { poolRaw = JSON.parse(readFileSync(join(homedir(), ".cells", "pool.json"), "utf8")); }
-      catch { try { poolRaw = JSON.parse(readFileSync(join(homedir(), ".cells", "eggs.json"), "utf8")); } catch { /* none */ } }
-      const entries = poolRaw?.members ?? poolRaw?.eggs ?? [];
-      const member = entries.find((e: any) => e.id === cell.hatched_from);
+      // loadPool owns the eggs.json→pool.json migration — no local fallback.
+      const file = await loadPool();
+      const member = file.members.find((e) => e.id === cell.hatched_from);
       if (member?.well_name) wellName = member.well_name;
     }
   } catch {

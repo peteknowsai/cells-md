@@ -63,25 +63,21 @@ cell's brain is broken — jump to **Failure**.
 
 ## Step 3 · Fire post-birth tasks in the background, then write outcome
 
-Site service registration, Cloudflare Worker deploy, and the well
-checkpoint all run async — the cell is already alive and you can already
-`cells talk` her. They land in the background. Mother does not wait.
+Site service registration, Cloudflare Worker deploy, channel binding,
+harness update, and the well checkpoint all run async — the cell is
+already alive and you can already `cells talk` her. They land in the
+background. Mother does not wait.
+
+`scripts/birth-postwork.sh` runs them in order and writes per-step
+status to `~/.cells/postwork/<NAME>.json` so failures don't go silent
+(the dashboard picks the file up; nothing else needs to change for
+visibility).
 
 ```bash
 POSTLOG="$HOME/.cells/logs/birth-postwork/<NAME>.log"
 mkdir -p "$(dirname "$POSTLOG")"
-nohup bash -c '
-  set -e
-  cd "${CELLS_REPO:-$HOME/Projects/cells}"
-  echo "[$(date -Iseconds)] post-birth start"
-  bash scripts/register-site-service.sh "<NAME>" "<EGG_WELL>" && echo "[$(date -Iseconds)] site service registered"
-  well url update --auth public -s "<EGG_WELL>" && echo "[$(date -Iseconds)] well url public"
-  bash scripts/deploy-cell-worker.sh "<NAME>" "<EGG_WELL>" && echo "[$(date -Iseconds)] worker deployed"
-  bash scripts/bind-cell-channels.sh "<NAME>" '"'"'<BLOB_JSON>'"'"' && echo "[$(date -Iseconds)] channels bound"
-  bash scripts/update-cell-harness.sh "<EGG_WELL>" '"'"'<BLOB_JSON>'"'"' && echo "[$(date -Iseconds)] harness updated"
-  well checkpoint create -s "<EGG_WELL>" --comment "born-<NAME>" && echo "[$(date -Iseconds)] checkpoint"
-  echo "[$(date -Iseconds)] post-birth done"
-' > "$POSTLOG" 2>&1 &
+nohup bash "${CELLS_REPO:-$HOME/Projects/cells}/scripts/birth-postwork.sh" \
+  "<NAME>" "<EGG_WELL>" '<BLOB_JSON>' > "$POSTLOG" 2>&1 &
 disown
 
 # Write outcome — birth is done.

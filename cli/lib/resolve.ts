@@ -10,12 +10,13 @@
 //     and not special           → return the input name (legacy / pre-pool cells)
 
 import { readFile } from "node:fs/promises";
-import { homedir } from "node:os";
-import { join } from "node:path";
+import { REGISTRY_PATH, POOL_PATH } from "./paths";
 
-const REGISTRY_PATH = join(homedir(), ".cells", "cells.json");
-const POOL_PATH = join(homedir(), ".cells", "pool.json");
-
+// Reads here are intentionally tolerant (readJson swallows a missing or
+// corrupt file): wellNameForCell degrades to returning the input name
+// rather than throwing, so `cells shell/tui/talk` still function against a
+// transiently-bad registry. That's why this keeps a local readJson instead
+// of the strict loadRegistry/loadPool — different error stance on purpose.
 type RegistryCell = {
   name: string;
   hatched_from?: string;

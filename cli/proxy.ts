@@ -54,6 +54,15 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { verifyClerkSession, gateHtml } from "./shared/clerk-gate";
 import { wellNameForCell } from "./lib/resolve";
+import {
+  V1_POOL_VARIANT_SIGNATURE,
+  loadPool,
+  savePool,
+  withPoolLock,
+} from "./lib/pool";
+import { isValidCellName } from "./lib/cell-name";
+import { loadRegistry, loadRegistrySafe, saveRegistry, type Registry } from "./lib/registry";
+import { cellRows, type CellRow } from "./lib/status-rows";
 
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = dirname(SCRIPT_DIR);
@@ -62,7 +71,6 @@ const MOTHER_ROOT = join(REPO_ROOT, "dna", "specials", "mother");
 const AUTH_PATH = join(homedir(), ".pi/agent/auth.json");
 const SECRETS_PATH = join(homedir(), ".cells/secrets.json");
 const PULSE_INBOX_DIR = join(homedir(), ".cells/pulse-inbox");
-const CELLS_REGISTRY = join(homedir(), ".cells/cells.json");
 const ACTIVITY_PATH = join(MOTHER_ROOT, "state/memory/project_cells_activity.md");
 const UPSTREAM = "https://api.anthropic.com";
 const CODEX_UPSTREAM = "https://chatgpt.com/backend-api";
@@ -500,7 +508,7 @@ async function handlePeers(req: Request): Promise<Response> {
   const auth = checkClientAuth(req);
   if (!auth.ok) return new Response(auth.reason, { status: 401 });
   try {
-    const reg = JSON.parse(readFileSync(CELLS_REGISTRY, "utf8"));
+    const reg = await loadRegistrySafe();
     const cells: any[] = Array.isArray(reg?.cells) ? reg.cells : [];
     const peers = cells
       .filter((c) => c?.status !== "killed")
@@ -790,61 +798,53 @@ async function handleHeartbeatChanged(req: Request): Promise<Response> {
 // correlated via short ids written to ~/.cells/birth-outcomes/<id>.json
 // so the cells CLI can long-poll for them.
 
-const POOL_PATH = join(homedir(), ".cells/pool.json");
-const POOL_LOCK_PATH = join(homedir(), ".cells/.pool.lock");
 const BIRTH_OUTCOMES_DIR = join(homedir(), ".cells/birth-outcomes");
-const V1_POOL_VARIANT_SIGNATURE = "v1-2026-05-13"; // mirror of cli/cells.ts
-
-async function withPoolLockProxy<T>(fn: () => Promise<T>): Promise<T> {
-  // Minimal lockfile shim. The full cli/cells.ts version waits + breaks
-  // stale locks; the proxy is single-process so contention is rare.
-  let attempts = 0;
-  while (existsSync(POOL_LOCK_PATH) && attempts++ < 50) {
-    await new Promise(r => setTimeout(r, 100));
-  }
-  await writeFile(POOL_LOCK_PATH, JSON.stringify({ pid: process.pid, at: Date.now() }));
-  try {
-    return await fn();
-  } finally {
-    try { await import("node:fs/promises").then(m => m.unlink(POOL_LOCK_PATH)); } catch {}
-  }
-}
+// pool storage paths, the variant constant, and the lock helper are now
+// canonical in ./lib/pool — imported above.
 
 async function bridgePoolClaim(body: { cellName: string }): Promise<Response> {
-  if (!body.cellName || !/^[a-z0-9-]+$/.test(body.cellName)) {
+  // Canonical cell-name contract (cli/lib/cell-name) — same rule cmdCreate
+  // enforces at birth, so a name that exists always passes here. The old
+  // inline /^[a-z0-9-]+$/ was looser (accepted leading/trailing hyphens
+  // and unbounded length) than creation — a defense-in-depth gap.
+  // wellName / birthId elsewhere in this file are a different format and
+  // keep their own checks.
+  if (!body.cellName || !isValidCellName(body.cellName)) {
     return new Response("bad cellName", { status: 400 });
   }
   let chosen: { wellName: string; tier: number; id: string } | null = null;
-  await withPoolLockProxy(async () => {
-    if (!existsSync(POOL_PATH)) return;
-    const file = JSON.parse(await readFile(POOL_PATH, "utf-8"));
-    const warm = file.members.find((e: any) =>
-      e.state === "warm" && e.variant_signature === V1_POOL_VARIANT_SIGNATURE && (e.tier ?? 2) === 4
-    ) ?? file.members.find((e: any) =>
-      e.state === "warm" && e.variant_signature === V1_POOL_VARIANT_SIGNATURE
+  await withPoolLock(async () => {
+    const file = await loadPool();
+    const open = file.members.find((e) =>
+      e.state === "open" && e.variant_signature === V1_POOL_VARIANT_SIGNATURE && (e.tier ?? 2) === 4
+    ) ?? file.members.find((e) =>
+      e.state === "open" && e.variant_signature === V1_POOL_VARIANT_SIGNATURE
     );
-    if (!warm) return;
-    warm.state = "claimed";
-    warm.claimed_at = new Date().toISOString();
-    warm.claimed_by = body.cellName;
-    chosen = { wellName: warm.well_name, tier: warm.tier ?? 2, id: warm.well_name.slice("egg-".length) };
-    await writeFile(POOL_PATH, JSON.stringify(file, null, 2));
+    if (!open) return;
+    open.state = "claimed";
+    open.claimed_at = new Date().toISOString();
+    open.claimed_by = body.cellName;
+    chosen = { wellName: open.well_name, tier: open.tier ?? 2, id: open.well_name.slice("egg-".length) };
+    await savePool(file);
   });
-  if (!chosen) return Response.json({ error: "no warm egg available" }, { status: 503 });
+  if (!chosen) return Response.json({ error: "no open egg available" }, { status: 503 });
   return Response.json(chosen);
 }
 
 async function bridgeRegistryRead(): Promise<Response> {
-  if (!existsSync(CELLS_REGISTRY)) return Response.json({ cells: [] });
-  return Response.json(JSON.parse(await readFile(CELLS_REGISTRY, "utf-8")));
+  // Mirror the registry to the host-bridge. loadRegistry gives the same
+  // behavior the raw read had (missing → {cells:[]}, malformed → throw →
+  // 500) while centralizing the shape in cli/lib/registry.
+  return Response.json(await loadRegistry());
 }
 
 async function bridgeRegistryWrite(body: { cells: any[] }): Promise<Response> {
   if (!body || !Array.isArray(body.cells)) {
     return new Response("bad body: {cells: []}", { status: 400 });
   }
-  await mkdir(dirname(CELLS_REGISTRY), { recursive: true });
-  await writeFile(CELLS_REGISTRY, JSON.stringify(body, null, 2));
+  // saveRegistry centralizes the write AND makes it atomic (tmp+rename),
+  // so a crash mid-write can't truncate cells.json.
+  await saveRegistry(body as Registry);
   return new Response(null, { status: 204 });
 }
 
@@ -879,11 +879,10 @@ async function bridgePoolSweep(body: { wellName: string }): Promise<Response> {
   }
   // Destroy + drop from pool. Refill is a fire-and-forget; we don't wait.
   Bun.spawn(["well", "destroy", body.wellName, "--force"], { stdio: ["ignore", "ignore", "ignore"] });
-  await withPoolLockProxy(async () => {
-    if (!existsSync(POOL_PATH)) return;
-    const file = JSON.parse(await readFile(POOL_PATH, "utf-8"));
-    file.members = file.members.filter((e: any) => e.well_name !== body.wellName);
-    await writeFile(POOL_PATH, JSON.stringify(file, null, 2));
+  await withPoolLock(async () => {
+    const file = await loadPool();
+    file.members = file.members.filter((e) => e.well_name !== body.wellName);
+    await savePool(file);
   });
   Bun.spawn(["bun", join(REPO_ROOT, "cli/cells.ts"), "pool", "refill"], { stdio: ["ignore", "ignore", "ignore"] });
   return new Response(null, { status: 204 });
@@ -1065,28 +1064,10 @@ async function handleWake(req: Request): Promise<Response> {
 
 // ───────────────────── dashboard / cell page data ─────────────────────
 
-type CellInfo = {
-  name: string;
-  born: string;
-};
-
-// 2026-04-30T05:29:45.393Z → 2026-04-30 05:29
-function formatBorn(iso?: string): string {
-  if (!iso) return "?";
-  return `${iso.slice(0, 10)} ${iso.slice(11, 16)}`;
-}
-
-function readCells(): CellInfo[] {
-  if (!existsSync(CELLS_REGISTRY)) return [];
-  try {
-    const r = JSON.parse(readFileSync(CELLS_REGISTRY, "utf-8"));
-    return (r.cells ?? []).map((c: { name: string; created_at?: string }) => ({
-      name: c.name,
-      born: formatBorn(c.created_at),
-    }));
-  } catch {
-    return [];
-  }
+async function readCells(): Promise<CellRow[]> {
+  // cellRows is tolerant of malformed entries (loadRegistrySafe validates
+  // only the envelope, not each cell) — see cli/lib/status-rows.
+  return cellRows((await loadRegistrySafe()).cells);
 }
 
 function readActivity(filterName?: string, limit = 20): string[] {
@@ -1177,7 +1158,7 @@ async function authRows(): Promise<string> {
 }
 
 async function dashboardHtml(): Promise<Response> {
-  const cells = readCells();
+  const cells = await readCells();
   const rows = cells
     .map((c) => {
       const url = `https://${c.name}.cells.md/`;

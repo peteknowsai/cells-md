@@ -19,6 +19,7 @@ import { createServer, connect } from "node:net";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { readFileSync } from "node:fs";
+import { loadRegistrySafe, findCellIn } from "./lib/registry";
 
 const CELL_NAME = process.env.CELLS_NARRATOR_CELL ?? "cells-narrator";
 const WELL_API = process.env.WELL_API_URL ?? "http://127.0.0.1:7878";
@@ -29,12 +30,17 @@ function wellsToken(): string {
 
 async function resolveCellIp(): Promise<string | null> {
   try {
-    const reg = JSON.parse(readFileSync(join(homedir(), ".cells", "cells.json"), "utf8"));
-    const cell = (reg?.cells ?? []).find((c: any) => c.name === CELL_NAME);
+    const cell = findCellIn((await loadRegistrySafe()).cells, CELL_NAME);
     if (!cell?.hatched_from) {
       console.error(`[cells-host-forwarder] no cell '${CELL_NAME}' in registry`);
       return null;
     }
+    // Derive the well name by string-build rather than a pool.json lookup:
+    // the bake invariant is well_name === "egg-" + id and birth sets
+    // hatched_from = id (cells.ts), so egg-<hatched_from> is exactly the
+    // member's well_name. Keeping it a string-build means this critical
+    // always-on forwarder resolves off the registry alone — one fewer file
+    // (pool.json) that can be torn or stale on the path to the cell.
     const wellName = `egg-${cell.hatched_from}`;
     const token = wellsToken();
     const r = await fetch(`${WELL_API}/v1/wells/${encodeURIComponent(wellName)}`, {

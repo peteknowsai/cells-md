@@ -551,7 +551,10 @@ async function findCodexRollout(root: string, threadUuid: string): Promise<strin
 // `codex exec --json` emits JSONL on stdout. Find the latest
 // item.completed event with item.type === "agent_message" and return its
 // text. Returns null if no agent_message was emitted.
-function extractCodexJsonText(stdout: string): string | null {
+//
+// Exported only so the harness-adapters tests can exercise it directly —
+// internal callers stay inside this file.
+export function extractCodexJsonText(stdout: string): string | null {
   let text: string | null = null;
   for (const raw of stdout.split(/\r?\n/)) {
     const line = raw.trim();

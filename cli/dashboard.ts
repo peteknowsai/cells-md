@@ -27,6 +27,13 @@ import { join } from "node:path";
 import { readFile } from "node:fs/promises";
 import { readFileSync, existsSync, readdirSync } from "node:fs";
 import { connect as netConnect } from "node:net";
+import {
+  loadPool,
+  V1_POOL_TARGET_DEPTH,
+  V1_RUNNING_POOL_TARGET,
+} from "./lib/pool";
+import { loadPostworkSummary, type PostworkSummary } from "./lib/postwork";
+import { loadRegistrySafe } from "./lib/registry";
 
 const PORT = Number(process.env.CELLS_DASHBOARD_PORT ?? 7881);
 const WELL_API = process.env.WELL_API_URL ?? "http://127.0.0.1:7878";
@@ -94,13 +101,16 @@ type CellSnapshot = {
   // onFirstToken callback and persisted in ~/.cells/logs/perf/first-token.jsonl.
   // Null if not yet measured (very fresh cells, or pre-instrumentation births).
   first_token_ms: number | null;
+  // Post-birth async tail status, from ~/.cells/postwork/<name>.json.
+  // Null when no postwork file exists (specials, pre-instrumentation births).
+  postwork: PostworkSummary | null;
 };
 
 type StatePayload = {
   ts: string;
   pool: {
     total: number;
-    warm: number;
+    open: number;
     hot: number;       // tier 4: running, instant-claim
     cold: number;      // tier 2: hibernated, ~3s wake
     claimed: number;
@@ -314,15 +324,11 @@ function buildFleetSnapshot(limit = 50): FleetSnapshot {
 }
 
 async function buildState(): Promise<StatePayload> {
-  // Prefer pool.json (post-rename); fall back to legacy eggs.json.
-  const poolPath = join(homedir(), ".cells", "pool.json");
-  const legacyPath = join(homedir(), ".cells", "eggs.json");
-  const poolRaw = await readJSON<{ members?: any[]; eggs?: any[] }>(
-    poolPath,
-    await readJSON<{ members?: any[]; eggs?: any[] }>(legacyPath, { members: [] }),
-  );
-  const poolEntries = poolRaw.members ?? poolRaw.eggs ?? [];
-  const regFile = await readJSON<{ cells: any[] }>(join(homedir(), ".cells", "cells.json"), { cells: [] });
+  // Pool members via the shared loader — picks up the warm→open
+  // migration shim and the legacy-eggs.json fallback for free.
+  const poolFile = await loadPool();
+  const poolEntries = poolFile.members;
+  const regFile = await loadRegistrySafe();
   const token = await wellsToken();
   // /dashboard/data has wedge (wells team 2026-05-15); /v1/wells does not.
   // The shapes overlap for everything we read (name, status, ip), so use
@@ -355,7 +361,10 @@ async function buildState(): Promise<StatePayload> {
   for (const e of poolMembers) memberCounts[e.state] = (memberCounts[e.state] ?? 0) + 1;
 
   // Cells
-  const cells: CellSnapshot[] = (regFile.cells ?? []).map((c: any) => {
+  const postworkSummaries = await Promise.all(
+    (regFile.cells ?? []).map((c: any) => loadPostworkSummary(c.name)),
+  );
+  const cells: CellSnapshot[] = (regFile.cells ?? []).map((c: any, i: number) => {
     // Specials (mother, pulse) live in deterministic wells (cells-<name>) —
     // no hatched_from. Pool cells use egg-<hex>. Cold-fork legacy = cell name.
     const wellName = c.special
@@ -381,29 +390,33 @@ async function buildState(): Promise<StatePayload> {
       wedge: well?.wedge ?? null,
       ip: well?.ip ?? null,
       first_token_ms: firstTokenIdx.get(c.name) ?? null,
+      postwork: postworkSummaries[i] ?? null,
     };
   });
   // Newest first
   cells.sort((a, b) => a.age_minutes - b.age_minutes);
 
-  const hot = poolMembers.filter((e) => e.state === "warm" && e.tier === 4).length;
-  const cold = poolMembers.filter((e) => e.state === "warm" && e.tier === 2).length;
+  const hot = poolMembers.filter((e) => e.state === "open" && e.tier === 4).length;
+  const cold = poolMembers.filter((e) => e.state === "open" && e.tier === 2).length;
 
   return {
     ts: new Date().toISOString(),
     pool: {
       total: poolMembers.length,
-      warm: memberCounts.warm ?? 0,
+      open: memberCounts.open ?? 0,
       hot,
       cold,
       claimed: memberCounts.claimed ?? 0,
       live: memberCounts.live ?? 0,
       culling: memberCounts.culling ?? 0,
-      target_depth: 10,    // matches V1_POOL_TARGET_DEPTH
-      target_hot: 10,      // matches V1_HOT_POOL_TARGET (pure-hot v1)
+      // Targets come from the canonical constants in cli/lib/pool so the
+      // dashboard never drifts from cells.ts again — previous values
+      // (10 / 10) were stale after the pure-hibernated V1 rework.
+      target_depth: V1_POOL_TARGET_DEPTH,
+      target_hot: V1_RUNNING_POOL_TARGET,
       list: poolMembers.sort((a, b) => {
-        // warm first, then claimed/culling, live last; secondary: youngest first
-        const rank = (s: string) => (s === "warm" ? 0 : s === "claimed" ? 1 : s === "culling" ? 2 : 3);
+        // open first, then claimed/culling, live last; secondary: youngest first
+        const rank = (s: string) => (s === "open" ? 0 : s === "claimed" ? 1 : s === "culling" ? 2 : 3);
         const r = rank(a.state) - rank(b.state);
         return r !== 0 ? r : a.age_minutes - b.age_minutes;
       }),
@@ -579,7 +592,9 @@ const HTML = `<!DOCTYPE html>
     font-weight: 600;
     letter-spacing: 0.02em;
   }
-  .pill-warm { background: var(--cells-light); color: var(--cells-dark); }
+  .pill-open { background: var(--cells-light); color: var(--cells-dark); }
+  .pill-postwork-pending { background: var(--warn-light); color: #8a6a1f; }
+  .pill-postwork-failed { background: var(--leak-light); color: #8a3333; }
   .pill-hot { background: var(--cells-light); color: var(--cells-dark); font-weight: 700; }
   .pill-cold { background: var(--neutral-light); color: var(--neutral); }
   .pill-claimed { background: var(--warn-light); color: #8a6a1f; }
@@ -665,7 +680,7 @@ const HTML = `<!DOCTYPE html>
   <div class="card">
     <div class="label">Pool</div>
     <div class="big">
-      <span id="pool-warm">—</span><span class="small" id="pool-target"></span>
+      <span id="pool-open">—</span><span class="small" id="pool-target"></span>
     </div>
     <div class="sub" id="pool-sub"></div>
   </div>
@@ -773,7 +788,7 @@ const HTML = `<!DOCTYPE html>
     setText("cell-count", s.cells.length);
     const warmingCount = s.cells.filter(c => c.status === "warming").length;
     setText("cell-sub", warmingCount > 0 ? warmingCount + " warming" : "all alive");
-    setText("pool-warm", s.pool.warm);
+    setText("pool-open", s.pool.open);
     setText("pool-target", "/" + s.pool.target_depth);
     setText(
       "egg-sub",
@@ -800,6 +815,16 @@ const HTML = `<!DOCTYPE html>
         tr.appendChild(nameTd);
         const statTd = document.createElement("td");
         statTd.appendChild(pill(c.status, c.status));
+        // Surface backgrounded post-birth tail when it's pending or failed.
+        // The ok case stays silent — green-on-every-row is noise.
+        if (c.postwork && c.postwork.status !== "ok") {
+          const label = c.postwork.status === "pending"
+            ? "postwork: pending"
+            : "postwork: " + c.postwork.failed_steps.join(",");
+          const pillEl = pill(label, "postwork-" + c.postwork.status);
+          pillEl.style.marginLeft = "6px";
+          statTd.appendChild(pillEl);
+        }
         tr.appendChild(statTd);
         const harnessTd = document.createElement("td");
         harnessTd.className = "mono";
@@ -858,10 +883,10 @@ const HTML = `<!DOCTYPE html>
         idTd.innerHTML = '<code>' + e.well_name + '</code>';
         tr.appendChild(idTd);
         const stTd = document.createElement("td");
-        // Show hot/cold for warm members (the user-facing tier), state otherwise.
+        // Show hot/cold for open members (the user-facing tier), state otherwise.
         const stateLabel =
-          e.state === "warm"
-            ? (e.tier === 4 ? "hot" : e.tier === 2 ? "cold" : "warm")
+          e.state === "open"
+            ? (e.tier === 4 ? "hot" : e.tier === 2 ? "cold" : "open")
             : e.state;
         stTd.appendChild(pill(stateLabel, stateLabel));
         tr.appendChild(stTd);
@@ -1017,8 +1042,8 @@ async function handleTalk(req: Request, name: string): Promise<Response> {
   // Verify the cell exists; resolve its well name for the wake hop below.
   let cellWellName: string | null = null;
   try {
-    const reg = JSON.parse(await readFile(join(homedir(), ".cells", "cells.json"), "utf8"));
-    const found = (reg?.cells ?? []).find((c: any) => c.name === name);
+    const reg = await loadRegistrySafe();
+    const found = (reg.cells ?? []).find((c: any) => c.name === name);
     if (!found) return Response.json({ error: "no cell" }, { status: 404 });
     // Specials live in cells-<name>; hatched cells in egg-<hatched_from>;
     // legacy non-hatched (rare in V1) use the cell name as the well name.

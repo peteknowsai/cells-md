@@ -29,10 +29,12 @@
  */
 
 import { type Subprocess, spawn } from "bun";
-import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, watch } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, watch } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { getAdapter, type AdapterHost, type HarnessAdapter } from "../lib/harness-adapters";
+import { isInsideDir } from "../lib/path-guard";
+import { MIME, collectSiteFiles } from "../lib/site-files";
 
 const PORT = Number(process.env.PORT ?? 8080);
 const NAME = process.env.CELL_NAME ?? "unknown";
@@ -83,21 +85,9 @@ function getMainRef(): string {
 const HERE = dirname(fileURLToPath(import.meta.url));
 const PUBLIC_DIR = join(HERE, "public");
 
-const MIME: Record<string, string> = {
-  ".html": "text/html; charset=utf-8",
-  ".css": "text/css; charset=utf-8",
-  ".js": "text/javascript; charset=utf-8",
-  ".json": "application/json; charset=utf-8",
-  ".png": "image/png",
-  ".jpg": "image/jpeg",
-  ".jpeg": "image/jpeg",
-  ".svg": "image/svg+xml",
-  ".gif": "image/gif",
-  ".webp": "image/webp",
-  ".ico": "image/x-icon",
-  ".txt": "text/plain; charset=utf-8",
-  ".md": "text/markdown; charset=utf-8",
-};
+// MIME + collectSiteFiles live in ../lib/site-files (imported above) so the
+// publish-collect containment defense is unit-testable without booting this
+// server.
 
 function defaultHome(): string {
   return `<!doctype html>
@@ -181,7 +171,10 @@ function serveStatic(pathname: string): Response | null {
   if (!existsSync(PUBLIC_DIR)) return null;
   const rel = pathname === "/" ? "/index.html" : pathname;
   const path = join(PUBLIC_DIR, rel);
-  if (!path.startsWith(PUBLIC_DIR)) return null;
+  // Containment guard: join() collapses `..`, but a request like
+  // `/../public-secrets/x` could still resolve to a sibling sharing the
+  // PUBLIC_DIR name prefix. isInsideDir's separator check refuses it.
+  if (!isInsideDir(PUBLIC_DIR, path)) return null;
   if (!existsSync(path)) return null;
   const ext = path.slice(path.lastIndexOf("."));
   const mime = MIME[ext] ?? "application/octet-stream";
@@ -605,35 +598,9 @@ function onHarnessReady() {
 
 const SITE_PUBLISH_URL = `https://${NAME}.cells.md/site/publish`;
 const PUBLISH_DEBOUNCE_MS = 800;
-// Per-file ceiling. The Worker's DO storage caps a value at 128 KiB and
-// base64 inflates ~33%, so an on-disk file must stay under ~96 KiB. v1 is
-// text-first (HTML/CSS/JS/markdown); large media is a later, R2-backed path.
-const SITE_FILE_CAP = 96 * 1024;
-
 let publishing = false;
 let dirtyDuringPublish = false;
 let publishTimer: Timer | null = null;
-
-function collectSiteFiles(dir: string, base: string, out: Record<string, { ct: string; data: string }>) {
-  for (const name of readdirSync(dir)) {
-    const full = join(dir, name);
-    const st = statSync(full);
-    if (st.isDirectory()) {
-      collectSiteFiles(full, base, out);
-    } else if (st.isFile()) {
-      if (st.size > SITE_FILE_CAP) {
-        console.error(`[site] skipping ${full} — ${Math.round(st.size / 1024)}KB over ${SITE_FILE_CAP / 1024}KB cap`);
-        continue;
-      }
-      const rel = "/" + full.slice(base.length).replace(/^\/+/, "");
-      const ext = name.includes(".") ? name.slice(name.lastIndexOf(".")) : "";
-      out[rel] = {
-        ct: MIME[ext] ?? "application/octet-stream",
-        data: readFileSync(full).toString("base64"),
-      };
-    }
-  }
-}
 
 // Build the current public/ snapshot and POST it to the Worker. Returns
 // true iff the Worker accepted it. Swallows + logs all errors.

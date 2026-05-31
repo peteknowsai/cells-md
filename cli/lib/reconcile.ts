@@ -17,7 +17,7 @@
 export type PoolMemberLike = {
   id: string;
   well_name: string;
-  state: string;          // PoolMemberState — "warm" | "claimed" | "live" | "culling"
+  state: string;          // PoolMemberState — "open" | "claimed" | "live" | "culling"
   tier?: 2 | 4;           // optional in storage; v1 pool members carry it
 };
 
@@ -43,7 +43,7 @@ export function planReconcileEvictions<T extends PoolMemberLike>(
       evicted.push({ id: m.id, well_name: m.well_name, reason: "welld doesn't know this well" });
       continue;
     }
-    if (m.tier === 4 && m.state === "warm" && wd.status !== "running") {
+    if (m.tier === 4 && m.state === "open" && wd.status !== "running") {
       evicted.push({
         id: m.id,
         well_name: m.well_name,

@@ -19,11 +19,12 @@ import { readFile, writeFile, mkdir, readdir, unlink, rm, stat } from "node:fs/p
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { existsSync } from "node:fs";
+import { loadPool as sharedLoadPool, countOpen } from "../cli/lib/pool";
+import { loadRegistry } from "../cli/lib/registry";
 
 const HOME = homedir();
-const REGISTRY_PATH   = join(HOME, ".cells", "cells.json");
+// REGISTRY_PATH + loadRegistry are canonical in cli/lib/registry.
 const CHANNELS_PATH   = join(HOME, ".cells", "channels.json");
-const POOL_PATH       = join(HOME, ".cells", "pool.json");
 const PULSE_CACHE_DIR = join(HOME, ".cells", "pulse-cache");
 const PULSE_INBOX_DIR = join(HOME, ".cells", "pulse-inbox");
 const VAULT_DIR       = join(HOME, "Obsidian", "cells");
@@ -180,24 +181,14 @@ function nameFor(combo: Combo, ts: Date): string {
 
 // ───── verification ─────
 
-type Registry = { cells: Array<{ name: string; created_at: string; modelChain?: string[]; hatched_from?: string | null }> };
 type ChannelsFile = { version: 1; bindings: Record<string, { cell: string; kind: string; createdAt: string }> };
 
-async function loadRegistry(): Promise<Registry> {
-  if (!existsSync(REGISTRY_PATH)) return { cells: [] };
-  try { return JSON.parse(await readFile(REGISTRY_PATH, "utf-8")); }
-  catch { return { cells: [] }; }
-}
-
-// The egg pool. Every birth claims one warm member; the harness runs a
+// The egg pool. Every birth claims one open member; the harness runs a
 // `cells pool refill` before the birth phase, so this just sanity-counts.
-type PoolFile = { version: number; members: Array<{ id: string; well_name: string; state: string }> };
-
-async function loadPool(): Promise<PoolFile> {
-  if (!existsSync(POOL_PATH)) return { version: 1, members: [] };
-  try { return JSON.parse(await readFile(POOL_PATH, "utf-8")); }
-  catch { return { version: 1, members: [] }; }
-}
+// Uses the shared loader from cli/lib/pool so the warm→open migration
+// shim + uniform-pool semantics stay consistent with cells / proxy /
+// dashboard.
+const loadPool = sharedLoadPool;
 
 // Resolve a cell to the well it actually runs on. Birth claims a generic
 // egg from the pool, so the well name is the egg's permanent well_name —
@@ -212,9 +203,10 @@ async function wellForCell(name: string): Promise<string> {
   return member?.well_name ?? name;
 }
 
-async function countWarmEggs(): Promise<number> {
-  const pool = await loadPool();
-  return pool.members.filter((m) => m.state === "warm").length;
+async function countOpenEggs(): Promise<number> {
+  // Reuse the canonical counter — it also filters on the V1 variant
+  // signature, so this won't over-count once a V2 variant pool coexists.
+  return countOpen((await loadPool()).members);
 }
 
 async function loadChannels(): Promise<ChannelsFile> {
@@ -776,7 +768,7 @@ async function main() {
     return;
   }
 
-  // Pre-flight: every birth claims a warm egg from the uniform pool, so
+  // Pre-flight: every birth claims an open egg from the uniform pool, so
   // stock the pool before the birth phase. `cells pool refill` brings it to
   // target depth; then sanity-check there's at least one egg per planned
   // birth (refill can fall short if a bake failed).
@@ -785,10 +777,10 @@ async function main() {
   if (refill.exitCode !== 0) {
     console.warn(`  pool refill exited ${refill.exitCode}: ${tail(refill.stderr, 300)}`);
   }
-  const warmEggs = await countWarmEggs();
-  console.log(`  pool: ${warmEggs} warm egg(s); plan needs ${plan.length}`);
-  if (warmEggs < plan.length) {
-    console.warn(`  ⚠ pool short by ${plan.length - warmEggs} — births may fail with "pool empty"`);
+  const openEggs = await countOpenEggs();
+  console.log(`  pool: ${openEggs} open egg(s); plan needs ${plan.length}`);
+  if (openEggs < plan.length) {
+    console.warn(`  ⚠ pool short by ${plan.length - openEggs} — births may fail with "pool empty"`);
   }
 
   // Birth sequentially. Parallel mothers contend for the same OAuth /

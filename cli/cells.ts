@@ -7,10 +7,31 @@ import { existsSync, statSync, readFileSync, unlinkSync, writeFileSync } from "n
 import { fileURLToPath } from "node:url";
 import * as readline from "node:readline/promises";
 import { createHash, randomBytes } from "node:crypto";
-import { poolKey, type Variant } from "./lib/variant-signature";
 import { planReconcileEvictions } from "./lib/reconcile";
 import { needsSeal } from "./lib/hibernate-ready";
 import { SECRETS_PATH, readSecret } from "./lib/secrets";
+import { validateCellName } from "./lib/cell-name";
+import { loadPostworkSummary, removePostwork, type PostworkSummary } from "./lib/postwork";
+import { REGISTRY_DIR } from "./lib/paths";
+import {
+  loadRegistry,
+  saveRegistry,
+  findCell,
+  type Cell,
+  type Registry,
+} from "./lib/registry";
+import {
+  V1_POOL_VARIANT_SIGNATURE,
+  V1_POOL_TARGET_DEPTH,
+  V1_RUNNING_POOL_TARGET,
+  loadPool,
+  savePool,
+  withPoolLock,
+  countOpenPoolMembers,
+  type PoolMember,
+  type PoolMemberState,
+  type PoolFile,
+} from "./lib/pool";
 import {
   CHANNELS_PATH,
   type ChannelKind,
@@ -34,13 +55,9 @@ const SPECIALS_DIR = join(DNA_ROOT, "specials");
 const MOTHER_ROOT = join(SPECIALS_DIR, "mother");
 const PULSE_ROOT = join(SPECIALS_DIR, "pulse");
 const DNA_DIR = join(DNA_ROOT, "cells/base");
-const REGISTRY_DIR = join(homedir(), ".cells");
-const REGISTRY_PATH = join(REGISTRY_DIR, "cells.json");
+// REGISTRY_DIR + REGISTRY_PATH are canonical in ./lib/paths — imported
+// above. Pool paths live there too; pool.ts owns the pool functions.
 const CONFIG_PATH = join(REGISTRY_DIR, "config.json");
-const POOL_PATH = join(REGISTRY_DIR, "pool.json");
-const POOL_LOCK_PATH = join(REGISTRY_DIR, ".pool.lock");
-// Legacy path retained only for one-shot migration on first load after rename.
-const LEGACY_EGGS_JSON_PATH = join(REGISTRY_DIR, "eggs.json");
 const MOTHER_LOCK_PATH = join(REGISTRY_DIR, "mother.lock");
 
 // Cells-side control-panel for the wells substrate. Operator-owned.
@@ -290,42 +307,8 @@ const PACKAGE_OPTIONS: SelectOption[] = OPTIONAL_PACKAGES.map((p) => ({
 
 const PACKAGE_DEFAULTS: string[] = OPTIONAL_PACKAGES.filter((p) => p.defaultChecked).map((p) => p.value);
 
-type Cell = {
-  name: string;
-  created_at: string;
-  // Birth registers a cell straight as "alive" — mother's end-test has
-  // already proven it works. "warming" is legacy (the retired async-tail
-  // path); kept readable for older registry entries.
-  status?: "warming" | "alive";
-  // The egg id this cell hatched from (the hex suffix of egg-<id>).
-  hatched_from?: string;
-  // Which agent runtime the cell runs — host-bridge reads this to pick the
-  // spawn path. Absent on older entries; default to "pi" at read time.
-  harness?: "pi" | "claude-code" | "codex" | "hermes";
-  // Model fallback chain (per-cell). First entry is the primary; pi-coding-agent
-  // advances to the next entry on retry-exhaustion via the patch in
-  // apply-pi-patches.sh. Mirrored here so harden-birth can verify the
-  // birth pipeline wrote it correctly into the cell's settings.json.
-  modelChain?: string[];
-  // True for cells born via `cells birth-special` (mother, pulse). These are
-  // pinned, baked from bespoke DNA in dna/specials/<name>/, and exempt from
-  // `cells kill --all-but` sweeps unless explicitly named.
-  special?: boolean;
-  // Mirrors welld's auto_sleep_seconds=null state. Source of truth is welld;
-  // this is a hint for `cells ls` / `cells doctor`.
-  pinned?: boolean;
-};
-type Registry = { cells: Cell[] };
-
-async function loadRegistry(): Promise<Registry> {
-  if (!existsSync(REGISTRY_PATH)) return { cells: [] };
-  return JSON.parse(await readFile(REGISTRY_PATH, "utf-8"));
-}
-
-async function saveRegistry(reg: Registry): Promise<void> {
-  await mkdir(REGISTRY_DIR, { recursive: true });
-  await writeFile(REGISTRY_PATH, JSON.stringify(reg, null, 2));
-}
+// Cell / Registry types + loadRegistry / saveRegistry / findCell are
+// canonical in ./lib/registry — imported above.
 
 // ───── pool.json — pre-warmed cell pool ─────
 //
@@ -335,109 +318,6 @@ async function saveRegistry(reg: Registry): Promise<void> {
 // Auto-hatch in cmdCreate looks for a open egg matching the requested
 // variant signature; if none, falls back to the slow build-from-scratch
 // path. See docs/eggs-phase-1.md for the full design.
-
-type PoolMemberState = "open" | "claimed" | "live" | "culling";
-
-type PoolMember = {
-  id: string;                  // 6-hex hash of variant signature
-  well_name: string;         // egg-<modeltoken>-<id>
-  variant_signature: string;   // canonical "v1:..." per cli/lib/variant-signature.ts
-  state: PoolMemberState;
-  born_at: string;
-  claimed_at: string | null;
-  claimed_by: string | null;   // cell name that hatched this egg
-  max_age_at: string;          // born_at + 7 days; not enforced in Phase 1
-};
-
-type PoolFile = { version: 1; members: PoolMember[] };
-
-// Read pool.json. If it doesn't exist but legacy eggs.json does (pre-rename
-// state on disk), migrate the legacy shape ({ eggs: [...] }) to the new
-// shape ({ members: [...] }) and write pool.json atomically. Renames the
-// legacy file to a backup so a second run is idempotent.
-async function loadPool(): Promise<PoolFile> {
-  if (!existsSync(POOL_PATH) && existsSync(LEGACY_EGGS_JSON_PATH)) {
-    try {
-      const legacy = JSON.parse(await readFile(LEGACY_EGGS_JSON_PATH, "utf-8"));
-      const members: PoolMember[] = Array.isArray(legacy?.eggs) ? legacy.eggs : [];
-      const migrated: PoolFile = { version: 1, members };
-      await mkdir(REGISTRY_DIR, { recursive: true });
-      const tmp = POOL_PATH + ".tmp";
-      await writeFile(tmp, JSON.stringify(migrated, null, 2));
-      await rename(tmp, POOL_PATH);
-      try { await rename(LEGACY_EGGS_JSON_PATH, LEGACY_EGGS_JSON_PATH + ".pre-pool-rename.bak"); } catch { /* best-effort */ }
-      return migrated;
-    } catch {
-      // Migration failed; fall through to fresh-state on POOL_PATH miss.
-    }
-  }
-  if (!existsSync(POOL_PATH)) return { version: 1, members: [] };
-  try {
-    const parsed = JSON.parse(await readFile(POOL_PATH, "utf-8"));
-    if (parsed?.version !== 1 || !Array.isArray(parsed.members)) {
-      throw new Error("pool.json malformed (expected {version: 1, members: [...]})");
-    }
-    // Naming migration (2026-05-22): the old standing value "warm" is now
-    // "open". In-place on read so a pool.json written by older code keeps
-    // working; the next savePool persists the new spelling.
-    for (const m of parsed.members) {
-      if ((m as any).state === "warm") (m as any).state = "open";
-    }
-    return parsed as PoolFile;
-  } catch (e) {
-    if ((e as any).code === "ENOENT") return { version: 1, members: [] };
-    throw e;
-  }
-}
-
-async function savePool(file: PoolFile): Promise<void> {
-  await mkdir(REGISTRY_DIR, { recursive: true });
-  // Atomic write: tmp + rename. Survives mid-write crashes.
-  const tmp = POOL_PATH + ".tmp";
-  await writeFile(tmp, JSON.stringify(file, null, 2));
-  await rename(tmp, POOL_PATH);
-}
-
-// Cooperative file lock around pool.json read-modify-write. Uses an
-// O_EXCL sentinel so two processes cannot both think they hold the
-// lock. Lock timeout is 10s — if a process dies holding the lock the
-// next caller cleans up after the timeout and retries once.
-async function withPoolLock<T>(fn: () => Promise<T>): Promise<T> {
-  await mkdir(REGISTRY_DIR, { recursive: true });
-  const start = Date.now();
-  while (Date.now() - start < 10_000) {
-    const fh = await Bun.file(POOL_LOCK_PATH).exists() ? null : await tryAcquireLock();
-    if (fh) {
-      try {
-        return await fn();
-      } finally {
-        try { await unlink(POOL_LOCK_PATH); } catch { /* ignore */ }
-      }
-    }
-    // Stale-lock recovery: if the lock is older than 30s, force-clear it.
-    try {
-      const s = statSync(POOL_LOCK_PATH);
-      if (Date.now() - s.mtimeMs > 30_000) {
-        try { await unlink(POOL_LOCK_PATH); } catch { /* ignore */ }
-      }
-    } catch { /* lock vanished mid-check */ }
-    await new Promise((r) => setTimeout(r, 50));
-  }
-  throw new Error(`could not acquire pool lock at ${POOL_LOCK_PATH} within 10s`);
-}
-
-async function tryAcquireLock(): Promise<boolean> {
-  // Bun has no O_EXCL helper; use node:fs.openSync with the wx flag.
-  try {
-    const fs = await import("node:fs");
-    const fd = fs.openSync(POOL_LOCK_PATH, "wx");
-    fs.closeSync(fd);
-    return true;
-  } catch (e: any) {
-    if (e.code === "EEXIST") return false;
-    throw e;
-  }
-}
 
 // Atomically claim a open egg matching the predicate. Returns the
 // claimed egg (state transitioned to "claimed", claimed_at + claimed_by
@@ -482,11 +362,6 @@ async function markEggCulling(eggId: string): Promise<void> {
     egg.state = "culling";
     await savePool(file);
   });
-}
-
-async function findCell(name: string): Promise<Cell | undefined> {
-  const reg = await loadRegistry();
-  return reg.cells.find((c) => c.name === name);
 }
 
 async function requireCell(name: string): Promise<Cell> {
@@ -1205,17 +1080,32 @@ async function readCellModel(name: string): Promise<string | null> {
   return null;
 }
 
-// Read post-birth deployment status from ~/.cells/logs/birth-postwork/<name>.log.
-//   "done"    — log exists and last line says "post-birth done"
-//   "running" — log exists, no done marker yet
-//   "—"       — no log (legacy birth before the post-birth split)
-function postBirthStatus(name: string): string {
+// Read post-birth deployment status. Prefers the structured signal in
+// ~/.cells/postwork/<name>.json (scripts/birth-postwork.sh writes a
+// status per step + completed_at when the chain finishes) so we can
+// distinguish "ok", "fail:<which-steps>", and "running" with no
+// log-grep heuristics. Falls back to the legacy plain-text log for
+// cells born before the JSON format landed.
+//
+//   "ok"           — every step finished cleanly
+//   "fail:<steps>" — the chain finished but one or more steps failed
+//   "running"      — the chain is still in flight
+//   "—"            — no postwork artifact (legacy/special/pre-split)
+async function postBirthStatus(name: string): Promise<string> {
+  const summary = await loadPostworkSummary(name);
+  if (summary) {
+    if (summary.status === "ok") return "ok";
+    if (summary.status === "failed") return `fail:${summary.failed_steps.join(",")}`;
+    return "running";
+  }
+  // Legacy: a plain log written by the pre-PR-5 SKILL.md nohup. Once
+  // every live cell has been re-birthed under birth-postwork.sh this
+  // branch can go.
   const logPath = join(homedir(), ".cells", "logs", "birth-postwork", `${name}.log`);
   if (!existsSync(logPath)) return "—";
   try {
     const txt = readFileSync(logPath, "utf-8");
-    if (txt.includes("post-birth done")) return "done";
-    return "running";
+    return txt.includes("post-birth done") ? "ok" : "running";
   } catch {
     return "—";
   }
@@ -1233,7 +1123,7 @@ async function cmdList() {
       name: c.name,
       model: (await readCellModel(c.name)) ?? "?",
       born: humanDate(c.created_at),
-      deploy: postBirthStatus(c.name),
+      deploy: await postBirthStatus(c.name),
     })),
   );
 
@@ -2097,41 +1987,75 @@ async function cmdDoctor() {
     console.log(`  fix:         check ${homedir()}/.local/bin/well is in PATH and executable`);
   }
 
-  // 6b. Post-birth deployment status across the fleet. Each cell that's
-  // been birthed since the gated/async split has a log at
-  // ~/.cells/logs/birth-postwork/<name>.log. "done" = worker deployed +
-  // checkpoint taken. "running" = still rolling. Anything that's been
-  // "running" for more than ~2 min is suspect — most post-births finish
-  // in ~10s. Legacy cells (pre-split) have no log; we surface them as "—".
+  // 6b. Post-birth deployment status across the fleet. Reads the
+  // structured signal at ~/.cells/postwork/<name>.json (written by
+  // scripts/birth-postwork.sh) — per-step status + completed_at
+  // timestamp. Distinguishes ok / failed (with which steps) / running /
+  // legacy (no postwork.json), and surfaces failed-step detail Pete
+  // would otherwise only see by tailing the per-cell log.
+  //
+  // Stale-run heuristic: a chain that hasn't completed within 5 minutes
+  // is probably hung — most postworks finish in ~10s.
   console.log("");
   const regForDeploy = await loadRegistry();
-  const postworkDir = join(homedir(), ".cells/logs/birth-postwork");
+  const STALE_THRESHOLD_MS = 5 * 60 * 1000;
+  let failedCount = 0;
   let staleCount = 0;
   for (const c of regForDeploy.cells) {
-    const logPath = join(postworkDir, `${c.name}.log`);
-    if (!existsSync(logPath)) {
-      console.log(`deploy ${c.name.padEnd(18)} ${dim}— (legacy or pre-split birth)${reset}`);
+    const summary = await loadPostworkSummary(c.name);
+    if (!summary) {
+      // Fallback for cells born before postwork.json: classify from the
+      // legacy plain log if present, so a stuck pre-JSON postwork still
+      // gets flagged STALE rather than silently dismissed as "legacy".
+      const legacyLog = join(homedir(), ".cells", "logs", "birth-postwork", `${c.name}.log`);
+      if (!existsSync(legacyLog)) {
+        console.log(`deploy ${c.name.padEnd(18)} ${dim}— (legacy or pre-postwork.json birth)${reset}`);
+        continue;
+      }
+      try {
+        const txt = await readFile(legacyLog, "utf-8");
+        const done = txt.includes("post-birth done");
+        const ageMs = Date.now() - statSync(legacyLog).mtimeMs;
+        if (done) {
+          console.log(`deploy ${c.name.padEnd(18)} ${green}ok${reset} ${dim}(${Math.round(ageMs / 60000)} min ago, legacy log)${reset}`);
+        } else if (ageMs > STALE_THRESHOLD_MS) {
+          console.log(`deploy ${c.name.padEnd(18)} ${red}STALE${reset} (${Math.round(ageMs / 60000)} min, legacy log)`);
+          console.log(`  log: ${legacyLog}`);
+          staleCount++;
+        } else {
+          console.log(`deploy ${c.name.padEnd(18)} ${yellow}running${reset} (${Math.round(ageMs / 1000)}s in, legacy log)`);
+        }
+      } catch {
+        console.log(`deploy ${c.name.padEnd(18)} ${dim}— (legacy log unreadable)${reset}`);
+      }
       continue;
     }
-    try {
-      const txt = await readFile(logPath, "utf-8");
-      const done = txt.includes("post-birth done");
-      const ageMs = Date.now() - statSync(logPath).mtimeMs;
-      if (done) {
-        console.log(`deploy ${c.name.padEnd(18)} ${green}done${reset} ${dim}(${Math.round(ageMs / 60000)} min ago)${reset}`);
-      } else if (ageMs > 2 * 60 * 1000) {
+    if (summary.status === "ok") {
+      const completedMs = summary.completed_at ? Date.parse(summary.completed_at) : Date.now();
+      const ageMin = Math.round((Date.now() - completedMs) / 60000);
+      console.log(`deploy ${c.name.padEnd(18)} ${green}ok${reset} ${dim}(${ageMin} min ago)${reset}`);
+    } else if (summary.status === "failed") {
+      const which = summary.failed_steps.join(", ");
+      console.log(`deploy ${c.name.padEnd(18)} ${red}FAILED${reset} (${which})`);
+      console.log(`  file: ${join(homedir(), ".cells/postwork", `${c.name}.json`)}`);
+      failedCount++;
+    } else {
+      const startedMs = summary.started_at ? Date.parse(summary.started_at) : Date.now();
+      const ageMs = Date.now() - startedMs;
+      if (ageMs > STALE_THRESHOLD_MS) {
         console.log(`deploy ${c.name.padEnd(18)} ${red}STALE${reset} (${Math.round(ageMs / 60000)} min running, expected ~10s)`);
-        console.log(`  log: ${logPath}`);
+        console.log(`  file: ${join(homedir(), ".cells/postwork", `${c.name}.json`)}`);
         staleCount++;
       } else {
         console.log(`deploy ${c.name.padEnd(18)} ${yellow}running${reset} (${Math.round(ageMs / 1000)}s in)`);
       }
-    } catch (e) {
-      console.log(`deploy ${c.name.padEnd(18)} ${red}log unreadable${reset}`);
     }
   }
+  if (failedCount > 0) {
+    console.log(`  ${red}${failedCount} cell(s) have failed post-birth steps. cat the postwork JSON to see which.${reset}`);
+  }
   if (staleCount > 0) {
-    console.log(`  ${yellow}${staleCount} cell(s) have stuck post-birth tasks. tail the log file to see what failed.${reset}`);
+    console.log(`  ${yellow}${staleCount} cell(s) have stuck post-birth tasks. tail the per-cell log for details.${reset}`);
   }
 
   // 7. Specials (mother, pulse) — if they've been baked as real cells,
@@ -2266,12 +2190,10 @@ function parseCreateArgs(args: string[]): { name: string | undefined; opts: Crea
       }
       opts.packages = parts;
     } else if (a.startsWith("--thinking=")) {
-      const v = a.slice("--thinking=".length);
-      if (!THINKING_VALUES.includes(v)) {
-        console.error(`unknown thinking level: ${v}. choose: ${THINKING_VALUES.join(", ")}`);
-        process.exit(1);
-      }
-      opts.thinking = v;
+      // Defer scale validation to cmdCreate — it's the only place that
+      // knows the chosen harness, and the scales differ by harness
+      // (claude-code has auto/max, codex has neither, pi has adaptive).
+      opts.thinking = a.slice("--thinking=".length);
     } else if (a.startsWith("--slack-channel=")) {
       const v = a.slice("--slack-channel=".length).trim();
       if (v && !CHANNEL_ID_PATTERNS.slack.test(v)) {
@@ -2443,6 +2365,11 @@ async function cmdCreate(name: string | undefined, opts: CreateOpts): Promise<vo
   name = name ?? generateCellName();
 
   // ── 2. Validate ──
+  const nameCheck = validateCellName(name);
+  if (!nameCheck.ok) {
+    console.error(nameCheck.reason);
+    process.exit(1);
+  }
   if (RESERVED_NAMES.has(name)) {
     console.error(`'${name}' is reserved. Pick another name.`);
     process.exit(1);
@@ -2482,6 +2409,21 @@ async function cmdCreate(name: string | undefined, opts: CreateOpts): Promise<vo
       console.error(
         `pi cells on Anthropic models need ANTHROPIC_API_KEY in ~/.cells/secrets.json\n` +
         `  (claude-code is the Max-subscription harness; pi uses a direct paid key)`,
+      );
+      process.exit(1);
+    }
+  }
+  // Harness-aware thinking validation. The interactive Ink picker already
+  // restricts choices via thinkingOptionsForHarness; this catches the
+  // non-interactive `--thinking=X` path that bypassed the picker. Skip
+  // when the user didn't pass --thinking (defaults are picked per harness
+  // by defaultThinkingFor / defaultThinkingForHarness above).
+  if (opts.thinking !== undefined) {
+    const allowed = thinkingOptionsForHarness(harness, modelKey).map((o) => o.value);
+    if (!allowed.includes(thinking)) {
+      console.error(
+        `thinking '${thinking}' is not valid for harness '${harness}' on ${modelKey}.\n` +
+        `  choose: ${allowed.join(", ")}`,
       );
       process.exit(1);
     }
@@ -2976,10 +2918,7 @@ async function registerSiteService(wellName: string, cellName: string): Promise<
 }
 
 // v1 egg pool helpers. The v1 pool is uniform — every egg is the same
-// canned generic cell, baked from cell-base. variant_signature is the
-// constant "v1-generic" so consumers can filter the pool without the
-// variant-aware machinery of the legacy multi-variant pool.
-const V1_POOL_VARIANT_SIGNATURE = "v1-generic";
+// V1_POOL_VARIANT_SIGNATURE is now canonical in ./lib/pool — imported above.
 
 // Generate a fresh egg well-name. Distinct from cell-names (cell-<hex>) so
 // `cells list` doesn't pretend pool wells are user-facing cells.
@@ -3038,7 +2977,8 @@ async function collectCellLlmEnv(): Promise<Record<string, string>> {
 // Schema note: pool.json still carries `tier: 2 | 4`. tier 4 = running,
 // tier 2 = hibernated. Power state is derived from tier; the numeric
 // field is frozen.
-const V1_RUNNING_POOL_TARGET = 0;
+//
+// V1_RUNNING_POOL_TARGET is now canonical in ./lib/pool — imported above.
 
 // Count running members currently in the pool. Used to decide whether
 // the next bake should produce a running egg or a hibernated one, and
@@ -4186,20 +4126,8 @@ async function markPoolMemberLive(wellName: string): Promise<void> {
   });
 }
 
-// v1 pool target depth — kept small on purpose. Eggs go stale as the
-// system hardens, and a deep pool just means more stale eggs to reap.
-// Each egg is a hibernated VM (~1.5GB disk dehydrated). Birth tops the
-// pool back up by one on its way out (see cmdBirth) — no background
-// refiller. Must match DEFAULT_POOL_CONFIG's total depth.
-const V1_POOL_TARGET_DEPTH = 5;
-
-// Count open v1 members currently in the pool.
-async function countOpenPoolMembers(): Promise<number> {
-  const file = await loadPool();
-  return file.members.filter(
-    (e) => e.state === "open" && e.variant_signature === V1_POOL_VARIANT_SIGNATURE,
-  ).length;
-}
+// V1_POOL_TARGET_DEPTH and countOpenPoolMembers() are now canonical in
+// ./lib/pool — imported above.
 
 // Promote a hibernated egg to running. Faster than baking a fresh
 // running egg from scratch: just /wake the well and update its tier
@@ -4547,6 +4475,9 @@ async function cmdDestroyOne(name: string): Promise<boolean> {
   await evictChannelBindingsForCell(name);
   await deleteCellWorker(name);
   await removeVaultEntry(name);
+  // Drop the postwork status file so orphans don't accumulate across
+  // kill/birth cycles for cells reusing the same name.
+  await removePostwork(name);
 
   // If this was a hatched cell, the cell's well IS the egg's well.
   // It just got destroyed above, so the pool.json entry is now stale.
@@ -7125,19 +7056,6 @@ async function cmdPool(args: string[]) {
     console.log(`✓ egg '${wellName}' ${state} (${((Date.now() - t0) / 1000).toFixed(1)}s)`);
     return;
   }
-  if (sub === "refill-v1") {
-    // Bring the v1 pool up to the target depth. Idempotent: returns
-    // immediately if pool is already full. Logs each bake.
-    const current = await countOpenPoolMembers();
-    if (current >= V1_POOL_TARGET_DEPTH) {
-      console.log(`v1 pool at target depth (${current}/${V1_POOL_TARGET_DEPTH})`);
-      return;
-    }
-    console.log(`refilling v1 pool: ${current} → ${V1_POOL_TARGET_DEPTH}…`);
-    const baked = await refillPoolToDepth();
-    console.log(`✓ baked ${baked} egg(s); pool now at ${await countOpenPoolMembers()}/${V1_POOL_TARGET_DEPTH}`);
-    return;
-  }
   if (sub === "create" || sub === undefined) {
     await cmdPoolCreate(args.slice(1));
     return;
@@ -7250,74 +7168,16 @@ async function cmdPoolCull(eggId: string) {
   }
 }
 
-// ───── egg refill / drain — pool maintenance CLI ─────
+// ───── pool refill / drain — pool maintenance CLI ─────
 //
-// `cells pool refill` reads `~/.cells/pool-config.json` (or falls back to
-// the default variant matrix from docs/eggs-variants.md), counts open
-// eggs per variant, and serially bakes any short-stock variants up to
-// configured depth. Per `project_mother_concurrency.md`, mother
-// concurrency=1, so refills serialize naturally.
+// `cells pool refill` brings the pool back to V1_POOL_TARGET_DEPTH.
+// Idempotent: returns immediately if the pool is already full, logs each
+// bake otherwise. The V1 pool is uniform (one generic egg shape,
+// variant_signature "v1-generic"), so there is no variant fan-out — just
+// a single depth target.
 //
 // `cells pool drain` culls every open egg in the registry. Useful before
 // re-baking cell-base or before quitting wells. Idempotent.
-//
-// The variant matrix and rationale are in `docs/eggs-variants.md`.
-
-const POOL_CONFIG_PATH = join(homedir(), ".cells", "pool-config.json");
-const LEGACY_EGGS_CONFIG_PATH = join(homedir(), ".cells", "eggs-config.json");
-
-type PoolConfigRow = {
-  model: ModelKey;
-  extensions: string[];
-  packages: string[];
-  depth: number;
-};
-
-// Default pool config — used when ~/.cells/pool-config.json doesn't exist.
-// V1 pool is uniform (one generic egg shape), so it's a single row. Depth
-// 5: small on purpose — eggs go stale as the system hardens, and a deep
-// pool just means more stale eggs to reap. Birth tops the pool back up by
-// one on its way out (see cmdBirth), so steady state holds at 5 without a
-// background refiller.
-const DEFAULT_POOL_CONFIG: PoolConfigRow[] = [
-  { model: "gpt-5.5", extensions: [], packages: [], depth: 5 },
-];
-
-async function loadPoolConfig(): Promise<PoolConfigRow[]> {
-  // Prefer pool-config.json; fall back to legacy eggs-config.json with a
-  // one-time warning so Pete can rename his file.
-  let path = POOL_CONFIG_PATH;
-  if (!existsSync(path)) {
-    if (existsSync(LEGACY_EGGS_CONFIG_PATH)) {
-      console.warn(`! using legacy ${LEGACY_EGGS_CONFIG_PATH} — rename to pool-config.json`);
-      path = LEGACY_EGGS_CONFIG_PATH;
-    } else {
-      return DEFAULT_POOL_CONFIG;
-    }
-  }
-  try {
-    const raw = await readFile(path, "utf-8");
-    const parsed = JSON.parse(raw);
-    if (!Array.isArray(parsed)) {
-      console.warn(`! ${path} is not an array — using defaults`);
-      return DEFAULT_POOL_CONFIG;
-    }
-    return parsed as PoolConfigRow[];
-  } catch (e) {
-    console.warn(`! ${path} parse failed (${e}) — using defaults`);
-    return DEFAULT_POOL_CONFIG;
-  }
-}
-
-function configRowToVariant(row: PoolConfigRow): Variant {
-  return {
-    model: row.model,
-    thinking: "",
-    extensions: [...row.extensions].sort(),
-    packages: [...row.packages].sort(),
-    channels: [],
-  };
-}
 
 async function cmdPoolRefill() {
   // Lazy reconcile first: don't bake against stale state. Pass
@@ -7325,65 +7185,14 @@ async function cmdPoolRefill() {
   // bake pass runs.
   await reconcilePool({ silent: false, skipRefill: true }).catch(() => { /* don't fail refill on reconcile error */ });
 
-  const config = await loadPoolConfig();
-  if (config.length === 0) {
-    console.log("(pool-config.json has no rows — nothing to refill)");
+  const current = await countOpenPoolMembers();
+  if (current >= V1_POOL_TARGET_DEPTH) {
+    console.log(`pool at target depth (${current}/${V1_POOL_TARGET_DEPTH})`);
     return;
   }
-
-  // Count open pool members per pool key in a single load. Phase 3-future: also
-  // surface claimed/live for the operator's read.
-  const file = await loadPool();
-  const warmByKey = new Map<string, number>();
-  for (const e of file.members) {
-    if (e.state !== "open") continue;
-    warmByKey.set(e.variant_signature, (warmByKey.get(e.variant_signature) ?? 0) + 1);
-  }
-
-  // Build the work list before doing any bakes — surface what's about to
-  // happen so the operator can Ctrl-C if surprised.
-  type Need = { variant: Variant; need: number; have: number; key: string };
-  const needs: Need[] = [];
-  for (const row of config) {
-    const v = configRowToVariant(row);
-    const key = poolKey(v);
-    const have = warmByKey.get(key) ?? 0;
-    const need = Math.max(0, row.depth - have);
-    if (need > 0) needs.push({ variant: v, need, have, key });
-  }
-
-  if (needs.length === 0) {
-    console.log("✓ pool is at target depth — nothing to refill");
-    return;
-  }
-
-  const total = needs.reduce((s, n) => s + n.need, 0);
-  console.log(`refilling ${total} egg${total === 1 ? "" : "s"} across ${needs.length} variant${needs.length === 1 ? "" : "s"}:`);
-  for (const n of needs) {
-    console.log(`  ${n.key}  (have ${n.have}, need ${n.have + n.need})`);
-  }
-
-  // Bake serially. parseEggCreateArgs takes a string[]; reuse via the
-  // public CLI shape so config rows feed the same path as `cells egg`.
-  let baked = 0;
-  for (const n of needs) {
-    for (let i = 0; i < n.need; i++) {
-      const args = [
-        `--model=${n.variant.model}`,
-        `--extensions=${n.variant.extensions.join(",")}`,
-        `--packages=${n.variant.packages.join(",")}`,
-      ];
-      console.log(`\n[${++baked}/${total}] cells pool create ${args.join(" ")}`);
-      try {
-        await cmdPoolCreate(args);
-      } catch (e) {
-        console.error(`! egg-bake failed for ${n.key}: ${e}`);
-        console.error(`  continuing with remaining variants — re-run 'cells pool refill' to retry`);
-      }
-    }
-  }
-
-  console.log(`\n✓ refill complete — ${baked} egg${baked === 1 ? "" : "s"} baked`);
+  console.log(`refilling pool: ${current} → ${V1_POOL_TARGET_DEPTH}…`);
+  const baked = await refillPoolToDepth();
+  console.log(`✓ baked ${baked} egg(s); pool now at ${await countOpenPoolMembers()}/${V1_POOL_TARGET_DEPTH}`);
 }
 
 async function cmdPoolDrain(args: string[]) {
@@ -7786,22 +7595,6 @@ ln -sf /usr/bin/batcat ~/.local/bin/bat 2>/dev/null || true`;
   );
   if (!writeConf.ok) {
     throw new Error(`write tmux conf failed: ${writeConf.stderr}`);
-  }
-}
-
-async function pushLocalDirToWell(name: string, localPath: string, remotePath: string): Promise<void> {
-  const tar = Bun.spawn(["tar", "czf", "-", "-C", localPath, "."], {
-    stdio: ["ignore", "pipe", "pipe"],
-  });
-  const proc = Bun.spawn(
-    ["well", "exec", "-s", name, "--", "bash", "-c",
-      `mkdir -p ${remotePath} && cd ${remotePath} && tar xzf -`],
-    { stdin: tar.stdout, stdout: "pipe", stderr: "pipe" },
-  );
-  const code = await proc.exited;
-  if (code !== 0) {
-    const err = await new Response(proc.stderr).text();
-    throw new Error(`push ${localPath} → ${name}:${remotePath} failed: ${err.slice(0, 300)}`);
   }
 }
 

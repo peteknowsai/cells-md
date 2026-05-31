@@ -34,7 +34,9 @@ drain_pool() {
 }
 
 ensure_warm() {
-  bun run cells egg refill-v1 >/dev/null 2>&1
+  # `egg refill-v1` was collapsed onto `pool refill` (it now brings the
+  # pool to V1_POOL_TARGET_DEPTH via refillPoolToDepth). Use the live name.
+  bun run cells pool refill >/dev/null 2>&1
 }
 
 reset_perf() {

@@ -26,14 +26,8 @@
 //   eval   = focused, on-demand probe of one combo with assertions; loud
 //            on failure; meant to verify a specific change.
 
-import { readFile } from "node:fs/promises";
-import { homedir } from "node:os";
-import { join } from "node:path";
-import { existsSync } from "node:fs";
-
-const HOME = homedir();
-const REGISTRY_PATH = join(HOME, ".cells", "cells.json");
-const POOL_PATH     = join(HOME, ".cells", "pool.json");
+import { findCell } from "../cli/lib/registry";
+import { wellNameForCell } from "../cli/lib/resolve";
 
 const ALIVE_TIMEOUT_MS = 90_000;
 const ALIVE_POLL_MS    = 2_000;
@@ -207,26 +201,10 @@ const runCells = (args: string[], opts?: { timeoutMs?: number }) => runCmd(["cel
 
 // ───── reading state ─────
 
-type RegistryCell = { name: string; status?: "warming" | "alive"; hatched_from?: string | null };
-type Registry = { cells: RegistryCell[] };
-
-async function loadRegistry(): Promise<Registry> {
-  if (!existsSync(REGISTRY_PATH)) return { cells: [] };
-  try { return JSON.parse(await readFile(REGISTRY_PATH, "utf-8")); }
-  catch { return { cells: [] }; }
-}
-
-// The egg pool. Birth claims one warm member; on success the member flips
-// to `live` and carries the cell name. `id` is the stable handle the
-// registry's `hatched_from` points at.
-type PoolMember = { id: string; well_name: string; state: string; cell_name?: string | null };
-type PoolFile = { version: number; members: PoolMember[] };
-
-async function loadPool(): Promise<PoolFile> {
-  if (!existsSync(POOL_PATH)) return { version: 1, members: [] };
-  try { return JSON.parse(await readFile(POOL_PATH, "utf-8")); }
-  catch { return { version: 1, members: [] }; }
-}
+// Registry + pool reads and cell→well resolution come from the canonical
+// cli/lib modules (findCell, wellNameForCell) — the same code the live CLI
+// uses, so this eval exercises the real resolution path rather than a
+// drifting hand-rolled copy.
 
 // Does the well still exist? Queried through the `well` CLI, which
 // authenticates via ~/.wells/token. `well info` exits 0 even on a 404 —
@@ -248,22 +226,6 @@ async function wellExists(name: string): Promise<boolean> {
   }
 }
 
-async function findCell(name: string): Promise<RegistryCell | null> {
-  const reg = await loadRegistry();
-  return reg.cells.find((c) => c.name === name) ?? null;
-}
-
-// Resolve a cell to the well it actually runs on. Birth claims a generic
-// egg from the pool, so the well name is the egg's permanent well_name —
-// not the cell name. The registry's `hatched_from` points at the pool
-// member's `id`; fall back to the cell name if the pool entry is gone.
-async function wellForCell(name: string): Promise<string> {
-  const cell = await findCell(name);
-  if (!cell?.hatched_from) return name;
-  const pool = await loadPool();
-  const member = pool.members.find((m) => m.id === cell.hatched_from);
-  return member?.well_name ?? name;
-}
 
 // `well checkpoint list -s <name>` prints a human table; grep it for the
 // `born-<name>` marker the ritual's step 7 lays down. No JSON output flag
@@ -378,7 +340,7 @@ async function runIteration(iter: number, total: number, args: Args): Promise<It
   result.birthOk = true;
   process.stdout.write(`✓ (${(birth.durationMs / 1000).toFixed(0)}s) · `);
 
-  const well = await wellForCell(name);
+  const well = await wellNameForCell(name);
 
   // The ritual's step 7 checkpoints the configured cell as `born-<name>`.
   result.bornCheckpoint = await hasBornCheckpoint(well, name);
@@ -442,7 +404,9 @@ async function runIteration(iter: number, total: number, args: Args): Promise<It
     return result;
   }
   // Verify cleanup.
-  const stillRegistered = (await findCell(name)) !== null;
+  // lib findCell returns undefined (not null) when absent — `!= null`
+  // catches both, so a clean kill correctly reads as not-registered.
+  const stillRegistered = (await findCell(name)) != null;
   const stillWell = await wellExists(well);
   if (stillRegistered || stillWell) {
     result.failure = `kill left orphans: ${stillRegistered ? "registry" : ""}${stillRegistered && stillWell ? "+" : ""}${stillWell ? "well" : ""}`;
