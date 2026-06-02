@@ -158,17 +158,8 @@ tar czf - -C "$REPO_ROOT/dna/cells/base" . \
     echo "fi"
     echo "command -v hermes >/dev/null 2>&1 || { echo 'hermes binary still missing after install'; exit 1; }"
     # The DNA overlay above landed a fresh /root/.hermes/config.yaml — still
-    # carrying its __MODEL__/__PROVIDER__/__API_MODE__/__THINKING__ placeholders.
-    # Pick the provider + api_mode from the model: Anthropic models (opus) run on
-    # the Max sub via the cells-anthropic provider (proxy.cells.md/anthropic.com);
-    # everything else (gpt-5.5) runs on the ChatGPT sub via the cells provider
-    # (proxy.cells.md/codex). Both ride CELLS_PROXY_SECRET — no metered key.
-    if [ "$PROVIDER" = "anthropic" ]; then
-      HERMES_PROVIDER="cells-anthropic"; HERMES_API_MODE="anthropic_messages"
-    else
-      HERMES_PROVIDER="cells"; HERMES_API_MODE="codex_responses"
-    fi
-    echo "sudo sed -i \"s/__MODEL__/$MODEL/g; s/__THINKING__/$THINKING/g; s|__PROVIDER__|$HERMES_PROVIDER|g; s|__API_MODE__|$HERMES_API_MODE|g\" /root/.hermes/config.yaml"
+    # carrying its __MODEL__/__THINKING__ placeholders. Substitute them now.
+    echo "sudo sed -i \"s/__MODEL__/$MODEL/g; s/__THINKING__/$THINKING/g\" /root/.hermes/config.yaml"
     echo "! grep -q __ /root/.hermes/config.yaml"
     # hermes loads its persona from \$HERMES_HOME/SOUL.md (= /root/.hermes/SOUL.md);
     # the cell's SOUL.md lives at /root/SOUL.md. Symlink so hermes finds it and

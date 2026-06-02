@@ -111,11 +111,9 @@ type ModelKey = keyof typeof MODEL_IDS;
 //
 // Two-subscription pattern, no per-token leaf:
 //   - claude-code on anthropic → opus → gpt-5.5:high
-//   - pi/hermes on anthropic → opus ONLY, no fallback (Pete, 2026-06-02): a
-//     gpt-5.5 rung would mask opus-on-Max flaking, and opus-on-Max is exactly
-//     what we want to watch for reliability — surface failures, don't hide them.
-//     (hermes ignores the chain at runtime anyway — single model.default — but
-//     we keep its registry chain honest.)
+//   - pi on anthropic → opus ONLY, no fallback (Pete, 2026-06-02): a gpt-5.5
+//     rung would mask opus-on-Max flaking, and pi-on-Max is exactly what we
+//     want to watch for reliability — surface failures, don't hide them.
 //   - openai-codex primary → gpt-5.5 (no fallback — already the cheap leaf)
 //
 // If both subscriptions degrade simultaneously (observed 2026-05-06), the
@@ -127,7 +125,7 @@ function buildDefaultChain(
   harness: string,
 ): string[] {
   const head = `${primary.provider}/${primary.modelId}:${primary.thinking}`;
-  if (primary.provider === "anthropic" && harness === "claude-code") {
+  if (primary.provider === "anthropic" && harness !== "pi") {
     return [head, "openai-codex/gpt-5.5:high"];
   }
   return [head];
@@ -173,7 +171,7 @@ const HARNESS_OPTIONS: SelectOption[] = [
   { value: "pi",          label: "pi" },
   { value: "claude-code", label: "claude-code", hint: "(Anthropic models via Max)" },
   { value: "codex",       label: "codex",       hint: "(OpenAI models via ChatGPT sub)" },
-  { value: "hermes",      label: "hermes",      hint: "(Nous Research agent · opus on Max or GPT-5.5 on ChatGPT)" },
+  { value: "hermes",      label: "hermes",      hint: "(Nous Research agent · GPT-5.5 via ChatGPT sub)" },
 ];
 
 const MODEL_OPTIONS: SelectOption[] = [
@@ -261,17 +259,8 @@ function modelOptionsForHarness(harness: string): SelectOption[] {
   if (harness === "claude-code") {
     return [{ value: "opus", label: "opus", hint: "(Anthropic · via Max sub)" }];
   }
-  if (harness === "codex") {
+  if (harness === "codex" || harness === "hermes") {
     return [{ value: "gpt-5.5", label: "gpt-5.5", hint: "(OpenAI · via ChatGPT sub)" }];
-  }
-  if (harness === "hermes") {
-    // hermes runs on either subscription: opus on Claude Max (via
-    // proxy.cells.md/anthropic.com, OAuth) or gpt-5.5 on ChatGPT (via
-    // proxy.cells.md/codex). Both flat-cost; neither uses a metered key.
-    return [
-      { value: "opus", label: "opus", hint: "(Anthropic · via Max sub)" },
-      { value: "gpt-5.5", label: "gpt-5.5", hint: "(OpenAI · via ChatGPT sub)" },
-    ];
   }
   return MODEL_OPTIONS;
 }
@@ -279,10 +268,7 @@ function modelOptionsForHarness(harness: string): SelectOption[] {
 function defaultThinkingForHarness(harness: string, modelKey: ModelKey): string {
   if (harness === "claude-code") return "high";
   if (harness === "codex") return "medium";
-  // hermes uses its own reasoning_effort scale (low/medium/high/xhigh) for both
-  // models, but opus on Max only thinks at high+ (sub-high maps to off), so
-  // default opus to high — gpt-5.5 keeps medium.
-  if (harness === "hermes") return modelKey === "opus" ? "high" : "medium";
+  if (harness === "hermes") return "medium";
   return defaultThinkingFor(modelKey);
 }
 
@@ -2415,14 +2401,11 @@ async function cmdCreate(name: string | undefined, opts: CreateOpts): Promise<vo
     console.error(`the codex harness runs the ChatGPT-subscription model only — use --model=gpt-5.5`);
     process.exit(1);
   }
-  if (harness === "hermes" && MODEL_IDS[modelKey].provider !== "openai-codex" && modelKey !== "opus") {
-    // hermes runs Nous Research's hermes-agent on a subscription, never the
-    // metered API: gpt-5.5 on the ChatGPT sub (proxy.cells.md/codex) or opus on
-    // Claude Max (proxy.cells.md/anthropic.com, OAuth — same Max path pi uses).
-    // Anthropic Max is opus-only here (mirrors claude-code's opus pin and the
-    // hermes picker) — so sonnet/haiku/gpt-5.5-pro are all rejected, matching
-    // the two options the interactive picker offers.
-    console.error(`the hermes harness runs subscription models only — use --model=gpt-5.5 (ChatGPT) or --model=opus (Max)`);
+  if (harness === "hermes" && MODEL_IDS[modelKey].provider !== "openai-codex") {
+    // The hermes harness runs Nous Research's hermes-agent on the ChatGPT
+    // subscription (via proxy.cells.md/codex) — the same subscription path
+    // codex uses. Only the openai-codex provider is that path.
+    console.error(`the hermes harness runs the ChatGPT-subscription model only — use --model=gpt-5.5`);
     process.exit(1);
   }
   // pi + Anthropic runs on Pete's Claude Max sub via the subscriptions proxy,
