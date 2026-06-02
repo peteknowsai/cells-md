@@ -110,16 +110,22 @@ type ModelKey = keyof typeof MODEL_IDS;
 // parseModelPattern resolves it.
 //
 // Two-subscription pattern, no per-token leaf:
-//   - anthropic primary → opus → gpt-5.5:high
+//   - claude-code on anthropic → opus → gpt-5.5:high
+//   - pi on anthropic → opus ONLY, no fallback (Pete, 2026-06-02): a gpt-5.5
+//     rung would mask opus-on-Max flaking, and pi-on-Max is exactly what we
+//     want to watch for reliability — surface failures, don't hide them.
 //   - openai-codex primary → gpt-5.5 (no fallback — already the cheap leaf)
 //
 // If both subscriptions degrade simultaneously (observed 2026-05-06), the
 // fleet pauses until one recovers. Deepseek was the API-billed third tier
 // for exactly this scenario; dropped 2026-05-19 to stop the per-token bill.
 // Add a leaf back if dual-degradation starts costing us real downtime.
-function buildDefaultChain(primary: { provider: string; modelId: string; thinking: string }): string[] {
+function buildDefaultChain(
+  primary: { provider: string; modelId: string; thinking: string },
+  harness: string,
+): string[] {
   const head = `${primary.provider}/${primary.modelId}:${primary.thinking}`;
-  if (primary.provider === "anthropic") {
+  if (primary.provider === "anthropic" && harness !== "pi") {
     return [head, "openai-codex/gpt-5.5:high"];
   }
   return [head];
@@ -169,11 +175,11 @@ const HARNESS_OPTIONS: SelectOption[] = [
 ];
 
 const MODEL_OPTIONS: SelectOption[] = [
-  { value: "opus",              label: "opus" },
-  { value: "sonnet",            label: "sonnet" },
-  { value: "haiku",             label: "haiku" },
-  { value: "gpt-5.5",           label: "gpt-5.5         (sub · ChatGPT Plus)" },
-  { value: "gpt-5.5-pro",       label: "gpt-5.5-pro     (api · paid)" },
+  { value: "opus",        label: "opus",        hint: "(Anthropic · via Max sub)" },
+  { value: "sonnet",      label: "sonnet",      hint: "(Anthropic · via Max sub)" },
+  { value: "haiku",       label: "haiku",       hint: "(Anthropic · via Max sub)" },
+  { value: "gpt-5.5",     label: "gpt-5.5",     hint: "(sub · ChatGPT Plus)" },
+  { value: "gpt-5.5-pro", label: "gpt-5.5-pro", hint: "(api · paid)" },
 ];
 
 // Pi thinking levels — `xhigh` only takes effect on a few codex-max models;
@@ -2402,17 +2408,14 @@ async function cmdCreate(name: string | undefined, opts: CreateOpts): Promise<vo
     console.error(`the hermes harness runs the ChatGPT-subscription model only — use --model=gpt-5.5`);
     process.exit(1);
   }
-  if (harness === "pi" && isAnthropicModel) {
-    // pi cells reach Anthropic via a paid ANTHROPIC_API_KEY, direct — not
-    // the Max sub (pi-via-Max is fingerprint-blocked). Require the key.
-    if (!(await readSecret("ANTHROPIC_API_KEY"))) {
-      console.error(
-        `pi cells on Anthropic models need ANTHROPIC_API_KEY in ~/.cells/secrets.json\n` +
-        `  (claude-code is the Max-subscription harness; pi uses a direct paid key)`,
-      );
-      process.exit(1);
-    }
-  }
+  // pi + Anthropic runs on Pete's Claude Max sub via the subscriptions proxy,
+  // exactly like claude-code: the cell's bearer is the sk-ant-oat-prefixed
+  // CELLS_PROXY_SECRET, so pi-ai takes its OAuth path and prepends the
+  // "You are Claude Code…" preamble Anthropic's OAuth gate requires; the proxy
+  // then swaps in the real Max token. No paid ANTHROPIC_API_KEY, no
+  // .anthropic-direct flag. (The old "pi-via-Max is fingerprint-blocked" belief
+  // was opus capacity weather — intermittent empty-stream 200s — which the
+  // [opus → gpt-5.5] chain absorbs. Verified end-to-end 2026-06-02.)
   // Harness-aware thinking validation. The interactive Ink picker already
   // restricts choices via thinkingOptionsForHarness; this catches the
   // non-interactive `--thinking=X` path that bypassed the picker. Skip
@@ -2445,7 +2448,7 @@ async function cmdCreate(name: string | undefined, opts: CreateOpts): Promise<vo
 
   // ── 3. Build the config blob handed to mother ──
   const choice = MODEL_IDS[modelKey];
-  const chain = buildDefaultChain({ provider: choice.provider, modelId: choice.modelId, thinking });
+  const chain = buildDefaultChain({ provider: choice.provider, modelId: choice.modelId, thinking }, harness);
   const blob = {
     harness,
     model: choice.modelId,
@@ -2479,9 +2482,10 @@ async function cmdCreate(name: string | undefined, opts: CreateOpts): Promise<vo
       // to host" on the freshly-allocated IP. Bake-validate uses the
       // same helper so the symmetry is intentional.
       await waitForSshReady(c.wellName);
-      if (harness === "claude-code" || harness === "codex" || harness === "hermes") {
-        await stripAnthropicKeyFromWell(c.wellName);
-      }
+      // No harness uses a direct paid Anthropic key anymore — claude-code and
+      // pi both reach Anthropic through proxy.cells.md (Max sub); codex/hermes
+      // run the ChatGPT sub. Strip the latent key off every cell.
+      await stripAnthropicKeyFromWell(c.wellName);
       return c;
     } catch (e) {
       console.error(
@@ -2938,8 +2942,14 @@ function generatePoolWellName(): string {
 async function collectCellLlmEnv(): Promise<Record<string, string>> {
   const env: Record<string, string> = {};
   const keys = [
-    "CELLS_PROXY_SECRET",   // openai-codex (gpt-5.5 via proxy.cells.md/codex); claude-code's ANTHROPIC_AUTH_TOKEN
-    "ANTHROPIC_API_KEY",    // pi cells on anthropic models — direct api.anthropic.com (paid key, not the Max sub)
+    "CELLS_PROXY_SECRET",   // the cell's bearer for everything on the subs proxy:
+                            // anthropic-on-Max (pi + claude-code, via ANTHROPIC_OAUTH_TOKEN)
+                            // and openai-codex/gpt-5.5 (via proxy.cells.md/codex)
+    // ANTHROPIC_API_KEY deliberately NOT baked: no harness uses a direct paid
+    // Anthropic key anymore (pi + claude-code both ride the Max sub via the
+    // proxy). Leaving it out keeps the paid credential off every pool egg for
+    // its whole lifetime; stripAnthropicKeyFromWell is the belt-and-suspenders
+    // sweep for any older egg that still carries it.
     "OPENAI_API_KEY",       // openai/* non-codex (direct)
     "GEMINI_API_KEY",       // google/gemini-* (direct)
     "EXA_API_KEY",          // web_search tool
@@ -3854,9 +3864,9 @@ async function ensureWellHasIp(wellName: string): Promise<void> {
 // only through proxy.cells.md and never touch the paid Anthropic key.
 // Left baked in, it's a latent secret on a coding-agent VM with no
 // legitimate use for it — readable by every process, not just login
-// shells (the env shim's `unset` only covers login shells). Run at birth,
-// once the harness is known. pi cells keep it: a pi cell may run a
-// direct-API anthropic model from its chain.
+// shells (the env shim's `unset` only covers login shells). Run at birth
+// for every harness: pi + anthropic now rides the Max sub via the proxy
+// too (same as claude-code), so no cell has a use for the paid key.
 async function stripAnthropicKeyFromWell(wellName: string): Promise<void> {
   const r = await wellExecCapture(
     wellName,

@@ -24,7 +24,22 @@ case "$HARNESS" in
     # because pi itself runs unprivileged. Use sudo + the exact command pi
     # suggested. The package name was renamed @mariozechner → @earendil-works.
     echo "updating pi on $EGG_WELL ..."
-    well exec -s "$EGG_WELL" -- bash -lc "sudo bash -c 'npm --prefix /usr uninstall -g @mariozechner/pi-coding-agent 2>/dev/null; npm --prefix /usr install -g @earendil-works/pi-coding-agent' 2>&1 | tail -10"
+    # set -o pipefail in the REMOTE shell so a failed npm install isn't masked
+    # by the `| tail` exit status (the outer script's pipefail doesn't reach
+    # inside `bash -lc`). A masked failure would let postwork report OK with pi
+    # missing or stale.
+    well exec -s "$EGG_WELL" -- bash -lc "set -o pipefail; sudo bash -c 'npm --prefix /usr uninstall -g @mariozechner/pi-coding-agent 2>/dev/null; npm --prefix /usr install -g @earendil-works/pi-coding-agent' 2>&1 | tail -10"
+    # The reinstall lands a PRISTINE pi-ai — the proxy baseUrl, fallback-chain,
+    # codex, and adaptive-thinking patches are gone. Reapply them or an
+    # Anthropic-on-Max cell silently reverts to direct api.anthropic.com (and,
+    # with the paid key now stripped, breaks). apply-pi-patches.sh searches
+    # both npm scopes, so it finds the freshly-installed @earendil-works copy.
+    echo "re-applying pi patches on $EGG_WELL ..."
+    # set -o pipefail so a failed re-patch propagates instead of being masked
+    # by `| tail` — otherwise postwork reports OK while the freshly installed
+    # @earendil-works pi stays pristine (direct api.anthropic.com), breaking an
+    # Anthropic-on-Max cell after a green smoke test. (codex review, round 2.)
+    well exec -s "$EGG_WELL" -- bash -lc "set -o pipefail; sudo bash /root/scripts/apply-pi-patches.sh 2>&1 | tail -5"
     ;;
   claude-code)
     echo "updating claude-code on $EGG_WELL ..."

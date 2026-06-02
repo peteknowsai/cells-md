@@ -110,11 +110,11 @@ tar czf - -C "$REPO_ROOT/dna/cells/base" . \
     echo "PI_SETTINGS_EOF"
     echo "jq . /root/.pi/settings.json > /dev/null"
 
-    # Anthropic-direct flag for paid pi cells on Anthropic.
-    if [ "$PROVIDER" = "anthropic" ]; then
-      echo "sudo touch /root/.anthropic-direct"
-      echo "sudo bash /root/scripts/apply-pi-patches.sh"
-    fi
+    # pi + Anthropic runs on the Max sub via proxy.cells.md (the egg's pi-ai
+    # already has its Anthropic baseUrl swapped to the proxy by the
+    # apply-pi-patches.sh postinstall hook). No /root/.anthropic-direct flag:
+    # that flag would restore the direct api.anthropic.com baseUrl, which only
+    # works with a paid key — the opposite of what we want.
   elif [ "$HARNESS" = "claude-code" ]; then
     echo "# ===claude settings ==="
     echo "sudo sed -i \"s/__MODEL__/$MODEL/g; s/__THINKING__/$THINKING/g; s/__NAME__/$NAME/g\" /root/.claude/settings.json"

@@ -32,11 +32,20 @@ fi
 # is the project root), the user's global bun cache, AND the system npm
 # global install paths (where wells's ubuntu-25.10-base ships pi as of
 # 2026-05-09 — pi pre-installed via `npm install -g`, not bun -g).
+# Both npm scopes: eggs bake @mariozechner/pi-coding-agent; the post-birth
+# harness update (scripts/update-cell-harness.sh) swaps it for the renamed
+# upstream @earendil-works/pi-coding-agent. Patches must apply to whichever
+# scope is present, or the proxy baseUrl + fallback patches silently vanish
+# after the update (a freshly-installed package is pristine).
 SEARCH_ROOTS=(
   "./node_modules/@mariozechner"
   "$HOME/.bun/install/global/node_modules/@mariozechner"
   "/usr/lib/node_modules/@mariozechner"
   "/usr/local/lib/node_modules/@mariozechner"
+  "./node_modules/@earendil-works"
+  "$HOME/.bun/install/global/node_modules/@earendil-works"
+  "/usr/lib/node_modules/@earendil-works"
+  "/usr/local/lib/node_modules/@earendil-works"
 )
 
 patched_url=0
@@ -46,33 +55,19 @@ patched_levels=0
 patched_footer=0
 patched_fallback=0
 
-# 1. Anthropic baseUrl. Default: swap api.anthropic.com → proxy.cells.md so
-# the cell reaches Anthropic via Pete's subscriptions proxy (Claude Max sub,
-# home-IP egress). Exception: if /root/.anthropic-direct exists, this cell
-# runs Anthropic models on a direct ANTHROPIC_API_KEY — restore the pristine
-# api.anthropic.com baseUrl so pi-ai talks to Anthropic directly, no proxy
-# hop (pi-via-Max is fingerprint-blocked; a paid key is clean). The birthing
-# ritual drops that flag for pi cells on anthropic models. The .bak is the
-# pristine pre-patch file, so restoring from it is the clean revert.
-# Bidirectionally idempotent — safe on every bun install.
-ANTHROPIC_DIRECT=0
-[ -f /root/.anthropic-direct ] && ANTHROPIC_DIRECT=1
+# 1. Anthropic baseUrl → proxy.cells.md, UNCONDITIONALLY. Every anthropic cell
+# (pi and claude-code) reaches Anthropic via Pete's subscriptions proxy on the
+# Claude Max sub (home-IP egress): the proxy bearer is the sk-ant-oat-prefixed
+# CELLS_PROXY_SECRET, so pi-ai prepends the Claude Code preamble the OAuth gate
+# requires and the request bills to Max (verified end-to-end 2026-06-02).
+# There is no direct paid-key path — Pete never pays for metered Anthropic, so
+# the old /root/.anthropic-direct escape hatch is gone. Idempotent.
 for F in $(find "${SEARCH_ROOTS[@]}" -name models.generated.js 2>/dev/null); do
-  if [ "$ANTHROPIC_DIRECT" = "1" ]; then
-    # direct mode: ensure api.anthropic.com — restore from the pristine .bak
-    # if the file has been proxy-swapped (idempotent: skip if already direct)
-    if ! grep -q 'api\.anthropic\.com' "$F" && [ -f "$F.bak" ]; then
-      cp "$F.bak" "$F"
-      patched_url=$((patched_url+1))
-    fi
-  else
-    # proxy mode (default): swap api.anthropic.com / mother.cells.md → proxy
-    if grep -qE 'api\.anthropic\.com|mother\.cells\.md' "$F"; then
-      [ -f "$F.bak" ] || cp "$F" "$F.bak"
-      "${SED_INPLACE[@]}" -e 's|https://api.anthropic.com|https://proxy.cells.md|g' \
-                          -e 's|https://mother.cells.md|https://proxy.cells.md|g' "$F"
-      patched_url=$((patched_url+1))
-    fi
+  if grep -qE 'api\.anthropic\.com|mother\.cells\.md' "$F"; then
+    [ -f "$F.bak" ] || cp "$F" "$F.bak"
+    "${SED_INPLACE[@]}" -e 's|https://api.anthropic.com|https://proxy.cells.md|g' \
+                        -e 's|https://mother.cells.md|https://proxy.cells.md|g' "$F"
+    patched_url=$((patched_url+1))
   fi
 done
 
@@ -249,10 +244,22 @@ inject = '''            // === cells model fallback chain ===
             // === end cells model fallback chain ===
 '''
 new = 'if (this._retryAttempt > settings.maxRetries) {\n' + inject + '            // Max retries exceeded, emit final failure and reset'
-if needle not in src:
-    sys.exit("fallback patch: needle not found in " + path)
-if src.count(needle) > 1:
-    sys.exit("fallback patch: needle ambiguous in " + path)
+if needle not in src or src.count(needle) > 1:
+    # The needle is the @mariozechner retry layout. The renamed upstream
+    # @earendil-works refactored the retry path (_handleRetryableError →
+    # _prepareRetry, with a caller-driven `if (await _prepareRetry()) continue`),
+    # so this needle no longer matches and the gpt-5.5 auto-fallback rung is
+    # NOT wired on @earendil cells. Treat that as a loud WARNING, not a fatal
+    # error: the proxy baseUrl patch above is what makes Anthropic-on-Max work
+    # and it succeeds; only the secondary fallback rung is missing. Failing
+    # here would block every opus-on-Max birth over a version-stale patch.
+    # TODO: rewrite the chain-advance injection for @earendil's _prepareRetry
+    # (return true after setModel so the caller continues on the next model)
+    # and verify it against induced opus terminations.
+    print("WARN fallback patch SKIPPED: needle stale for this pi build (" + path +
+          ") — gpt-5.5 auto-fallback NOT wired; opus-on-Max still works.",
+          file=sys.stderr)
+    raise SystemExit(0)
 open(path, 'w').write(src.replace(needle, new, 1))
 PY
   patched_fallback=$((patched_fallback+1))
