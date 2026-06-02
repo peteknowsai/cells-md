@@ -7,6 +7,9 @@ state/
 node_modules/
 dist/
 build/
+# Python bytecode (e.g. hermes model-provider plugin compile artifacts)
+__pycache__/
+*.pyc
 .pi/.cache/
 .pi/npm/
 # only the top-level memory dir (cell-keeper's data) — NOT the memory extension code under template/.pi/

@@ -1,0 +1,5 @@
+name: cells-anthropic-provider
+kind: model-provider
+version: 1.0.0
+description: cells proxy — Claude (opus) on the Claude Max subscription via proxy.cells.md
+author: cells

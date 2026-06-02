@@ -1,24 +1,32 @@
-# hermes harness config — __MODEL__ / __THINKING__ substituted at birth
-# (birthing ritual, hermes branch).
+# hermes harness config — __MODEL__ / __PROVIDER__ / __API_MODE__ / __THINKING__
+# substituted at bake time (scripts/bake-egg.sh, hermes branch).
 #
-# `provider: cells` resolves to the cells proxy provider registered by the
-# plugin at .hermes/plugins/model-providers/cells/ — a codex_responses
-# (OpenAI Responses API) provider pointed at proxy.cells.md/codex. The proxy
-# swaps the cell's OPENAI_CODEX_API_KEY bearer (= CELLS_PROXY_SECRET) for the
-# real ChatGPT-subscription token, so a hermes cell runs on the subscription,
-# never the metered API.
+# Two subscription-backed paths, selected by the chosen model:
 #
-# `api_mode: codex_responses` is load-bearing: hermes's runtime provider
-# resolution re-derives api_mode from the provider name + base URL and does
-# NOT consult the registered ProviderProfile's api_mode. Without this line
-# `cells` falls through to the chat_completions default — the codex backend
-# has no /chat/completions surface, so every turn 403s. The runtime honours
-# an explicit model.api_mode only when model.provider matches, hence both
-# keys.
+#   gpt-5.5 → provider `cells`, api_mode `codex_responses`
+#     The cells proxy provider (.hermes/plugins/model-providers/cells/) — a
+#     codex_responses (OpenAI Responses API) provider pointed at
+#     proxy.cells.md/codex. The proxy swaps the cell's OPENAI_CODEX_API_KEY
+#     bearer (= CELLS_PROXY_SECRET) for the real ChatGPT-subscription token.
+#
+#   opus → provider `cells-anthropic`, api_mode `anthropic_messages`
+#     The cells-anthropic provider (.hermes/plugins/model-providers/cells-anthropic/)
+#     pointed at proxy.cells.md/anthropic.com. hermes takes its Claude-Code OAuth
+#     path (preamble + claude-cli UA + oauth betas) because the base_url contains
+#     "anthropic.com"; the proxy swaps CELLS_PROXY_SECRET for the real Claude Max
+#     OAuth token. No paid Anthropic key on the cell.
+#
+# `api_mode` is load-bearing: hermes's runtime provider resolution re-derives
+# api_mode from the provider name + base URL and does NOT consult the registered
+# ProviderProfile's api_mode. Neither proxy.cells.md/codex nor
+# proxy.cells.md/anthropic.com auto-detects, so without this line the provider
+# falls through to the chat_completions default — which neither backend serves,
+# so every turn would error. The runtime honours an explicit model.api_mode only
+# when model.provider matches the runtime provider, hence both keys.
 model:
   default: __MODEL__
-  provider: cells
-  api_mode: codex_responses
+  provider: __PROVIDER__
+  api_mode: __API_MODE__
 
 agent:
   # Reasoning effort — low | medium | high | xhigh.
