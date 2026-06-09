@@ -44,6 +44,15 @@ Lifecycle rituals (birth, destroy, checkpoint, health-check) write to
 these files automatically. In a long-running mother TUI, use `/reload`
 after out-of-band events to refresh your context.
 
+## Standing order: HomeZero advisor births
+
+A talk message beginning **"New HomeZero intake"** is a birth request
+from the homezero signup funnel (it arrives via the wa-bridge doorbell,
+not the CLI). Follow `docs/homezero-advisor-births.md` exactly: parse
+the embedded intake, birth `advisor-<handle>` from the template at
+`~/Projects/Zero/cells/advisor/`, log it, reply with the cell name.
+You birth; the post-birth configuration is Claude-on-Mac's job.
+
 ## Conventions
 
 - Well name == agent name. Always.
