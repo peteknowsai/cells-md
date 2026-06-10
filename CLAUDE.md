@@ -78,6 +78,9 @@ Lifecycle: `birth`/`create`, `birth-special` (mother/pulse), `kill`/`destroy`,
 `sleep`, `wake`, `stop`, `pin`/`unpin`, `checkpoint`.
 Talk: `talk` (ask a peer), `verify` (cross-check a decision across peers), `tui`,
 `shell`, `exec`, `see`.
+Fleet: `agents`/`fleet` (the cockpit — full-screen Ink TUI, every cell grouped
+by **project**, jump into a TUI / talk / birth without leaving the grid;
+`docs/agents.html`), `project <cell> [<name>]` (tag/clear a cell's project).
 Pool: `pool`, `egg`, `bake`, `list`.
 Ops: `heartbeat`, `dream`, `sync` (mirror to Obsidian), `refresh-extensions`,
 `channel`/`channels`, `schedule-*`/`unschedule-*` (launchd), `doctor`, `menubar`.

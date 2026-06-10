@@ -2214,6 +2214,7 @@ type CreateOpts = {
   seed?: string;        // first message auto-sent post-birth (default: introduce-yourself)
   seedOff?: boolean;    // true if --seed=off — no seed greeting
   noPool?: boolean;     // deprecated no-op — birth is pool-only now (parsed for back-compat)
+  project?: string;     // fleet-grouping label recorded in the registry (see `cells agents`)
 };
 
 // Default seed: the cell greets the user back in one sentence + offers help.
@@ -2306,6 +2307,8 @@ function parseCreateArgs(args: string[]): { name: string | undefined; opts: Crea
       }
     } else if (a === "--no-pool") {
       opts.noPool = true;
+    } else if (a.startsWith("--project=")) {
+      opts.project = a.slice("--project=".length).trim();
     } else if (a.startsWith("--")) {
       console.error(`unknown flag: ${a}`);
       process.exit(1);
@@ -2730,6 +2733,7 @@ async function cmdCreate(name: string | undefined, opts: CreateOpts): Promise<vo
     hatched_from: claim.id,
     modelChain: chain,
     harness,
+    ...(opts.project ? { project: opts.project } : {}),
   });
   await saveRegistry(reg);
 
@@ -7872,6 +7876,85 @@ sudo chmod 644 /etc/profile.d/cells-env.sh
   }
 }
 
+// `cells agents` (alias `cells fleet`) — the fleet cockpit. A launcher loop
+// around the Ink view in agents-ui.tsx: render every cell grouped by project,
+// and when the operator picks an action that takes over the terminal (attach
+// to a cell's TUI, talk to it, birth a new one) unmount the view, run the
+// action with inherited stdio, then re-render. Regroup + retag happen inside
+// the view with no round-trip. This is the cells analog of `claude agents`.
+async function cmdAgents(args: string[]): Promise<void> {
+  let grouping: "project" | "state" = "project";
+  let projectFilter: string | null = null;
+  for (const a of args) {
+    if (a === "--by=state" || a === "--state") grouping = "state";
+    else if (a === "--by=project") grouping = "project";
+    else if (a.startsWith("--project=")) projectFilter = a.slice("--project=".length).trim() || null;
+  }
+
+  // Non-interactive (piped / no TTY): print a one-shot grouped snapshot.
+  // The cockpit needs a keyboard, so stdin must be a TTY too — Ink's
+  // useInput sets raw mode on stdin and throws otherwise.
+  if (!process.stdout.isTTY || !process.stdin.isTTY) {
+    const { loadFleet, groupFleet, formatAge } = await import("./lib/fleet");
+    const snap = await loadFleet();
+    const cells = snap.cells.filter((c) => !projectFilter || c.project === projectFilter);
+    if (!snap.welldReachable) console.log("(welld offline — power shown as unknown)");
+    for (const g of groupFleet(cells, grouping)) {
+      console.log(`\n${g.label}`);
+      for (const c of g.cells) {
+        console.log(`  ${c.power.padEnd(7)} ${c.name.padEnd(20)} ${c.harness}·${c.model}  ${formatAge(c.ageMinutes)}`);
+      }
+    }
+    return;
+  }
+
+  const { runAgentsView } = await import("./agents-ui.tsx");
+  let selectName: string | null = null;
+  for (;;) {
+    const res = await runAgentsView({ initialGrouping: grouping, projectFilter, selectName });
+    grouping = res.grouping;
+    selectName = res.selectName;
+    const action = res.action;
+    if (action.type === "quit") break;
+    process.stdout.write("\x1b[2J\x1b[3J\x1b[H"); // clean handoff to the child
+    if (action.type === "attach") {
+      await cmdTui(action.name);
+    } else if (action.type === "talk") {
+      await cmdTalk(action.name, []);
+    } else if (action.type === "birth") {
+      await cmdCreate(action.name, action.project ? { project: action.project } : {});
+      selectName = action.name ?? selectName;
+    }
+  }
+}
+
+// `cells project <cell> [<project>]` — set or clear a cell's fleet-grouping
+// project label in the registry. Omitting <project> (or "none") clears it.
+// Pure Mac-side metadata — never wakes the cell.
+async function cmdProject(args: string[]): Promise<void> {
+  const name = args[0];
+  if (!name) {
+    console.error("usage: cells project <cell> [<project>]   (omit project to clear)");
+    process.exit(1);
+  }
+  const project = args.slice(1).join(" ").trim();
+  const reg = await loadRegistry();
+  const cell = reg.cells.find((c) => c.name === name);
+  if (!cell) {
+    console.error(`cell '${name}' not found in registry`);
+    process.exit(1);
+  }
+  if (!project || project.toLowerCase() === "none") {
+    delete cell.project;
+    await saveRegistry(reg);
+    console.log(`cleared ${name}'s project`);
+  } else {
+    cell.project = project;
+    await saveRegistry(reg);
+    console.log(`${name} → project '${project}'`);
+  }
+}
+
 const [sub, ...rest] = process.argv.slice(2);
 
 switch (sub) {
@@ -7890,6 +7973,9 @@ switch (sub) {
   }
   case "verify":     await cmdVerify(rest); break;
   case "list":       await cmdList(); break;
+  case "agents":
+  case "fleet":      await cmdAgents(rest); break;
+  case "project":    await cmdProject(rest); break;
   case "sleep":      await cmdSleep(needName(rest, "sleep")); break;
   case "stop":       await cmdStop(needName(rest, "stop")); break;
   case "wake":       await cmdWake(needName(rest, "wake")); break;

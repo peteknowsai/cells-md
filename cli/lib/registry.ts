@@ -35,6 +35,12 @@ export type Cell = {
   // Mirrors welld's auto_sleep_seconds=null state. Source of truth is welld;
   // this is a hint for `cells ls` / `cells doctor`.
   pinned?: boolean;
+  // Free-form project label used to group the fleet in `cells agents`. The
+  // Mac-side fleet index owns this (not the cell's in-VM IDENTITY.md) so the
+  // cockpit can group / retag without waking a hibernated cell. Set at birth
+  // with `--project`, changed later with `cells project <name> <project>` or
+  // the in-view `r` retag. Absent → grouped under "unassigned".
+  project?: string;
 };
 
 export type Registry = { cells: Cell[] };

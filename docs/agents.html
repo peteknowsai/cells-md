@@ -1,0 +1,120 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>cells agents — the fleet cockpit</title>
+<link rel="stylesheet" href="_assets/doc.css">
+</head>
+<body>
+<div class="page">
+
+  <div class="doc-header">
+    <div class="crumb">cells <span class="sep">/</span> agents</div>
+    <div>2026-06-02</div>
+  </div>
+
+  <h1>cells agents — the fleet cockpit</h1>
+  <p class="subtitle">One screen for the whole fleet: every cell, grouped by <strong>project</strong>, with live awake/asleep status — jump into any cell's TUI, talk to it, or birth a new one without leaving the grid. The cells answer to Claude Code's <code>claude agents</code>.</p>
+
+  <div class="callout">
+    <div class="label">Shipped — 2026-06-02 — branch <code>feature/cells-agents-view</code></div>
+    <p>Run <code>cells agents</code> (alias <code>cells fleet</code>). Pure shaping logic in <code>cli/lib/fleet.ts</code> (19 unit tests); the Ink view in <code>cli/agents-ui.tsx</code>; launcher + the new <code>project</code> dimension in <code>cli/cells.ts</code>. The registry gained an optional <code>project</code> field — additive, no migration.</p>
+  </div>
+
+  <div class="toc">
+    <h4>Contents</h4>
+    <ol>
+      <li><a href="#what">What it is</a></li>
+      <li><a href="#screen">The screen</a></li>
+      <li><a href="#project">The project dimension — the new thing</a></li>
+      <li><a href="#keys">Keys</a></li>
+      <li><a href="#status">What "awake / asleep" means (and what it doesn't, yet)</a></li>
+      <li><a href="#build">Where the code lives</a></li>
+      <li><a href="#next">Not yet — the honest backlog</a></li>
+    </ol>
+  </div>
+
+  <h2 id="what">What it is</h2>
+  <p>Until now the fleet had no single cockpit. <code>cells list</code> is a flat dump; the web dashboard (<code>cells-dashboard.cells.md</code>) is a glanceable wall, not a place you <em>act</em> from. <code>cells agents</code> is the terminal command center: a full-screen, live, keyboard-driven view of every cell, modeled directly on Claude Code's <code>claude agents</code> — but where Claude Code lists background <em>sessions</em>, this lists <em>cells</em>, and where Claude Code groups by working directory, this groups by <strong>project</strong>.</p>
+  <p>It's a thin launcher around the same actions you already have — <code>cells tui</code>, <code>cells talk</code>, <code>cells birth</code> — so it reuses every proven path rather than reimplementing them. Pick a row, press a key, the view steps aside and the action takes the terminal; when it's done, the grid comes back exactly where you left it.</p>
+
+  <h2 id="screen">The screen</h2>
+  <pre>
+cells · agents
+6 cells · 3 awake · 3 asleep · 1 project · grouped by project · live
+
+operators
+❯ ◆ mother          pi·claude-opus-4-7      awake   pinned   10d
+  ◆ pulse           claude-code·opus-4-7    awake   pinned   10d
+
+homezero
+  ● delta-market    claude-code·opus-4-7    awake             10d
+
+unassigned
+  ○ bob             pi·gpt-5.5              asleep            10d
+  ○ cells-narrator  pi·gpt-5.5              asleep            10d
+  ○ wells           pi·gpt-5.5              asleep            10d
+
+↑↓ move · ↵ open · space talk · n new · r retag · g regroup · ? help · q quit</pre>
+  <ul>
+    <li><strong>Header</strong> — fleet counts, the current grouping, and whether welld is reachable (<code>live</code> / <code>welld offline</code>).</li>
+    <li><strong>Operators</strong> — the always-on machinery (<code>mother</code>, <code>pulse</code>: <code>special</code>/<code>pinned</code>) always floats to the top, regardless of grouping. It's not project work.</li>
+    <li><strong>Glyph + label</strong> — <code>◆</code> pinned/operator, <code>●</code> awake (green), <code>○</code> asleep (dim), <code>⚠</code> wedged/needs-eyes (red). The label spells it out: <code>awake</code> / <code>asleep</code> / <code>check</code> / <code>wedged</code>.</li>
+    <li><strong>Selected row</strong> — the violet <code>❯</code> caret. Selection is tracked by cell <em>name</em>, so a 4-second refresh that reorders rows never makes the cursor jump.</li>
+  </ul>
+
+  <h2 id="project">The project dimension — the new thing</h2>
+  <p>Cells were addressable by name and organized into colonies, but never grouped by <em>project</em> — the loose "what body of work is this for" bucket you actually think in (homezero, paonia, zero…). That's now a first-class, optional label on the registry, owned Mac-side so the cockpit can group and retag <strong>without waking a hibernated cell</strong>.</p>
+  <p>Three ways to set it:</p>
+  <pre>
+# at birth
+cells birth delta-research --project=homezero
+
+# from the shell, any time (omit the project to clear)
+cells project delta-market homezero
+cells project delta-market none
+
+# from inside the cockpit: select a row, press r, type, ↵</pre>
+  <p>Untagged cells collect under <code>unassigned</code> (sorted to the bottom). Press <code>g</code> to flip the whole view from grouping-by-project to grouping-by-power-state (awake / asleep) and back; your choice rides along as you attach and return.</p>
+
+  <h2 id="keys">Keys</h2>
+  <table>
+    <thead><tr><th>Key</th><th>Action</th></tr></thead>
+    <tbody>
+      <tr><td><code>↑</code> / <code>↓</code> &nbsp;(<code>j</code> / <code>k</code>)</td><td>Move between cells</td></tr>
+      <tr><td><code>↵</code> &nbsp;or&nbsp; <code>→</code></td><td><strong>Attach</strong> — drop into the cell's own TUI (runs <code>cells tui</code>)</td></tr>
+      <tr><td><code>space</code></td><td><strong>Talk</strong> — open a conversation with the cell (runs <code>cells talk</code>)</td></tr>
+      <tr><td><code>n</code></td><td><strong>Birth</strong> a new cell into the selected project (blank name = auto)</td></tr>
+      <tr><td><code>r</code></td><td><strong>Retag</strong> the selected cell's project (writes the registry)</td></tr>
+      <tr><td><code>g</code></td><td><strong>Regroup</strong>: by project ↔ by power state</td></tr>
+      <tr><td><code>?</code></td><td>Toggle the shortcut help</td></tr>
+      <tr><td><code>q</code> &nbsp;or&nbsp; <code>esc</code></td><td>Quit back to the shell</td></tr>
+    </tbody>
+  </table>
+  <p>Two flags: <code>cells agents --by=state</code> opens grouped by power, and <code>cells agents --project=homezero</code> opens scoped to one project. Piped (no TTY), the command prints a one-shot grouped snapshot instead of the live view — handy in scripts.</p>
+
+  <h2 id="status">What "awake / asleep" means (and what it doesn't, yet)</h2>
+  <p>Power comes straight from welld's <code>/dashboard/data</code>: <code>running</code> → awake, <code>stopped</code>/<code>hibernating</code> → asleep, welld unreachable → unknown. Health is welld's <code>wedge</code> field — <code>suspected</code>/<code>confirmed</code> surface as the red <code>⚠</code>, the cells analog of Claude Code's "needs input": a cell that needs an operator's eyes.</p>
+  <p>What's deliberately <em>not</em> here yet: a per-cell "working / idle / done" state and a one-line "what is it doing right now" summary, the way <code>claude agents</code> shows a Haiku-generated activity line per session. Cells hibernate when idle and don't report a live activity string today, so the cockpit shows power + health honestly rather than faking a busy/idle signal. Closing that gap (a cell self-reporting a status line on each turn — agent-first, not a poller) is the headline item in the backlog below.</p>
+
+  <h2 id="build">Where the code lives</h2>
+  <ul>
+    <li><code>cli/lib/fleet.ts</code> — the canonical fleet loader. Merges registry + pool + welld into a normalized <code>FleetCell[]</code>; pure grouping/sorting/age helpers split from IO and unit-tested in <code>cli/lib/fleet.test.ts</code>.</li>
+    <li><code>cli/agents-ui.tsx</code> — the Ink view. Render + navigate + retag + regroup inline; attach/talk/birth handed back to the launcher. Mirrors <code>birth-ui.tsx</code>'s render/unmount pattern.</li>
+    <li><code>cli/cells.ts</code> — <code>cmdAgents</code> (the launcher loop), <code>cmdProject</code> (shell retag), the <code>--project</code> birth flag, and the <code>agents</code>/<code>fleet</code>/<code>project</code> dispatch.</li>
+    <li><code>cli/lib/registry.ts</code> — the new optional <code>project</code> field on <code>Cell</code>.</li>
+  </ul>
+
+  <h2 id="next">Not yet — the honest backlog</h2>
+  <ul>
+    <li><strong>Live activity line per cell.</strong> A cell reports a one-line "what I'm doing" on each turn (written to its <code>&lt;name&gt;.cells.md</code> push state or a status file), so the cockpit can show it — and split <code>awake</code> into <em>working</em> vs <em>idle</em>. Agent-first: the cell pushes, the cockpit reads. No poller.</li>
+    <li><strong>Peek panel.</strong> <code>space</code> currently round-trips into a full talk session; a true in-view peek (last output + reply box, like <code>claude agents</code>) would keep you in the grid.</li>
+    <li><strong>Async birth.</strong> <code>n</code> blocks on the birth (mother serializes births anyway — one at a time). A "warming" row that fills in when the birth lands would match the dispatch-and-watch feel.</li>
+    <li><strong>Native menubar tie-in.</strong> Surface the same fleet/project state in the macOS menubar app.</li>
+  </ul>
+
+</div>
+<script src="_assets/doc.js" defer></script>
+</body>
+</html>
