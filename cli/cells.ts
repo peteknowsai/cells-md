@@ -2097,6 +2097,86 @@ async function cmdDoctor() {
       }
     }
   }
+
+  // 8. Fleet transport — the in-well probes. Everything above stops at the
+  // Mac; these reach inside each cell and check the talk reply path end to
+  // end: welld service definition present, well-site unit materialized in
+  // the guest, supervisor :8080 answering, recent OOM kills, clock skew.
+  // Hibernated wells get the definition check only — doctor never wakes a
+  // cell. (Born from the 2026-06-09/10 incident, where all of the above was
+  // green while mother had no supervisor for 18 days.)
+  {
+    const { GUEST_PROBE_SCRIPT, parseGuestProbe, classifyCellTransport } = await import("./lib/fleet-probe");
+    console.log("\nfleet transport:");
+    const base = process.env.WELL_API_URL ?? "http://127.0.0.1:7878";
+    const token = await wellsToken().catch(() => "");
+    const wellsByName = new Map<string, any>();
+    try {
+      const data: any = await fetch(`${base}/dashboard/data`, {
+        headers: { Authorization: `Bearer ${token}` },
+        signal: AbortSignal.timeout(3000),
+      }).then((r) => (r.ok ? r.json() : null));
+      for (const w of data?.wells ?? []) wellsByName.set(w.name, w);
+    } catch {
+      /* welld unreachable — every cell reports power unknown below */
+    }
+
+    const transportReg = await loadRegistry();
+    let transportFails = 0;
+    await Promise.all(
+      transportReg.cells.map(async (c) => {
+        const wellName = await wellNameForCell(c.name);
+        const well = wellsByName.get(wellName);
+        const power: "running" | "hibernated" | "unknown" =
+          well?.status === "running" ? "running" : well?.status === "stopped" ? "hibernated" : "unknown";
+
+        let defPresent = false;
+        try {
+          const svc: any = await fetch(`${base}/v1/wells/${encodeURIComponent(wellName)}/services`, {
+            headers: { Authorization: `Bearer ${token}` },
+            signal: AbortSignal.timeout(3000),
+          }).then((r) => (r.ok ? r.json() : null));
+          defPresent = (svc?.services ?? []).some((s: any) => s.id === "site");
+        } catch {
+          /* treated as missing — surfaces as fail, which is the safe loud default */
+        }
+
+        let guest: ReturnType<typeof parseGuestProbe> = null;
+        if (power === "running") {
+          try {
+            const proc = Bun.spawn(
+              ["well", "exec", "-s", wellName, "--", "sudo", "bash", "-lc", GUEST_PROBE_SCRIPT],
+              { stdin: "ignore", stdout: "pipe", stderr: "pipe" },
+            );
+            const out = await new Response(proc.stdout).text();
+            await proc.exited;
+            guest = parseGuestProbe(out);
+          } catch {
+            /* guest stays null → classified as warn */
+          }
+        }
+
+        const verdict = classifyCellTransport({
+          defPresent,
+          power,
+          guest,
+          macEpochS: Math.floor(Date.now() / 1000),
+        });
+        const tag =
+          verdict.status === "ok"
+            ? `${green}ok${reset}`
+            : verdict.status === "warn"
+              ? `${yellow}warn${reset}`
+              : `${red}FAIL${reset}`;
+        if (verdict.status === "fail") transportFails++;
+        const powerTag = power === "running" ? "awake " : power === "hibernated" ? "asleep" : "?     ";
+        console.log(`  ${c.name.padEnd(18)} ${powerTag} ${tag}${verdict.reasons.length ? `  ${dim}${verdict.reasons.join("; ")}${reset}` : ""}`);
+      }),
+    );
+    if (transportFails > 0) {
+      console.log(`  ${red}${transportFails} cell(s) cannot complete a talk round-trip. Fix before trusting the fleet.${reset}`);
+    }
+  }
 }
 
 async function checkPiPatches(): Promise<{ ok: boolean; detail: string }> {
@@ -3555,9 +3635,14 @@ async function cmdBirthSpecial(rawArgs: string[]): Promise<void> {
   //     without the site service localhost:8080 (the supervisor) isn't up.
   //     Pulse needs both running before installPulseLoop fires.
   //
-  //     Scoped to `pulse` today — mother was set up by hand pre-this-code
-  //     and a rerun via --rebuild should still apply cleanly when needed.
-  if (spec.name === "pulse") {
+  //     Every special gets this — it was pulse-only until 2026-06-10, on
+  //     the theory that mother's hand-setup would persist. It didn't: her
+  //     2026-05-22 re-birth landed on a fresh well, welld's service
+  //     definition still pointed at the old one, and she ran 18 days with
+  //     no supervisor — talk replies silently dropped (the June 9/10
+  //     incident). Service materialization is PUT-time-only, so re-birth
+  //     MUST re-register. Both scripts are idempotent.
+  {
     // Pass welld auth/URL into the child scripts — they default to
     // hosted-sprites and look up WELL_TOKEN in secrets.json which the
     // local-welld path doesn't populate (token lives at ~/.wells/token).

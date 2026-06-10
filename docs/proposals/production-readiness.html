@@ -1,0 +1,132 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Production readiness — four roots under ten symptoms</title>
+<link rel="stylesheet" href="../_assets/doc.css">
+</head>
+<body>
+<div class="page">
+
+  <div class="doc-header">
+    <div class="crumb">cells <span class="sep">/</span> proposals <span class="sep">/</span> production readiness</div>
+    <div>2026-06-10</div>
+  </div>
+
+  <h1>Production readiness — four roots under ten symptoms</h1>
+  <p class="subtitle">Root-cause analysis of the 2026-06-09/10 fleet incident (Zero's ten-item punch list), what shipped the same night, and the structural work that makes the fleet trustable. The headline: nothing about the night was a transport outage — it was <strong>drift the system had no way to see</strong>.</p>
+
+  <div class="callout">
+    <div class="label">The one-paragraph version</div>
+    <p>Mother ran <strong>18 days</strong> with a welld service definition and no in-guest supervisor — every <code>cells talk</code> reply to her silently dropped, because materialization is PUT-time-only and her May 22 re-birth landed on a fresh well. The night's "fleet-wide outage" was that drift, plus a 36-minute well wedge, plus an OOM-killed supervisor on a 947MB VM, plus bob waking with an 18-day-stale clock and a pi that has failed every fork since May 23. <code>cells doctor</code> was green throughout, because every check it had stopped at the Mac. The codex route was never down.</p>
+  </div>
+
+  <div class="toc">
+    <h4>Contents</h4>
+    <ol>
+      <li><a href="#timeline">The night, reconstructed</a></li>
+      <li><a href="#anatomy">How a talk reply actually travels</a></li>
+      <li><a href="#roots">The four roots</a></li>
+      <li><a href="#mapping">Punch list → root mapping</a></li>
+      <li><a href="#shipped">Shipped tonight</a></li>
+      <li><a href="#next">The production-readiness ladder</a></li>
+      <li><a href="#wells">Handoffs to the wells team</a></li>
+    </ol>
+  </div>
+
+  <h2 id="timeline">The night, reconstructed</h2>
+  <table>
+    <thead><tr><th>UTC</th><th>What happened</th><th>Evidence</th></tr></thead>
+    <tbody>
+      <tr><td>May&nbsp;22</td><td>Mother re-birthed onto a fresh well. welld's <code>site</code> service definition (created May 21, with the pre-migration <code>/home/well/.bun</code> PATH) still points at the <em>old</em> well. The new VM never gets the unit. <strong>From this moment, every awaited reply to mother drops.</strong></td><td>welld <code>GET /services</code> shows def dated 2026-05-21; well created 2026-05-22; <code>systemctl</code>: "Unit well-site.service could not be found"</td></tr>
+      <tr><td>May&nbsp;23</td><td>bob's pi starts failing every fork-ask (<code>pi exit 1 … fetch failed</code>, the known fork auth gap) — then hibernates, freezing the broken state and an unstepped clock for 18 days.</td><td>bob's journal: identical failures at 09:00–09:04 May 23; journal timestamps still read "May 23" on June 10 wake</td></tr>
+      <tr><td>23:25</td><td>cells-mother's well wedges (welld <code>status=stopped</code>, runtime <code>alive_running</code> — the narrator-class wedge). Networking dies from inside: her codex calls and everything else fail "Unable to connect". This is the start of Zero's incident window.</td><td>Zero's first-failure timestamp; wedge signature documented in dashboard.ts</td></tr>
+      <tr><td>23:36</td><td>Zero restarts the cells-tunnel — no effect (the tunnel was never the problem).</td><td>Zero's report</td></tr>
+      <tr><td>00:01:53</td><td>Mother's well restarts (wedge recovery). Networking restored; she can think again. But the missing-unit drift remains.</td><td><code>uptime -s</code> = 2026-06-10 00:01:53</td></tr>
+      <tr><td>00:03</td><td>Zero's talk test: delivery works (the DO path drives pi — she answers "ok" via anthropic), but the awaiting CLI helper died instantly on <code>localhost:8080</code> ConnectionRefused. <em>"Messages DELIVER and cells PROCESS them, but replies never reach the CLI."</em></td><td>mother's session file; the helper's error string matches the <code>agent-wait</code> fetch path exactly</td></tr>
+      <tr><td>01:09</td><td>Service re-registered through the supported API path. First retest OOM-kills the supervisor mid-reply (947MB VM, pi replaying her megabyte main session — 788MB peak + 492MB swap). systemd restarts it, the DO <em>redelivers</em>, pi answers in 1.9s — and the supervisor logs <code>agent_reply for unknown corr — no local waiter</code>: a completed reply, dropped.</td><td>mother's journal, 01:10–01:11</td></tr>
+      <tr><td>01:13</td><td>Warm retest: <strong>mother round-trips in 3.4s.</strong> delta-market: 5.0s. pulse: healthy. bob: clean 408 timeout — transport fine, his agent can't think (the May 23 fork breakage + skew, untouched since).</td><td>live test output</td></tr>
+    </tbody>
+  </table>
+
+  <h2 id="anatomy">How a talk reply actually travels</h2>
+  <p>The await path has four hops, each a separate failure domain — and three of the four failed this month for <em>different</em> reasons:</p>
+  <pre>
+cells talk X "msg"                                  (Mac CLI)
+  └─ well exec → /root/bin/cells talk X --await     (helper inside X's well)
+       ├─ POST https://X.cells.md/inbox/append      (CF Worker DO — delivery)
+       │    └─ DO → bridge WS → supervisor → pi     (the cell thinks, replies)
+       └─ GET http://localhost:8080/agent-wait      (long-poll the supervisor
+            ← agent_reply via DO → bridge WS          for the reply)</pre>
+  <ul>
+    <li><strong>Delivery</strong> (DO → cell) is robust — it survived every failure tonight, including redelivery after an OOM kill.</li>
+    <li><strong>The reply leg depends on the in-cell supervisor</strong> (<code>well-site.service</code> → <code>bun run server.ts</code> on :8080). No supervisor → instant ConnectionRefused. Dead supervisor mid-poll → the same error after a delay. Both read as "transport broken" from the Mac.</li>
+    <li><strong>Replies are not durable.</strong> If the waiter dies, a completed reply is dropped (<code>no local waiter</code>). There is no buffer and no re-poll semantics.</li>
+  </ul>
+
+  <h2 id="roots">The four roots</h2>
+
+  <h3>Root A — Fire-and-forget materialization</h3>
+  <p>Service definitions, DNA, workers, and clocks are pushed into a cell <em>once</em> — at PUT time, at bake time, at birth time. Nothing ever compares intent against reality again. Re-birth onto a fresh well, a failed apply, an image rebuild, or 18 days of hibernation all silently orphan the cell from its own machinery. Mother (no unit, 18 days), bob (18-day-old supervisor code, 18-day clock skew), and the stale <code>/home/well</code> PATH in her definition are all this one root.</p>
+  <p><strong>Fix direction (agent-first, not a daemon):</strong> a reconcile pass that walks registry → welld defs → in-guest state and repairs drift, run by an agent on a heartbeat — the same shape as <code>pool reconcile</code>. The doctor probes shipped tonight are the <em>detection</em> half; the repair half is the next rung. Birth-special re-registering unconditionally (shipped) closes the re-birth hole specifically.</p>
+
+  <h3>Root B — No end-to-end observability</h3>
+  <p><code>cells doctor</code> checked Mac-side state only: local auth, local proxy, patches, shims, postwork files. A fleet whose every cell was mute probed green. Detection of all four failure classes requires reaching <em>inside</em> the wells — which doctor now does (shipped, §5).</p>
+
+  <h3>Root C — Unmanaged capacity and non-durable replies</h3>
+  <p>Specials run opus with megabyte main sessions in <strong>947MB VMs</strong>. A pi spawn that replays the session can OOM the whole unit mid-conversation (mother, 01:11). The protocol then drops the completed reply because the waiter is gone. Three sub-fixes: RAM headroom for specials (wells knob — Pete decision), fork-context capping (known open item, now with a body count), and reply buffering in the supervisor so a re-poll within a window can claim a late reply.</p>
+
+  <h3>Root D — Emergent (not structural) billing safety</h3>
+  <p>Every well's <code>/etc/environment</code> carries the real metered <code>sk-ant-api03</code> key, and well egress is permissive. The no-metered-billing guarantee currently depends on a login-shell shim unsetting a variable. Zero is right that this is structural risk. Since pi-on-Max shipped (2026-06-02), the paid-key path in cells is legacy — the clean fix is removing the key from well environments entirely. <strong>Decision queued for Pete in NEEDS_PETE.md.</strong></p>
+
+  <h2 id="mapping">Punch list → root mapping</h2>
+  <table>
+    <thead><tr><th>#</th><th>Zero's item</th><th>Actual root</th><th>Status</th></tr></thead>
+    <tbody>
+      <tr><td>1</td><td>Talk replies broken fleet-wide (P0)</td><td><strong>A</strong> (mother: def-without-unit since May 22) + <strong>C</strong> (OOM kill) + wedge window. Not a transport outage — delta-market and pulse round-tripped fine once tested in isolation.</td><td>Mother fixed live (3.4s round-trips); birth-special hole closed; doctor detects the class</td></tr>
+      <tr><td>2</td><td>wells→codex down, three dead gpt-5.5 cells (P0)</td><td>Route was <strong>never down</strong> — authenticated probe from inside a well reached the ChatGPT backend. Mother's codex failures = her wedge window. bob/wells/narrator are dead from the <strong>May 23 pi fork breakage</strong> (+ Root A staleness), masked by hibernation for 18 days.</td><td>Route verified live; bob's repair = DNA/clock refresh, queued under Root A reconcile</td></tr>
+      <tr><td>3</td><td>Mother's modelChain drift (fixed, verify)</td><td>Verified: <code>0b1145d</code> on main; her journal shows <code>set_model anthropic/claude-opus-4-7</code>; answers in seconds.</td><td>Closed</td></tr>
+      <tr><td>4</td><td>Proxy raw-route errors + 10s idleTimeout</td><td>Confirmed: no <code>idleTimeout</code> in proxy's <code>Bun.serve</code> → Bun's 10s default vs minutes-long streams. The stale <code>?beta=true</code> ConnectionRefused blocks: Mac-side network blips reaching api.anthropic.com (the err file did not grow during the incident — consistent with old weather).</td><td><code>idleTimeout: 0</code> shipped (needs proxy restart to take effect)</td></tr>
+      <tr><td>5</td><td>Doctor green while fleet mute</td><td><strong>B</strong>, in full.</td><td>Fleet-transport probe section shipped; caught mother's OOM on its first live run</td></tr>
+      <tr><td>6</td><td>Metered-key leak risk</td><td><strong>D</strong>.</td><td>Decision for Pete (NEEDS_PETE.md) — recommend removing the key from wells entirely</td></tr>
+      <tr><td>7</td><td>wells sudo ignores -E</td><td>wells behavior (sudo-rs); cells docs should name the <code>sudo bash -lc</code> pattern.</td><td>Documented here; line item for the ops doc</td></tr>
+      <tr><td>8</td><td>Proxy log attribution ("api unknown")</td><td>Cosmetic; well-exec-driven pi sessions don't pass <code>x-cell-name</code> (the codex-proxy extension does; the anthropic path doesn't).</td><td>Backlog — default it from <code>CELL_NAME</code> in the cell-side provider config</td></tr>
+      <tr><td>9</td><td>Pool hygiene</td><td>One stuck <code>claimed</code> entry (bb82dd, delta-market's failed first claim, zombie VM since May 22) + orphan well <code>egg-711295</code> in welld with no pool entry.</td><td>bb82dd culled via <code>pool cull</code>; reconcile run clean; 711295 destroy needs approval (destructive)</td></tr>
+      <tr><td>10</td><td>Stale pi-via-Max doc</td><td>Superseded 2026-06-02.</td><td>birth-checklist.md corrected</td></tr>
+    </tbody>
+  </table>
+
+  <h2 id="shipped">Shipped tonight (branch <code>fix/fleet-transport-hardening</code>)</h2>
+  <ul>
+    <li><strong>Mother repaired live</strong> — service re-registered through <code>register-site-service.sh</code>; verified 3.4s talk round-trips.</li>
+    <li><strong><code>cells doctor</code> fleet-transport section</strong> — per-cell: welld def present, unit materialized in-guest, supervisor :8080 health, OOM kills (48h), clock skew. Hibernated cells get the def check only (doctor never wakes a cell). Pure logic in <code>cli/lib/fleet-probe.ts</code>, incident failure modes pinned as 13 tests. <em>First live run flagged mother's OOM unprompted.</em></li>
+    <li><strong>birth-special registers the site service + worker for every special</strong> — the exact hole that orphaned mother.</li>
+    <li><strong>Proxy <code>idleTimeout: 0</code></strong> — restart <code>com.pete.cells-proxy</code> to take effect.</li>
+    <li><strong>Pool cleaned</strong> — bb82dd culled, reconcile verified.</li>
+    <li><strong>birth-checklist.md</strong> un-staled re pi-via-Max.</li>
+  </ul>
+
+  <h2 id="next">The production-readiness ladder</h2>
+  <p>In order; each rung makes the next one testable. "Production ready" = a fleet that detects its own drift, repairs it, and never loses a completed reply.</p>
+  <ol>
+    <li><strong>Detect (shipped):</strong> doctor fleet-transport probes.</li>
+    <li><strong>Repair:</strong> reconcile pass for service/DNA/clock drift — agent-run on a heartbeat, same pattern as pool reconcile. Repairs bob and any future mother-class drift automatically. (Root A)</li>
+    <li><strong>Durable replies:</strong> supervisor buffers agent_replies for N minutes; the CLI helper re-polls by corr_id after transient failures; one retry on the Mac side. Kills the "no local waiter" loss class. (Root C)</li>
+    <li><strong>Capacity:</strong> RAM headroom for specials (Pete: wells create-time knob), fork-context cap (existing open item — it is now a production blocker, not a nuisance). (Root C)</li>
+    <li><strong>Structural billing safety:</strong> remove the metered key from wells, or lock egress. (Root D, Pete decision)</li>
+    <li><strong>Canary:</strong> a scheduled end-to-end talk round-trip against one cell, run by pulse on its heartbeat — the fleet's own pulse check, agent-first. Alerts before a human notices.</li>
+  </ol>
+
+  <h2 id="wells">Handoffs to the wells team</h2>
+  <ul>
+    <li><strong><code>lib/services.ts</code> still SSHes <code>ubuntu@</code></strong> (line ~117) — missed in the May 22 root-SSH migration (<code>217d68f</code>). It works today because the ubuntu user still exists with welld's key; it's a timebomb when ubuntu is dropped. One-line fix + decide whether service apply should also run on well (re)create so definitions re-materialize.</li>
+    <li><strong>Wedge recovery window:</strong> mother's wedge ran 23:25→00:01 before recovery. Worth tightening detection latency, and surfacing wedge state to the cells layer louder than a dashboard field.</li>
+    <li><strong>RAM sizing for specials:</strong> 947MB is not enough for opus + megabyte sessions + supervisor. Recommend 2GB for mother/pulse-class wells.</li>
+    <li><strong>Orphan well <code>egg-711295</code></strong> — exists in welld, referenced by nothing cells-side. Destroy after confirmation.</li>
+  </ul>
+
+</div>
+<script src="../_assets/doc.js" defer></script>
+</body>
+</html>

@@ -61,7 +61,7 @@ The automated sweep (`scripts/eval-birth.ts` / `scripts/harden-birth.ts`, see th
 
 For each row, run §4 immediately after birth before moving on.
 
-`pi` cells reach Anthropic models via a paid `ANTHROPIC_API_KEY` (direct, clean). The Claude Max subscription is reachable only through the `claude-code` harness — genuine Claude Code traffic via `proxy.cells.md`. pi-via-Max is fingerprint-dead; don't birth a `pi` cell expecting Max.
+`pi` cells reach Claude on the Max subscription through `proxy.cells.md` — `cells birth --harness pi --model opus` works (shipped to main 2026-06-02, `c1ea209`; the use-max extension trips the first-party-billing gate). The earlier "pi-via-Max is fingerprint-dead" belief was wrong — the sk-ant-oat secret satisfies the OAuth gate; sporadic opus terminations are capacity weather, not blocking. pi+opus cells are opus-only by design (no gpt-5.5 fallback rung, so flaking stays visible).
 
 ## 4. Per-birth verification
 

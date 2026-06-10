@@ -1226,6 +1226,12 @@ await refreshValidBearers();
 
 const server = Bun.serve({
   port: PORT,
+  // Bun's default idleTimeout is 10s — long model responses stream for
+  // minutes with quiet gaps (thinking pauses), and the default was cutting
+  // them mid-flight ("request timed out after 10 seconds" in cells-proxy.err).
+  // 0 = no idle timeout; cloudflared in front has its own connection
+  // lifecycle. Mirrors the cell-side supervisor (site/server.ts).
+  idleTimeout: 0,
   async fetch(req) {
     const host = hostOf(req);
     const url = new URL(req.url);
