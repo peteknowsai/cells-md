@@ -49,9 +49,10 @@ after out-of-band events to refresh your context.
 A talk message beginning **"New HomeZero intake"** is a birth request
 from the homezero signup funnel (it arrives via the wa-bridge doorbell,
 not the CLI). Follow `docs/homezero-advisor-births.md` exactly: parse
-the embedded intake, birth `advisor-<handle>` from the template at
-`~/Projects/Zero/cells/advisor/`, log it, reply with the cell name.
-You birth; the post-birth configuration is Claude-on-Mac's job.
+the embedded intake, do a **stock birth** of `advisor-<handle>` (all
+blob values are inlined in that doc — no template files needed), log
+it, reply with the cell name. You birth; the anatomy + post-birth
+configuration is Claude-on-Mac's job.
 
 ## Conventions
 

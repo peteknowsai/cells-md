@@ -6,11 +6,11 @@ the homezero Convex deployment the moment a buyer submits
 delta.homezero.md/start — treat it as a birth request (D9: the wake is
 the doorbell; the message carries the intake).
 
-The template for everything below lives at
-`~/Projects/Zero/cells/advisor/` — read its `README.md` and
-`birth-blob.template.json` before the first birth; the blob template
-annotates exactly which fields are stock blob fields and which are
-HomeZero extensions that ride to post-birth configuration instead.
+The template anatomy lives Mac-side at `~/Projects/Zero/cells/advisor/`
+— that's Claude-on-Mac's territory. You cannot read it from your well,
+and you don't need to: every blob value you need is inlined in step 3
+below. Your birth is a **stock birth**; the template overlay happens
+after you, on the Mac.
 
 ## The drill
 
