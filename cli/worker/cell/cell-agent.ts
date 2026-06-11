@@ -149,6 +149,14 @@ type PersistedState = {
   // when the supervisor's agent_response matches. Stored as entries since
   // a Map doesn't survive JSON.
   agentForks: [string, { reply_to: string; from: string; thread_id: string }][];
+  // At-least-once delivery for agent_message/agent_reply frames. ws.send()
+  // into a zombie WS (supervisor side died in hibernation; Cloudflare still
+  // reports OPEN) silently swallows the frame — and the wake-triggering
+  // message is ALWAYS sent into exactly that socket (advisor-pete buyer
+  // mutes, 2026-06-11). Frames carry an ack_key; the supervisor echoes
+  // frame_ack; unacked frames re-send on reconnect and on the alarm tick
+  // until acked or expired. The supervisor dedupes by corr_id.
+  pendingFrames?: [string, { frame: string; at: number }][];
   flushBackoffMs: number;
   last429At: number;
 };
@@ -181,6 +189,7 @@ export class CellAgent {
   private flushBackoffMs = FLUSH_INTERVAL_MS;
   private last429At = 0;
   private pendingAgentForks: Map<string, { reply_to: string; from: string; thread_id: string }> = new Map();
+  private pendingFrames: Map<string, { frame: string; at: number }> = new Map();
 
   constructor(state: DurableObjectState, env: Env) {
     this.state = state;
@@ -212,6 +221,7 @@ export class CellAgent {
     this.pendingEmailSubject = p.pendingEmailSubject ?? "";
     this.wsQueue = Array.isArray(p.wsQueue) ? p.wsQueue : [];
     this.pendingAgentForks = new Map(Array.isArray(p.agentForks) ? p.agentForks : []);
+    this.pendingFrames = new Map(Array.isArray(p.pendingFrames) ? p.pendingFrames : []);
     this.flushBackoffMs = p.flushBackoffMs ?? FLUSH_INTERVAL_MS;
     this.last429At = p.last429At ?? 0;
   }
@@ -232,6 +242,7 @@ export class CellAgent {
       pendingEmailSubject: this.pendingEmailSubject,
       wsQueue: this.wsQueue,
       agentForks: [...this.pendingAgentForks.entries()],
+      pendingFrames: [...this.pendingFrames.entries()],
       flushBackoffMs: this.flushBackoffMs,
       last429At: this.last429At,
     };
@@ -286,10 +297,14 @@ export class CellAgent {
     await this.ensureLoaded();
     if (this.currentTurn?.pendingDelivery) {
       await this.retryPendingDelivery();
-      if (this.currentTurn?.pendingDelivery) {
-        // Still stranded — reschedule and try again next tick.
-        await this.state.storage.setAlarm(Date.now() + ALARM_INTERVAL_MS);
-      }
+    }
+    // Unacked reliable frames: re-send (sendOrQueue path — queues + rings
+    // the doorbell if the WS is down) and keep ticking until drained.
+    if (this.pendingFrames.size) {
+      this.resendPendingFrames(this.bridgeWs());
+    }
+    if (this.currentTurn?.pendingDelivery || this.pendingFrames.size) {
+      await this.state.storage.setAlarm(Date.now() + ALARM_INTERVAL_MS);
     }
     await this.persist();
   }
@@ -409,12 +424,12 @@ export class CellAgent {
       console.log(
         `[${this.env.CELL_NAME}] inbound agent_reply from=${env.from} in_reply_to=${env.in_reply_to.slice(0, 10)} text=${env.text.slice(0, 100).replace(/\n/g, " ")}`
       );
-      await this.sendOrQueue(JSON.stringify({
+      await this.sendReliable(`r:${env.in_reply_to}`, {
         type: "agent_reply",
         in_reply_to: env.in_reply_to,
         from: env.from,
         text: env.text,
-      }));
+      });
       await this.persist();
       return new Response(null, { status: 202 });
     }
@@ -444,7 +459,9 @@ export class CellAgent {
         : 0;
 
     // Queue + doorbell if the cell is asleep — same as the prompt path.
-    await this.sendOrQueue(JSON.stringify({
+    // Reliable: an agent_message lost to the post-wake zombie WS is a
+    // buyer's WhatsApp going mute.
+    await this.sendReliable(`m:${env.corr_id}`, {
       type: "agent_message",
       from: env.from,
       corr_id: env.corr_id,
@@ -453,7 +470,7 @@ export class CellAgent {
       hops: env.hops,
       text: env.text,
       ...(Number.isFinite(ttlMs) && ttlMs > 0 ? { timeout_seconds: Math.round(ttlMs / 1000) } : {}),
-    }));
+    });
 
     await this.persist();
     return new Response(null, { status: 202 });
@@ -658,10 +675,14 @@ export class CellAgent {
         }
       }
       this.wsQueue = [];
-      await this.persist();
     } else {
       console.log(`[${this.env.CELL_NAME}] bridge connected`);
     }
+
+    // Frames sent into the previous (zombie) socket and never acked get a
+    // second life on the fresh one. The supervisor dedupes by corr_id.
+    if (this.pendingFrames.size) this.resendPendingFrames(server);
+    await this.persist();
 
     return new Response(null, { status: 101, webSocket: client });
   }
@@ -703,6 +724,42 @@ export class CellAgent {
 
   webSocketError(_ws: WebSocket, error: unknown) {
     console.error(`[${this.env.CELL_NAME}] bridge ws error: ${String(error).slice(0, 120)}`);
+  }
+
+  // At-least-once send: the frame carries ack_key, sits in pendingFrames
+  // until the supervisor's frame_ack (or an implicit ack via the matching
+  // agent_response), and re-sends on reconnect + alarm. Use for frames
+  // that must survive the post-wake zombie-WS window; fire-and-forget
+  // sendOrQueue remains right for streaming deltas and pings.
+  private async sendReliable(key: string, frameObj: Record<string, unknown>): Promise<void> {
+    const frame = JSON.stringify({ ...frameObj, ack_key: key });
+    this.pendingFrames.set(key, { frame, at: Date.now() });
+    await this.sendOrQueue(frame);
+    // The alarm is the retry engine — make sure one is armed.
+    if ((await this.state.storage.getAlarm()) == null) {
+      await this.state.storage.setAlarm(Date.now() + 5_000);
+    }
+  }
+
+  // Re-send unacked frames (reconnect path takes the fresh socket; alarm
+  // path goes through sendOrQueue). Expire entries past 10 min — by then
+  // every sender has timed out and a late fork would answer nobody.
+  private resendPendingFrames(ws: WebSocket | null): void {
+    const now = Date.now();
+    for (const [key, p] of this.pendingFrames) {
+      if (now - p.at > 600_000) {
+        console.log(`[${this.env.CELL_NAME}] expiring undelivered frame ${key}`);
+        this.pendingFrames.delete(key);
+        continue;
+      }
+      try {
+        if (ws) ws.send(p.frame);
+        else void this.sendOrQueue(p.frame);
+        console.log(`[${this.env.CELL_NAME}] re-sent unacked frame ${key}`);
+      } catch (e) {
+        console.error(`[${this.env.CELL_NAME}] re-send failed for ${key}: ${String(e).slice(0, 120)}`);
+      }
+    }
   }
 
   // Send a frame to the supervisor if connected; otherwise queue it and
@@ -754,6 +811,12 @@ export class CellAgent {
 
     if (type === "bridge_hello" || type === "pong" || type === "response") return;
 
+    // frame_ack — the supervisor confirms receipt of a reliable frame.
+    if (type === "frame_ack") {
+      if (typeof ev.key === "string") this.pendingFrames.delete(ev.key);
+      return;
+    }
+
     // agent_response — supervisor's reply to an agent_message we forwarded.
     // Look up the pending corr_id and POST a kind:"agent" envelope back to
     // the sender's reply_to. Does not touch turn state — main is untouched
@@ -761,6 +824,9 @@ export class CellAgent {
     if (type === "agent_response") {
       const corrId = typeof ev.in_reply_to === "string" ? ev.in_reply_to : "";
       const text = typeof ev.text === "string" ? ev.text : "";
+      // Implicit ack: a response proves the agent_message was delivered,
+      // even to a supervisor too old to send frame_ack.
+      if (corrId) this.pendingFrames.delete(`m:${corrId}`);
       if (corrId) void this.forwardAgentResponse(corrId, text);
       return;
     }

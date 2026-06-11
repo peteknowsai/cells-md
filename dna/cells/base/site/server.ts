@@ -851,6 +851,10 @@ const server = Bun.serve({
 // ---------------------------------------------------------------------------
 
 // Handle one inbound bridge frame (already line-split). The vocabulary is
+// Dedupe window for at-least-once agent_message delivery (see ack_key
+// handling below). Bounded — oldest entries evicted past 300.
+const seenAgentCorrs = new Set<string>();
+
 // pi's RPC dialect plus bridge-control (ping) and agent-comms (agent_reply,
 // agent_message). Replies go back up via broadcastToClients → bridgeWs.
 function handleBridgeFrame(line: string) {
@@ -868,6 +872,17 @@ function handleBridgeFrame(line: string) {
     return;
   }
   if (cmd?.type === "pong") return;
+
+  // Reliable-delivery handshake: any frame carrying ack_key gets an
+  // immediate frame_ack so the DO stops re-sending it. The DO holds
+  // agent_message/agent_reply as pending-until-acked because a ws.send()
+  // into the post-hibernation zombie socket vanishes silently — the
+  // wake-triggering message always rode exactly that socket (advisor-pete
+  // buyer mutes, 2026-06-11). Ack BEFORE dedupe: a duplicate means an
+  // earlier ack was lost, so it needs acking again either way.
+  if (typeof cmd?.ack_key === "string" && cmd.ack_key) {
+    broadcastToClients(JSON.stringify({ type: "frame_ack", key: cmd.ack_key }));
+  }
 
   // agent_reply — forwarded by our DO when an in_reply_to envelope landed
   // in our inbox. Match the corr_id against waiting CLIs that called
@@ -895,6 +910,21 @@ function handleBridgeFrame(line: string) {
     const from = typeof cmd.from === "string" ? cmd.from : "unknown";
     const text = typeof cmd.text === "string" ? cmd.text : "";
     const target = typeof cmd.target === "string" ? cmd.target : "fork";
+    // At-least-once delivery means duplicates: the DO re-sends until our
+    // ack lands. Same corr_id = same message — fork it once.
+    if (corrId && seenAgentCorrs.has(corrId)) {
+      console.log(`[bridge] duplicate agent_message corr=${corrId.slice(0, 10)} — already handling, dropped`);
+      return;
+    }
+    if (corrId) {
+      seenAgentCorrs.add(corrId);
+      if (seenAgentCorrs.size > 300) {
+        for (const k of seenAgentCorrs) {
+          seenAgentCorrs.delete(k);
+          if (seenAgentCorrs.size <= 200) break;
+        }
+      }
+    }
     // Sender's declared turn budget (DO forwards it from the envelope) —
     // sizes the fork leash below so a long WhatsApp/onboarding turn isn't
     // killed at the per-harness default while the sender is still waiting.
