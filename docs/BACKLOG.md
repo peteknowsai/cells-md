@@ -68,3 +68,17 @@ worse version of this.
 `cells birth ck-pi-opus --harness=pi --model=opus` must fail at parse with
 the policy message (see docs/birth-checklist.md §3). Worth a line in
 eval-birth/harden-birth so a regression can't reopen the lane silently.
+
+## Clock skew: detect stale chronyd config; close the wake window (2026-06-11)
+
+The advisor outage (buyer messages timing out) had two layers doctor missed:
+1. **Stale daemon, fixed disk**: several cells had `makestep 1.0 -1` on disk
+   but a chronyd started before the fix — running with stock step-3-then-slew
+   semantics, silently re-accumulating hours of skew per hibernate/wake cycle.
+   Doctor compares clocks only on RUNNING cells, and these failed exactly at
+   wake. Cheap detection: flag `chronyd start time < chrony.conf mtime` on any
+   running cell (config changed under a live daemon = restart needed).
+2. **The wake window**: chrony corrects 10–60s after wake; the wake-triggering
+   inbound message is always processed inside that window. Cells-side this is
+   unfixable — wells owns restore and was asked (2026-06-11) to step the guest
+   clock before resuming delivery. Track that ask.
