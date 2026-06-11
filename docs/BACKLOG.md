@@ -50,3 +50,21 @@ the same situation (seen on the now-deleted `hbtest`).
 
 **Fix:** give the hermes adapter the same no-main fallback, or add a
 birth-time main-session warm-up for hermes the way claude-code has one.
+
+## forkAndAsk's 150s ceiling kills ritual-length talks (2026-06-11, from Zero)
+
+`cells talk mother "/birth ..."` can't work: the supervisor's forkAndAsk
+kills talk-triggered work at 150s, and mother's ritual takes 3-6 min. Zero
+works around it by running births Mac-side. `cells talk --main` (the
+long-turn escape hatch) is still "not yet implemented (Phase 4)".
+
+**Fix shape:** ack-then-work — the fork acks receipt immediately and the
+reply arrives later via the normal envelope path (reply_to), instead of
+holding the fork open. A longer leash for ritual-shaped messages is the
+worse version of this.
+
+## Eval: add the negative birth row for the Max policy (2026-06-11)
+
+`cells birth ck-pi-opus --harness=pi --model=opus` must fail at parse with
+the policy message (see docs/birth-checklist.md §3). Worth a line in
+eval-birth/harden-birth so a regression can't reopen the lane silently.
