@@ -362,14 +362,45 @@ async function cmdTalk(rest: string[]) {
 
   // POST envelope to peer's inbox/append. 202 means accepted; the supervisor
   // is now forking (or routing to main) and will reply asynchronously.
-  const postRes = await fetch(`https://${peer}.cells.md/inbox/append`, {
-    method: "POST",
-    headers: {
-      "content-type": "application/json",
-      authorization: `Bearer ${secret}`,
-    },
-    body: JSON.stringify({ event: env }),
-  });
+  //
+  // Short timeout + retries, NOT one naked fetch: when this talk is the
+  // thing that woke a hibernating well, the guest's outbound network can
+  // silently stall for the first ~seconds-to-minutes after restore (SYNs
+  // dropped, no RST). A naked fetch sat in that stall for Bun's 300s
+  // default — the advisor's WhatsApp mutes on 2026-06-11 were exactly
+  // this. Abort at 15s and retry; by the second or third attempt the
+  // network has settled and the POST lands in milliseconds.
+  // 5 × (15s abort + backoff) ≈ a 95s window — the observed post-restore
+  // black-hole lasts ~60-70s, so the late attempts land on settled network.
+  let postRes: Response | null = null;
+  let lastErr: unknown = null;
+  for (let attempt = 1; attempt <= 5; attempt++) {
+    try {
+      postRes = await fetch(`https://${peer}.cells.md/inbox/append`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          authorization: `Bearer ${secret}`,
+        },
+        body: JSON.stringify({ event: env }),
+        signal: AbortSignal.timeout(15_000),
+      });
+      break;
+    } catch (e) {
+      lastErr = e;
+      postRes = null;
+      if (attempt < 5) await new Promise((r) => setTimeout(r, 2_000 * attempt));
+    }
+  }
+  if (!postRes) {
+    die(JSON.stringify({
+      ok: false,
+      command: "talk",
+      error: `POST to ${peer} failed after 5 attempts: ${String(lastErr).slice(0, 150)}`,
+      diagnosis: "peer inbox unreachable — network stall or worker down",
+    }));
+    return;
+  }
   if (!postRes.ok) {
     const body = await postRes.text();
     die(`POST to ${peer} failed (${postRes.status}): ${body.slice(0, 300)}`);
