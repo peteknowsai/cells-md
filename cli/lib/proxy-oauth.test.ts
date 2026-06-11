@@ -4,6 +4,7 @@ import {
   ANTHROPIC_OAUTH_PREFIX,
   ensurePreamble,
   classifyOAuthRoute,
+  anthropicRouteVerdict,
 } from "./proxy-oauth";
 
 // Convenience: the block shape ensurePreamble emits for the preamble.
@@ -194,5 +195,59 @@ describe("classifyOAuthRoute", () => {
 
   it("empty-string pathname → {false, ''}", () => {
     expect(classifyOAuthRoute("")).toEqual({ isHermesOAuthRoute: false, upstreamPath: "" });
+  });
+});
+
+// The Max-policy gate (Pete, 2026-06-11): Anthropic route is claude-code-only.
+// Fixtures mirror the real fleet at policy time — pulse (claude-code), bob
+// (pi, gpt-5.5 chain), mother (pi spawn harness, claude-code:anthropic chain
+// entry), plus the unregistered/unknown caller class the proxy logs showed.
+describe("anthropicRouteVerdict", () => {
+  it("claude-code harness → allowed", () => {
+    const v = anthropicRouteVerdict({ harness: "claude-code", modelChain: ["anthropic/claude-opus-4-7:high"] });
+    expect(v.allowed).toBe(true);
+  });
+
+  it("pi harness, codex chain (bob) → denied, reason names the harness + the codex alternative", () => {
+    const v = anthropicRouteVerdict({ harness: "pi", modelChain: ["openai-codex/gpt-5.5:medium"] });
+    expect(v.allowed).toBe(false);
+    expect(v.reason).toContain("'pi'");
+    expect(v.reason).toContain("/codex");
+  });
+
+  it("hermes harness → denied", () => {
+    expect(anthropicRouteVerdict({ harness: "hermes", modelChain: ["openai-codex/gpt-5.5:high"] }).allowed).toBe(false);
+  });
+
+  it("codex harness → denied", () => {
+    expect(anthropicRouteVerdict({ harness: "codex" }).allowed).toBe(false);
+  });
+
+  it("dual-harness special (mother): pi spawn harness + claude-code:anthropic chain entry → allowed", () => {
+    const v = anthropicRouteVerdict({
+      harness: "pi",
+      modelChain: ["claude-code:anthropic/claude-opus-4-7:high", "pi:openai-codex/gpt-5.5:high"],
+    });
+    expect(v.allowed).toBe(true);
+    expect(v.reason).toContain("chain entry");
+  });
+
+  it("pi:anthropic chain prefix does NOT sanction — only claude-code:anthropic does", () => {
+    const v = anthropicRouteVerdict({ harness: "pi", modelChain: ["pi:anthropic/claude-opus-4-7:high"] });
+    expect(v.allowed).toBe(false);
+  });
+
+  it("unregistered caller (x-cell-name unknown / __NAME__ / absent) → denied", () => {
+    const v = anthropicRouteVerdict(undefined);
+    expect(v.allowed).toBe(false);
+    expect(v.reason).toContain("not in registry");
+  });
+
+  it("legacy entry with no harness field → treated as pi (registry.ts contract) → denied", () => {
+    expect(anthropicRouteVerdict({ modelChain: ["anthropic/claude-opus-4-7:high"] }).allowed).toBe(false);
+  });
+
+  it("legacy entry with no modelChain at all → denied without throwing", () => {
+    expect(anthropicRouteVerdict({ harness: "pi" }).allowed).toBe(false);
   });
 });

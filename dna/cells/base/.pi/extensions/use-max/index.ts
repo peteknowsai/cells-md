@@ -1,21 +1,20 @@
 /**
- * use-max — first-party billing trigger.
+ * use-max — persona composer (the name is historical).
  *
- * Routes the cell's API calls to Pete's Claude Max subscription instead of
- * extra-usage metered billing. Composes the cell's anatomy files at the
- * agent root into one structured systemPrompt and returns it via the
- * before_agent_start hook. Setting systemPrompt via the SDK is what trips
- * Anthropic's first-party-billing gate; auto-load of AGENTS.md from cwd
- * doesn't.
+ * Composes the cell's anatomy files at the agent root into one structured
+ * systemPrompt and returns it via the before_agent_start hook — without it
+ * the cell speaks as stock Pi. Each file keeps its own H1 heading;
+ * composition is just file bodies concatenated in order. SOUL.md is
+ * required; the rest are optional. If SOUL.md is missing the hook returns
+ * nothing — pi falls back to its auto-load behavior.
  *
- * Each file keeps its own H1 heading; composition is just file bodies
- * concatenated in order. SOUL.md is required; the rest are optional.
- *
- * If SOUL.md is missing the hook returns nothing — pi falls back to its
- * auto-load behavior, which doesn't trip Max. With extra-usage disabled,
- * misconfiguration 401s instead of silently routing to metered billing.
- *
- * See PI-FIRST-PARTY-BILLING-RECIPE.md.
+ * Why the name: setting systemPrompt via the SDK is also what trips
+ * Anthropic's first-party-billing gate, which is how pi cells rode the
+ * Claude Max sub until 2026-06-11. That lane is closed by policy — Max is
+ * claude-code-harness-only; pi rides the ChatGPT sub via the /codex proxy
+ * route, and the proxy 403s pi calls to the Anthropic route
+ * (anthropicRouteVerdict in cli/lib/proxy-oauth.ts). The composer stays
+ * because the persona is harness furniture, not billing plumbing.
  */
 
 import * as fs from "node:fs";

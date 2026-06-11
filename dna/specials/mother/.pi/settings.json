@@ -14,16 +14,12 @@
   ],
   "enabledModels": [
     "openai-codex/gpt-5.5",
-    "openai/gpt-5.5-pro",
-    "anthropic/claude-opus-4-7",
-    "anthropic/claude-sonnet-4-6",
-    "anthropic/claude-haiku-4-5"
+    "openai/gpt-5.5-pro"
   ],
-  "defaultProvider": "anthropic",
-  "defaultModel": "claude-opus-4-7",
+  "defaultProvider": "openai-codex",
+  "defaultModel": "gpt-5.5",
   "defaultThinkingLevel": "high",
   "modelChain": [
-    "anthropic/claude-opus-4-7:high",
     "openai-codex/gpt-5.5:high"
   ],
   "harnessChain": [

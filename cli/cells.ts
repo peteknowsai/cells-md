@@ -110,10 +110,8 @@ type ModelKey = keyof typeof MODEL_IDS;
 // parseModelPattern resolves it.
 //
 // Two-subscription pattern, no per-token leaf:
-//   - claude-code on anthropic → opus → gpt-5.5:high
-//   - pi on anthropic → opus ONLY, no fallback (Pete, 2026-06-02): a gpt-5.5
-//     rung would mask opus-on-Max flaking, and pi-on-Max is exactly what we
-//     want to watch for reliability — surface failures, don't hide them.
+//   - anthropic primary (claude-code harness only — the Max sub is
+//     claude-code-exclusive, Pete 2026-06-11) → opus → gpt-5.5:high
 //   - openai-codex primary → gpt-5.5 (no fallback — already the cheap leaf)
 //
 // If both subscriptions degrade simultaneously (observed 2026-05-06), the
@@ -122,10 +120,10 @@ type ModelKey = keyof typeof MODEL_IDS;
 // Add a leaf back if dual-degradation starts costing us real downtime.
 function buildDefaultChain(
   primary: { provider: string; modelId: string; thinking: string },
-  harness: string,
+  _harness: string,
 ): string[] {
   const head = `${primary.provider}/${primary.modelId}:${primary.thinking}`;
-  if (primary.provider === "anthropic" && harness !== "pi") {
+  if (primary.provider === "anthropic") {
     return [head, "openai-codex/gpt-5.5:high"];
   }
   return [head];
@@ -250,11 +248,11 @@ function thinkingOptionsForHarness(harness: string, modelKey: ModelKey): SelectO
   return thinkingOptionsFor(modelKey);
 }
 
-// Models offered for a given harness. pi gets the full chain picker; the
-// coding-machine harnesses each run a single subscription-backed model, so
-// the picker shows just that one pinned option. The Model step is still
-// always rendered — the user should always see (and confirm) what their
-// cell will run, even when there's nothing to choose between.
+// Models offered for a given harness. The coding-machine harnesses each run
+// a single subscription-backed model, so the picker shows just that one
+// pinned option. The Model step is still always rendered — the user should
+// always see (and confirm) what their cell will run, even when there's
+// nothing to choose between.
 function modelOptionsForHarness(harness: string): SelectOption[] {
   if (harness === "claude-code") {
     return [{ value: "opus", label: "opus", hint: "(Anthropic · via Max sub)" }];
@@ -262,7 +260,10 @@ function modelOptionsForHarness(harness: string): SelectOption[] {
   if (harness === "codex" || harness === "hermes") {
     return [{ value: "gpt-5.5", label: "gpt-5.5", hint: "(OpenAI · via ChatGPT sub)" }];
   }
-  return MODEL_OPTIONS;
+  // pi: no Anthropic rows — the Max sub is claude-code-harness-only
+  // (Pete, 2026-06-11). pi rides the ChatGPT sub, gpt-5.5-pro is the
+  // metered escape hatch.
+  return MODEL_OPTIONS.filter((o) => MODEL_IDS[o.value as ModelKey].provider !== "anthropic");
 }
 
 function defaultThinkingForHarness(harness: string, modelKey: ModelKey): string {
@@ -2491,14 +2492,19 @@ async function cmdCreate(name: string | undefined, opts: CreateOpts): Promise<vo
     console.error(`the hermes harness runs the ChatGPT-subscription model only — use --model=gpt-5.5`);
     process.exit(1);
   }
-  // pi + Anthropic runs on Pete's Claude Max sub via the subscriptions proxy,
-  // exactly like claude-code: the cell's bearer is the sk-ant-oat-prefixed
-  // CELLS_PROXY_SECRET, so pi-ai takes its OAuth path and prepends the
-  // "You are Claude Code…" preamble Anthropic's OAuth gate requires; the proxy
-  // then swaps in the real Max token. No paid ANTHROPIC_API_KEY, no
-  // .anthropic-direct flag. (The old "pi-via-Max is fingerprint-blocked" belief
-  // was opus capacity weather — intermittent empty-stream 200s — which the
-  // [opus → gpt-5.5] chain absorbs. Verified end-to-end 2026-06-02.)
+  // The Claude Max sub is claude-code-harness-only (Pete, 2026-06-11):
+  // Anthropic permits Max use through Claude Code; pi and hermes ride the
+  // ChatGPT subscription (gpt-5.5 via openai-codex), which OpenAI permits.
+  // The proxy enforces the same rule per-request (anthropicRouteVerdict in
+  // cli/lib/proxy-oauth.ts) — this check just fails the birth early with a
+  // usable message instead of a 403 at the cell's first call.
+  if (harness === "pi" && isAnthropicModel) {
+    console.error(
+      `pi cells don't run Anthropic models — the Claude Max sub is claude-code-only.\n` +
+      `  use --harness=claude-code for ${modelKey}, or --model=gpt-5.5 for pi`,
+    );
+    process.exit(1);
+  }
   // Harness-aware thinking validation. The interactive Ink picker already
   // restricts choices via thinkingOptionsForHarness; this catches the
   // non-interactive `--thinking=X` path that bypassed the picker. Skip
@@ -3726,11 +3732,11 @@ ls .pi/extensions/`;
   const fg = isHexColor(tokens[1] ?? "") ? tokens[1] : "#ffffff";
   const subScript = `set -euo pipefail
 cd /root
-for f in AGENTS.md SOUL.md IDENTITY.md CELLS.md CONTACTS.md HEARTBEAT.md package.json .tmux.conf; do
+for f in AGENTS.md CLAUDE.md SOUL.md IDENTITY.md CELLS.md CONTACTS.md HEARTBEAT.md package.json .tmux.conf .claude/settings.json; do
   [ -f "$f" ] && sudo sed -i "s/__NAME__/${spec.name}/g" "$f" || true
 done
 [ -f .tmux.conf ] && sudo sed -i "s|__CELL_BG__|${bg}|g; s|__CELL_FG__|${fg}|g" .tmux.conf || true
-echo "name-subst: $(grep -lc __NAME__ AGENTS.md SOUL.md package.json .tmux.conf 2>/dev/null | wc -l) files still with __NAME__ (want 0)"`;
+echo "name-subst: $(grep -lc __NAME__ AGENTS.md CLAUDE.md SOUL.md package.json .tmux.conf .claude/settings.json 2>/dev/null | wc -l) files still with __NAME__ (want 0)"`;
   const sub = await wellExecCapture(spec.wellName, subScript);
   if (!sub.ok) {
     throw new Error(`name substitution failed: ${sub.stderr.slice(0, 300)}`);

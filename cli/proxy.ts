@@ -63,7 +63,7 @@ import {
 import { isValidCellName } from "./lib/cell-name";
 import { loadRegistry, loadRegistrySafe, saveRegistry, type Registry } from "./lib/registry";
 import { cellRows, type CellRow } from "./lib/status-rows";
-import { ensurePreamble, classifyOAuthRoute } from "./lib/proxy-oauth";
+import { ensurePreamble, classifyOAuthRoute, anthropicRouteVerdict } from "./lib/proxy-oauth";
 
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = dirname(SCRIPT_DIR);
@@ -536,6 +536,20 @@ function checkClientAuth(req: Request): { ok: true; cell: string } | { ok: false
   return { ok: true, cell };
 }
 
+// Registry lookup for the Max-policy gate (anthropicRouteVerdict), cached so
+// the hot path doesn't re-read cells.json per request. 30s staleness is fine:
+// the gate's job is policy, not liveness — a just-born claude-code cell waits
+// at most one TTL before its first Anthropic call clears.
+const REGISTRY_CACHE_TTL_MS = 30_000;
+let registryCache: { at: number; byName: Map<string, { harness?: string; modelChain?: string[] }> } | null = null;
+async function lookupCellForGate(name: string) {
+  if (!registryCache || Date.now() - registryCache.at > REGISTRY_CACHE_TTL_MS) {
+    const reg = await loadRegistrySafe();
+    registryCache = { at: Date.now(), byName: new Map(reg.cells.map((c) => [c.name, c])) };
+  }
+  return registryCache.byName.get(name);
+}
+
 async function handleApiProxy(req: Request): Promise<Response> {
   const url = new URL(req.url);
 
@@ -572,6 +586,16 @@ async function handleApiProxy(req: Request): Promise<Response> {
 
   const auth = checkClientAuth(req);
   if (!auth.ok) return new Response(`unauthorized: ${auth.reason}`, { status: 401 });
+
+  // Max-policy gate: the Anthropic route serves claude-code cells only
+  // (see anthropicRouteVerdict in cli/lib/proxy-oauth.ts). Denials are loud
+  // on purpose — a pi/hermes cell landing here is misconfigured, and a 403
+  // with the policy spelled out beats silently riding the Max sub.
+  const verdict = anthropicRouteVerdict(await lookupCellForGate(auth.cell));
+  if (!verdict.allowed) {
+    console.warn(`[proxy] anthropic route denied for '${auth.cell}': ${verdict.reason}`);
+    return new Response(`forbidden: ${verdict.reason}`, { status: 403 });
+  }
 
   let access: string;
   try {
@@ -668,6 +692,19 @@ async function handleCodexProxy(req: Request): Promise<Response> {
 
   const auth = checkClientAuth(req);
   if (!auth.ok) return new Response(`unauthorized: ${auth.reason}`, { status: 401 });
+
+  // This proxy doesn't speak WebSocket — refuse upgrades honestly so the
+  // client's handshake fails clean and it falls back to POST/SSE. Without
+  // this, a fetch-forwarded upgrade can surface as a fake 101 whose socket
+  // never switches protocols; under idleTimeout:0 that socket stays open
+  // and pi-ai's codex provider dies reading garbage frames ("Invalid
+  // opcode received") instead of falling back. The fleet's WS attempts
+  // only ever "worked" by failing — the old 10s idle timeout closed the
+  // fake socket, which pi-ai read as WS-unavailable and fell back to SSE.
+  if ((req.headers.get("upgrade") ?? "").toLowerCase() === "websocket") {
+    console.log(`[${new Date().toISOString()}] codex ${auth.cell} WS upgrade refused (SSE only)`);
+    return new Response("codex proxy: websocket not supported — use POST (SSE)", { status: 426 });
+  }
 
   let access: string;
   let accountId: string;

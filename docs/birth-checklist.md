@@ -61,7 +61,7 @@ The automated sweep (`scripts/eval-birth.ts` / `scripts/harden-birth.ts`, see th
 
 For each row, run §4 immediately after birth before moving on.
 
-`pi` cells reach Claude on the Max subscription through `proxy.cells.md` — `cells birth --harness pi --model opus` works (shipped to main 2026-06-02, `c1ea209`; the use-max extension trips the first-party-billing gate). The earlier "pi-via-Max is fingerprint-dead" belief was wrong — the sk-ant-oat secret satisfies the OAuth gate; sporadic opus terminations are capacity weather, not blocking. pi+opus cells are opus-only by design (no gpt-5.5 fallback rung, so flaking stays visible).
+The Claude Max subscription is **claude-code-harness-only** (Pete, 2026-06-11): `cells birth --harness pi --model opus` is rejected at parse time, and the proxy 403s any non-claude-code cell on the Anthropic route (`anthropicRouteVerdict` in `cli/lib/proxy-oauth.ts`). pi and hermes ride the ChatGPT subscription (gpt-5.5 via the `/codex` proxy route). A useful negative row: `cells birth ck-pi-opus --harness=pi --model=opus` must fail with the policy message before touching the pool.
 
 ## 4. Per-birth verification
 

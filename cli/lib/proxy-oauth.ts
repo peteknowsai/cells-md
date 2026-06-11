@@ -54,3 +54,42 @@ export function classifyOAuthRoute(pathname: string): { isHermesOAuthRoute: bool
     : pathname;
   return { isHermesOAuthRoute, upstreamPath };
 }
+
+// ── Max-policy gate ────────────────────────────────────────────────────
+//
+// The Claude Max subscription is claude-code-harness-only (Pete, 2026-06-11):
+// Anthropic permits Max use through Claude Code; every other harness rides
+// the ChatGPT subscription via the /codex route. Birth refuses pi+anthropic
+// combos up front, but the proxy is where the guarantee becomes structural —
+// a misconfigured or legacy cell gets a loud 403 here instead of silently
+// burning the Max sub.
+//
+// Identity comes from the x-cell-name header (self-reported — cells aren't
+// adversarial; the threat model is misconfiguration) resolved against the
+// Mac-side registry by the caller. The verdict is pure so it's testable:
+// the caller hands us whatever the registry lookup produced.
+//
+// A cell may pass either by harness ("claude-code") or by carrying an
+// explicit claude-code:anthropic/* chain entry — the dual-harness specials
+// (mother: registry harness "pi", chain primary claude-code+opus) are
+// sanctioned by their chain, not their spawn harness. UA can't be the key:
+// pi-ai's OAuth path sends the same claude-cli/<version> UA as Claude Code.
+export function anthropicRouteVerdict(
+  cell: { harness?: string; modelChain?: string[] } | undefined,
+): { allowed: boolean; reason: string } {
+  if (!cell) {
+    return {
+      allowed: false,
+      reason: "cell not in registry — the Anthropic route requires a registered claude-code cell (x-cell-name header)",
+    };
+  }
+  const harness = cell.harness ?? "pi"; // absent on older entries → pi (registry.ts contract)
+  if (harness === "claude-code") return { allowed: true, reason: "claude-code harness" };
+  if ((cell.modelChain ?? []).some((e) => e.startsWith("claude-code:anthropic/"))) {
+    return { allowed: true, reason: "claude-code:anthropic chain entry" };
+  }
+  return {
+    allowed: false,
+    reason: `harness '${harness}' doesn't ride the Max sub — Anthropic models are claude-code-only; use gpt-5.5 via /codex`,
+  };
+}
