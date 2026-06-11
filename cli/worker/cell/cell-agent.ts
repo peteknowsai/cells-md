@@ -378,13 +378,28 @@ export class CellAgent {
       console.log(`[${this.env.CELL_NAME}] dropping agent envelope: hops=${env.hops} > ${MAX_HOPS}`);
       return new Response(null, { status: 200 });
     }
-    // Re-enabled 2026-05-19 after fixing chrony makestep on wells VMs (cells
-    // were hibernating, waking with stale RTC, and chrony defaults only
-    // step at startup — they slewed forever on offsets >1s). bake-egg.sh
-    // now appends `makestep 1.0 -1` to /etc/chrony/chrony.conf at birth.
+    // An envelope already expired AT ARRIVAL is a sender-clock artifact, not
+    // a stale message: in-flight time is seconds, and no sender posts an
+    // envelope it considers dead. Rebase the TTL onto our clock instead of
+    // dropping — sent_at and expires_at share the sender's clock, so their
+    // difference is the intended timeout regardless of skew. The old
+    // unconditional drop silently ate every `cells talk --await` from a
+    // skewed well (advisor-pete, 356s behind, 2026-06-11 — the bake-egg
+    // makestep fix this check trusted had never actually applied: stock
+    // chrony.conf ships `makestep 1 3`, so the append-if-absent guard never
+    // fired). Expiry still applies later, while the envelope sits in the
+    // hibernation queue — that's the case the TTL exists for.
     if (isExpired(env)) {
-      console.log(`[${this.env.CELL_NAME}] dropping expired agent envelope corr=${env.corr_id.slice(0, 10)}`);
-      return new Response(null, { status: 200 });
+      const ttlMs = new Date(env.expires_at).getTime() - new Date(env.sent_at).getTime();
+      if (Number.isFinite(ttlMs) && ttlMs > 0) {
+        env.expires_at = new Date(Date.now() + ttlMs).toISOString();
+        console.log(
+          `[${this.env.CELL_NAME}] rebased skew-expired envelope corr=${env.corr_id.slice(0, 10)} ttl=${Math.round(ttlMs / 1000)}s`,
+        );
+      } else {
+        console.log(`[${this.env.CELL_NAME}] dropping expired agent envelope corr=${env.corr_id.slice(0, 10)}`);
+        return new Response(null, { status: 200 });
+      }
     }
 
     // (1) Reply path. Forward to the supervisor over the existing WS so

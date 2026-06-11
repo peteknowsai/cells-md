@@ -79,11 +79,19 @@ tar czf - -C "$REPO_ROOT/dna/cells/base" . \
   # offset exceeds 1s, regardless of measurement count. Without this, fresh
   # envelopes generated on a recently-woken cell appear "expired" to the
   # worker (Phase 0 of agent-comms hit this on cells-narrator at 49 min behind).
-  echo "if ! sudo grep -q '^makestep' /etc/chrony/chrony.conf 2>/dev/null; then"
+  #
+  # REPLACE the stock line, don't append-if-absent: Ubuntu's chrony.conf
+  # ships `makestep 1 3` (step only in the first 3 measurements), so the
+  # old `if ! grep makestep` guard never fired and every egg baked through
+  # 2026-06-11 shipped with stock stepping — the advisor-pete CLI-talk
+  # outage (envelopes expired-on-arrival at the DO, 356s skew) was this.
+  echo "if sudo grep -q '^makestep' /etc/chrony/chrony.conf 2>/dev/null; then"
+  echo "  sudo sed -i 's/^makestep.*/makestep 1.0 -1/' /etc/chrony/chrony.conf"
+  echo "else"
   echo "  echo 'makestep 1.0 -1' | sudo tee -a /etc/chrony/chrony.conf > /dev/null"
-  echo "  sudo systemctl restart chrony 2>/dev/null || true"
-  echo "  sudo chronyc makestep > /dev/null 2>&1 || true"
   echo "fi"
+  echo "sudo systemctl restart chrony 2>/dev/null || true"
+  echo "sudo chronyc makestep > /dev/null 2>&1 || true"
 
   echo "# ===dna perms ==="
   # The DNA overlay carries each file's mode from the repo; make sure the

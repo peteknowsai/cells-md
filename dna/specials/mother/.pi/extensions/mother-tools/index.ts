@@ -19,6 +19,8 @@
  */
 
 import { Type } from "@sinclair/typebox";
+import { existsSync as fsExistsSync } from "node:fs";
+import { join as pathJoin } from "node:path";
 
 const BRIDGE_BASE = process.env.CELLS_BRIDGE_URL ?? "https://proxy.cells.md/bridge";
 
@@ -47,6 +49,18 @@ function fmt(label: string, r: { ok: boolean; status: number; data: any; text: s
   const body = r.data ? JSON.stringify(r.data, null, 2) : r.text || "(empty)";
   return `${head}\n${body}`;
 }
+
+// well_exec and report_outcome exist in BOTH this extension (bridge-routed,
+// for the on-well mother) and well-tools (local, for Mac-side flows like
+// `cells checkpoint`). pi auto-loads every .pi/extensions/*/index.ts under
+// its cwd and hard-errors on duplicate tool names, so we register our
+// bridge versions only when well-tools is absent — which is exactly the
+// on-well case (birth-special strips well-tools from the live mother).
+// Mac-side, well-tools is present and owns those two names. pi's cwd is
+// the agent root in both contexts (MOTHER_ROOT on the Mac, /root on-well).
+const WELL_TOOLS_PRESENT = fsExistsSync(
+  pathJoin(process.cwd(), ".pi", "extensions", "well-tools", "index.ts"),
+);
 
 export default function (pi: any) {
   pi.registerTool({
@@ -102,7 +116,7 @@ export default function (pi: any) {
     },
   });
 
-  pi.registerTool({
+  if (!WELL_TOOLS_PRESENT) pi.registerTool({
     name: "well_exec",
     label: "Run a script on a well",
     description:
@@ -131,7 +145,7 @@ export default function (pi: any) {
     },
   });
 
-  pi.registerTool({
+  if (!WELL_TOOLS_PRESENT) pi.registerTool({
     name: "report_outcome",
     label: "Report birth outcome",
     description:

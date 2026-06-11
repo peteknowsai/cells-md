@@ -300,6 +300,10 @@ export default function (pi: any) {
     }),
     async execute(_id: string, params: { name: string }) {
       const cellsPath = join(homedir(), ".cells", "cells.json");
+      // Pool members moved from eggs.json ({eggs:[...]}) to pool.json
+      // ({members:[...]}) — read the current file first, keep the legacy
+      // one as a fallback for ancient state dirs.
+      const poolPath = join(homedir(), ".cells", "pool.json");
       const eggsPath = join(homedir(), ".cells", "eggs.json");
       try {
         if (!existsSync(cellsPath)) {
@@ -313,7 +317,7 @@ export default function (pi: any) {
           };
         }
         const reg = JSON.parse(readFileSync(cellsPath, "utf8")) as {
-          cells: Array<{ name: string; hatched_from?: string; status?: string }>;
+          cells: Array<{ name: string; hatched_from?: string; status?: string; special?: boolean }>;
         };
         const cell = reg.cells.find((c) => c.name === params.name);
         if (!cell) {
@@ -322,6 +326,17 @@ export default function (pi: any) {
               {
                 type: "text",
                 text: `cell_resolve: no cell named '${params.name}' in registry. Cannot resolve well.`,
+              },
+            ],
+          };
+        }
+        if (cell.special) {
+          // Specials (mother, pulse) live in deterministic cells-<name> wells.
+          return {
+            content: [
+              {
+                type: "text",
+                text: `cell_resolve: cell '${params.name}' is a special. well_name=cells-${params.name}`,
               },
             ],
           };
@@ -336,26 +351,35 @@ export default function (pi: any) {
             ],
           };
         }
-        if (!existsSync(eggsPath)) {
+        let egg: { id: string; well_name: string } | undefined;
+        if (existsSync(poolPath)) {
+          const pool = JSON.parse(readFileSync(poolPath, "utf8")) as {
+            members: Array<{ id: string; well_name: string }>;
+          };
+          egg = pool.members.find((e) => e.id === cell.hatched_from);
+        }
+        if (!egg && existsSync(eggsPath)) {
+          const eggs = JSON.parse(readFileSync(eggsPath, "utf8")) as {
+            eggs: Array<{ id: string; well_name: string }>;
+          };
+          egg = eggs.eggs.find((e) => e.id === cell.hatched_from);
+        }
+        if (!existsSync(poolPath) && !existsSync(eggsPath)) {
           return {
             content: [
               {
                 type: "text",
-                text: `cell_resolve: cell '${params.name}' references egg ${cell.hatched_from} but ${eggsPath} is missing. Cannot resolve well.`,
+                text: `cell_resolve: cell '${params.name}' references egg ${cell.hatched_from} but neither ${poolPath} nor ${eggsPath} exists. Cannot resolve well.`,
               },
             ],
           };
         }
-        const eggs = JSON.parse(readFileSync(eggsPath, "utf8")) as {
-          eggs: Array<{ id: string; well_name: string }>;
-        };
-        const egg = eggs.eggs.find((e) => e.id === cell.hatched_from);
         if (!egg) {
           return {
             content: [
               {
                 type: "text",
-                text: `cell_resolve: cell '${params.name}' references egg ${cell.hatched_from} but no such egg in eggs.json. well likely already destroyed.`,
+                text: `cell_resolve: cell '${params.name}' references egg ${cell.hatched_from} but no such egg in pool.json (or legacy eggs.json). well likely already destroyed.`,
               },
             ],
           };
