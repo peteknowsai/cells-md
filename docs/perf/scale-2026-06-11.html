@@ -72,6 +72,16 @@ disk: ~5–9 GB per well · 319 GB free at test time</pre>
 </section>
 
 <section>
+  <h2>Side finding — seal under churn</h2>
+  <p>Two egg bakes seal-failed with <code>disk still held within 60000ms</code> during and right
+  after the test window (9 VMs running, births + kills + bakes overlapping), on <em>fresh</em> eggs —
+  not standing orphans (VZ process count matched running wells once the fleet quieted). Verdict:
+  the 60s disk-release window the seal path waits on is tight under host load. Refill recovers on
+  retry, the steward backstops depth, and the empty-pool birth path self-heals — but wells may want
+  a load-aware seal timeout. Handed to the wells channel.</p>
+</section>
+
+<section>
   <h2>Verdict</h2>
   <p><strong>This 48 GB Mini comfortably runs dozens of mostly-asleep cells with 10–15 simultaneous conversations.</strong> The three binding constraints, in order: <strong>RAM for concurrently-awake cells</strong> (~1.9 GB RSS each; hibernated cells cost zero — budget ~15–18 awake alongside macOS and services), <strong>disk per cell</strong> (5–9 GB; ~30–40 cells on current free space), and <strong>mother's serial birth throughput</strong> (~2 births/min while the pool holds, ~0.6/min at bake speed once drained — bursts longer than pool depth pay a ~2.5-minute drought-recovery gap, now self-healing). Wake-on-demand held under a 5-way storm at p50 5.7s, which is the number that matters for the every-buyer-gets-an-advisor pitch: a sleeping advisor answers WhatsApp in about six seconds.</p>
 </section>
