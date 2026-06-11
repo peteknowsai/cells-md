@@ -103,6 +103,19 @@ export type ForkAndAskResult =
   | { ok: true; text: string }
   | { ok: false; error: string };
 
+// Size a fork's process leash from the sender's declared turn budget
+// (envelope timeout_seconds, forwarded by the cell Worker DO). The sender
+// is already long-polling for exactly that long, so the per-harness
+// defaults only apply to unmarked envelopes. Floor 60s — a tiny declared
+// budget shouldn't kill a turn that was going to make it; ceiling 15 min —
+// a buggy or hostile stamp must not pin a fork process forever.
+export const TURN_LEASH_FLOOR_MS = 60_000;
+export const TURN_LEASH_CEILING_MS = 900_000;
+export function turnLeashMs(requestedMs: number): number {
+  if (!Number.isFinite(requestedMs) || requestedMs <= 0) return TURN_LEASH_FLOOR_MS;
+  return Math.min(Math.max(requestedMs, TURN_LEASH_FLOOR_MS), TURN_LEASH_CEILING_MS);
+}
+
 // Random hex used in fork artifact paths so concurrent forks don't collide.
 function forkSlug(): string {
   const bytes = new Uint8Array(8);

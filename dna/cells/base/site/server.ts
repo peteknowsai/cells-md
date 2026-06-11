@@ -32,7 +32,7 @@ import { type Subprocess, spawn } from "bun";
 import { existsSync, mkdirSync, readFileSync, watch } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { getAdapter, type AdapterHost, type HarnessAdapter } from "../lib/harness-adapters";
+import { getAdapter, turnLeashMs, type AdapterHost, type HarnessAdapter } from "../lib/harness-adapters";
 import { isInsideDir } from "../lib/path-guard";
 import { MIME, collectSiteFiles } from "../lib/site-files";
 
@@ -819,7 +819,14 @@ function handleBridgeFrame(line: string) {
     const from = typeof cmd.from === "string" ? cmd.from : "unknown";
     const text = typeof cmd.text === "string" ? cmd.text : "";
     const target = typeof cmd.target === "string" ? cmd.target : "fork";
-    console.log(`[bridge] agent_message corr=${corrId.slice(0, 10)} from=${from} target=${target} text=${text.slice(0, 100).replace(/\n/g, " ")}`);
+    // Sender's declared turn budget (DO forwards it from the envelope) —
+    // sizes the fork leash below so a long WhatsApp/onboarding turn isn't
+    // killed at the per-harness default while the sender is still waiting.
+    const timeoutS =
+      typeof cmd.timeout_seconds === "number" && cmd.timeout_seconds > 0 ? cmd.timeout_seconds : 0;
+    console.log(
+      `[bridge] agent_message corr=${corrId.slice(0, 10)} from=${from} target=${target}${timeoutS ? ` leash=${timeoutS}s` : ""} text=${text.slice(0, 100).replace(/\n/g, " ")}`,
+    );
     if (target === "main") {
       // --main escalation: write into the main thread like Slack/email.
       // Phase 4 wires this; for now reject so we don't silently fall through.
@@ -839,6 +846,7 @@ function handleBridgeFrame(line: string) {
         prompt: text,
         mainRef: getMainRef(),
         cellName,
+        ...(timeoutS ? { timeoutMs: turnLeashMs(timeoutS * 1000) } : {}),
       });
       const dt = Date.now() - t0;
       if (result.ok) {

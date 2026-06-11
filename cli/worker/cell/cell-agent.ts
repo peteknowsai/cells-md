@@ -432,6 +432,17 @@ export class CellAgent {
 
     // The supervisor speaks pi's RPC vocabulary; agent_message is a new
     // frame type that bypasses the prompt path (different routing target).
+    // Sender-declared turn budget, recovered skew-free from the envelope
+    // stamps (both share the sender's clock, so the difference is the
+    // intended TTL). The supervisor sizes the fork leash from this —
+    // without it, adapters fall back to per-harness defaults and a 90s
+    // claude-code leash kills WhatsApp/onboarding turns mid-thought
+    // (observed live 2026-06-11, advisor-pete onboarding).
+    const ttlMs =
+      env.expires_at && env.sent_at
+        ? new Date(env.expires_at).getTime() - new Date(env.sent_at).getTime()
+        : 0;
+
     // Queue + doorbell if the cell is asleep — same as the prompt path.
     await this.sendOrQueue(JSON.stringify({
       type: "agent_message",
@@ -441,6 +452,7 @@ export class CellAgent {
       target: env.target,
       hops: env.hops,
       text: env.text,
+      ...(Number.isFinite(ttlMs) && ttlMs > 0 ? { timeout_seconds: Math.round(ttlMs / 1000) } : {}),
     }));
 
     await this.persist();

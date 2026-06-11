@@ -2178,6 +2178,35 @@ async function cmdDoctor() {
       console.log(`  ${red}${transportFails} cell(s) cannot complete a talk round-trip. Fix before trusting the fleet.${reset}`);
     }
   }
+
+  // 9. wa-bridge — the WhatsApp transport adapter (Zero's Mac daemon,
+  // :7891). It's the single point of failure for the buyer-facing advisor
+  // surface and its known failure mode is dying silently (Baileys session
+  // expiry → QR re-pair). Probe /health: wa must be "connected", queues
+  // empty. Absent daemon is a warn, not a fail — not every operator Mac
+  // runs the HomeZero surface.
+  {
+    const waPort = process.env.WA_BRIDGE_PORT ?? "7891";
+    let line: string;
+    try {
+      const h: any = await fetch(`http://127.0.0.1:${waPort}/health`, {
+        signal: AbortSignal.timeout(2000),
+      }).then((r) => (r.ok ? r.json() : null));
+      if (h?.ok && h?.wa === "connected") {
+        const depths = Object.entries(h.queueDepths ?? {}).filter(([, n]) => Number(n) > 0);
+        line = depths.length
+          ? `${yellow}connected, queued${reset} ${dim}(${depths.map(([k, n]) => `${k}:${n}`).join(", ")} — deliveries backing up)${reset}`
+          : `${green}connected${reset} ${dim}(up ${Math.round((h.uptime ?? 0) / 3600)}h)${reset}`;
+      } else if (h) {
+        line = `${red}socket ${h.wa ?? "unknown"}${reset} ${dim}— WhatsApp surface down; may need QR re-pair${reset}`;
+      } else {
+        line = `${yellow}bad /health response${reset}`;
+      }
+    } catch {
+      line = `${yellow}not running${reset} ${dim}(WhatsApp surface offline — fine if this Mac doesn't host HomeZero)${reset}`;
+    }
+    console.log(`\nwa-bridge:     ${line}`);
+  }
 }
 
 async function checkPiPatches(): Promise<{ ok: boolean; detail: string }> {

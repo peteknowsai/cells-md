@@ -592,3 +592,24 @@ test("pi translateInbound: any command is JSON.stringified verbatim", () => {
   expect(piAdapter.translateInbound!(cmd, host)).toBe(JSON.stringify(cmd));
   expect(piAdapter.translateInbound!({ type: "abort" }, host)).toBe('{"type":"abort"}');
 });
+
+// Fork leash sizing from the sender's declared budget (envelope
+// timeout_seconds via the DO). The constants are load-bearing: the floor
+// protects against pathological tiny stamps, the ceiling against a fork
+// pinned forever — see the advisor-pete onboarding kill, 2026-06-11.
+import { turnLeashMs, TURN_LEASH_FLOOR_MS, TURN_LEASH_CEILING_MS } from "./harness-adapters";
+
+test("turnLeashMs honors a sane sender budget verbatim (180s CLI default)", () => {
+  expect(turnLeashMs(180_000)).toBe(180_000);
+});
+test("turnLeashMs floors tiny budgets at 60s", () => {
+  expect(turnLeashMs(5_000)).toBe(TURN_LEASH_FLOOR_MS);
+});
+test("turnLeashMs ceilings runaway budgets at 15 min", () => {
+  expect(turnLeashMs(86_400_000)).toBe(TURN_LEASH_CEILING_MS);
+});
+test("turnLeashMs: zero / negative / NaN fall to the floor", () => {
+  expect(turnLeashMs(0)).toBe(TURN_LEASH_FLOOR_MS);
+  expect(turnLeashMs(-5)).toBe(TURN_LEASH_FLOOR_MS);
+  expect(turnLeashMs(Number.NaN)).toBe(TURN_LEASH_FLOOR_MS);
+});
