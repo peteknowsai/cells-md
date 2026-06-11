@@ -8418,6 +8418,14 @@ async function cmdModel(args: string[]): Promise<void> {
     );
     process.exit(1);
   }
+  if (provider !== "anthropic" && harness === "claude-code") {
+    console.error(
+      `${name} runs the claude-code harness, which only runs Anthropic models — ` +
+      `writing '${entry}' would leave it with an unrunnable config. ` +
+      `Fast chat needs the pi harness (rebirth, or the documented in-place flip).`,
+    );
+    process.exit(1);
+  }
   if (harness !== "pi" && harness !== "claude-code") {
     console.error(`cells model supports pi and claude-code cells (got harness=${harness})`);
     process.exit(1);

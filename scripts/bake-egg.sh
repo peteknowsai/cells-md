@@ -111,6 +111,21 @@ tar czf - -C "$REPO_ROOT/dna/cells/base" . \
   echo "sudo sed -i '/^CELL_NAME=/d' /etc/environment 2>/dev/null || true"
   echo "echo 'CELL_NAME=$NAME' | sudo tee -a /etc/environment > /dev/null"
 
+  # .claude/settings.json is imprinted for EVERY harness, not just
+  # claude-code: the deep-research extension shells out to the claude
+  # binary from pi cells, and that call rides this file's proxy base URL +
+  # x-cell-name header. An unimprinted header (`x-cell-name: __NAME__`)
+  # 403s at the proxy gate (codex review, 2026-06-11). Non-claude-code
+  # harnesses get the deep-lane defaults (opus/high) — chat config lives
+  # in their own harness tree; deep_research passes --model opus anyway.
+  echo "# ===claude settings (all harnesses — deep-research rides them) ==="
+  if [ "$HARNESS" = "claude-code" ]; then
+    echo "sudo sed -i \"s/__MODEL__/$MODEL/g; s/__THINKING__/$THINKING/g; s/__NAME__/$NAME/g\" /root/.claude/settings.json"
+  else
+    echo "sudo sed -i \"s/__MODEL__/opus/g; s/__THINKING__/high/g; s/__NAME__/$NAME/g\" /root/.claude/settings.json"
+  fi
+  echo "jq . /root/.claude/settings.json > /dev/null"
+
   if [ "$HARNESS" = "pi" ]; then
     echo "# ===pi settings ==="
     echo "sudo tee /root/.pi/settings.json > /dev/null <<'PI_SETTINGS_EOF'"
@@ -124,9 +139,7 @@ tar czf - -C "$REPO_ROOT/dna/cells/base" . \
     # that flag would restore the direct api.anthropic.com baseUrl, which only
     # works with a paid key — the opposite of what we want.
   elif [ "$HARNESS" = "claude-code" ]; then
-    echo "# ===claude settings ==="
-    echo "sudo sed -i \"s/__MODEL__/$MODEL/g; s/__THINKING__/$THINKING/g; s/__NAME__/$NAME/g\" /root/.claude/settings.json"
-    echo "jq . /root/.claude/settings.json > /dev/null"
+    # (.claude/settings.json already imprinted above, for all harnesses.)
     # Birth-time session capture: warm up claude once and cache the session
     # id. Runtime supervisor always --resumes; no capture branch in the hot
     # path. The agent-comms primitive forks main rather than maintaining a

@@ -33,12 +33,24 @@ type RunResult = { ok: boolean; exit: number; timedOut: boolean; stdout: string;
 function runClaude(prompt: string, signal: AbortSignal): Promise<RunResult> {
   return new Promise((resolve) => {
     // bash -lc: a login shell sources /etc/profile.d/cells-env.sh, which is
-    // where ANTHROPIC_AUTH_TOKEN (the proxy bearer) and PATH come from.
+    // where ANTHROPIC_AUTH_TOKEN (the proxy bearer), CELL_NAME, and PATH
+    // come from.
+    //
+    // Preflight self-heal: cells born by a pre-2026-06-11 bake only
+    // imprinted .claude/settings.json on the claude-code harness, so a pi
+    // cell can still carry `x-cell-name: __NAME__` — which the proxy gate
+    // looks up verbatim and 403s. Imprint from CELL_NAME (the canonical
+    // identity in /etc/environment) before the first call; a no-op on
+    // imprinted cells.
+    const preflight =
+      'if grep -q __NAME__ /root/.claude/settings.json 2>/dev/null; then ' +
+      'sudo sed -i "s/__NAME__/${CELL_NAME:?}/g; s/__MODEL__/opus/g; s/__THINKING__/high/g" /root/.claude/settings.json; fi; ';
     const proc = spawn(
       "bash",
       [
         "-lc",
-        "export HOME=/root IS_SANDBOX=1; cd /root && exec claude -p --model opus --permission-mode bypassPermissions",
+        preflight +
+          "export HOME=/root IS_SANDBOX=1; cd /root && exec claude -p --model opus --permission-mode bypassPermissions",
       ],
       { cwd: AGENT_DIR, stdio: ["pipe", "pipe", "pipe"] },
     );
@@ -103,7 +115,15 @@ export default function (pi: any) {
         params.context ? `\nContext from the conversation:\n${params.context}` : "",
         `\nThe question:\n${params.question}`,
       ].join("\n");
-      const r = await runClaude(prompt, signal);
+      let r = await runClaude(prompt, signal);
+      // One retry on a fast, empty failure. Observed live (bob, 2026-06-11):
+      // the very first in-fork claude invocation on a cell can die in a few
+      // seconds with no output, and every call after it succeeds. A single
+      // deterministic retry absorbs that class without masking real errors —
+      // a second identical failure is reported.
+      if (!r.ok && !r.timedOut && !r.stdout.trim() && !signal.aborted) {
+        r = await runClaude(prompt, signal);
+      }
       if (r.timedOut) {
         return {
           content: [
