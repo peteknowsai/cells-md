@@ -16,9 +16,9 @@
 import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { latestOpusFrom } from "../cli/lib/model-normalizer";
 
 const N_PAIRS = Number(process.env.N_PAIRS ?? 10);
-const MODEL = process.env.MODEL ?? "claude-opus-4-7";
 const AUTH_PATH = join(homedir(), ".pi", "agent", "auth.json");
 
 type Auth = { anthropic?: { access?: string; expires?: number } };
@@ -27,6 +27,26 @@ const token = auth.anthropic?.access;
 if (!token) throw new Error("no anthropic access token in ~/.pi/agent/auth.json");
 const expires = auth.anthropic?.expires ?? 0;
 const minsLeft = Math.round((expires - Date.now()) / 60000);
+
+// No pinned default — this probe hits api.anthropic.com directly (no proxy
+// normalizer in the path), so discover the latest Opus the same way the
+// proxy does. MODEL env still overrides for pinned comparisons.
+async function resolveModel(): Promise<string> {
+  if (process.env.MODEL) return process.env.MODEL;
+  const res = await fetch("https://api.anthropic.com/v1/models?limit=100", {
+    headers: {
+      authorization: `Bearer ${token}`,
+      "anthropic-version": "2023-06-01",
+      "anthropic-beta": "oauth-2025-04-20",
+    },
+  });
+  if (!res.ok) throw new Error(`GET /v1/models -> ${res.status}; pass MODEL=... explicitly`);
+  const data = (await res.json()) as { data?: { id: string; created_at?: string }[] };
+  const latest = latestOpusFrom(data.data ?? []);
+  if (!latest) throw new Error("no opus model in /v1/models; pass MODEL=... explicitly");
+  return latest;
+}
+const MODEL = await resolveModel();
 console.log(`OAuth token expires in ~${minsLeft} min · model ${MODEL} · ${N_PAIRS} pairs`);
 
 const CLEAN_PROMPT = "Say the single word: hello";

@@ -24,16 +24,26 @@ after you, on the Mac.
    existing cell name instead of birthing a duplicate.
 3. **Birth `advisor-<handle>`** by the standard ritual, from the egg
    pool, with the blob values from the template: harness `pi`, model
-   `claude-opus-4-7`, provider `anthropic`, thinking `high`, chain
-   `["anthropic/claude-opus-4-7:high"]` (single rung on purpose — no
-   gpt-5.5 fallback, Pete's 2026-06-02 rule), extensions
-   `memory,dream,mentality`, channels `[]` (WhatsApp is NOT a cells
-   channel; the bridge handles it).
+   `gpt-5.5`, provider `openai-codex`, thinking `low`, chain
+   `["openai-codex/gpt-5.5:low"]`, extensions
+   `memory,dream,mentality,deep-research`, channels `[]` (WhatsApp is
+   NOT a cells channel; the bridge handles it).
+
+   Why this shape (Pete, 2026-06-11): advisors are conversational —
+   chat runs on gpt-5.5 low so WhatsApp replies come back in seconds.
+   Depth comes from the `deep-research` extension, which fires the
+   latest Claude Opus (`claude -p --model opus` on the cell's own box,
+   through the proxy on the Max sub) when a question deserves real
+   thought. The old pi + anthropic recipe is rejected by the birth
+   gate — Max is claude-code-harness-only.
 4. **Do not configure the anatomy yourself.** The newborn needs the
-   template overlay, germ substitution, advisor.db, env, and the smoke
-   test — that's the post-birth checklist
-   (`~/Projects/Zero/cells/advisor/post-birth-checklist.md`), run by
-   Claude-on-Mac, not by you. Your job ends at a healthy stock birth.
+   template overlay, germ substitution, advisor.db, env, the deep-research
+   license (`cells chain advisor-<handle> --add
+   claude-code:anthropic/opus:high` — without it the proxy 403s the
+   `deep_research` tool), and the smoke test — that's the post-birth
+   checklist (`~/Projects/Zero/cells/advisor/post-birth-checklist.md`),
+   run by Claude-on-Mac, not by you. Your job ends at a healthy stock
+   birth.
 5. **Log + reply.** Append the usual activity-log line
    (`<UTC> born advisor-<handle> intake=<intakeId> — needs post-birth
    config`) and reply to the talk message with the cell name, the

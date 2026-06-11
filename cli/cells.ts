@@ -91,11 +91,16 @@ async function wellPublicBase(): Promise<string> {
   return process.env.WELL_PUBLIC_BASE ?? (await loadCellsConfig()).well_public_base;
 }
 
-// Model registry — short name → { provider, modelId }. Anthropic doesn't
-// provide a floating "claude-opus-latest" alias; the major-version-stamped
-// alias is what they recommend. Bump these when a new minor ships.
+// Model registry — short name → { provider, modelId }. "opus" is deliberately
+// NOT version-stamped (Pete 2026-06-11: opus always means the latest Opus).
+// Two layers make that real with nothing to bump when a new Opus ships:
+//   1. the claude CLI resolves the bare `opus` alias to the newest Opus, and
+//   2. the proxy rewrites ANY opus-family ID in a request body to the latest
+//      Opus discovered from GET /v1/models (cli/lib/model-normalizer.ts) —
+//      covering stale binaries and old pinned settings too.
+// sonnet/haiku stay major-version-stamped; nothing chats on them.
 const MODEL_IDS = {
-  opus:                { provider: "anthropic", modelId: "claude-opus-4-7" },
+  opus:                { provider: "anthropic", modelId: "opus" },
   sonnet:              { provider: "anthropic", modelId: "claude-sonnet-4-6" },
   haiku:               { provider: "anthropic", modelId: "claude-haiku-4-5" },
   "gpt-5.5":           { provider: "openai-codex", modelId: "gpt-5.5" },
@@ -133,7 +138,7 @@ function buildDefaultChain(
 // In-tree extensions a user can opt into at create time. Each lives at
 // dna/cells/base/.pi/extensions/<name>/ — birth pushes the whole dna, then
 // deletes the unselected ones from the cell.
-const OPTIONAL_EXTENSIONS = ["memory", "mentality", "wiki", "dream"] as const;
+const OPTIONAL_EXTENSIONS = ["memory", "mentality", "wiki", "dream", "deep-research"] as const;
 type OptionalExtension = (typeof OPTIONAL_EXTENSIONS)[number];
 
 // Curated list of npm/git packages a cell CAN install via `pi install` at
@@ -8313,6 +8318,138 @@ async function cmdProject(args: string[]): Promise<void> {
   }
 }
 
+// cells chain <cell> [--add <entry>] [--remove <entry>] — inspect or edit a
+// cell's registry modelChain. The chain is Mac-side metadata: the proxy's
+// Max-policy gate reads it (a `claude-code:anthropic/...` entry licenses a
+// pi cell's deep_research tool to ride the Anthropic route), and `cells
+// list`/fleet display it. It is NOT the cell's runtime fallback chain — that
+// lives in the cell's own .pi/settings.json and is untouched here.
+async function cmdChain(args: string[]): Promise<void> {
+  const name = args[0];
+  if (!name || name.startsWith("--")) {
+    console.error("usage: cells chain <cell> [--add <entry>] [--remove <entry>]");
+    console.error('  entry format: [<harness>:]<provider>/<model>:<thinking>  e.g. claude-code:anthropic/opus:high');
+    process.exit(1);
+  }
+  const reg = await loadRegistry();
+  const cell = reg.cells.find((c) => c.name === name);
+  if (!cell) {
+    console.error(`cell '${name}' not found in registry`);
+    process.exit(1);
+  }
+  const chain: string[] = Array.isArray(cell.modelChain) ? cell.modelChain : [];
+  let changed = false;
+  for (let i = 1; i < args.length; i++) {
+    if (args[i] === "--add") {
+      const entry = args[++i];
+      if (!entry) { console.error("--add needs an entry"); process.exit(1); }
+      if (!chain.includes(entry)) { chain.push(entry); changed = true; console.log(`+ ${entry}`); }
+      else console.log(`already present: ${entry}`);
+    } else if (args[i] === "--remove") {
+      const entry = args[++i];
+      if (!entry) { console.error("--remove needs an entry"); process.exit(1); }
+      const at = chain.indexOf(entry);
+      if (at >= 0) { chain.splice(at, 1); changed = true; console.log(`- ${entry}`); }
+      else console.log(`not in chain: ${entry}`);
+    } else {
+      console.error(`unknown flag: ${args[i]}`);
+      process.exit(1);
+    }
+  }
+  if (changed) {
+    cell.modelChain = chain;
+    await saveRegistry(reg);
+  }
+  console.log(`${name} modelChain:`);
+  for (const e of chain) console.log(`  ${e}`);
+}
+
+// cells model <cell> [<provider>/<model>:<thinking>] — the CONVERSATION
+// model: what the cell's chat turns run on. Show with no entry; set with
+// one. Setting edits the cell's runtime config in place (pi:
+// .pi/settings.json defaults + chain head; claude-code: .claude/settings.json
+// model/effortLevel), restarts the supervisor so the next turn picks it up,
+// and mirrors the new head into the registry chain for display. No rebirth.
+//
+// This is the speed knob (Pete 2026-06-11): conversational, channel-facing
+// cells chat on openai-codex/gpt-5.5:low; depth comes from the deep_research
+// tool, not the chat path. The Max policy still applies — anthropic
+// conversation models are claude-code-harness-only.
+async function cmdModel(args: string[]): Promise<void> {
+  const name = args[0];
+  if (!name) {
+    console.error("usage: cells model <cell> [<provider>/<model>:<thinking>]");
+    console.error("  e.g. cells model advisor-pete openai-codex/gpt-5.5:low");
+    process.exit(1);
+  }
+  const reg = await loadRegistry();
+  const cell = reg.cells.find((c) => c.name === name);
+  if (!cell) {
+    console.error(`cell '${name}' not found in registry`);
+    process.exit(1);
+  }
+  const harness = cell.harness ?? "pi";
+  const entry = args[1];
+
+  if (!entry) {
+    console.log(`${name} (harness=${harness})`);
+    console.log(`  registry chain: ${(cell.modelChain ?? []).join("  →  ") || "(none)"}`);
+    const wellName = await wellNameForCell(name);
+    const probe =
+      harness === "claude-code"
+        ? `jq -r '"  live conversation model: " + .model + ":" + .effortLevel' /root/.claude/settings.json`
+        : `jq -r '"  live conversation model: " + .defaultProvider + "/" + .defaultModel + ":" + .defaultThinkingLevel' /root/.pi/settings.json`;
+    const r = await wellExecCapture(wellName, probe);
+    console.log(r.ok ? r.stdout.trim() : `  (live config unreadable — well may be asleep)`);
+    return;
+  }
+
+  const m = entry.match(/^([a-z0-9-]+)\/([A-Za-z0-9.:_-]+?):(minimal|low|medium|high|xhigh|max)$/);
+  if (!m) {
+    console.error(`bad entry '${entry}' — want <provider>/<model>:<thinking>, e.g. openai-codex/gpt-5.5:low`);
+    process.exit(1);
+  }
+  const [, provider, model, thinking] = m;
+  if (provider === "anthropic" && harness !== "claude-code") {
+    console.error(
+      `${name} runs the ${harness} harness — anthropic conversation models are claude-code-only (the Max policy). ` +
+      `Deep Opus access for a ${harness} cell goes through the deep_research tool + ` +
+      `\`cells chain ${name} --add claude-code:anthropic/opus:high\`.`,
+    );
+    process.exit(1);
+  }
+  if (harness !== "pi" && harness !== "claude-code") {
+    console.error(`cells model supports pi and claude-code cells (got harness=${harness})`);
+    process.exit(1);
+  }
+
+  const wellName = await wellNameForCell(name);
+  const script =
+    harness === "claude-code"
+      ? `set -euo pipefail
+jq '.model = "${model}" | .effortLevel = "${thinking}"' /root/.claude/settings.json > /tmp/cs.json
+sudo mv /tmp/cs.json /root/.claude/settings.json && sudo chown root:root /root/.claude/settings.json
+sudo systemctl restart well-site
+sync`
+      : `set -euo pipefail
+jq '.defaultProvider = "${provider}" | .defaultModel = "${model}" | .defaultThinkingLevel = "${thinking}" | .modelChain = (["${provider}/${model}:${thinking}"] + ((.modelChain // [])[1:]))' /root/.pi/settings.json > /tmp/ps.json
+sudo mv /tmp/ps.json /root/.pi/settings.json && sudo chown root:root /root/.pi/settings.json
+sudo systemctl restart well-site
+sync`;
+  const r = await wellExecCapture(wellName, script);
+  if (!r.ok) {
+    console.error(`live config update failed: ${(r.stderr || r.stdout).slice(0, 300)}`);
+    process.exit(1);
+  }
+
+  const chain: string[] = Array.isArray(cell.modelChain) ? cell.modelChain : [];
+  if (chain.length > 0) chain[0] = entry;
+  else chain.push(entry);
+  cell.modelChain = chain;
+  await saveRegistry(reg);
+  console.log(`${name}: conversation model → ${entry} (supervisor restarted, registry updated)`);
+}
+
 const [sub, ...rest] = process.argv.slice(2);
 
 switch (sub) {
@@ -8334,6 +8471,8 @@ switch (sub) {
   case "agents":
   case "fleet":      await cmdAgents(rest); break;
   case "project":    await cmdProject(rest); break;
+  case "chain":      await cmdChain(rest); break;
+  case "model":      await cmdModel(rest); break;
   case "sleep":      await cmdSleep(needName(rest, "sleep")); break;
   case "stop":       await cmdStop(needName(rest, "stop")); break;
   case "wake":       await cmdWake(needName(rest, "wake")); break;
@@ -8378,7 +8517,7 @@ switch (sub) {
     console.log("                                     --model=opus|sonnet|haiku|gpt-5.5|gpt-5.5-pro");
     console.log("                                     --thinking=off|minimal|low|medium|high|xhigh|adaptive|max|auto");
     console.log("                                              (pi: off..xhigh + adaptive; claude-code: low..max + auto; codex: low..xhigh)");
-    console.log("                                     --extensions=memory,mentality,wiki,dream");
+    console.log("                                     --extensions=memory,mentality,wiki,dream,deep-research");
     console.log("                                     --packages=pi-web-access");
     console.log("                                     --channels=slack         (auto-creates #cells-<name>, binds, deploys worker)");
     console.log("                                     --slack-channel=C0123456789  (legacy: bind to existing channel by ID)");
@@ -8417,6 +8556,12 @@ switch (sub) {
     console.log("  cells channel unlink <cell> [<channel-id>]  remove one or all bindings for a cell");
     console.log("  cells channel list           list all channel↔cell bindings");
     console.log("  cells channel sync           re-mirror channels.json to Cloudflare KV");
+    console.log("  cells model <cell> [<provider>/<model>:<thinking>]");
+    console.log("                              show or set the cell's CONVERSATION model (what chat runs on), live, no rebirth");
+    console.log("                              e.g. cells model advisor-pete openai-codex/gpt-5.5:low");
+    console.log("  cells chain <cell> [--add <entry>] [--remove <entry>]");
+    console.log("                              inspect/edit the registry modelChain; a claude-code:anthropic/opus:high entry");
+    console.log("                              licenses a pi cell's deep_research tool to ride the Max sub");
     console.log("  cells kill <name>... [-y]   destroy one or more cells (irreversible) (alias: destroy)");
     console.log("                              --all-but <name>... kill every cell except the listed ones");
     console.log("                              -y/--yes skip the confirmation prompt");

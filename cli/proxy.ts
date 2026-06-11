@@ -64,6 +64,7 @@ import { isValidCellName } from "./lib/cell-name";
 import { loadRegistry, loadRegistrySafe, saveRegistry, type Registry } from "./lib/registry";
 import { cellRows, type CellRow } from "./lib/status-rows";
 import { ensurePreamble, classifyOAuthRoute, anthropicRouteVerdict } from "./lib/proxy-oauth";
+import { latestOpusFrom, normalizeAnthropicModel } from "./lib/model-normalizer";
 
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = dirname(SCRIPT_DIR);
@@ -550,6 +551,45 @@ async function lookupCellForGate(name: string) {
   return registryCache.byName.get(name);
 }
 
+// ── "opus means latest opus" ────────────────────────────────────────
+// Discovered live from GET /v1/models (the Max OAuth token can call it —
+// verified 2026-06-11) and cached. Cells never pin an Opus version: any
+// opus-family model in a request body is rewritten to this before it goes
+// upstream. See cli/lib/model-normalizer.ts for the pure logic.
+const OPUS_CACHE_TTL_MS = 6 * 60 * 60 * 1000;
+let latestOpus: string | null = null;
+let latestOpusFetchedAt = 0;
+let latestOpusFetch: Promise<void> | null = null;
+
+function refreshLatestOpus(access: string): Promise<void> {
+  if (latestOpusFetch) return latestOpusFetch;
+  latestOpusFetch = (async () => {
+    try {
+      const res = await fetch(`${UPSTREAM}/v1/models?limit=100`, {
+        headers: {
+          authorization: `Bearer ${access}`,
+          "anthropic-version": "2023-06-01",
+          "anthropic-beta": "oauth-2025-04-20",
+        },
+      });
+      if (!res.ok) {
+        console.warn(`[opus-latest] /v1/models -> ${res.status}; keeping ${latestOpus ?? "none"}`);
+        return;
+      }
+      const data = (await res.json()) as { data?: { id: string; created_at?: string }[] };
+      const picked = latestOpusFrom(data.data ?? []);
+      if (picked && picked !== latestOpus) console.log(`[opus-latest] latest opus is ${picked}`);
+      if (picked) latestOpus = picked;
+      latestOpusFetchedAt = Date.now();
+    } catch (e) {
+      console.warn(`[opus-latest] models fetch failed: ${e}`);
+    } finally {
+      latestOpusFetch = null;
+    }
+  })();
+  return latestOpusFetch;
+}
+
 async function handleApiProxy(req: Request): Promise<Response> {
   const url = new URL(req.url);
 
@@ -636,6 +676,29 @@ async function handleApiProxy(req: Request): Promise<Response> {
     try {
       const parsed = JSON.parse(new TextDecoder().decode(bodyBytes)) as Record<string, unknown>;
       bodyBytes = new TextEncoder().encode(JSON.stringify(ensurePreamble(parsed)));
+    } catch {
+      // Not JSON / unparseable — forward unchanged rather than break the call.
+    }
+  }
+
+  // "opus means latest opus": rewrite any opus-family model ID to the newest
+  // Opus before forwarding. Covers /v1/messages and /v1/messages/count_tokens.
+  // First request after proxy start awaits the catalog fetch once; afterwards
+  // it's a cached lookup refreshed in the background every 6h. The body is
+  // already buffered (401-retry), so this adds no buffering cost.
+  if (bodyBytes && bodyBytes.length && upstreamPath.startsWith("/v1/messages")) {
+    if (!latestOpus) await refreshLatestOpus(access);
+    else if (Date.now() - latestOpusFetchedAt > OPUS_CACHE_TTL_MS) void refreshLatestOpus(access);
+    try {
+      const parsed = JSON.parse(new TextDecoder().decode(bodyBytes)) as Record<string, unknown>;
+      if (typeof parsed.model === "string") {
+        const normalized = normalizeAnthropicModel(parsed.model, latestOpus);
+        if (normalized !== parsed.model) {
+          console.log(`[opus-latest] ${auth.cell}: ${parsed.model} -> ${normalized}`);
+          parsed.model = normalized;
+          bodyBytes = new TextEncoder().encode(JSON.stringify(parsed));
+        }
+      }
     } catch {
       // Not JSON / unparseable — forward unchanged rather than break the call.
     }

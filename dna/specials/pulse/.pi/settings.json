@@ -1,15 +1,15 @@
 {
   "extensions": [],
   "enabledModels": [
-    "anthropic/claude-opus-4-7",
+    "anthropic/opus",
     "openai-codex/gpt-5.5"
   ],
   "defaultProvider": "anthropic",
-  "defaultModel": "claude-opus-4-7",
+  "defaultModel": "opus",
   "defaultThinkingLevel": "high",
-  "modelChain": ["anthropic/claude-opus-4-7:high", "openai-codex/gpt-5.5:high"],
+  "modelChain": ["anthropic/opus:high", "openai-codex/gpt-5.5:high"],
   "harnessChain": [
-    { "harness": "claude-code", "model": "anthropic/claude-opus-4-7", "thinking": "high" },
+    { "harness": "claude-code", "model": "anthropic/opus", "thinking": "high" },
     { "harness": "pi",          "model": "openai-codex/gpt-5.5",      "thinking": "high" }
   ]
 }

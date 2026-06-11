@@ -23,7 +23,7 @@
   "harnessChain": [
     {
       "harness": "claude-code",
-      "model": "anthropic/claude-opus-4-7",
+      "model": "anthropic/opus",
       "thinking": "high"
     },
     {
