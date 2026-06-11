@@ -316,18 +316,91 @@ function broadcastToClients(line: string) {
   }
 }
 
+// ── target=main: durable conversation turns ─────────────────────────
+//
+// A main-targeted envelope drives the cell's MAIN session instead of a
+// throwaway fork, so the exchange persists in session history (peers and
+// buyers get continuity instead of goldfish memory). The main session is
+// single-threaded by nature: turns queue behind interactive use and each
+// other. The reply is the text the session streams until agent_end; a
+// leash (sized from the sender's budget) fails the turn loudly if the
+// harness wedges, so the sender's long-poll never just evaporates.
+type MainTurn = {
+  corrId: string;
+  from: string;
+  text: string;
+  leashMs: number;
+  acc: string;
+  timer?: ReturnType<typeof setTimeout>;
+  startedAt?: number;
+};
+const mainQueue: MainTurn[] = [];
+let activeMainTurn: MainTurn | null = null;
+let mainSessionBusy = false; // any turn in flight — ours or interactive
+
+function enqueueMainTurn(t: { corrId: string; from: string; text: string; leashMs: number }) {
+  mainQueue.push({ ...t, acc: "" });
+  pumpMainQueue();
+}
+
+function pumpMainQueue() {
+  if (activeMainTurn || mainSessionBusy || mainQueue.length === 0 || !harnessReady) return;
+  const turn = mainQueue.shift()!;
+  activeMainTurn = turn;
+  turn.startedAt = Date.now();
+  turn.timer = setTimeout(() => {
+    finishMainTurn(`[error] main turn timed out after ${Math.round(turn.leashMs / 1000)}s`);
+  }, turn.leashMs);
+  console.log(`[bridge] main turn start corr=${turn.corrId.slice(0, 10)} from=${turn.from} leash=${Math.round(turn.leashMs / 1000)}s`);
+  // Same path an interactive client prompt takes — busy signal, ready
+  // buffering, per-turn vs persistent dispatch all included. The prefix
+  // tells the cell who's speaking; the session records it verbatim.
+  handleBridgeFrame(
+    JSON.stringify({
+      type: "prompt",
+      message: `[message from ${turn.from} — your reply goes back to them] ${turn.text}`,
+    }),
+  );
+}
+
+function finishMainTurn(text: string) {
+  const turn = activeMainTurn;
+  if (!turn) return;
+  activeMainTurn = null;
+  if (turn.timer) clearTimeout(turn.timer);
+  const dt = turn.startedAt ? Date.now() - turn.startedAt : 0;
+  console.log(`[bridge] main turn end corr=${turn.corrId.slice(0, 10)} dt=${dt}ms text=${text.slice(0, 100).replace(/\n/g, " ")}`);
+  broadcastToClients(JSON.stringify({ type: "agent_response", in_reply_to: turn.corrId, text }));
+  pumpMainQueue();
+}
+
 // One translated pi-shaped event line — broadcast to WS clients and sniff
 // for agent_end → idle lifecycle. agent_start is pi-only (passthrough); the
 // busy signal fires at WS-prompt-receive time for uniform coverage across
-// all three harnesses.
+// all three harnesses. Main-turn accounting taps the same stream: text
+// deltas accumulate into the active main turn, agent_end closes it.
 function onTranslatedLine(line: string) {
   broadcastToClients(line);
   try {
     const evt = JSON.parse(line);
     if (evt?.type === "agent_end") {
       void signalLifecycle("idle");
+      mainSessionBusy = false;
+      if (activeMainTurn) {
+        finishMainTurn(activeMainTurn.acc.trim() || "(empty reply)");
+      } else {
+        pumpMainQueue(); // an interactive turn just freed the session
+      }
     } else if (evt?.type === "agent_start") {
       void signalLifecycle("busy");
+      mainSessionBusy = true;
+    } else if (
+      activeMainTurn &&
+      evt?.type === "message_update" &&
+      evt.assistantMessageEvent?.type === "text_delta" &&
+      typeof evt.assistantMessageEvent.delta === "string"
+    ) {
+      activeMainTurn.acc += evt.assistantMessageEvent.delta;
     }
   } catch { /* not JSON — already broadcast */ }
 }
@@ -584,6 +657,9 @@ function onHarnessReady() {
     pendingPrompts.length = 0;
   }
   broadcastToClients(JSON.stringify({ type: "bridge_ready" }));
+  // Main-targeted envelopes that arrived during boot are waiting in the
+  // queue — the doorbell woke us for exactly this.
+  pumpMainQueue();
 }
 
 // ---------------------------------------------------------------------------
@@ -828,13 +904,16 @@ function handleBridgeFrame(line: string) {
       `[bridge] agent_message corr=${corrId.slice(0, 10)} from=${from} target=${target}${timeoutS ? ` leash=${timeoutS}s` : ""} text=${text.slice(0, 100).replace(/\n/g, " ")}`,
     );
     if (target === "main") {
-      // --main escalation: write into the main thread like Slack/email.
-      // Phase 4 wires this; for now reject so we don't silently fall through.
-      broadcastToClients(JSON.stringify({
-        type: "agent_response",
-        in_reply_to: corrId,
-        text: `[error] target="main" not yet implemented (Phase 4)`,
-      }));
+      // Durable-conversation path: drive the cell's MAIN session (the same
+      // process and session file Slack/CLI stream) instead of a throwaway
+      // fork. The exchange lands in session history, so the cell remembers
+      // it next turn — conversation continuity by construction.
+      enqueueMainTurn({
+        corrId,
+        from,
+        text,
+        leashMs: turnLeashMs((timeoutS || 180) * 1000),
+      });
       return;
     }
     // Fork path. Wrap in an IIFE so we don't block the frame loop; multiple
@@ -873,6 +952,9 @@ function handleBridgeFrame(line: string) {
   // but the DO drops every event silently.
   if (cmd?.type === "prompt") {
     void signalLifecycle("busy");
+    // Main-turn accounting: any prompt occupies the main session, whether
+    // it came from an interactive client or our own main-turn pump.
+    mainSessionBusy = true;
     if (HARNESS !== "pi") {
       broadcastToClients(JSON.stringify({ type: "agent_start" }));
     }

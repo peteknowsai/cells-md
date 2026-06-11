@@ -1,0 +1,79 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Scale test — 2026-06-11</title>
+<link rel="stylesheet" href="../_assets/doc.css">
+<script defer src="../_assets/doc.js"></script>
+</head>
+<body>
+<header>
+  <h1>Scale test — finding the Mini's ceiling</h1>
+  <p class="subtitle">2026-06-11 · 48 GB / 18-core Mac · welld 5810274 · cells (refresh + steward + target=main branch)</p>
+</header>
+
+<section>
+  <h2>Why</h2>
+  <p>The pitch is "every buyer gets an advisor" — N cells, mostly asleep, woken
+  by conversation. Nobody had birthed a batch and watched the machine sweat.
+  This run measures the four pressure points: <strong>serial birth latency</strong>
+  (mother is the bottleneck by design), <strong>pool drain/refill under birth
+  pressure</strong> (the steward's refill loop vs a birth burst),
+  <strong>concurrent wake storms</strong> (boot_gate=3, wake_gate=1), and
+  <strong>all-awake memory footprint</strong> (1 GB/well committed while running).</p>
+</section>
+
+<section>
+  <h2>Phase A — six serial births, pool starts at 5/5</h2>
+  <table>
+    <thead><tr><th>Birth</th><th>Wall time</th><th>Open eggs after</th><th>Notes</th></tr></thead>
+    <tbody id="phase-a">
+      <tr><td>ck-scale-1</td><td>36s</td><td>4</td><td></td></tr>
+      <tr><td>ck-scale-2</td><td>32s</td><td>3</td><td></td></tr>
+      <tr><td>ck-scale-3</td><td>32s</td><td>2</td><td></td></tr>
+      <tr><td>ck-scale-4</td><td>32s</td><td>1</td><td></td></tr>
+      <tr><td>ck-scale-5</td><td>33s</td><td>0</td><td>pool drained</td></tr>
+      <tr><td>ck-scale-6</td><td>0s (refused)</td><td>0</td><td>drought: instant clean refusal, <em>no refill kicked</em> (fixed same day — empty-pool birth now auto-starts a detached refill)</td></tr>
+    </tbody>
+  </table>
+  <p>Five warm-egg births in 165s wall — 32–36s each, dead consistent, mother fully serialized. The pool drains ~10× faster than it bakes (a birth claims in seconds; a bake takes ~90s), so any burst longer than the pool depth hits the drought path. With the same-day fix, the drought self-heals: the failed birth starts the refill, and the retry lands ~2–4 minutes later. Steward backstops at 30-minute intervals.</p>
+</section>
+
+<section>
+  <h2>Phase B — concurrent wake storm</h2>
+  <p>All scale cells hibernated, then simultaneous <code>cells talk</code> to
+  every one of them. Measures wake-on-demand latency under gate contention.</p>
+  <table>
+    <thead><tr><th>Cell</th><th>Reply latency</th></tr></thead>
+    <tbody id="phase-b">
+      <tr><td>ck-scale-2</td><td>4.28s</td></tr>
+      <tr><td>ck-scale-5</td><td>4.36s</td></tr>
+      <tr><td>ck-scale-4</td><td>5.71s</td></tr>
+      <tr><td>ck-scale-1</td><td>5.95s</td></tr>
+      <tr><td>ck-scale-3</td><td>6.65s</td></tr>
+    </tbody>
+  </table>
+  <p>Five hibernated cells stormed with simultaneous talks: every reply inside 6.7s, p50 5.7s — that's VM wake + supervisor boot + harness spawn + a full LLM round-trip, under wake_gate=1 / boot_gate=3 contention. Wake-on-demand holds under a burst; a buyer messaging a sleeping advisor waits about six seconds.</p>
+</section>
+
+<section>
+  <h2>Phase C — all-awake footprint</h2>
+  <pre id="phase-c">9 wells running simultaneously (5 scale + mother(2GB) + pulse(2GB) + 2 production)
+VZ processes: 9 · RSS 17.0 GB  →  ~1.9 GB per awake 1GB-well (incl. VZ overhead)
+host: active 19.5 GB / 48 GB · load 5.2 / 18 cores · welld degraded=false
+hibernated wells: 0 RAM (VZ process killed; state on disk)
+disk: ~5–9 GB per well · 319 GB free at test time</pre>
+</section>
+
+<section>
+  <h2>Phase D — teardown</h2>
+  <p>All six cells killed in one command, 19s total: registry clean, wells destroyed, pool claims cleared, per-cell Cloudflare workers deleted. Kill stays deterministic at batch size.</p>
+</section>
+
+<section>
+  <h2>Verdict</h2>
+  <p><strong>This 48 GB Mini comfortably runs dozens of mostly-asleep cells with 10–15 simultaneous conversations.</strong> The three binding constraints, in order: <strong>RAM for concurrently-awake cells</strong> (~1.9 GB RSS each; hibernated cells cost zero — budget ~15–18 awake alongside macOS and services), <strong>disk per cell</strong> (5–9 GB; ~30–40 cells on current free space), and <strong>mother's serial birth throughput</strong> (~2 births/min while the pool holds, ~0.6/min at bake speed once drained — bursts longer than pool depth pay a ~2.5-minute drought-recovery gap, now self-healing). Wake-on-demand held under a 5-way storm at p50 5.7s, which is the number that matters for the every-buyer-gets-an-advisor pitch: a sleeping advisor answers WhatsApp in about six seconds.</p>
+</section>
+</body>
+</html>

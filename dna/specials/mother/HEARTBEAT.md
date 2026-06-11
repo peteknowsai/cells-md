@@ -1,5 +1,12 @@
 # Heartbeat
 
+## Every 30 minutes
+
+- Run the steward pass: execute the skill at
+  `.claude/skills/steward/SKILL.md`. One deterministic sweep
+  (`scripts/steward-sweep.sh` via mac_exec), then judgment on the
+  summary. Quiet fleet → silent no-op turn.
+
 ## Daily
 
 - 04:00 local — dream consolidation (memory, wiki, mentality re-balanced).

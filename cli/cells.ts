@@ -1,9 +1,10 @@
 #!/usr/bin/env bun
 import { $ } from "bun";
-import { readFile, writeFile, appendFile, mkdir, unlink, symlink, cp, readdir, stat, rm, rename } from "node:fs/promises";
+import { readFile, writeFile, appendFile, mkdir, unlink, symlink, cp, readdir, stat, rm, rename, mkdtemp, copyFile } from "node:fs/promises";
 import { homedir, tmpdir, userInfo } from "node:os";
-import { dirname, join, basename } from "node:path";
-import { existsSync, statSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
+import { dirname, join, basename, relative } from "node:path";
+import { existsSync, statSync, readFileSync, unlinkSync, writeFileSync, readdirSync, openSync } from "node:fs";
+import { execSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import * as readline from "node:readline/promises";
 import { createHash, randomBytes } from "node:crypto";
@@ -1880,6 +1881,161 @@ async function cmdMenubarStatus() {
 }
 
 // First-line diagnostic for "auth feels broken." See docs/oauth-refresh.md.
+// One refill at a time — both the steward sweep and the empty-pool birth
+// path use this guard so a drought doesn't stack bakes.
+async function isRefillInFlight(): Promise<boolean> {
+  const p = Bun.spawn(["pgrep", "-f", "cells.ts pool refill"], { stdout: "pipe", stderr: "ignore" });
+  await p.exited;
+  return (await new Response(p.stdout).text()).trim().length > 0;
+}
+
+// Shared by the human doctor (section 8) and `doctor --json` (the steward's
+// food). One probe pass per cell: welld service def, power, in-guest unit/
+// health/OOM/clock. Hibernated cells get the def check only — never woken.
+type TransportRow = {
+  name: string;
+  well: string;
+  power: "running" | "hibernated" | "unknown";
+  status: "ok" | "warn" | "fail";
+  reasons: string[];
+};
+
+async function collectFleetTransport(): Promise<TransportRow[]> {
+  const { GUEST_PROBE_SCRIPT, parseGuestProbe, classifyCellTransport } = await import("./lib/fleet-probe");
+  const base = process.env.WELL_API_URL ?? "http://127.0.0.1:7878";
+  const token = await wellsToken().catch(() => "");
+  const wellsByName = new Map<string, any>();
+  try {
+    const data: any = await fetch(`${base}/dashboard/data`, {
+      headers: { Authorization: `Bearer ${token}` },
+      signal: AbortSignal.timeout(3000),
+    }).then((r) => (r.ok ? r.json() : null));
+    for (const w of data?.wells ?? []) wellsByName.set(w.name, w);
+  } catch {
+    /* welld unreachable — every cell reports power unknown below */
+  }
+
+  const reg = await loadRegistry();
+  const rows: TransportRow[] = [];
+  await Promise.all(
+    reg.cells.map(async (c) => {
+      const wellName = await wellNameForCell(c.name);
+      const well = wellsByName.get(wellName);
+      const power: "running" | "hibernated" | "unknown" =
+        well?.status === "running" ? "running" : well?.status === "stopped" ? "hibernated" : "unknown";
+
+      let defPresent = false;
+      try {
+        const svc: any = await fetch(`${base}/v1/wells/${encodeURIComponent(wellName)}/services`, {
+          headers: { Authorization: `Bearer ${token}` },
+          signal: AbortSignal.timeout(3000),
+        }).then((r) => (r.ok ? r.json() : null));
+        defPresent = (svc?.services ?? []).some((s: any) => s.id === "site");
+      } catch {
+        /* treated as missing — surfaces as fail, which is the safe loud default */
+      }
+
+      let guest: ReturnType<typeof parseGuestProbe> = null;
+      if (power === "running") {
+        try {
+          const proc = Bun.spawn(
+            ["well", "exec", "-s", wellName, "--", "sudo", "bash", "-lc", GUEST_PROBE_SCRIPT],
+            { stdin: "ignore", stdout: "pipe", stderr: "pipe" },
+          );
+          const out = await new Response(proc.stdout).text();
+          await proc.exited;
+          guest = parseGuestProbe(out);
+        } catch {
+          /* guest stays null → classified as warn */
+        }
+      }
+
+      const verdict = classifyCellTransport({
+        defPresent,
+        power,
+        guest,
+        macEpochS: Math.floor(Date.now() / 1000),
+      });
+      rows.push({ name: c.name, well: wellName, power, status: verdict.status, reasons: verdict.reasons });
+    }),
+  );
+  rows.sort((a, b) => a.name.localeCompare(b.name));
+  return rows;
+}
+
+// `cells doctor --json` — the machine-readable subset the steward sweep
+// consumes. Substrate + service health as booleans, pool depth, and the
+// per-cell transport verdicts. Everything best-effort: an unreachable
+// service reports ok:false rather than throwing, so the steward always
+// gets a complete picture to act on.
+async function cmdDoctorJson() {
+  const probe = async (url: string): Promise<any> => {
+    try {
+      return await fetch(url, { signal: AbortSignal.timeout(3000) }).then((r) => (r.ok ? r.json() : null));
+    } catch {
+      return null;
+    }
+  };
+  const token = await wellsToken().catch(() => "");
+  const base = process.env.WELL_API_URL ?? "http://127.0.0.1:7878";
+
+  const welld = await (async () => {
+    try {
+      return await fetch(`${base}/healthz`, {
+        headers: { Authorization: `Bearer ${token}` },
+        signal: AbortSignal.timeout(3000),
+      }).then((r) => (r.ok ? r.json() : null));
+    } catch {
+      return null;
+    }
+  })();
+  const proxyHealth = await probe("https://proxy.cells.md/_proxy/health");
+  const hostBridge = await probe("http://127.0.0.1:7880/healthz");
+  const waPort = process.env.WA_BRIDGE_PORT ?? "7891";
+  const waBridge = await probe(`http://127.0.0.1:${waPort}/health`);
+
+  const pool = await loadPool().catch(() => ({ members: [] as any[] }));
+  const open = pool.members.filter((m: any) => m.state === "open").length;
+
+  const reg = await loadRegistry();
+  const specials: Record<string, { power: string; pinned: boolean }> = {};
+  for (const c of reg.cells.filter((c) => c.special)) {
+    const info: any = await (async () => {
+      try {
+        return await fetch(`${base}/v1/wells/cells-${c.name}`, {
+          headers: { Authorization: `Bearer ${token}` },
+          signal: AbortSignal.timeout(3000),
+        }).then((r) => (r.ok ? r.json() : null));
+      } catch {
+        return null;
+      }
+    })();
+    specials[c.name] = {
+      power: info?.status ?? "unknown",
+      pinned: info ? info.auto_sleep_seconds === null : false,
+    };
+  }
+
+  const cells = await collectFleetTransport();
+
+  console.log(
+    JSON.stringify(
+      {
+        at: new Date().toISOString(),
+        welld: { ok: welld?.ok === true, degraded: welld?.degraded === true },
+        proxy: { ok: proxyHealth?.ok === true },
+        hostBridge: { ok: hostBridge?.ok === true },
+        waBridge: { ok: waBridge?.ok === true, wa: waBridge?.wa ?? "unreachable" },
+        pool: { open, target: V1_POOL_TARGET_DEPTH },
+        specials,
+        cells,
+      },
+      null,
+      2,
+    ),
+  );
+}
+
 async function cmdDoctor() {
   const dim = "\x1b[2m";
   const reset = "\x1b[0m";
@@ -2107,73 +2263,20 @@ async function cmdDoctor() {
   // cell. (Born from the 2026-06-09/10 incident, where all of the above was
   // green while mother had no supervisor for 18 days.)
   {
-    const { GUEST_PROBE_SCRIPT, parseGuestProbe, classifyCellTransport } = await import("./lib/fleet-probe");
     console.log("\nfleet transport:");
-    const base = process.env.WELL_API_URL ?? "http://127.0.0.1:7878";
-    const token = await wellsToken().catch(() => "");
-    const wellsByName = new Map<string, any>();
-    try {
-      const data: any = await fetch(`${base}/dashboard/data`, {
-        headers: { Authorization: `Bearer ${token}` },
-        signal: AbortSignal.timeout(3000),
-      }).then((r) => (r.ok ? r.json() : null));
-      for (const w of data?.wells ?? []) wellsByName.set(w.name, w);
-    } catch {
-      /* welld unreachable — every cell reports power unknown below */
-    }
-
-    const transportReg = await loadRegistry();
+    const rows = await collectFleetTransport();
     let transportFails = 0;
-    await Promise.all(
-      transportReg.cells.map(async (c) => {
-        const wellName = await wellNameForCell(c.name);
-        const well = wellsByName.get(wellName);
-        const power: "running" | "hibernated" | "unknown" =
-          well?.status === "running" ? "running" : well?.status === "stopped" ? "hibernated" : "unknown";
-
-        let defPresent = false;
-        try {
-          const svc: any = await fetch(`${base}/v1/wells/${encodeURIComponent(wellName)}/services`, {
-            headers: { Authorization: `Bearer ${token}` },
-            signal: AbortSignal.timeout(3000),
-          }).then((r) => (r.ok ? r.json() : null));
-          defPresent = (svc?.services ?? []).some((s: any) => s.id === "site");
-        } catch {
-          /* treated as missing — surfaces as fail, which is the safe loud default */
-        }
-
-        let guest: ReturnType<typeof parseGuestProbe> = null;
-        if (power === "running") {
-          try {
-            const proc = Bun.spawn(
-              ["well", "exec", "-s", wellName, "--", "sudo", "bash", "-lc", GUEST_PROBE_SCRIPT],
-              { stdin: "ignore", stdout: "pipe", stderr: "pipe" },
-            );
-            const out = await new Response(proc.stdout).text();
-            await proc.exited;
-            guest = parseGuestProbe(out);
-          } catch {
-            /* guest stays null → classified as warn */
-          }
-        }
-
-        const verdict = classifyCellTransport({
-          defPresent,
-          power,
-          guest,
-          macEpochS: Math.floor(Date.now() / 1000),
-        });
-        const tag =
-          verdict.status === "ok"
-            ? `${green}ok${reset}`
-            : verdict.status === "warn"
-              ? `${yellow}warn${reset}`
-              : `${red}FAIL${reset}`;
-        if (verdict.status === "fail") transportFails++;
-        const powerTag = power === "running" ? "awake " : power === "hibernated" ? "asleep" : "?     ";
-        console.log(`  ${c.name.padEnd(18)} ${powerTag} ${tag}${verdict.reasons.length ? `  ${dim}${verdict.reasons.join("; ")}${reset}` : ""}`);
-      }),
-    );
+    for (const r of rows) {
+      const tag =
+        r.status === "ok"
+          ? `${green}ok${reset}`
+          : r.status === "warn"
+            ? `${yellow}warn${reset}`
+            : `${red}FAIL${reset}`;
+      if (r.status === "fail") transportFails++;
+      const powerTag = r.power === "running" ? "awake " : r.power === "hibernated" ? "asleep" : "?     ";
+      console.log(`  ${r.name.padEnd(18)} ${powerTag} ${tag}${r.reasons.length ? `  ${dim}${r.reasons.join("; ")}${reset}` : ""}`);
+    }
     if (transportFails > 0) {
       console.log(`  ${red}${transportFails} cell(s) cannot complete a talk round-trip. Fix before trusting the fleet.${reset}`);
     }
@@ -2620,6 +2723,22 @@ async function cmdCreate(name: string | undefined, opts: CreateOpts): Promise<vo
   };
   let claim = await claimAndReady();
   if (!claim) {
+    // Kick the refill before refusing — a drought should start fixing
+    // itself the moment it's observed, not wait for the steward's next
+    // pass. Detached so this process still exits promptly; the retry a
+    // couple of minutes later lands on a fresh egg. (Scale test
+    // 2026-06-11: 5 births drained the pool in 160s and the 6th failed
+    // with no refill in flight.)
+    if (!(await isRefillInFlight())) {
+      const log = join(homedir(), ".cells/logs/pool-refill.log");
+      await mkdir(dirname(log), { recursive: true }).catch(() => {});
+      Bun.spawn(["bun", join(REPO_ROOT, "cli/cells.ts"), "pool", "refill"], {
+        stdin: "ignore",
+        stdout: openSync(log, "a"),
+        stderr: openSync(log, "a"),
+      }).unref();
+      console.error(`  (pool refill started in the background — retry in ~2 minutes)`);
+    }
     console.error(
       `birth failed: the egg pool is empty (or no egg could be readied).\n` +
       `  cells pool refill          # bake more pool members\n` +
@@ -6164,6 +6283,210 @@ pgrep -f "pi --mode rpc" >/dev/null && echo restarted || { echo "✗ pi not runn
   return true;
 }
 
+// ───── cells refresh — update LIVING cells from current DNA ─────
+//
+// Until 2026-06-11 DNA improvements only reached newborns; live cells ran
+// birth-era code forever (bob's stale supervisor, advisor-pete's missing
+// lib module — three incidents in one week). Refresh pushes the platform-
+// owned surface (site/server.ts, lib/, bin/, scripts/, plus extensions/
+// skills/prompts the cell already carries) and never touches cell-owned
+// identity/state. Classification rules + tests: cli/lib/refresh.ts.
+//
+// Safety: replaced files are backed up on the well, well-site restarts,
+// and a failed health check rolls the backup straight back. /root/.dna-
+// version records what landed.
+
+import { buildPlan, overlay } from "./lib/refresh";
+
+function listDnaFilesRec(dir: string, root: string, out: Map<string, string>): void {
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    if (entry.name === "node_modules" || entry.name === ".git") continue;
+    const abs = join(dir, entry.name);
+    if (entry.isDirectory()) listDnaFilesRec(abs, root, out);
+    else if (entry.isFile()) out.set(relative(root, abs), abs);
+  }
+}
+
+function listDnaFiles(root: string): Map<string, string> {
+  const out = new Map<string, string>();
+  if (existsSync(root)) listDnaFilesRec(root, root, out);
+  return out;
+}
+
+async function refreshOneCell(
+  cellName: string,
+  opts: { dryRun: boolean; verify: boolean },
+): Promise<{ ok: boolean; detail: string }> {
+  const reg = await loadRegistry();
+  const cell = reg.cells.find((c) => c.name === cellName);
+  if (!cell) return { ok: false, detail: "not in registry" };
+  const wellName = await wellNameForCell(cellName);
+
+  // Source = base DNA floored, special dir overlaid (same order birth uses).
+  const specialDir = cell.special ? join(SPECIALS_DIR, cellName) : null;
+  const sources = overlay(listDnaFiles(DNA_DIR), specialDir ? listDnaFiles(specialDir) : null);
+
+  await ensureWellRunningForTalk(wellName);
+
+  // Discover which if-present units the cell carries — its enabled set is
+  // config, not ours to change. One round-trip.
+  const discover = await wellExecCapture(
+    wellName,
+    `for root in .pi/extensions .pi/skills .claude/skills; do
+       for d in /root/$root/*/; do [ -d "$d" ] && echo "$root/$(basename "$d")"; done
+     done
+     [ -d /root/.pi/prompts ] && echo .pi/prompts
+     true`,
+  );
+  if (!discover.ok) return { ok: false, detail: `unit discovery failed: ${discover.stderr.slice(0, 120)}` };
+  const presentUnits = new Set(
+    discover.stdout.split("\n").map((l) => l.trim()).filter((l) => l && !l.includes("*")),
+  );
+
+  const plan = buildPlan(sources, presentUnits);
+  if (plan.push.size === 0) return { ok: false, detail: "empty plan (no DNA sources?)" };
+  if (opts.dryRun) {
+    return {
+      ok: true,
+      detail: `dry-run: ${plan.push.size} files would land; units skipped (not on cell): ${plan.skippedUnits.join(", ") || "none"}`,
+    };
+  }
+
+  // Stage the plan on the Mac mirroring /root-relative layout, then one
+  // tar pipe to the well.
+  const stage = await mkdtemp(join(tmpdir(), "cells-refresh-"));
+  try {
+    for (const [rel, abs] of plan.push) {
+      const dst = join(stage, rel);
+      await mkdir(dirname(dst), { recursive: true });
+      await copyFile(abs, dst);
+      // tar preserves mode from the staged copy; copyFile preserves it
+      // from the repo working tree, where exec bits are already right.
+    }
+    let sha = "unknown";
+    try {
+      sha = execSync("git rev-parse --short HEAD", { cwd: REPO_ROOT }).toString().trim();
+      if (execSync("git status --porcelain", { cwd: REPO_ROOT }).toString().trim()) sha += "+dirty";
+    } catch { /* not fatal — version stamp is best-effort */ }
+
+    const ts = new Date().toISOString().replace(/[:.]/g, "-");
+    const remote = `set -e
+sudo bash -c '
+  set -e
+  mkdir -p /root/.refresh-stage /root/.refresh-backup-${ts}
+  cd /root/.refresh-stage && tar xzf -
+  cd /root/.refresh-stage
+  find . -type f | while read -r f; do
+    rel="\${f#./}"
+    if [ -f "/root/$rel" ]; then
+      mkdir -p "/root/.refresh-backup-${ts}/$(dirname "$rel")"
+      cp -a "/root/$rel" "/root/.refresh-backup-${ts}/$rel"
+    fi
+    mkdir -p "/root/$(dirname "$rel")"
+    cp -a "$f" "/root/$rel"
+  done
+  echo "${sha} ${ts}" > /root/.dna-version
+  sync
+  # keep the 3 newest backups, prune the rest
+  ls -dt /root/.refresh-backup-* 2>/dev/null | tail -n +4 | xargs -r rm -rf
+  systemctl restart well-site
+  ok=0
+  for i in $(seq 1 12); do
+    sleep 2
+    [ "$(curl -s -m 2 http://localhost:8080/health)" = "ok" ] && ok=1 && break
+  done
+  if [ "$ok" = "1" ]; then
+    rm -rf /root/.refresh-stage
+    echo REFRESH_HEALTHY
+  else
+    cd /root/.refresh-backup-${ts} && find . -type f | while read -r f; do cp -a "$f" "/root/\${f#./}"; done
+    sync; systemctl restart well-site
+    echo REFRESH_ROLLED_BACK
+  fi
+'`;
+
+    const tar = Bun.spawn(["tar", "czf", "-", "-C", stage, "."], { stdin: "ignore", stdout: "pipe", stderr: "pipe" });
+    const recv = Bun.spawn(["well", "exec", "-s", wellName, "--", "bash", "-c", remote], {
+      stdin: tar.stdout,
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    const out = await new Response(recv.stdout).text();
+    const code = await recv.exited;
+    if (code !== 0) {
+      const err = await new Response(recv.stderr).text();
+      return { ok: false, detail: `push failed: ${(err || out).trim().slice(-180) || `exit ${code}`}` };
+    }
+    if (out.includes("REFRESH_ROLLED_BACK")) {
+      return { ok: false, detail: `health check failed after restart — rolled back to pre-refresh state` };
+    }
+    if (!out.includes("REFRESH_HEALTHY")) {
+      return { ok: false, detail: `unexpected install output: ${out.trim().slice(-180)}` };
+    }
+
+    if (opts.verify) {
+      const talk = await runTalkOnCell(cellName, "reply with just the word ok", { timeoutS: 120, useMain: false });
+      if (!talk.ok) return { ok: false, detail: `refreshed (${plan.push.size} files, ${sha}) but talk verify failed: ${talk.error.slice(0, 120)}` };
+      return { ok: true, detail: `${plan.push.size} files @ ${sha}, talk verified` };
+    }
+    return { ok: true, detail: `${plan.push.size} files @ ${sha}` };
+  } finally {
+    await rm(stage, { recursive: true, force: true }).catch(() => {});
+  }
+}
+
+async function cmdRefresh(args: string[]) {
+  let dryRun = false;
+  let verify = false;
+  const positional: string[] = [];
+  for (const a of args) {
+    if (a === "--dry-run") dryRun = true;
+    else if (a === "--verify") verify = true;
+    else if (a === "--all") positional.push("--all");
+    else positional.push(a);
+  }
+  const target = positional[0];
+  if (!target) {
+    console.error("usage: cells refresh <name|--all> [--dry-run] [--verify]");
+    console.error("  pushes current DNA infrastructure to a LIVE cell (never identity/state)");
+    console.error("  --all      every running cell (hibernated cells are skipped, not woken)");
+    console.error("  --dry-run  show the plan without touching the cell");
+    console.error("  --verify   talk round-trip after the restart");
+    process.exit(1);
+  }
+
+  const reg = await loadRegistry();
+  let names: string[];
+  if (target === "--all") {
+    // --all refreshes running cells only — a fleet refresh shouldn't wake
+    // the world. Name a cell explicitly to wake-and-refresh it.
+    const token = await wellsToken().catch(() => "");
+    const base = process.env.WELL_API_URL ?? "http://127.0.0.1:7878";
+    const data: any = await fetch(`${base}/dashboard/data`, {
+      headers: { Authorization: `Bearer ${token}` },
+      signal: AbortSignal.timeout(3000),
+    }).then((r) => (r.ok ? r.json() : null)).catch(() => null);
+    const running = new Set((data?.wells ?? []).filter((w: any) => w.status === "running").map((w: any) => w.name));
+    names = [];
+    for (const c of reg.cells) {
+      const wn = await wellNameForCell(c.name);
+      if (running.has(wn)) names.push(c.name);
+      else console.log(`  ${c.name.padEnd(18)} skipped (hibernated — name it explicitly to wake-and-refresh)`);
+    }
+  } else {
+    await requireCell(target);
+    names = [target];
+  }
+
+  let fails = 0;
+  for (const name of names) {
+    const r = await refreshOneCell(name, { dryRun, verify });
+    console.log(`  ${name.padEnd(18)} ${r.ok ? "✓" : "✗"} ${r.detail}`);
+    if (!r.ok) fails++;
+  }
+  if (fails > 0) process.exit(1);
+}
+
 async function cmdRefreshExtensions(args: string[]) {
   // Flags: --restart (kick pi after pushing so the extension loads),
   //        --remove (inverse: drop the extension instead of pushing).
@@ -8030,11 +8353,12 @@ switch (sub) {
   case "unschedule-pool-refill": await cmdUnschedulePoolRefill(); break;
   case "schedule-pool-reconcile":   await cmdSchedulePoolReconcile(); break;
   case "unschedule-pool-reconcile": await cmdUnschedulePoolReconcile(); break;
+  case "refresh":               await cmdRefresh(rest); break;
   case "refresh-extensions":    await cmdRefreshExtensions(rest); break;
   case "heartbeat":             await cmdHeartbeat(rest); break;
   case "channel":
   case "channels":              await cmdChannel(rest); break;
-  case "doctor":             await cmdDoctor(); break;
+  case "doctor":             rest.includes("--json") ? await cmdDoctorJson() : await cmdDoctor(); break;
   case "shell":              await cmdShell(needName(rest, "shell")); break;
   case "exec":               await cmdExec(needName(rest, "exec"), rest.slice(1)); break;
   case "see":                await cmdSee(needName(rest, "see")); break;
@@ -8081,6 +8405,8 @@ switch (sub) {
     console.log("  cells unschedule-pool-refill remove a stale pool-refill launchd plist (refill is on-birth now)");
     console.log("  cells schedule-pool-reconcile   install launchd plist (pool reconcile every 5min)");
     console.log("  cells unschedule-pool-reconcile remove pool reconcile launchd plist");
+    console.log("  cells refresh <name|--all> [--dry-run] [--verify]");
+    console.log("                              update a LIVE cell's infrastructure from current DNA");
     console.log("  cells refresh-extensions <name|--all> [ext...] [--restart] [--remove]");
     console.log("                              push DNA extension(s) onto existing cell(s) (default: heartbeat-watch)");
     console.log("                              --restart kicks pi on the cell so new extensions load (otherwise dormant until next pi start)");
