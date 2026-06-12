@@ -26,24 +26,23 @@ after you, on the Mac.
    pool, with the blob values from the template: harness `pi`, model
    `gpt-5.5`, provider `openai-codex`, thinking `low`, chain
    `["openai-codex/gpt-5.5:low"]`, extensions
-   `memory,dream,mentality,deep-research`, channels `[]` (WhatsApp is
-   NOT a cells channel; the bridge handles it).
+   `memory,dream,mentality`, channels `[]` (WhatsApp is NOT a cells
+   channel; the bridge handles it).
 
    Why this shape (Pete, 2026-06-11): advisors are conversational —
-   chat runs on gpt-5.5 low so WhatsApp replies come back in seconds.
-   Depth comes from the `deep-research` extension, which fires the
-   latest Claude Opus (`claude -p --model opus` on the cell's own box,
-   through the proxy on the Max sub) when a question deserves real
-   thought. The old pi + anthropic recipe is rejected by the birth
-   gate — Max is claude-code-harness-only.
+   the WhatsApp thread is just a conversation, fast and grounded in
+   what the advisor already knows (memory, BUYER.md, advisor.db). No
+   deep-research extension in the conversation path (Pete's call,
+   2026-06-12: heavy thinking mid-chat makes the buyer wait minutes).
+   Research-shaped work belongs in the advisor's background loops
+   (heartbeat drains), not in a turn the buyer is staring at. The old
+   pi + anthropic recipe is rejected by the birth gate — Max is
+   claude-code-harness-only.
 4. **Do not configure the anatomy yourself.** The newborn needs the
-   template overlay, germ substitution, advisor.db, env, the deep-research
-   license (`cells chain advisor-<handle> --add
-   claude-code:anthropic/opus:high` — without it the proxy 403s the
-   `deep_research` tool), and the smoke test — that's the post-birth
-   checklist (`~/Projects/Zero/cells/advisor/post-birth-checklist.md`),
-   run by Claude-on-Mac, not by you. Your job ends at a healthy stock
-   birth.
+   template overlay, germ substitution, advisor.db, env, and the smoke
+   test — that's the post-birth checklist
+   (`~/Projects/Zero/cells/advisor/post-birth-checklist.md`), run by
+   Claude-on-Mac, not by you. Your job ends at a healthy stock birth.
 5. **Log + reply.** Append the usual activity-log line
    (`<UTC> born advisor-<handle> intake=<intakeId> — needs post-birth
    config`) and reply to the talk message with the cell name, the
