@@ -93,6 +93,39 @@ tar czf - -C "$REPO_ROOT/dna/cells/base" . \
   echo "sudo systemctl restart chrony 2>/dev/null || true"
   echo "sudo chronyc makestep > /dev/null 2>&1 || true"
 
+  # Harness drift guard: post-birth update-cell-harness.sh runs ONCE; without
+  # an ongoing mechanism every cell freezes at its birth version (found
+  # 2026-06-12: whole fleet was 2.1.148-160 vs 2.1.176). The claude binary
+  # self-updates only in interactive sessions, never under --print. A daily
+  # timer covers it; Persistent=true catches up after hibernation. Claude
+  # only — pi updates need patch reapplication and stay deliberate.
+  echo "# ===claude auto-update timer ==="
+  echo "sudo tee /etc/systemd/system/claude-update.service > /dev/null <<'UNIT'"
+  echo "[Unit]"
+  echo "Description=Update the Claude Code binary (harness drift guard)"
+  echo "After=network-online.target"
+  echo "Wants=network-online.target"
+  echo ""
+  echo "[Service]"
+  echo "Type=oneshot"
+  echo "Environment=HOME=/root"
+  echo "ExecStart=/bin/bash -lc 'claude update'"
+  echo "UNIT"
+  echo "sudo tee /etc/systemd/system/claude-update.timer > /dev/null <<'UNIT'"
+  echo "[Unit]"
+  echo "Description=Daily Claude Code update"
+  echo ""
+  echo "[Timer]"
+  echo "OnCalendar=daily"
+  echo "RandomizedDelaySec=3600"
+  echo "Persistent=true"
+  echo ""
+  echo "[Install]"
+  echo "WantedBy=timers.target"
+  echo "UNIT"
+  echo "sudo systemctl daemon-reload"
+  echo "sudo systemctl enable --now claude-update.timer > /dev/null 2>&1 || true"
+
   echo "# ===dna perms ==="
   # The DNA overlay carries each file's mode from the repo; make sure the
   # bin/ entries are executable regardless of how the working copy was
