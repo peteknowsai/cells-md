@@ -2030,7 +2030,17 @@ async function cmdDoctorJson() {
         welld: { ok: welld?.ok === true, degraded: welld?.degraded === true },
         proxy: { ok: proxyHealth?.ok === true },
         hostBridge: { ok: hostBridge?.ok === true },
-        waBridge: { ok: waBridge?.ok === true, wa: waBridge?.wa ?? "unreachable" },
+        waBridge: {
+          ok: waBridge?.ok === true,
+          wa: waBridge?.wa ?? "unreachable",
+          // Delivery-asymmetry signals: "connected" can lie. After a WA
+          // socket bounce the bridge kept accepting inbound and logging
+          // "completed" while every outbound send silently died (buyer saw
+          // nothing, 2026-06-12). Fresh inbound + stale outbound is that
+          // failure's signature — the steward alerts on it.
+          inboundAgeS: typeof waBridge?.lastInboundAgeS === "number" ? waBridge.lastInboundAgeS : null,
+          outboundAgeS: typeof waBridge?.lastOutboundAgeS === "number" ? waBridge.lastOutboundAgeS : null,
+        },
         pool: { open, target: V1_POOL_TARGET_DEPTH },
         specials,
         cells,

@@ -50,6 +50,19 @@ fi
 if [ "$(echo "$J1" | jq -r '.waBridge.wa')" != "connected" ]; then
   ALERTS+=("wa-bridge socket $(echo "$J1" | jq -r '.waBridge.wa') — WhatsApp surface degraded (QR re-pair?)")
 fi
+# "connected" can lie: after a WA socket bounce the bridge accepted inbound
+# but silently failed every outbound send (2026-06-12 — buyer replies logged
+# "completed", never delivered). Fresh inbound + stale outbound = that
+# signature. Fix is a bridge kickstart, which IS safe to do automatically.
+WA_IN=$(echo "$J1" | jq -r '.waBridge.inboundAgeS // empty')
+WA_OUT=$(echo "$J1" | jq -r '.waBridge.outboundAgeS // empty')
+if [ -n "$WA_IN" ] && [ -n "$WA_OUT" ] && [ "$WA_IN" -lt 900 ] && [ "$WA_OUT" -gt 3600 ] 2>/dev/null; then
+  if launchctl kickstart -k "gui/$(id -u)/md.homezero.wa-bridge" 2>/dev/null; then
+    FIXED+=("wa-bridge kickstarted — inbound fresh (${WA_IN}s) but outbound stale (${WA_OUT}s): silent send failure signature")
+  else
+    ALERTS+=("wa-bridge outbound looks silently dead (in=${WA_IN}s out=${WA_OUT}s) and kickstart failed")
+  fi
+fi
 
 # ── per-cell transport fixes ────────────────────────────────────────
 while IFS=$'\t' read -r name well status reasons; do
