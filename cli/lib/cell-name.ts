@@ -55,6 +55,15 @@ export function projectMotherName(project: string): string {
   return `${project}${MOTHER_SUFFIX}`;
 }
 
+// A project cell's globally-unique name: "<project>-<name>". Project cells are
+// name-prefixed (like <project>-mother) so two projects can each have an
+// "abstractor" without colliding, and a fleet name self-documents its project.
+// Idempotent: a name already prefixed with "<project>-" is left as-is, so
+// `cells birth zero zero-abstractor` doesn't become zero-zero-abstractor.
+export function projectCellName(project: string, name: string): string {
+  return name.startsWith(`${project}-`) ? name : `${project}-${name}`;
+}
+
 export function validateCellName(name: string): { ok: true } | { ok: false; reason: string } {
   if (typeof name !== "string" || name.length === 0) {
     return { ok: false, reason: "cell name is empty" };

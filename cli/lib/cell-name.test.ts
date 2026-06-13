@@ -5,6 +5,7 @@ import {
   isMotherName,
   projectOfMother,
   projectMotherName,
+  projectCellName,
 } from "./cell-name";
 
 test("accepts plain lowercase names", () => {
@@ -115,4 +116,11 @@ test("projectOfMother: null for non-mothers and the empty-project degenerate", (
 test("projectMotherName round-trips with projectOfMother", () => {
   expect(projectMotherName("zero")).toBe("zero-mother");
   expect(projectOfMother(projectMotherName("paonia"))).toBe("paonia");
+});
+
+test("projectCellName prefixes the project, idempotently", () => {
+  expect(projectCellName("zero", "abstractor")).toBe("zero-abstractor");
+  expect(projectCellName("zero", "zero-abstractor")).toBe("zero-abstractor"); // no double prefix
+  expect(projectCellName("paonia", "clerk")).toBe("paonia-clerk");
+  expect(projectCellName("zero", "cell-abc123")).toBe("zero-cell-abc123"); // auto-names too
 });
