@@ -77,8 +77,10 @@ try {
     cron1.includes("0 8 * * * root") && cron1.includes("refresh the dataset"));
   check("saveSchedule: crontab line sources cells-env.sh",
     cron1.includes(". /etc/profile.d/cells-env.sh"));
-  check("saveSchedule: crontab line tees to cron-fires.log",
-    cron1.includes(">> /root/.cells/logs/cron-fires.log"));
+  // The fire is wrapped in cron-fire.sh, which owns the cron-fires.log
+  // redirect (it used to be inline on the crontab line — moved 2026-05).
+  check("saveSchedule: crontab line invokes cron-fire.sh",
+    cron1.includes("/root/bin/cron-fire.sh"));
 
   // --- replacing a cell's schedule replaces the block, not appends ---
   const f2 = path.join(inbox, `testcell-${Date.now() + 5}.md`);
@@ -166,9 +168,18 @@ try {
   check("renderDigest: digest no longer has recent-fires section",
     !digOut.includes("## Recent fires"));
 
-  // --- bootstrap: missing registry → graceful no-op ---
+  // --- bootstrap: a HARD no-op (seeding is Mac-driven) ---
+  // Locks in that bootstrap never seeds the inbox — not even if a registry
+  // file is present in-well. This is load-bearing for per-project pulse: the
+  // old registry-walk would seed the ENTIRE fleet into THIS pulse, and a
+  // project pulse would then double-fire every cell. The Mac is the sole
+  // seeder; the in-well bootstrap must stay inert.
+  const inboxBefore = fs.readdirSync(path.join(rt, "pulse-inbox")).filter((f) => f.endsWith(".md")).length;
+  fs.writeFileSync(paths.registryPath, JSON.stringify({ cells: [{ name: "a" }, { name: "b" }, { name: "c" }] }));
   const boot = await bootstrapInbox(paths);
-  check("bootstrapInbox: no-op when the registry is missing", boot.count === 0);
+  const inboxAfter = fs.readdirSync(path.join(rt, "pulse-inbox")).filter((f) => f.endsWith(".md")).length;
+  check("bootstrapInbox: no-op count even with a registry present", boot.count === 0);
+  check("bootstrapInbox: seeds nothing into the inbox (no fleet-wide seed)", inboxAfter === inboxBefore);
 
   // --- end releases the sentinel ---
   end(paths);

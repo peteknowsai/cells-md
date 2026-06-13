@@ -129,6 +129,73 @@ To retrofit existing cells with the extension: `cells refresh-extensions <name|-
 | `cells heartbeat` | Print digest |
 | `cells heartbeat <cell>` | Print one cell's schedule rows |
 | `cells heartbeat --tail` | Recent fires (newest first) |
+| `cells heartbeat reseed <project>` | Re-push a project's cell schedules into their owning pulse (crash recovery) |
+
+## Per-project pulse
+
+> **Status:** shipped 2026-06-13 (`feature/per-project-pulse`). Opt-in.
+
+Like mother, **pulse is a role keyed by project**. There is one global
+`pulse` that schedules every cell by default; a project can opt into its
+own always-on scheduler:
+
+```
+cells birth zero pulse          # → zero-pulse (prompts; or --yes)
+```
+
+A project pulse is the same DNA as the global one (`dna/specials/pulse/`),
+baked into its own well `cells-zero-pulse`, tagged to the project. It
+genuinely shards the work — `zero-pulse` fires `cells talk` at zero's cells
+while the global pulse handles everyone else, in parallel. **Unlike mother,
+pulse takes no birth lock** (parallel fires are fine; the mother lock existed
+only because every birth hit Pete's one Max session).
+
+It is **opt-in** because each pulse is an always-on pinned cell (~1.9GB RAM,
+never hibernates). The global pulse already covers every project for free —
+a project pulse only buys isolation / its own cadence. The birth prompts for
+confirmation (skip with `--yes`).
+
+### Ownership — one resolver, on the Mac
+
+Every cell is watched by **exactly one** pulse. A single pure function decides
+which — `pulseOwner(project, cells)` in `cli/lib/pulse-owner.ts`: a project's
+own pulse if it's registered + alive, else the global `pulse`. Both consumers
+live on the Mac and call the same function, so they can never disagree:
+
+- **`cli/proxy.ts` `bridgeInboxPulse`** — *the partition*. Every
+  `/heartbeat-changed` push is routed to the owning pulse's inbox. Exactly-once
+  follows: one owner per cell ⇒ one inbox per heartbeat.
+- **`cli/cells.ts`** — kill-eviction, retag, and the birth/death handoffs.
+
+The in-well pulse **never computes ownership** — a pulse well has no copy of
+the registry (only mother gets it, via `/bridge/registry/read`). It is a dumb
+drainer of whatever the Mac seeds into its inbox. `pulse-core`'s old
+`bootstrap` (a registry walk) was therefore always a no-op in production; it's
+now a hard no-op so a project pulse can never self-seed the whole fleet.
+
+### Handoff — no double-fire, no go-dark
+
+Schedules move with the cell, exactly once:
+
+- **Birth** (`zero-pulse` born): after promote, for each zero cell — seed it
+  into `zero-pulse`, then forget it from the global pulse, **then** start
+  `zero-pulse`'s loop (`installPulseLoop` only *enables* the service; the
+  deferred `startPulseLoop` runs post-handoff). The new pulse holds no cron
+  blocks until its handoff is done, so the two wells are never both firing a
+  cell — at worst a seconds-long gap, never an overlap.
+- **Death** (clean `cells kill zero-pulse`): zero's cells were evicted from the
+  global pulse at birth, so they're actively **failed back** — each schedule
+  re-seeded into the global pulse, which rebuilds their cron on its next tick.
+- **Retag** (`cells project <cell> <new>`): if the new project changes the
+  owning pulse, the cell's schedule is migrated (seed-new-then-forget-old).
+- **Crash** (OOM / wedge — no clean kill): not covered automatically yet. Run
+  `cells heartbeat reseed <project>` to fail the cells back by hand. (A steward
+  reconcile to automate this is in `docs/BACKLOG.md`.)
+
+The handoff re-seeds from the Mac's **last-seen HEARTBEAT.md mirror**
+(`~/.cells/heartbeat-mirror/<cell>.md`, written by the proxy on every change),
+falling back to the Obsidian vault snapshot. It's the freshest copy the system
+has and never requires waking a cell.
 
 ## Why an LLM at all
 

@@ -518,29 +518,28 @@ export function syncCrontab(p) {
 }
 
 /**
- * First-run only: walk the registry, read each cell's HEARTBEAT.md from
- * the vault mirror, and synthesize an inbox entry for each. Idempotent.
+ * No-op. Seeding is MAC-DRIVEN, not in-well.
  *
- * @returns {Promise<{count: number, note?: string}>}
+ * This once walked the registry (~/.cells/cells.json) + the Obsidian vault to
+ * synthesize a first-run inbox. But neither exists inside a pulse well — only
+ * mother gets the registry, via /bridge/registry/read at runtime — so it has
+ * always returned 0 in production. A pulse is seeded entirely by the Mac: the
+ * proxy pushes each cell's HEARTBEAT.md into the owning pulse's inbox on every
+ * change (cli/proxy.ts bridgeInboxPulse), and the Mac re-seeds on a
+ * project-pulse birth/death/retag handoff (cli/cells.ts).
+ *
+ * Keeping it a hard no-op (rather than a registry walk) is load-bearing for
+ * per-project pulse: if a registry ever DID appear in a pulse well, the old
+ * walk would seed the ENTIRE fleet into THIS pulse — and a project pulse would
+ * then double-fire every cell. The Mac is the sole ownership authority; the
+ * in-well pulse only ever drains what it was handed.
+ *
+ * @returns {Promise<{count: number, note: string}>}
  */
 export async function bootstrapInbox(p) {
   ensureDirs(p);
-  if (!fs.existsSync(p.registryPath)) return { count: 0, note: "registry missing; nothing to bootstrap" };
-  const reg = JSON.parse(fs.readFileSync(p.registryPath, "utf-8"));
-  const cells = reg.cells ?? [];
-  let count = 0;
-  for (const c of cells) {
-    const hb = path.join(p.vaultDir, c.name, "HEARTBEAT.md");
-    if (!fs.existsSync(hb)) continue;
-    const content = fs.readFileSync(hb, "utf-8");
-    const ts = Date.now();
-    fs.writeFileSync(path.join(inboxDir(p), `${c.name}-${ts}.md`), content);
-    count++;
-    // Spread timestamps so sort order is stable.
-    await new Promise((r) => setTimeout(r, 2));
-  }
-  appendTrace(p, `bootstrap_inbox synthesized=${count}`);
-  return { count };
+  appendTrace(p, `bootstrap_inbox noop (seeding is Mac-driven)`);
+  return { count: 0, note: "no-op: seeding is Mac-driven (proxy push + birth/death handoff)" };
 }
 
 /**

@@ -24,8 +24,11 @@ crontab in sync with each cell's HEARTBEAT.md.
 1. **Begin.** `node bin/pulse-core.mjs begin`
    - `skip:true` → a prior tick is still in flight. Stop now. Do **not**
      run `end` — the prior tick will.
-   - `isFirstRun:true` → run `node bin/pulse-core.mjs bootstrap` before
-     step 2 (seeds the inbox from the vault on a cold start).
+   - `isFirstRun:true` → nothing extra to do; go to step 2. Seeding is
+     **Mac-driven** — the proxy pushes each cell's HEARTBEAT.md into your inbox
+     on every change, and the Mac re-seeds you on a project-pulse handoff.
+     (`bootstrap` is a kept-for-compatibility no-op: you have no registry to
+     walk, so just drain whatever you were handed.)
 
 2. **Drain + translate.** `node bin/pulse-core.mjs drain` returns a JSON
    array of `{cell, content, path}` — only entries that need translating

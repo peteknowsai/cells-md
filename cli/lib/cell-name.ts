@@ -55,6 +55,37 @@ export function projectMotherName(project: string): string {
   return `${project}${MOTHER_SUFFIX}`;
 }
 
+// ── Pulse naming ──────────────────────────────────────────────────────────
+// Pulse is the family scheduler, and — like mother — a ROLE keyed by project,
+// not a singleton: the global `pulse`, or a project's `<project>-pulse`. The
+// difference from mother is that pulse genuinely shards (different pulses fire
+// `cells talk` at different cells, in parallel), where project mothers share a
+// global birth lock. These helpers mirror the mother block above byte-for-byte
+// so the two roles can't drift; the ownership *resolver* (which cell each
+// heartbeat belongs to) lives in ./pulse-owner.
+
+const PULSE_SUFFIX = "-pulse";
+
+// True for the global pulse and every project pulse.
+export function isPulseName(name: string): boolean {
+  return name === "pulse" || name.endsWith(PULSE_SUFFIX);
+}
+
+// The project a pulse name belongs to: "" for the global `pulse`, the project
+// for "<project>-pulse", or null if the name isn't a pulse at all.
+export function projectOfPulse(name: string): string | null {
+  if (name === "pulse") return "";
+  if (name.endsWith(PULSE_SUFFIX) && name.length > PULSE_SUFFIX.length) {
+    return name.slice(0, -PULSE_SUFFIX.length);
+  }
+  return null;
+}
+
+// The pulse name for a project: "<project>-pulse".
+export function projectPulseName(project: string): string {
+  return `${project}${PULSE_SUFFIX}`;
+}
+
 // A project cell's globally-unique name: "<project>-<name>". Project cells are
 // name-prefixed (like <project>-mother) so two projects can each have an
 // "abstractor" without colliding, and a fleet name self-documents its project.

@@ -6,6 +6,9 @@ import {
   projectOfMother,
   projectMotherName,
   projectCellName,
+  isPulseName,
+  projectOfPulse,
+  projectPulseName,
 } from "./cell-name";
 
 test("accepts plain lowercase names", () => {
@@ -123,4 +126,43 @@ test("projectCellName prefixes the project, idempotently", () => {
   expect(projectCellName("zero", "zero-abstractor")).toBe("zero-abstractor"); // no double prefix
   expect(projectCellName("paonia", "clerk")).toBe("paonia-clerk");
   expect(projectCellName("zero", "cell-abc123")).toBe("zero-cell-abc123"); // auto-names too
+});
+
+// ── pulse naming (project pulses) ──────────────────────────────────────
+
+test("isPulseName: global pulse and project pulses", () => {
+  expect(isPulseName("pulse")).toBe(true);
+  expect(isPulseName("zero-pulse")).toBe(true);
+  expect(isPulseName("home-zero-pulse")).toBe(true); // project may contain hyphens
+});
+
+test("isPulseName: ordinary cells are not pulses", () => {
+  expect(isPulseName("abstractor")).toBe(false);
+  expect(isPulseName("mother")).toBe(false);
+  // a cell literally named "pulse-foo" is not a pulse (suffix, not prefix)
+  expect(isPulseName("pulse-ship")).toBe(false);
+});
+
+test("projectOfPulse: derives the project (\"\" for global)", () => {
+  expect(projectOfPulse("pulse")).toBe("");
+  expect(projectOfPulse("zero-pulse")).toBe("zero");
+  expect(projectOfPulse("a-b-pulse")).toBe("a-b"); // project may contain hyphens
+});
+
+test("projectOfPulse: null for non-pulses and the empty-project degenerate", () => {
+  expect(projectOfPulse("abstractor")).toBeNull();
+  expect(projectOfPulse("mother")).toBeNull();
+  expect(projectOfPulse("-pulse")).toBeNull(); // empty project → not a valid project pulse
+});
+
+test("projectPulseName round-trips with projectOfPulse", () => {
+  expect(projectPulseName("zero")).toBe("zero-pulse");
+  expect(projectOfPulse(projectPulseName("paonia"))).toBe("paonia");
+});
+
+test("mother and pulse roles do not bleed into each other", () => {
+  expect(isMotherName("zero-pulse")).toBe(false);
+  expect(isPulseName("zero-mother")).toBe(false);
+  expect(projectOfMother("zero-pulse")).toBeNull();
+  expect(projectOfPulse("zero-mother")).toBeNull();
 });
