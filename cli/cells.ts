@@ -211,6 +211,16 @@ const HARNESS_OPTIONS: SelectOption[] = [
   { value: "hermes",      label: "hermes",      hint: "(Nous Research agent · GPT-5.5 via ChatGPT sub)" },
 ];
 
+// The executable a `cells run` job invokes for each harness — used by the
+// refresh readiness-gate to confirm a job could actually spawn (the harness
+// resolves on the job PATH) before `cells refresh` returns ✓.
+const HARNESS_JOB_BIN: Record<string, string> = {
+  "pi": "pi",
+  "claude-code": "claude",
+  "codex": "codex",
+  "hermes": "hermes",
+};
+
 const MODEL_OPTIONS: SelectOption[] = [
   { value: "opus",        label: "opus",        hint: "(Anthropic · via Max sub)" },
   { value: "sonnet",      label: "sonnet",      hint: "(Anthropic · via Max sub)" },
@@ -7661,6 +7671,22 @@ async function refreshOneCell(
     // special dir, but the rev tracks the universal platform surface.
     const rev = dnaRev(DNA_DIR);
     const ts = new Date().toISOString().replace(/[:.]/g, "-");
+    // After the supervisor answers /health, also wait until the cell's harness
+    // binary resolves in a job-like login shell before declaring the refresh
+    // done. /health=ok only proves the HTTP listener is up; a `cells run` job
+    // fired the instant refresh returns ✓ can still hit "pi: command not found"
+    // (exit 127) if the harness PATH isn't settled yet — the race that bit
+    // homezero's birth-orchestrate and threatens the DNA-rev steward's
+    // refresh-then-(future-)work. Empty bin (unknown harness) → skip the probe.
+    const harnessBin = HARNESS_JOB_BIN[cell.harness ?? "pi"] ?? "";
+    const harnessGate = harnessBin
+      ? `    hok=0
+    for j in $(seq 1 20); do
+      if HOME=/root bash -lc "command -v ${harnessBin} >/dev/null 2>&1"; then hok=1; break; fi
+      sleep 1
+    done
+    [ "$hok" = "1" ] && echo REFRESH_HEALTHY || echo REFRESH_HEALTHY_HARNESS_SLOW`
+      : `    echo REFRESH_HEALTHY`;
     const remote = `set -e
 sudo bash -c '
   set -e
@@ -7692,7 +7718,7 @@ sudo bash -c '
     echo "${rev}" > /root/.dna-rev
     sync
     rm -rf /root/.refresh-stage
-    echo REFRESH_HEALTHY
+${harnessGate}
   else
     cd /root/.refresh-backup-${ts} && find . -type f | while read -r f; do cp -a "$f" "/root/\${f#./}"; done
     sync; systemctl restart well-site
@@ -7718,13 +7744,19 @@ sudo bash -c '
     if (!out.includes("REFRESH_HEALTHY")) {
       return { ok: false, detail: `unexpected install output: ${out.trim().slice(-180)}` };
     }
+    // Supervisor healthy + new code live, but the harness didn't resolve on the
+    // job PATH within the wait. The refresh itself succeeded (don't fail it);
+    // warn so a refresh-then-run caller knows an immediate job could still 127.
+    const readyNote = out.includes("REFRESH_HEALTHY_HARNESS_SLOW")
+      ? ` ⚠ ${harnessBin || "harness"} not job-ready within 20s — a job fired immediately may fail (127)`
+      : "";
 
     if (opts.verify) {
       const talk = await runTalkOnCell(cellName, "reply with just the word ok", { timeoutS: 120, useMain: false });
       if (!talk.ok) return { ok: false, detail: `refreshed (${plan.push.size} files, ${sha}) but talk verify failed: ${talk.error.slice(0, 120)}` };
-      return { ok: true, detail: `${plan.push.size} files @ ${sha}, talk verified` };
+      return { ok: true, detail: `${plan.push.size} files @ ${sha}, talk verified${readyNote}` };
     }
-    return { ok: true, detail: `${plan.push.size} files @ ${sha}` };
+    return { ok: true, detail: `${plan.push.size} files @ ${sha}${readyNote}` };
   } finally {
     await rm(stage, { recursive: true, force: true }).catch(() => {});
   }
