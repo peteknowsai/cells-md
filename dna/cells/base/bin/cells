@@ -1,19 +1,17 @@
 #!/usr/bin/env bun
 /**
- * cells — slim on-sprite CLI.
+ * cells — slim in-cell CLI.
  *
  * Lets a cell see its peers, inspect itself, and talk to other cells. Read
- * + talk only — no create/destroy/checkpoint (those stay with the keeper
- * on Pete's Mac).
+ * + talk only — no create/destroy (those stay with the keeper on Pete's Mac;
+ * the substrate API at 127.0.0.1:7878 isn't reachable from inside a cell).
  *
- * Backed by the Sprites HTTP API at https://api.sprites.dev with bearer
- * auth via $SPRITES_TOKEN. The local `sprite` CLI is bypassed entirely
- * because (a) it doesn't honor SPRITES_TOKEN env, (b) its surface keeps
- * shifting between releases.
+ * Read surface routes through the cells.md edge: `proxy.cells.md/peers`
+ * (bearer = $CELLS_PROXY_SECRET), the same path `cells talk --list` uses.
+ * The retired pre-wells Sprites API (api.sprites.dev / $SPRITES_TOKEN) is
+ * gone — on a wells-era cell that token is absent, so the old read commands
+ * died with a confusing "SPRITES_TOKEN not set" that read like an auth gap.
  */
-
-const API = "https://api.sprites.dev";
-const TOKEN = process.env.SPRITES_TOKEN;
 
 function die(msg: string, code = 1): never {
   console.error(msg);
@@ -35,35 +33,29 @@ function selfName(): string {
   return Bun.spawnSync(["hostname"]).stdout.toString().trim();
 }
 
-async function api(path: string, init?: RequestInit): Promise<any> {
-  if (!TOKEN) die("SPRITES_TOKEN not set in env (check ~/.bashrc.d/sprites)");
-  const r = await fetch(`${API}${path}`, {
-    ...init,
-    headers: {
-      Authorization: `Bearer ${TOKEN}`,
-      "Content-Type": "application/json",
-      ...(init?.headers ?? {}),
-    },
-  });
-  const text = await r.text();
-  if (!r.ok) die(`api ${path} → ${r.status}: ${text.slice(0, 300)}`);
-  try {
-    return JSON.parse(text);
-  } catch {
-    return text;
-  }
-}
+type Peer = {
+  name: string;
+  status: string;
+  harness: string;
+  model: string;
+  special: boolean;
+  site_url: string;
+};
 
-function fmtAge(iso: string | null): string {
-  if (!iso) return "—";
-  const ms = Date.now() - new Date(iso).getTime();
-  const s = Math.floor(ms / 1000);
-  if (s < 60) return `${s}s`;
-  const m = Math.floor(s / 60);
-  if (m < 60) return `${m}m`;
-  const h = Math.floor(m / 60);
-  if (h < 48) return `${h}h`;
-  return `${Math.floor(h / 24)}d`;
+// The fleet roster, from the Mac's registry via the proxy edge. Bearer-auth'd
+// with the same $CELLS_PROXY_SECRET the cell uses for `cells talk`. This is
+// the live replacement for the retired Sprites read API.
+async function fetchPeers(): Promise<Peer[]> {
+  const secret = getProxySecret();
+  const res = await fetch("https://proxy.cells.md/peers", {
+    headers: { authorization: `Bearer ${secret}` },
+  });
+  if (!res.ok) {
+    const body = await res.text();
+    die(`peers lookup failed (${res.status}): ${body.slice(0, 300)}`);
+  }
+  const data = (await res.json()) as { peers: Peer[]; as_of: string };
+  return data.peers ?? [];
 }
 
 // ───── commands ─────
@@ -72,75 +64,46 @@ async function cmdWhoami() {
   console.log(selfName());
 }
 
+function renderPeerRow(p: Peer): string {
+  const marker = p.special ? "*" : " ";
+  const status = p.status === "alive" ? "alive" : p.status;
+  return `${marker} ${p.name.padEnd(22)} ${status.padEnd(10)} ${(p.harness ?? "").padEnd(12)} ${p.model ?? ""}`;
+}
+
 async function cmdList() {
-  const data = await api("/v1/sprites");
-  const sprites = (data?.sprites ?? []) as Array<{
-    name: string;
-    status: string;
-    created_at: string;
-  }>;
-  if (sprites.length === 0) {
-    console.log("(no cells)");
+  const peers = await fetchPeers();
+  if (peers.length === 0) {
+    console.log("(no peers)");
     return;
   }
-  // sort by name; show status + age
-  sprites.sort((a, b) => a.name.localeCompare(b.name));
-  for (const s of sprites) {
-    console.log(
-      `${s.name.padEnd(24)} ${s.status.padEnd(12)} created ${fmtAge(s.created_at)} ago`,
-    );
-  }
+  peers.sort((a, b) => a.name.localeCompare(b.name));
+  for (const p of peers) console.log(renderPeerRow(p));
 }
 
 async function cmdInfo(arg: string) {
   const name = arg === "self" || arg === "" ? selfName() : arg;
-  const sprite = await api(`/v1/sprites/${encodeURIComponent(name)}`);
-  let policy: any = null;
-  try {
-    policy = await api(`/v1/sprites/${encodeURIComponent(name)}/policy/network`);
-  } catch {
-    // non-fatal — show "unknown"
-  }
-  const rules = policy?.rules
-    ? policy.rules.map((r: any) => `${r.action} ${r.domain}`).join(", ")
-    : "(unknown)";
-  console.log(`name:           ${sprite.name}`);
-  console.log(`status:         ${sprite.status}`);
-  console.log(`url:            ${sprite.url ?? "—"}`);
-  console.log(`organization:   ${sprite.organization ?? "—"}`);
-  console.log(`created:        ${sprite.created_at}`);
-  console.log(`last running:   ${sprite.last_running_at ?? "—"}`);
-  console.log(`egress:         ${rules}`);
+  const peers = await fetchPeers();
+  const p = peers.find((x) => x.name === name);
+  if (!p) die(`no peer named '${name}' (try: cells list)`);
+  // Egress/network-policy (the old Sprites `info` field) has no cells.md
+  // equivalent — that's a Cloudflare/wells concern, not surfaced to a cell.
+  console.log(`name:     ${p.name}`);
+  console.log(`status:   ${p.status}`);
+  console.log(`harness:  ${p.harness}`);
+  console.log(`model:    ${p.model}`);
+  console.log(`special:  ${p.special ? "yes" : "no"}`);
+  console.log(`url:      ${p.site_url}`);
 }
 
 async function cmdCheckpoint(arg: string) {
+  // Checkpoint is a substrate (wells) operation driven from the keeper's Mac.
+  // A cell can't reach welld (127.0.0.1:7878 is Mac-local), and the Sprites
+  // path that used to back this is retired — so there is no in-cell path.
   const name = arg === "self" || arg === "" ? selfName() : arg;
-  if (name !== selfName()) die("on-cell `cells checkpoint` only operates on self. Ask Pete to checkpoint other cells.");
-  // POST /v1/sprites/<name>/checkpoint streams NDJSON events. Walk them
-  // and surface the resulting checkpoint id (or error).
-  if (!TOKEN) die("SPRITES_TOKEN not set");
-  const r = await fetch(`${API}/v1/sprites/${encodeURIComponent(name)}/checkpoint`, {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${TOKEN}`,
-      "Content-Type": "application/json",
-    },
-    body: "{}",
-  });
-  const text = await r.text();
-  if (!r.ok) die(`checkpoint failed (${r.status}): ${text.slice(0, 300)}`);
-  let id: string | null = null;
-  for (const line of text.split("\n")) {
-    if (!line.trim()) continue;
-    try {
-      const ev = JSON.parse(line);
-      const m = typeof ev.data === "string" ? ev.data.match(/ID:\s*(\S+)/) : null;
-      if (m) id = m[1];
-    } catch {
-      // not JSON, skip
-    }
-  }
-  console.log(id ? `checkpoint created: ${id}` : `checkpoint created (id unknown)`);
+  die(
+    `checkpoint is keeper-only — a cell can't reach the substrate from inside.\n` +
+      `  Ask Pete to run \`cells checkpoint ${name}\` on the Mac, or \`cells talk mother\`.`,
+  );
 }
 
 // `cells talk` — the agent-comms primitive (substrate-native cells-to-cells
@@ -321,21 +284,8 @@ async function cmdVerify(rest: string[]): Promise<void> {
 }
 
 async function cmdTalkList(): Promise<void> {
-  const secret = getProxySecret();
-  const res = await fetch("https://proxy.cells.md/peers", {
-    headers: { authorization: `Bearer ${secret}` },
-  });
-  if (!res.ok) {
-    const body = await res.text();
-    die(`peers lookup failed (${res.status}): ${body.slice(0, 300)}`);
-  }
-  const data = await res.json() as { peers: Array<{ name: string; status: string; harness: string; model: string; special: boolean; site_url: string }>; as_of: string };
-  // Pretty list — one row per peer.
-  for (const p of data.peers) {
-    const marker = p.special ? "*" : " ";
-    const status = p.status === "alive" ? "alive" : p.status;
-    console.log(`${marker} ${p.name.padEnd(20)} ${status.padEnd(10)} ${p.harness.padEnd(12)} ${p.model}`);
-  }
+  // Same roster as `cells list` — one row per peer from the cells.md edge.
+  for (const p of await fetchPeers()) console.log(renderPeerRow(p));
 }
 
 async function cmdTalk(rest: string[]) {
@@ -463,18 +413,17 @@ switch (sub) {
     await cmdCheckpoint(rest[0] ?? "self");
     break;
   default:
-    console.log("cells— on-sprite CLI (read + talk subset)");
+    console.log("cells — in-cell CLI (read + talk subset)");
     console.log("");
     console.log("usage:");
     console.log("  cells whoami              print self name");
-    console.log("  cells list                list peer cells (status, age)");
-    console.log("  cells info [name|self]    show name, status, egress (default: self)");
+    console.log("  cells list                list peer cells (status, harness, model)");
+    console.log("  cells info [name|self]    show name, status, harness, model, url (default: self)");
     console.log("  cells talk <peer> [flags] <msg>   send to a peer; --await blocks for reply, --main escalates to peer's main thread");
     console.log("  cells verify <decision> --to=<peers> fan out a decision to N peers, aggregate AGREE/DISAGREE");
-    console.log("  cells checkpoint [self]   snapshot your own filesystem (~300ms)");
     console.log("");
-    console.log("not available on cells (keeper-only):");
-    console.log("  create, destroy, sleep, wake, dream*");
-    console.log("  (`cells checkpoint` only works on self \u2014 ask Pete for peer checkpoints)");
+    console.log("not available in-cell (keeper-only, run on Pete's Mac):");
+    console.log("  create, destroy, sleep, wake, checkpoint, dream");
+    console.log("  (the substrate API isn't reachable from inside a cell \u2014 ask Pete or `cells talk mother`)");
     process.exit(sub ? 1 : 0);
 }
