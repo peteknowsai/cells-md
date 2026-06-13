@@ -1,5 +1,11 @@
 import { test, expect } from "bun:test";
-import { isValidCellName, validateCellName } from "./cell-name";
+import {
+  isValidCellName,
+  validateCellName,
+  isMotherName,
+  projectOfMother,
+  projectMotherName,
+} from "./cell-name";
 
 test("accepts plain lowercase names", () => {
   expect(isValidCellName("alice")).toBe(true);
@@ -76,4 +82,37 @@ test("validateCellName returns ok for the auto-generated shape", () => {
   expect(validateCellName("cell-abc123").ok).toBe(true);
   expect(validateCellName("cell-000000").ok).toBe(true);
   expect(validateCellName("cell-ffffff").ok).toBe(true);
+});
+
+// ── mother naming (project mothers) ────────────────────────────────────
+
+test("isMotherName: global mother and project mothers", () => {
+  expect(isMotherName("mother")).toBe(true);
+  expect(isMotherName("zero-mother")).toBe(true);
+  expect(isMotherName("paonia-mother")).toBe(true);
+});
+
+test("isMotherName: ordinary cells are not mothers", () => {
+  expect(isMotherName("abstractor")).toBe(false);
+  expect(isMotherName("advisor-pete")).toBe(false);
+  expect(isMotherName("pulse")).toBe(false);
+  // a cell literally named "mother-foo" is not a mother (suffix, not prefix)
+  expect(isMotherName("mother-ship")).toBe(false);
+});
+
+test("projectOfMother: derives the project (\"\" for global)", () => {
+  expect(projectOfMother("mother")).toBe("");
+  expect(projectOfMother("zero-mother")).toBe("zero");
+  expect(projectOfMother("a-b-mother")).toBe("a-b"); // project may contain hyphens
+});
+
+test("projectOfMother: null for non-mothers and the empty-project degenerate", () => {
+  expect(projectOfMother("abstractor")).toBeNull();
+  expect(projectOfMother("pulse")).toBeNull();
+  expect(projectOfMother("-mother")).toBeNull(); // empty project → not a valid project mother
+});
+
+test("projectMotherName round-trips with projectOfMother", () => {
+  expect(projectMotherName("zero")).toBe("zero-mother");
+  expect(projectOfMother(projectMotherName("paonia"))).toBe("paonia");
 });

@@ -12,7 +12,14 @@ import { planReconcileEvictions } from "./lib/reconcile";
 import { ulid } from "./shared/agent-envelope";
 import { needsSeal } from "./lib/hibernate-ready";
 import { SECRETS_PATH, readSecret } from "./lib/secrets";
-import { validateCellName } from "./lib/cell-name";
+import {
+  validateCellName,
+  isValidCellName,
+  describeCellNameRules,
+  isMotherName,
+  projectOfMother,
+  projectMotherName,
+} from "./lib/cell-name";
 import { loadPostworkSummary, removePostwork, type PostworkSummary } from "./lib/postwork";
 import { REGISTRY_DIR } from "./lib/paths";
 import {
@@ -1309,8 +1316,8 @@ async function runTalkOnCell(
 // under a frame-progress watchdog (kill, retry once, durably mark failed).
 
 async function cmdRun(cellName: string, rest: string[]): Promise<void> {
-  if (cellName === "mother") {
-    console.error("! jobs on mother are refused — mother serializes births on mother.lock; a detached job racing a ritual is the known silent-deadlock");
+  if (isMotherName(cellName)) {
+    console.error(`! jobs on a mother are refused — ${cellName} serializes births on the birth-ritual lock; a detached job racing a ritual is the known silent-deadlock`);
     process.exit(1);
   }
   await requireCell(cellName);
@@ -2588,8 +2595,8 @@ function wellsEnv(): Record<string, string> {
 const PACKAGE_VALUES = OPTIONAL_PACKAGES.map((p) => p.value);
 
 function parseCreateArgs(args: string[]): { name: string | undefined; opts: CreateOpts } {
-  let name: string | undefined;
   const opts: CreateOpts = {};
+  const positionals: string[] = [];
   for (const a of args) {
     if (a.startsWith("--harness=")) {
       opts.harness = a.slice("--harness=".length);
@@ -2656,14 +2663,29 @@ function parseCreateArgs(args: string[]): { name: string | undefined; opts: Crea
     } else if (a.startsWith("--")) {
       console.error(`unknown flag: ${a}`);
       process.exit(1);
-    } else if (!name) {
-      name = a;
     } else {
-      console.error(`unexpected arg: ${a}`);
-      process.exit(1);
+      positionals.push(a);
     }
   }
-  // Name is optional. If omitted, cmdCreate auto-generates one (v1 fast-path).
+  // Positional grammar (Stage 3 strips a trailing whitespace-containing brief
+  // before this). What remains:
+  //   0 → auto-name (v1 fast-path);  1 → <name>;  2 → <project> <name>.
+  let name: string | undefined;
+  if (positionals.length === 1) {
+    name = positionals[0];
+  } else if (positionals.length === 2) {
+    const project = positionals[0]!;
+    if (!isValidCellName(project)) {
+      console.error(`bad project '${project}' — ${describeCellNameRules()}`);
+      process.exit(1);
+    }
+    // An explicit --project= flag pins and wins over the positional.
+    if (!opts.project) opts.project = project;
+    name = positionals[1];
+  } else if (positionals.length > 2) {
+    console.error(`too many arguments: ${positionals.join(" ")}\n  usage: cells birth [<project>] [<name>] [--flags]`);
+    process.exit(1);
+  }
   return { name, opts };
 }
 
@@ -3026,7 +3048,16 @@ async function cmdCreate(name: string | undefined, opts: CreateOpts): Promise<vo
   // Legacy gate CELLS_USE_MOTHER_CELL=1 still routes through cells-mother
   // via talkAndAwaitOutcome; that path is single-harness (pi on her well)
   // and bypasses the chain for now.
-  if (!process.stdout.isTTY) console.log(`birthing ${name}…`);
+  // Which mother owns this birth: the project's own mother if registered, else
+  // the global mother. Stage 2 keeps the ritual itself the shared MOTHER_ROOT
+  // skill on Pete's one Max session (the birth-ritual lock serializes it
+  // globally — project mothers are isolation/ownership, NOT parallel births),
+  // so this is attribution: who's responsible, and (Stage 3) whose project
+  // defaults fill the blob.
+  const owningMother = await motherFor(opts.project);
+  if (!process.stdout.isTTY) {
+    console.log(owningMother === "mother" ? `birthing ${name}…` : `birthing ${name} (${owningMother})…`);
+  }
   const useMotherCell = process.env.CELLS_USE_MOTHER_CELL === "1";
   const motherChain = await readMotherHarnessChain();
 
@@ -3868,11 +3899,17 @@ async function bakePoolMember(): Promise<string> {
 // than the generic pool consume path.
 
 type SpecialSpec = {
-  name: "mother" | "pulse";
+  name: string; // the cell name — "mother"/"pulse", or "<project>-mother"
   wellName: string;
   harness: "pi" | "claude-code";
+  // Which dna/specials/<dnaName>/ template to bake from. A project mother
+  // (<project>-mother) shares the global mother's DNA — there are no per-project
+  // birth-DNA forks (project specifics ride in the blob, not the genome).
+  dnaName: "mother" | "pulse";
+  // Project tag for a project mother; absent for the global mother/pulse.
+  project?: string;
   // NOTE: model/provider/thinking are deliberately NOT here. Runtime model
-  // config lives in dna/specials/<name>/.pi/settings.json — single source of
+  // config lives in dna/specials/<dnaName>/.pi/settings.json — single source of
   // truth. The registry's modelChain is *derived* from that file at bake
   // time (see cmdBirthSpecial). Putting them here too caused real drift:
   // the registry showed claude-opus-4-7 while mother actually ran on codex.
@@ -3883,13 +3920,49 @@ const SPECIALS: Record<"mother" | "pulse", SpecialSpec> = {
     name: "mother",
     wellName: "cells-mother",
     harness: "pi",
+    dnaName: "mother",
   },
   pulse: {
     name: "pulse",
     wellName: "cells-pulse",
     harness: "claude-code",
+    dnaName: "pulse",
   },
 };
+
+// Resolve a `birth-special` argument to its spec: a known global special, or a
+// project mother `<project>-mother` synthesized from the shared mother template
+// (own well `cells-<project>-mother`, mother's harness + DNA, tagged project).
+// (isMotherName / projectOfMother / projectMotherName are the shared naming
+// primitives in lib/cell-name.ts.)
+function resolveSpecialSpec(arg: string): SpecialSpec | null {
+  if (arg === "mother" || arg === "pulse") return SPECIALS[arg];
+  const project = projectOfMother(arg);
+  if (project) {
+    return {
+      name: arg,
+      wellName: `cells-${arg}`,
+      harness: SPECIALS.mother.harness,
+      dnaName: "mother",
+      project,
+    };
+  }
+  return null;
+}
+
+// Which mother orchestrates births for a project: the project's own mother if
+// it's registered + alive, else the global mother. (In Stage 2 the birth ritual
+// itself is the shared MOTHER_ROOT skill on Pete's one Max session — see the
+// birth-ritual lock — so this resolves ownership/attribution, not a separate
+// execution path.)
+async function motherFor(project: string | undefined): Promise<string> {
+  if (project) {
+    const pm = projectMotherName(project);
+    const cell = await findCell(pm);
+    if (cell && cell.special && cell.status !== "warming") return pm;
+  }
+  return "mother";
+}
 
 // Read the model chain straight out of the special's DNA settings.json.
 // This is the *single source of truth* for what a special is configured to
@@ -3908,8 +3981,8 @@ const SPECIALS: Record<"mother" | "pulse", SpecialSpec> = {
 // runs the ritual) and for `cells list` (display). Pi's runtime only ever
 // reads `modelChain`, never the registry — so its fallback chain stays
 // pi-only even when harnessChain[0] is claude-code.
-async function readSpecialModelChain(name: "mother" | "pulse"): Promise<string[]> {
-  const path = join(SPECIALS_DIR, name, ".pi", "settings.json");
+async function readSpecialModelChain(dnaName: "mother" | "pulse"): Promise<string[]> {
+  const path = join(SPECIALS_DIR, dnaName, ".pi", "settings.json");
   const settings = JSON.parse(await readFile(path, "utf-8"));
   if (Array.isArray(settings.harnessChain) && settings.harnessChain.length > 0) {
     return settings.harnessChain.map((e: { harness: string; model: string; thinking?: string }) =>
@@ -3982,12 +4055,12 @@ const SPECIAL_OVERLAY_WIPE = [
 async function cmdBirthSpecial(rawArgs: string[]): Promise<void> {
   const args = rawArgs.filter(a => !a.startsWith("--"));
   const flags = new Set(rawArgs.filter(a => a.startsWith("--")));
-  const name = args[0] as "mother" | "pulse" | undefined;
-  if (!name || !(name in SPECIALS)) {
-    console.error("usage: cells birth-special <mother|pulse> [--rebuild]");
+  const arg = args[0];
+  const spec = arg ? resolveSpecialSpec(arg) : null;
+  if (!spec) {
+    console.error("usage: cells birth-special <mother|pulse|<project>-mother> [--rebuild]");
     process.exit(2);
   }
-  const spec = SPECIALS[name];
   const rebuild = flags.has("--rebuild");
 
   console.log(`birth-special ${spec.name} → ${spec.wellName}`);
@@ -4013,7 +4086,7 @@ async function cmdBirthSpecial(rawArgs: string[]): Promise<void> {
   //     promote). Doing this upsert (warming replaces any old alive entry)
   //     BEFORE the destroy means a registry-lock failure here leaves the old
   //     special + its well fully intact — nothing half-torn-down.
-  const specialChain = await readSpecialModelChain(spec.name);
+  const specialChain = await readSpecialModelChain(spec.dnaName);
   try {
     await mutateRegistry((cells) =>
       upsertBirthingCell(cullStaleWarming(cells, Date.now()), {
@@ -4023,6 +4096,7 @@ async function cmdBirthSpecial(rawArgs: string[]): Promise<void> {
         modelChain: specialChain,
         special: true,
         pinned: true,
+        ...(spec.project ? { project: spec.project } : {}),
       }),
     );
   } catch (e) {
@@ -4099,8 +4173,10 @@ async function bakeSpecial(spec: SpecialSpec, specialChain: string[]): Promise<v
   }
 
   // 6. Overlay specials DNA. Wipe the base identity files first so leftover
-  //    base extensions / settings don't poison the special.
-  console.log(`  overlaying dna/specials/${spec.name}/ onto /root…`);
+  //    base extensions / settings don't poison the special. A project mother
+  //    bakes from the shared mother template (spec.dnaName), not a per-project
+  //    genome — __NAME__ substitution below personalizes it to <project>-mother.
+  console.log(`  overlaying dna/specials/${spec.dnaName}/ onto /root…`);
   const wipeCmd = SPECIAL_OVERLAY_WIPE.map(p => `sudo rm -rf /root/${p}`).join(" && ");
   const wipe = await wellExecCapture(spec.wellName, wipeCmd);
   if (!wipe.ok) {
@@ -4109,7 +4185,7 @@ async function bakeSpecial(spec: SpecialSpec, specialChain: string[]): Promise<v
   // Specials DNA contains symlinks (mother/docs → ../../../docs,
   // mother/scripts → ../../../scripts) so deref at archive time with -h.
   // Also pass --overwrite so files overlay base DNA cleanly.
-  const overlaySrc = join(SPECIALS_DIR, spec.name);
+  const overlaySrc = join(SPECIALS_DIR, spec.dnaName);
   const overlayTar = Bun.spawn(["tar", "czhf", "-", "-C", overlaySrc, "."], {
     stdio: ["ignore", "pipe", "pipe"],
   });
@@ -4191,11 +4267,12 @@ async function bakeSpecial(spec: SpecialSpec, specialChain: string[]): Promise<v
     console.log(`  ✓ worker deployed`);
   }
 
-  // 7. Cell-specific kicker.
-  if (spec.name === "pulse") {
+  // 7. Cell-specific kicker (keyed on the DNA template, so a <project>-mother
+  //    gets mother's kicker too).
+  if (spec.dnaName === "pulse") {
     await installPulseLoop(spec.wellName);
   }
-  if (spec.name === "mother") {
+  if (spec.dnaName === "mother") {
     // Strip in-well-incompatible extensions:
     //  - well-tools shells out to the Mac's `well` CLI; doesn't exist in-well.
     //    Its tools (well_exec, report_outcome) are re-registered by mother-tools
@@ -4275,6 +4352,7 @@ echo "name-subst: $(grep -lc __NAME__ AGENTS.md CLAUDE.md SOUL.md package.json .
       harness: spec.harness,
       special: true,
       pinned: true,
+      ...(spec.project ? { project: spec.project } : {}),
     });
     if (!findCellIn(next, spec.name)) {
       next = [...next, {
@@ -4285,6 +4363,7 @@ echo "name-subst: $(grep -lc __NAME__ AGENTS.md CLAUDE.md SOUL.md package.json .
         modelChain: specialChain,
         special: true,
         pinned: true,
+        ...(spec.project ? { project: spec.project } : {}),
       }];
     }
     return next;
@@ -8843,6 +8922,21 @@ switch (sub) {
   case "pi":         await cmdPi(); break;
   case "birth":
   case "create": {
+    // `cells birth <project> mother [--rebuild]` creates that project's mother
+    // (a project-scoped special). Routed here — before parseCreateArgs / the
+    // reserved-name guard, which both reject "mother" — so the grammar
+    // ("mother" inside a project means that project's mother) falls out cleanly.
+    // Bare `cells birth mother` (no project) is NOT this and stays blocked.
+    const positionals = rest.filter((a) => !a.startsWith("--"));
+    if (positionals.length === 2 && positionals[1] === "mother") {
+      const project = positionals[0]!;
+      if (!isValidCellName(project)) {
+        console.error(`bad project '${project}' — ${describeCellNameRules()}`);
+        process.exit(1);
+      }
+      await cmdBirthSpecial([projectMotherName(project), ...rest.filter((a) => a.startsWith("--"))]);
+      break;
+    }
     const { name, opts } = parseCreateArgs(rest);
     await cmdCreate(name, opts);
     break;
