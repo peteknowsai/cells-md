@@ -39,12 +39,19 @@ PALETTE=(
   "#7AB87A #1F1F28"   # mint
 )
 
-# md5sum first 4 hex chars → integer → modulo into palette index.
-HASH=$(printf %s "$NAME" | md5sum 2>/dev/null | cut -c1-4)
-# md5sum isn't on macOS by default; fall back to md5 -q.
+# First 4 chars of a content hash → integer → modulo into palette index.
+# Each attempt is guarded with `|| true` so a missing tool can't trip `set -e`:
+# the mac_exec birth environment runs with a minimal PATH that has neither
+# md5sum nor macOS's md5, so without the guard the script aborted here (exit
+# 127) before the fallback ran. cksum is POSIX and always present in /usr/bin.
+HASH=$(printf %s "$NAME" | md5sum 2>/dev/null | cut -c1-4 || true)
 if [ -z "$HASH" ]; then
-  HASH=$(printf %s "$NAME" | md5 -q | cut -c1-4)
+  HASH=$(printf %s "$NAME" | md5 -q 2>/dev/null | cut -c1-4 || true)
 fi
+if [ -z "$HASH" ]; then
+  HASH=$(printf %s "$NAME" | cksum | cut -c1-4 || true)
+fi
+HASH=${HASH:-0}
 
 INDEX=$(( 0x$HASH % ${#PALETTE[@]} ))
 echo "${PALETTE[$INDEX]}"

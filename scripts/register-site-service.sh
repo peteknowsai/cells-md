@@ -17,9 +17,11 @@ set -euo pipefail
 NAME="${1:?usage: $0 <cell-name> [well-name]}"
 SPRITE_NAME="${2:-$NAME}"
 # WELL_API_URL + WELL_TOKEN may be overridden by env (cells.ts injects
-# these for backend=well to point at welld on localhost). Default
-# matches the legacy hosted-wells API.
-API_URL="${WELL_API_URL:-https://api.sprites.dev}"
+# these for backend=well to point at welld on localhost). Default to local
+# welld: everything points at it now, and mother's mac_exec births run
+# without the env injection — the legacy hosted-wells API (api.sprites.dev)
+# 404s, which used to cost a birth a failed step + a manual retry.
+API_URL="${WELL_API_URL:-http://localhost:7878}"
 if [ -n "${WELL_TOKEN:-}" ]; then
   TOKEN="$WELL_TOKEN"
 else
