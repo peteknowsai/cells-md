@@ -20,7 +20,11 @@ import {
   projectOfMother,
   projectMotherName,
   projectCellName,
+  isPulseName,
+  projectOfPulse,
+  projectPulseName,
 } from "./lib/cell-name";
+import { pulseOwner, projectScheduledCells } from "./lib/pulse-owner";
 import { loadPostworkSummary, removePostwork, type PostworkSummary } from "./lib/postwork";
 import { compileBrief, type BriefVocab } from "./lib/brief";
 import { REGISTRY_DIR } from "./lib/paths";
@@ -2885,6 +2889,15 @@ async function cmdCreate(name: string | undefined, opts: CreateOpts): Promise<vo
     console.error(`'${name}' is reserved for project mothers. To create it: cells birth ${proj} mother`);
     process.exit(1);
   }
+  // Same reservation for the `*-pulse` namespace — every `*-pulse` cell is a
+  // real pulse scheduler (born via `cells birth <project> pulse`), so the
+  // ownership resolver (pulseOwner) can trust the name alone and a non-pulse
+  // cell can never accidentally be picked as a project's scheduler.
+  if (isPulseName(name)) {
+    const proj = projectOfPulse(name);
+    console.error(`'${name}' is reserved for project pulses. To create it: cells birth ${proj} pulse`);
+    process.exit(1);
+  }
   if (isNameTaken((await loadRegistry()).cells, name)) {
     console.error(`cell '${name}' already exists in registry`);
     process.exit(1);
@@ -4015,27 +4028,38 @@ const SPECIALS: Record<"mother" | "pulse", SpecialSpec> = {
 };
 
 // Resolve a `birth-special` argument to its spec: a known global special, or a
-// project mother `<project>-mother` synthesized from the shared mother template
-// (own well `cells-<project>-mother`, mother's harness + DNA, tagged project).
-// (isMotherName / projectOfMother / projectMotherName are the shared naming
-// primitives in lib/cell-name.ts.)
+// project mother/pulse (`<project>-mother` / `<project>-pulse`) synthesized from
+// the shared template (own well `cells-<project>-<role>`, the role's harness +
+// DNA, tagged project). (projectOfMother / projectOfPulse and friends are the
+// shared naming primitives in lib/cell-name.ts.)
 function resolveSpecialSpec(arg: string): SpecialSpec | null {
   if (arg === "mother" || arg === "pulse") return SPECIALS[arg];
-  const project = projectOfMother(arg);
-  if (project) {
-    // Both the cell name (arg, a worker subdomain label) and the well name
-    // (cells-<arg>) must be valid DNS labels ≤63 chars. The `cells birth
-    // <project> mother` dispatch path guards the project, but the direct
-    // `birth-special <project>-mother` form lands here unguarded — without this
-    // a bad name (uppercase, space, too long) would half-create a malformed
-    // well before failing late and messily.
+  // Both the cell name (arg, a worker subdomain label) and the well name
+  // (cells-<arg>) must be valid DNS labels ≤63 chars. The `cells birth <project>
+  // <role>` dispatch path guards the project, but the direct `birth-special
+  // <project>-<role>` form lands here unguarded — without this a bad name
+  // (uppercase, space, too long) would half-create a malformed well before
+  // failing late and messily.
+  const motherProject = projectOfMother(arg);
+  if (motherProject) {
     if (!isValidCellName(arg) || !isValidCellName(`cells-${arg}`)) return null;
     return {
       name: arg,
       wellName: `cells-${arg}`,
       harness: SPECIALS.mother.harness,
       dnaName: "mother",
-      project,
+      project: motherProject,
+    };
+  }
+  const pulseProject = projectOfPulse(arg);
+  if (pulseProject) {
+    if (!isValidCellName(arg) || !isValidCellName(`cells-${arg}`)) return null;
+    return {
+      name: arg,
+      wellName: `cells-${arg}`,
+      harness: SPECIALS.pulse.harness,
+      dnaName: "pulse",
+      project: pulseProject,
     };
   }
   return null;
@@ -4149,7 +4173,7 @@ async function cmdBirthSpecial(rawArgs: string[]): Promise<void> {
   const arg = args[0];
   const spec = arg ? resolveSpecialSpec(arg) : null;
   if (!spec) {
-    console.error("usage: cells birth-special <mother|pulse|<project>-mother> [--rebuild]");
+    console.error("usage: cells birth-special <mother|pulse|<project>-mother|<project>-pulse> [--rebuild]");
     process.exit(2);
   }
   const rebuild = flags.has("--rebuild");
@@ -4168,7 +4192,7 @@ async function cmdBirthSpecial(rawArgs: string[]): Promise<void> {
 
   // 1b. Pre-register "warming" BEFORE the slow birth (and before the --rebuild
   //     well destroy below). A claude-code special (pulse, a project mother)
-  //     starts its always-on loop — installPulseLoop fires pulse.service, which
+  //     starts its always-on loop — startPulseLoop fires pulse.service, which
   //     makes proxy Anthropic calls — before we'd otherwise register it at the
   //     end. The Max-policy gate 403s a cell it can't find, so the loop's first
   //     ticks would fail. Registration is the gate's allowlist (name + harness);
@@ -4314,11 +4338,11 @@ async function bakeSpecial(spec: SpecialSpec, specialChain: string[]): Promise<v
   //     Worker. The pool/mother-driven birth ritual does these as part of
   //     post-birth-async work (see dna/specials/mother/.claude/skills/birth/);
   //     specials skip that ritual, so we run them here, synchronously,
-  //     because the next step (installPulseLoop) starts pulse.service —
-  //     which immediately injects /pulse messages into the cell's main
-  //     session via <name>.cells.md. Without the worker the inject 404s;
-  //     without the site service localhost:8080 (the supervisor) isn't up.
-  //     Pulse needs both running before installPulseLoop fires.
+  //     because a later step (startPulseLoop, after promote) starts
+  //     pulse.service — which immediately injects /pulse messages into the
+  //     cell's main session via <name>.cells.md. Without the worker the inject
+  //     404s; without the site service localhost:8080 (the supervisor) isn't
+  //     up. Pulse needs both running before startPulseLoop fires.
   //
   //     Every special gets this — it was pulse-only until 2026-06-10, on
   //     the theory that mother's hand-setup would persist. It didn't: her
@@ -4460,6 +4484,20 @@ echo "name-subst: $(grep -lc __NAME__ AGENTS.md CLAUDE.md SOUL.md package.json .
     return next;
   });
 
+  // 9b. Project-pulse birth handoff — take this project's cells over from the
+  //     global pulse before this pulse starts ticking (no double-fire window).
+  //     The global pulse (no project) skips this. Runs after promote so the
+  //     registry already shows this pulse alive (the proxy now routes the
+  //     project's heartbeats here too).
+  if (spec.dnaName === "pulse" && spec.project) {
+    await handoffProjectCellsOnBirth(spec.project, spec.wellName);
+  }
+  // 9c. Start the always-on loop now that the cell is alive + (for a project
+  //     pulse) its handoff is done. installPulseLoop only enabled the service.
+  if (spec.dnaName === "pulse") {
+    await startPulseLoop(spec.wellName);
+  }
+
   console.log(`✓ ${spec.name} born in ${spec.wellName}, pinned (auto_sleep_seconds=null).`);
   console.log(`  next: cells talk ${spec.name}`);
 }
@@ -4537,15 +4575,34 @@ else
   sudo systemctl enable --now cron
 fi
 sudo systemctl daemon-reload
-sudo systemctl enable --now pulse.service
-sudo systemctl status --no-pager pulse.service | head -8 || true
+# Enable but do NOT start here. The loop is started by startPulseLoop() only
+# after promote (and, for a project pulse, after its birth handoff completes)
+# so a project pulse can never write a cron block before its cells have been
+# forgotten from the global pulse — that's what makes the handoff double-fire-
+# free. The global pulse has no handoff, so it starts moments later all the same.
+sudo systemctl enable pulse.service
 sudo systemctl status --no-pager cron 2>/dev/null | head -4 || sudo systemctl status --no-pager crond | head -4 || true`;
 
   const r = await wellExecCapture(wellName, script);
   if (!r.ok) {
     throw new Error(`installPulseLoop failed: ${(r.stderr + r.stdout).slice(-400)}`);
   }
-  console.log(`  ✓ pulse.service enabled (always-on, 5min tick) + cron daemon armed`);
+  console.log(`  ✓ pulse.service enabled (cron armed) — start deferred to post-promote`);
+}
+
+// Start the always-on pulse loop. Split out from installPulseLoop so a project
+// pulse only begins ticking — and writing cron blocks — after its birth handoff
+// has evicted its cells from the global pulse. Idempotent (start on a running
+// service is a no-op), so --rebuild is safe.
+async function startPulseLoop(wellName: string): Promise<void> {
+  const r = await wellExecCapture(
+    wellName,
+    `sudo systemctl start pulse.service && sudo systemctl status --no-pager pulse.service | head -6 || true`,
+  );
+  if (!r.ok) {
+    throw new Error(`startPulseLoop failed: ${(r.stderr + r.stdout).slice(-300)}`);
+  }
+  console.log(`  ✓ pulse.service started (always-on, 5min tick)`);
 }
 
 // Ensure a (supposedly running) well actually has a DHCP-assigned IP.
@@ -5269,7 +5326,16 @@ async function cmdDestroyOne(name: string): Promise<boolean> {
   await mutateRegistry((cells) => removeCell(cells, name)).catch((e) =>
     console.warn(`note: registry removal for ${name} failed (${e instanceof Error ? e.message : String(e)}); continuing teardown — re-run \`cells kill ${name}\` to clear the entry`),
   );
-  await evictPulseStateForCell(name);
+  await evictPulseStateForCell(name, killedCell?.project);
+  // If we just killed a PROJECT pulse, fail its cells back to the global pulse:
+  // they were evicted from global when this pulse was born, so they'd otherwise
+  // go dark. (Best-effort; a crash that skips this path → `cells heartbeat
+  // reseed <project>`.)
+  if (killedCell && isPulseName(name)) {
+    const deadProject = projectOfPulse(name);
+    if (deadProject) await failbackProjectPulse(deadProject).catch((e) =>
+      console.warn(`! failback for ${deadProject} failed (${e instanceof Error ? e.message : String(e)})`));
+  }
   await archiveSlackChannelsForCell(name);
   await evictChannelBindingsForCell(name);
   await deleteCellWorker(name);
@@ -5429,35 +5495,140 @@ async function deleteCellWorker(name: string): Promise<void> {
   }
 }
 
-// Tell pulse to forget a destroyed cell — drops its schedule cache, prunes
-// lastFire entries, and clears any orphan inbox files. Runs deterministically
-// inside the pulse well via pulse-core's `forget` subcommand; no agent path,
-// no LLM, no fork. The `forget` call drops the cell's pulse-cache row AND
-// strips its block from /etc/cron.d/pulse-schedules, so cron stops firing
-// at it. Best-effort — if the pulse cell is down or absent (early in setup,
-// between rebirth steps) the call fails and *both* the cache row and the
-// crontab block survive; cron will keep firing `cells talk <dead-cell>`
-// until manual cleanup. Recovery: once the pulse cell is back, run
-//   cells exec pulse "node /root/bin/pulse-core.mjs forget <name>"
-// from the host. The warning below surfaces the failure so it doesn't go
-// silent.
-async function evictPulseStateForCell(name: string): Promise<void> {
-  // Resolve the pulse cell's well name (default "pulse"; overridable via
-  // env for ops that run a renamed pulse cell during cutover).
-  const pulseCellName = process.env.CELLS_PULSE_CELL ?? "pulse";
-  let pulseWell: string;
+// ─── pulse handoff primitives (project-pulse birth / death / retag) ────────
+//
+// A pulse owns a continuous schedule table (pulse-cache/<cell>.json + a cron
+// block per cell). When a cell moves between pulses — a <project>-pulse is born
+// (global → project), dies (project → global), or a cell is retagged — its
+// schedule must move with it, exactly once. These small deterministic helpers
+// are the moving parts; the ownership resolver (pulseOwner) decides where.
+
+// ~/.cells/heartbeat-mirror/<cell>.md — the Mac-side freshest-seen HEARTBEAT.md
+// for every scheduled cell, written by the proxy on each /heartbeat-changed
+// (see cli/proxy.ts). It is the source of truth for re-seeding a cell's
+// schedule into a different pulse: fresher than the Obsidian vault snapshot,
+// and it never requires waking the cell to read its live file.
+const HEARTBEAT_MIRROR_DIR = join(homedir(), ".cells", "heartbeat-mirror");
+
+// The freshest HEARTBEAT.md the Mac has for a cell: the proxy's last-seen
+// mirror, falling back to the Obsidian vault. null if neither exists (a cell
+// that never posted a schedule since the mirror landed and was never
+// vault-synced — handoff then leaves it on its current pulse and warns rather
+// than drop the schedule into a gap).
+async function readHeartbeatContent(cell: string): Promise<string | null> {
   try {
-    pulseWell = await wellNameForCell(pulseCellName);
+    return await readFile(join(HEARTBEAT_MIRROR_DIR, `${cell}.md`), "utf-8");
+  } catch { /* fall through to vault */ }
+  try {
+    return await readFile(join(VAULT_DIR, cell, "HEARTBEAT.md"), "utf-8");
   } catch {
-    return; // pulse cell not in registry — nothing to evict
+    return null;
   }
-  const r = await wellExecCapture(
-    pulseWell,
-    `node /root/bin/pulse-core.mjs forget ${name}`,
-  ).catch(() => null);
-  if (!r || !r.ok) {
+}
+
+// Seed a cell's HEARTBEAT.md into a pulse well's inbox so that pulse rebuilds
+// its schedule on the next tick. Mirrors the proxy's bridgeInboxPulse write
+// (the in-well pulse-core is a dumb drainer — the Mac is the sole seeder).
+async function seedPulseInbox(pulseWell: string, cell: string, content: string): Promise<boolean> {
+  const script = `set -euo pipefail
+sudo mkdir -p /root/.cells/pulse-inbox
+TS=$(date +%s%N)
+F=/root/.cells/pulse-inbox/${cell}-$TS.md
+sudo tee "$F" >/dev/null <<'__INBOX_EOF__'
+${content}
+__INBOX_EOF__
+echo "$F"`;
+  const r = await wellExecCapture(pulseWell, script).catch(() => null);
+  return !!r && r.ok;
+}
+
+// Drop a cell's schedule from a pulse well: pulse-core's `forget` removes the
+// pulse-cache row AND strips its /etc/cron.d/pulse-schedules block, so cron
+// stops firing at it. Deterministic, no agent/LLM/fork. Best-effort (returns
+// false if the pulse is down).
+async function forgetCellFromPulse(pulseWell: string, cell: string): Promise<boolean> {
+  const r = await wellExecCapture(pulseWell, `node /root/bin/pulse-core.mjs forget ${cell}`).catch(() => null);
+  return !!r && r.ok;
+}
+
+// Resolve a cell's owning pulse to a well name (its project's pulse if live,
+// else the global pulse), via the shared partition resolver. null if that
+// pulse isn't in the registry (nothing to do).
+async function owningPulseWell(project: string | undefined, cells: Cell[]): Promise<string | null> {
+  const ownerName = pulseOwner(project, cells, process.env.CELLS_PULSE_CELL ?? "pulse");
+  try {
+    return await wellNameForCell(ownerName);
+  } catch {
+    return null;
+  }
+}
+
+// Tell the cell's OWNING pulse to forget it on destroy — drops its schedule
+// cache, prunes lastFire entries, clears orphan inbox files, and stops cron
+// from firing `cells talk <dead-cell>`. `project` is the killed cell's project
+// tag, captured by the caller BEFORE its registry entry is removed (we need it
+// to resolve a project cell's pulse). Best-effort + loud: recovery is
+//   cells exec <owning-pulse> "node /root/bin/pulse-core.mjs forget <name>"
+async function evictPulseStateForCell(name: string, project?: string): Promise<void> {
+  const pulseWell = await owningPulseWell(project, (await loadRegistry()).cells);
+  if (!pulseWell) return; // owning pulse not in registry — nothing to evict
+  if (!(await forgetCellFromPulse(pulseWell, name))) {
     console.warn(`! pulse forget ${name} failed (pulse may be down) — schedule may need manual cleanup`);
   }
+}
+
+// Project-pulse BIRTH handoff: move each of the project's cells from the global
+// pulse to the freshly-born <project>-pulse, with no double-fire window. For
+// each cell: seed it into the new pulse, then forget it from global — so during
+// the brief gap neither (not both) fires it. Called AFTER promote and BEFORE
+// startPulseLoop, so the new pulse holds no cron blocks until its handoff is
+// done. A cell whose HEARTBEAT.md the Mac can't read is left on global + warned
+// (never dropped into a gap).
+async function handoffProjectCellsOnBirth(project: string, newPulseWell: string): Promise<void> {
+  const cells = (await loadRegistry()).cells;
+  let globalWell: string | null = null;
+  try { globalWell = await wellNameForCell(process.env.CELLS_PULSE_CELL ?? "pulse"); } catch { globalWell = null; }
+  const targets = projectScheduledCells(project, cells);
+  let moved = 0, kept = 0;
+  for (const cell of targets) {
+    const content = await readHeartbeatContent(cell);
+    if (content == null) {
+      console.warn(`  ! ${cell}: no cached HEARTBEAT.md — left on the global pulse (run \`cells sync ${cell}\` to migrate it)`);
+      kept++;
+      continue;
+    }
+    if (!(await seedPulseInbox(newPulseWell, cell, content))) {
+      console.warn(`  ! ${cell}: seed into ${project}-pulse failed — left on the global pulse`);
+      kept++;
+      continue;
+    }
+    if (globalWell) await forgetCellFromPulse(globalWell, cell);
+    moved++;
+  }
+  console.log(`  handoff: ${moved}/${targets.length} ${project} cells → ${project}-pulse${kept ? `, ${kept} kept on global` : ""}`);
+}
+
+// Project-pulse DEATH failback: a dying <project>-pulse's cells were evicted
+// from the global pulse at its birth, so without action they'd go dark. Re-seed
+// each project cell's HEARTBEAT.md into the global pulse so it rebuilds their
+// cron blocks on its next tick. Clean-kill path; a CRASHED project pulse is
+// covered by the manual `cells heartbeat reseed <project>` handle (and, later,
+// a steward reconcile — see docs/BACKLOG.md).
+async function failbackProjectPulse(project: string): Promise<void> {
+  let globalWell: string;
+  try { globalWell = await wellNameForCell(process.env.CELLS_PULSE_CELL ?? "pulse"); }
+  catch { console.warn(`! global pulse not in registry — ${project} cells' schedules need a manual reseed`); return; }
+  const cells = (await loadRegistry()).cells;
+  const targets = projectScheduledCells(project, cells);
+  if (!targets.length) return;
+  let ok = 0, missing = 0;
+  for (const cell of targets) {
+    const content = await readHeartbeatContent(cell);
+    if (content == null) { missing++; continue; }
+    if (await seedPulseInbox(globalWell, cell, content)) ok++;
+  }
+  console.log(`  failed back ${ok}/${targets.length} ${project} cell schedules to the global pulse` +
+    (missing ? ` (${missing} uncached — run \`cells sync <cell>\` then \`cells heartbeat reseed ${project}\`)` : ""));
 }
 
 async function cmdChannel(args: string[]) {
@@ -7095,6 +7266,40 @@ async function cmdRefreshExtensions(args: string[]) {
  */
 async function cmdHeartbeat(args: string[]) {
   const heartbeatsMd = join(PULSE_ROOT, "state", "heartbeats.md");
+
+  // `cells heartbeat reseed <project>` — re-push every project cell's schedule
+  // into its current owning pulse (the project's pulse if alive, else global).
+  // The recovery handle for a CRASHED project pulse (clean kills fail back
+  // automatically): once the pulse is back — or to hand its cells to global
+  // after a crash — this rebuilds their cron blocks from the Mac's last-seen
+  // HEARTBEAT.md mirror, no cell wake required.
+  if (args[0] === "reseed") {
+    const project = args[1];
+    if (!project) {
+      console.error("usage: cells heartbeat reseed <project>");
+      return;
+    }
+    const cells = (await loadRegistry()).cells;
+    const ownerWell = await owningPulseWell(project, cells);
+    if (!ownerWell) {
+      console.error(`(no owning pulse in registry for project '${project}')`);
+      return;
+    }
+    const targets = projectScheduledCells(project, cells);
+    if (!targets.length) {
+      console.log(`(no scheduled cells tagged project '${project}')`);
+      return;
+    }
+    const ownerName = pulseOwner(project, cells, process.env.CELLS_PULSE_CELL ?? "pulse");
+    let ok = 0, missing = 0;
+    for (const cell of targets) {
+      const content = await readHeartbeatContent(cell);
+      if (content == null) { missing++; console.warn(`  ! ${cell}: no cached HEARTBEAT.md (run \`cells sync ${cell}\`)`); continue; }
+      if (await seedPulseInbox(ownerWell, cell, content)) ok++;
+    }
+    console.log(`reseeded ${ok}/${targets.length} ${project} cell schedules into ${ownerName}${missing ? ` (${missing} uncached)` : ""}`);
+    return;
+  }
 
   if (args[0] === "--tail") {
     const pulseCellName = process.env.CELLS_PULSE_CELL ?? "pulse";
@@ -8842,11 +9047,18 @@ async function cmdProject(args: string[]): Promise<void> {
     process.exit(1);
   }
   const project = args.slice(1).join(" ").trim();
-  if (!findCellIn((await loadRegistry()).cells, name)) {
+  const before = findCellIn((await loadRegistry()).cells, name);
+  if (!before) {
     console.error(`cell '${name}' not found in registry`);
     process.exit(1);
   }
   const clearing = !project || project.toLowerCase() === "none";
+  const newProject = clearing ? undefined : project;
+  const globalPulse = process.env.CELLS_PULSE_CELL ?? "pulse";
+
+  // Which pulse owns this cell's schedule BEFORE the retag.
+  const oldOwner = pulseOwner(before.project, (await loadRegistry()).cells, globalPulse);
+
   await mutateRegistry((cells) =>
     cells.map((c) => {
       if (c.name !== name) return c;
@@ -8858,6 +9070,28 @@ async function cmdProject(args: string[]): Promise<void> {
     }),
   );
   console.log(clearing ? `cleared ${name}'s project` : `${name} → project '${project}'`);
+
+  // If the retag moved this cell to a different owning pulse (e.g. into/out of
+  // a project that runs its own pulse), migrate its schedule so it keeps firing
+  // from exactly one pulse — seed into the new owner, then forget from the old
+  // (same gap-not-overlap order as birth). No-op when ownership is unchanged.
+  const newOwner = pulseOwner(newProject, (await loadRegistry()).cells, globalPulse);
+  if (newOwner !== oldOwner) {
+    const content = await readHeartbeatContent(name);
+    if (content == null) {
+      console.warn(`! ${name}'s schedule couldn't be migrated (no cached HEARTBEAT.md) — run \`cells sync ${name}\`; until then it keeps firing from ${oldOwner}`);
+      return;
+    }
+    let fromWell: string | null = null, toWell: string | null = null;
+    try { fromWell = await wellNameForCell(oldOwner); } catch { /* gone */ }
+    try { toWell = await wellNameForCell(newOwner); } catch { /* gone */ }
+    if (toWell && (await seedPulseInbox(toWell, name, content))) {
+      if (fromWell) await forgetCellFromPulse(fromWell, name);
+      console.log(`  moved ${name}'s schedule: ${oldOwner} → ${newOwner}`);
+    } else {
+      console.warn(`! couldn't seed ${name} into ${newOwner} — schedule left on ${oldOwner}`);
+    }
+  }
 }
 
 // cells chain <cell> [--add <entry>] [--remove <entry>] — inspect or edit a
@@ -9013,29 +9247,56 @@ switch (sub) {
   case "pi":         await cmdPi(); break;
   case "birth":
   case "create": {
-    // `cells birth <project> mother [--rebuild]` creates that project's mother
-    // (a project-scoped special). Routed here — before parseCreateArgs / the
-    // reserved-name guard, which both reject "mother" — so the grammar
-    // ("mother" inside a project means that project's mother) falls out cleanly.
-    // Bare `cells birth mother` (no project) is NOT this and stays blocked.
+    // `cells birth <project> mother|pulse [--rebuild]` creates that project's
+    // operator special (mother = its birther, pulse = its scheduler). Routed
+    // here — before parseCreateArgs / the reserved-name guard, which both reject
+    // "mother"/"pulse" — so the grammar ("<role>" inside a project means that
+    // project's <role>) falls out cleanly. Bare `cells birth mother|pulse` (no
+    // project) is NOT this and stays blocked.
     {
       const positionals = rest.filter((a) => !a.startsWith("--"));
-      // Mirror parseCreateArgs' brief-strip so `birth <project> mother "brief"`
-      // is recognized as the mother form (and refused with a clear message)
-      // instead of falling through to the misleading "'mother' is reserved".
+      const flags = rest.filter((a) => a.startsWith("--"));
+      // Mirror parseCreateArgs' brief-strip so `birth <project> <role> "brief"`
+      // is recognized as the role form (and refused with a clear message)
+      // instead of falling through to the misleading "'<role>' is reserved".
       const hadBrief = positionals.length > 0 && /\s/.test(positionals[positionals.length - 1]!);
       const core = hadBrief ? positionals.slice(0, -1) : positionals;
-      if (core.length === 2 && core[1] === "mother") {
+      if (core.length === 2 && (core[1] === "mother" || core[1] === "pulse")) {
+        const role = core[1]!;
         const project = core[0]!;
         if (!isValidCellName(project)) {
           console.error(`bad project '${project}' — ${describeCellNameRules()}`);
           process.exit(1);
         }
         if (hadBrief) {
-          console.error(`a project mother takes no brief — she bakes from the shared mother template.\n  try: cells birth ${project} mother`);
+          console.error(`a project ${role} takes no brief — it bakes from the shared ${role} template.\n  try: cells birth ${project} ${role}`);
           process.exit(1);
         }
-        await cmdBirthSpecial([projectMotherName(project), ...rest.filter((a) => a.startsWith("--"))]);
+        if (role === "pulse") {
+          // A project pulse is an always-on pinned cell (~1.9GB RAM, never
+          // hibernates). Unlike the universal pulse — which already covers
+          // every project for free — this is opt-in and steady-state costly,
+          // so gate it behind an explicit confirmation. --yes / -y skips it
+          // (non-TTY without --yes refuses rather than hang on a prompt).
+          const yes = flags.includes("--yes") || flags.includes("-y");
+          const rebuild = flags.includes("--rebuild");
+          if (!yes && !rebuild) {
+            const msg = `'${project}-pulse' is an always-on pinned cell (~1.9GB RAM, never hibernates).\nThe universal pulse already schedules ${project}'s cells for free — a project pulse only adds isolation / its own cadence.`;
+            if (!process.stdout.isTTY) {
+              console.error(`${msg}\nRe-run with --yes to confirm: cells birth ${project} pulse --yes`);
+              process.exit(1);
+            }
+            console.log(msg);
+            const ans = (await ask(`\nbirth ${project}-pulse? [y/N] `)).toLowerCase();
+            if (ans !== "y" && ans !== "yes") {
+              console.log("birth cancelled.");
+              process.exit(0);
+            }
+          }
+          await cmdBirthSpecial([projectPulseName(project), ...flags.filter((f) => f !== "--yes" && f !== "-y")]);
+          break;
+        }
+        await cmdBirthSpecial([projectMotherName(project), ...flags]);
         break;
       }
     }

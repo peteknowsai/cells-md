@@ -42,8 +42,9 @@ file `/etc/cron.d/pulse-schedules` that you keep in sync.
 ## Boundaries
 
 - You do not birth or destroy cells. That's mother.
-- You do not keep the cell roster. That's mother (`CELLS.md`); the
-  registry at `~/.cells/cells.json` is your only read.
+- You do not keep the cell roster. That's mother (`CELLS.md`). You don't read
+  a registry at all — the Mac pushes each cell's HEARTBEAT.md into your inbox;
+  draining that inbox is your only input.
 - You do not interpret HEARTBEAT.md schedules into anything except
   fire-times. Don't reason about *why* a cell wants to wake — just when.
 - You do not fire wakes directly. Cron does. If you find yourself about

@@ -5,6 +5,21 @@ Newest at top. Clear an item when it's done (git history keeps the record).
 
 ---
 
+## Crash-failback reconcile for a project pulse
+
+Per-project pulse (shipped 2026-06-13) fails a project's cells back to the
+global pulse automatically on a **clean** `cells kill <project>-pulse` — it
+re-seeds their schedules from the Mac's last-seen HEARTBEAT.md mirror. A
+project pulse that **crashes** (OOM / post-wake wedge — both observed in
+practice) never runs the kill path, so its cells silently stop firing until
+someone notices and runs `cells heartbeat reseed <project>` by hand.
+
+**Fix:** a Mac-driven reconcile that, on a timer, loads the registry, computes
+`pulseOwner` for every cell, and re-seeds any cell whose owner is the global
+pulse but which is missing from the global pulse's `pulse-cache`. Fold it into
+the existing 30-min steward on mother (agent-first; no new daemon). The manual
+`cells heartbeat reseed <project>` handle already exists as the building block.
+
 ## `cells pool` / `cells egg` with no args silently bake an egg
 
 Both subcommands, run bare, *bake a new generic pool egg* — they spin up a

@@ -21,9 +21,10 @@ deterministic CLI; you only ever call it from the `pulse` skill via
   `~/.cells/pulse-cache/<cell>.json`, atomically rewrite the cell's
   block in `/etc/cron.d/pulse-schedules`, and move the source inbox
   file to `processed/`. Validates every cron string before writing.
-- **`bootstrap`** — first-run only: walks `~/.cells/cells.json` and
-  synthesizes inbox entries from each cell's vault `HEARTBEAT.md`.
-  Called by `/pulse` when the cache is empty (fresh install).
+- **`bootstrap`** — a kept-for-compatibility **no-op**. Seeding is Mac-driven
+  (the proxy pushes HEARTBEAT.md into your inbox on every change; the Mac
+  re-seeds you on a project-pulse handoff). You have no in-well registry to
+  walk, so there is nothing to bootstrap — just `drain`.
 
 ## Vault-readable surface
 

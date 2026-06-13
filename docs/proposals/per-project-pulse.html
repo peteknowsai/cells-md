@@ -1,0 +1,179 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Per-project pulse</title>
+<link rel="stylesheet" href="../_assets/doc.css">
+<script defer src="../_assets/doc.js"></script>
+</head>
+<body>
+<header>
+  <h1>Per-project pulse</h1>
+  <p class="subtitle">Pulse — the family scheduler — becomes a role keyed by project, the same way mother did: one global <code>pulse</code> plus opt-in <code>&lt;project&gt;-pulse</code>. Designed &amp; built 2026-06-13 with Pete. <strong>Shipped 2026-06-13</strong> on <code>feature/per-project-pulse</code>.</p>
+</header>
+
+<section>
+  <h2>Plain-English summary</h2>
+  <p>
+    Today one <strong>pulse</strong> cell watches every cell's <code>HEARTBEAT.md</code> schedule and
+    fires <code>cells talk</code> at the right times. After this change, a project can run
+    <strong>its own pulse</strong>:
+  </p>
+  <pre class="cmd"><code>cells birth zero pulse        # → zero-pulse</code></pre>
+  <p>
+    <code>zero-pulse</code> schedules homezero's cells; the global pulse keeps everyone else. They run
+    in parallel — pulse firing a <code>cells talk</code> at one cell never blocks another. It's
+    <strong>opt-in</strong>: the global pulse already covers every project for free, and each pulse is an
+    always-on pinned cell (~1.9&nbsp;GB RAM), so a project only pays for one when it wants its own
+    isolation or cadence.
+  </p>
+  <p>
+    The whole design reduces to one rule: <strong>every cell is watched by exactly one pulse, and the
+    Mac is the sole authority on which.</strong> Get that right and double-fires and dark schedules
+    can't happen.
+  </p>
+</section>
+
+<section>
+  <h2>The one idea underneath it</h2>
+  <p>
+    <strong>A pulse is a role, not a singleton — and the key that scopes the role is the project.</strong>
+    This is the exact shape of <a href="project-mothers-brief-birth.html">project mothers</a>, and most of
+    the machinery is reused: the <code>SpecialSpec</code> <code>dnaName</code>/<code>project</code> fields,
+    <code>resolveSpecialSpec</code>, the shared <code>dna/specials/pulse/</code> template, the
+    <code>&lt;project&gt;-&lt;role&gt;</code> naming + reserved namespace.
+  </p>
+  <p>
+    But pulse differs from mother in two ways that drive the real design work:
+  </p>
+  <ul>
+    <li><strong>No birth lock.</strong> Project mothers keep a <em>global</em> lock because every birth
+      ritual hits Pete's one Max session — they're isolation/ownership, not parallelism. Pulse has no such
+      bottleneck: different pulses fire at different cells, genuinely concurrent. So a project pulse is
+      <em>real</em> sharding.</li>
+    <li><strong>Continuous state.</strong> Mother is idle-on-demand. Pulse owns a live schedule table
+      (a <code>pulse-cache/&lt;cell&gt;.json</code> + a cron block per cell) that must move with a cell when
+      ownership changes — exactly once, with no window where two pulses fire it and no window where none do.</li>
+  </ul>
+</section>
+
+<section>
+  <h2>The decisive correction: the Mac is the sole seeder</h2>
+  <p>
+    The scary version of this design has <em>two</em> places deciding ownership that must agree byte-for-byte:
+    the proxy's routing and the in-well <code>bootstrapInbox</code>, which on first run walked the registry to
+    seed itself. An adversarial review found that <strong><code>bootstrapInbox</code> was already dead code.</strong>
+  </p>
+  <p>
+    A pulse well has no copy of <code>~/.cells/cells.json</code> and no Obsidian vault — only mother gets the
+    registry, via a <code>/bridge/registry/read</code> runtime call. So <code>bootstrapInbox</code> has always
+    returned <code>{count:0, "registry missing"}</code> on every real pulse. The live global pulse is seeded
+    <em>entirely</em> by the proxy pushing heartbeats into its inbox.
+  </p>
+  <p>
+    That collapses the hard problem. There is no second resolver to keep in sync because <strong>the in-well
+    pulse never computes ownership at all</strong> — it's a dumb drainer of whatever the Mac hands it. We
+    deleted the registry dependency (it's now a hard no-op) rather than make it project-aware, which also
+    removes a latent landmine: if a registry ever <em>did</em> appear in a pulse well, the old walk would seed
+    the entire fleet into that pulse, and a project pulse would double-fire everything.
+  </p>
+</section>
+
+<section>
+  <h2>Ownership — one pure resolver</h2>
+  <p>
+    <code>pulseOwner(project, cells)</code> in <code>cli/lib/pulse-owner.ts</code> is the single source of
+    truth: a project's own pulse if it's registered, <code>special</code>, and past the warming gate; else the
+    global <code>pulse</code>. Pure, no IO, unit-tested. Two consumers, both on the Mac, both calling it:
+  </p>
+  <ul>
+    <li><strong><code>cli/proxy.ts</code> · <code>bridgeInboxPulse</code></strong> — <em>the partition.</em> Every
+      <code>/heartbeat-changed</code> push resolves the owner and writes into exactly that pulse's inbox.
+      Exactly-once falls out: one owner per cell ⇒ one inbox per heartbeat.</li>
+    <li><strong><code>cli/cells.ts</code></strong> — kill-eviction (forget from the cell's <em>owning</em> pulse,
+      not a hardcoded <code>pulse</code>), retag migration, and the birth/death handoffs.</li>
+  </ul>
+</section>
+
+<section>
+  <h2>Handoff — no double-fire, no go-dark</h2>
+  <table>
+    <thead><tr><th>Event</th><th>What happens</th></tr></thead>
+    <tbody>
+      <tr>
+        <td><strong>Birth</strong><br><code>cells birth zero pulse</code></td>
+        <td>After promote, for each zero cell: <strong>seed</strong> it into <code>zero-pulse</code> →
+          <strong>forget</strong> it from the global pulse → <strong>then start</strong> <code>zero-pulse</code>'s
+          loop. <code>installPulseLoop</code> only <em>enables</em> the service; a separate
+          <code>startPulseLoop</code> runs after the handoff, so the new pulse writes no cron block until its
+          cells are off the global one. Strict order ⇒ at worst a seconds-long gap, never an overlap.</td>
+      </tr>
+      <tr>
+        <td><strong>Death</strong><br><code>cells kill zero-pulse</code></td>
+        <td>Zero's cells were evicted from the global pulse at birth, so they're actively <strong>failed back</strong>:
+          each schedule is re-seeded into the global pulse, which rebuilds their cron on its next tick. Passive
+          routing alone wouldn't do it — a cell whose only traffic <em>is</em> its schedule never posts again.</td>
+      </tr>
+      <tr>
+        <td><strong>Retag</strong><br><code>cells project &lt;cell&gt; &lt;new&gt;</code></td>
+        <td>If the new project changes the owning pulse, migrate the schedule (seed-new-then-forget-old).</td>
+      </tr>
+      <tr>
+        <td><strong>Crash</strong><br>(OOM / wedge)</td>
+        <td>The clean-kill path never runs. Manual handle: <code>cells heartbeat reseed &lt;project&gt;</code>.
+          Automating this via mother's 30-min steward is in <code>docs/BACKLOG.md</code>.</td>
+      </tr>
+    </tbody>
+  </table>
+  <p>
+    Re-seeding sources the cell's <strong>last-seen <code>HEARTBEAT.md</code></strong> from a Mac-side mirror
+    (<code>~/.cells/heartbeat-mirror/&lt;cell&gt;.md</code>, written by the proxy on every change), falling back
+    to the Obsidian vault. It's the freshest copy the system has, and it never requires waking a cell.
+  </p>
+  <pre class="diagram">birth ordering (the load-bearing invariant)
+
+  promote zero-pulse → alive
+        │
+        ▼   for each zero cell:
+  seed → zero-pulse inbox     ← new pulse not started yet (no cron blocks)
+        │
+        ▼
+  forget ← global pulse        ← global stops firing this cell
+        │
+        ▼
+  start zero-pulse.service      ← now (and only now) zero-pulse builds cron
+</pre>
+</section>
+
+<section>
+  <h2>Opt-in &amp; cost</h2>
+  <p>
+    A project pulse is an always-on, pinned cell — it never hibernates, so it holds ~1.9&nbsp;GB of RAM for as
+    long as it lives. The global pulse is mandatory and covers every project; a project pulse is pure opt-in.
+    <code>cells birth &lt;project&gt; pulse</code> prints the cost and confirms (a TTY prompt, or <code>--yes</code>
+    to skip; non-interactive without <code>--yes</code> refuses rather than hang). The <code>&lt;project&gt;-pulse</code>
+    namespace is reserved on the normal birth path, the same as <code>&lt;project&gt;-mother</code>.
+  </p>
+</section>
+
+<section>
+  <h2>What shipped</h2>
+  <ul>
+    <li><code>cli/lib/cell-name.ts</code> — <code>isPulseName</code> / <code>projectOfPulse</code> /
+      <code>projectPulseName</code> (mirrors the mother block).</li>
+    <li><code>cli/lib/pulse-owner.ts</code> (new) — pure <code>pulseOwner</code> + <code>projectScheduledCells</code>;
+      unit-tested in <code>pulse-owner.test.ts</code>.</li>
+    <li><code>cli/cells.ts</code> — birth dispatch (<code>&lt;project&gt; pulse</code> + confirm),
+      <code>resolveSpecialSpec</code> pulse branch, reserved-namespace guard, the
+      <code>installPulseLoop</code>/<code>startPulseLoop</code> split, birth/death/retag handoffs,
+      <code>cells heartbeat reseed</code>.</li>
+    <li><code>cli/proxy.ts</code> — <code>bridgeInboxPulse</code> routes by <code>pulseOwner</code>; the
+      <code>/heartbeat-changed</code> handler writes the last-seen mirror.</li>
+    <li><code>dna/specials/pulse/</code> — <code>bootstrapInbox</code> made a hard no-op; SKILL/TOOLS/SOUL
+      updated to "seeding is Mac-driven".</li>
+  </ul>
+</section>
+
+</body>
+</html>

@@ -123,7 +123,12 @@ guide a human through designing a multi-cell colony.
   deterministically. She serializes on `mother.lock` — **one birth at a time**.
 - **pulse** — the family scheduler. `pulse-cc` (claude-code, always-on) is primary as
   of 2026-05-20: it drains a push inbox of cells' HEARTBEAT.md changes and fires
-  `cells talk` at scheduled times.
+  `cells talk` at scheduled times. Like mother, pulse is now a **role keyed by
+  project**: the global `pulse` plus opt-in `<project>-pulse` (`cells birth zero
+  pulse`). One pure resolver on the Mac (`pulseOwner`, `cli/lib/pulse-owner.ts`)
+  decides which pulse owns each cell; the proxy routes every heartbeat to exactly
+  that one. Unlike mother, pulse takes **no birth lock** — different pulses fire in
+  parallel. See `docs/pulse.md` → "Per-project pulse".
 
 ## Conventions & gotchas
 

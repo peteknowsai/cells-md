@@ -61,6 +61,7 @@ import {
   withPoolLock,
 } from "./lib/pool";
 import { isValidCellName } from "./lib/cell-name";
+import { pulseOwner } from "./lib/pulse-owner";
 import { loadRegistry, loadRegistrySafe, saveRegistry, withRegistryLock, isStaleWarming, type Cell, type Registry } from "./lib/registry";
 import { cellRows, type CellRow } from "./lib/status-rows";
 import { ensurePreamble, classifyOAuthRoute, anthropicRouteVerdict, gateCacheNeedsReload } from "./lib/proxy-oauth";
@@ -73,6 +74,12 @@ const MOTHER_ROOT = join(REPO_ROOT, "dna", "specials", "mother");
 const AUTH_PATH = join(homedir(), ".pi/agent/auth.json");
 const SECRETS_PATH = join(homedir(), ".cells/secrets.json");
 const PULSE_INBOX_DIR = join(homedir(), ".cells/pulse-inbox");
+// The Mac-side "freshest-seen HEARTBEAT.md" mirror, one file per cell. Written
+// on every /heartbeat-changed; read by cli/cells.ts when a project-pulse birth
+// / death / retag must re-seed a cell's schedule into a different pulse. It is
+// the source of truth for that handoff: always current (updated the instant a
+// cell posts a change) and readable without waking the cell.
+const HEARTBEAT_MIRROR_DIR = join(homedir(), ".cells/heartbeat-mirror");
 const ACTIVITY_PATH = join(MOTHER_ROOT, "state/memory/project_cells_activity.md");
 const UPSTREAM = "https://api.anthropic.com";
 const CODEX_UPSTREAM = "https://chatgpt.com/backend-api";
@@ -887,6 +894,16 @@ async function handleHeartbeatChanged(req: Request): Promise<Response> {
     if (!cell || !/^[a-z0-9-]+$/.test(cell)) return new Response("missing or bad cell", { status: 400 });
     if (typeof content !== "string") return new Response("bad content", { status: 400 });
 
+    // Persist the freshest HEARTBEAT.md we've seen for this cell, so a future
+    // project-pulse birth/death/retag can re-seed its schedule into a different
+    // pulse without waking the cell. Best-effort — never fail the push on it.
+    try {
+      await mkdir(HEARTBEAT_MIRROR_DIR, { recursive: true });
+      await writeFile(join(HEARTBEAT_MIRROR_DIR, `${cell}.md`), content);
+    } catch (e) {
+      console.warn(`[${new Date().toISOString()}] heartbeat-mirror write failed for ${cell}: ${e instanceof Error ? e.message : String(e)}`);
+    }
+
     // Two destinations during the Phase 3 transition:
     //   - default: Mac path (~/.cells/pulse-inbox/) — legacy pulse-on-Mac.
     //   - CELLS_USE_PULSE_CELL=1: bridge into the pulse cell's well at
@@ -1078,9 +1095,18 @@ async function bridgeTalk(body: { cell: string; message: string }): Promise<Resp
 async function bridgeInboxPulse(body: { cell: string; content: string }): Promise<Response> {
   if (!body.cell || !/^[a-z0-9-]+$/.test(body.cell)) return new Response("bad cell", { status: 400 });
   if (typeof body.content !== "string") return new Response("bad content", { status: 400 });
-  // The active pulse cell — defaults to `pulse`; override via
-  // CELLS_PULSE_CELL env. Resolved to a well name per call.
-  const pulseWell = await wellNameForCell(process.env.CELLS_PULSE_CELL ?? "pulse");
+  // THE partition point: route this cell's heartbeat to the pulse that owns it —
+  // its project's pulse if one is registered + alive, else the global pulse.
+  // pulseOwner is the SAME pure resolver cli/cells.ts uses for kill/retag/birth
+  // handoff, so the Mac never disagrees with itself about who watches a cell;
+  // every cell resolves to exactly one owning well (no double-watch, no gap).
+  // This load is cold relative to LLM traffic (heartbeat changes are rare), so
+  // a fresh read is fine — the gate's 30s cache only holds {harness,modelChain}.
+  const reg = await loadRegistrySafe();
+  const owner = reg.cells.find((c) => c.name === body.cell);
+  const pulseWell = await wellNameForCell(
+    pulseOwner(owner?.project, reg.cells, process.env.CELLS_PULSE_CELL ?? "pulse"),
+  );
   const script = `set -euo pipefail
 sudo mkdir -p /root/.cells/pulse-inbox
 TS=$(date +%s%N)

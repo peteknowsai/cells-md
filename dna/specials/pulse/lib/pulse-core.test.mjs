@@ -166,9 +166,18 @@ try {
   check("renderDigest: digest no longer has recent-fires section",
     !digOut.includes("## Recent fires"));
 
-  // --- bootstrap: missing registry → graceful no-op ---
+  // --- bootstrap: a HARD no-op (seeding is Mac-driven) ---
+  // Locks in that bootstrap never seeds the inbox — not even if a registry
+  // file is present in-well. This is load-bearing for per-project pulse: the
+  // old registry-walk would seed the ENTIRE fleet into THIS pulse, and a
+  // project pulse would then double-fire every cell. The Mac is the sole
+  // seeder; the in-well bootstrap must stay inert.
+  const inboxBefore = fs.readdirSync(path.join(rt, "pulse-inbox")).filter((f) => f.endsWith(".md")).length;
+  fs.writeFileSync(paths.registryPath, JSON.stringify({ cells: [{ name: "a" }, { name: "b" }, { name: "c" }] }));
   const boot = await bootstrapInbox(paths);
-  check("bootstrapInbox: no-op when the registry is missing", boot.count === 0);
+  const inboxAfter = fs.readdirSync(path.join(rt, "pulse-inbox")).filter((f) => f.endsWith(".md")).length;
+  check("bootstrapInbox: no-op count even with a registry present", boot.count === 0);
+  check("bootstrapInbox: seeds nothing into the inbox (no fleet-wide seed)", inboxAfter === inboxBefore);
 
   // --- end releases the sentinel ---
   end(paths);
