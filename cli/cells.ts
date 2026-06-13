@@ -1379,9 +1379,34 @@ async function cmdRun(cellName: string, rest: string[]): Promise<void> {
     if (res.ok) debug = await res.json();
   } catch {}
   if (!debug || !Array.isArray(debug.jobs)) {
-    console.error(`! ${cellName}'s worker predates the jobs lane — redeploy it first:`);
-    console.error(`    bash scripts/deploy-cell-worker.sh ${cellName}`);
-    process.exit(1);
+    // The cell's worker predates the jobs lane — an old cell, or a fresh birth
+    // whose worker deploy hasn't propagated yet. Self-heal: redeploy the current
+    // worker once and re-probe, instead of dead-ending the operator with a
+    // manual command (which is all this used to do — and exactly the friction
+    // homezero hit firing Phase B on a just-born advisor).
+    console.error(`! ${cellName}'s worker predates the jobs lane — redeploying it…`);
+    const wn = await wellNameForCell(cellName);
+    const redeploy = Bun.spawn(
+      ["bash", join(REPO_ROOT, "scripts/deploy-cell-worker.sh"), cellName, wn],
+      { stdout: "inherit", stderr: "inherit" },
+    );
+    if ((await redeploy.exited) !== 0) {
+      console.error(`! worker redeploy failed for ${cellName} — fix manually: bash scripts/deploy-cell-worker.sh ${cellName}`);
+      process.exit(1);
+    }
+    debug = null;
+    try {
+      const res2 = await fetch(`${base}/debug`, {
+        headers: { authorization: `Bearer ${secret}` },
+        signal: AbortSignal.timeout(15_000),
+      });
+      if (res2.ok) debug = await res2.json();
+    } catch {}
+    if (!debug || !Array.isArray(debug.jobs)) {
+      console.error(`! ${cellName}'s worker still lacks the jobs lane after redeploy — investigate the worker deploy.`);
+      process.exit(1);
+    }
+    console.error(`  ✓ worker redeployed; jobs lane present`);
   }
 
   const jobId = ulid();

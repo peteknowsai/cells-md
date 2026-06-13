@@ -5,25 +5,26 @@ Newest at top. Clear an item when it's done (git history keeps the record).
 
 ---
 
-## Pool eggs bake a pre-jobs-lane worker → fresh births can't take `cells run`
+## A cell's worker can lag the jobs lane → `cells run` now self-heals it
 
-A pool egg is baked once and carries whatever per-cell Cloudflare Worker
-shipped at bake time. The jobs-lane Worker (the Durable Object that honors
-`kind:"job"` events) postdates some eggs in the pool, so a freshly-claimed
-egg's `<cell>.cells.md` Worker rejects a `cells run` job with "worker predates
-the jobs lane — redeploy it first". Surfaced 2026-06-13 by homezero's
-decoupled birth: Phase B (advisor self-config) runs as a `cells run` job on the
-just-born advisor, which fails until the Worker is redeployed.
+A `cells run` job is rejected if the cell's `<cell>.cells.md` Worker predates
+the jobs lane (its `/debug` has no `jobs` key — an old Durable Object misroutes
+`kind:"job"` into the chat path). Surfaced 2026-06-13 by homezero firing Phase B
+on a just-born advisor. NOTE: the per-cell Worker is deployed at BIRTH
+(`birth-postwork.sh` → `deploy-cell-worker.sh`), NOT baked into pool eggs
+(`bake-egg.sh` deploys no Worker) — so the original "eggs bake a stale Worker"
+framing was wrong. The real gap was a fresh birth's Worker not being live/
+propagated when the job fired, plus old cells carrying pre-jobs-lane Workers.
 
-**Workaround in use (homezero):** `birth-orchestrate.sh` runs
-`scripts/deploy-cell-worker.sh <cell>` right after birth, before the Phase-B
-job. ~few-second cost, idempotent, harmless after the root fix.
+**Fixed (2026-06-13):** `cells run`, on a failed jobs-lane probe, now redeploys
+the current Worker once and re-probes before submitting — self-healing instead
+of dead-ending the operator with a manual command.
 
-**Root fix (cells-side):** bake the current jobs-lane Worker into the pool eggs
-— `scripts/bake-egg.sh` and the Worker-refresh path — so a fresh birth is
-jobs-lane-ready with no post-birth redeploy. Touches the pool bake (every
-birth), so it wants its own test against a real egg bake, separate from the
-project-mother work.
+**Residual (low):** birth doesn't *verify* the Worker is job-capable before
+finishing, and `birth-postwork`'s `worker_deploy` step is best-effort — a
+silently-failed deploy still leaves a non-job-ready cell until the next
+`cells run` self-heals it. A birth-time `/debug` jobs probe (warn on miss) would
+close the gap proactively. Not blocking — the self-heal covers the symptom.
 
 ## Crash-failback reconcile for a project pulse
 
