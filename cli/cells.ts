@@ -18,6 +18,7 @@ import {
   isValidCellName,
   describeCellNameRules,
   isMotherName,
+  motherJobRefusalReason,
   projectOfMother,
   projectMotherName,
   projectCellName,
@@ -1323,8 +1324,13 @@ async function runTalkOnCell(
 // under a frame-progress watchdog (kill, retry once, durably mark failed).
 
 async function cmdRun(cellName: string, rest: string[]): Promise<void> {
-  if (isMotherName(cellName)) {
-    console.error(`! jobs on a mother are refused — ${cellName} serializes births on the birth-ritual lock; a detached job racing a ritual is the known silent-deadlock`);
+  // Jobs on a mother were once refused outright. They're now allowed for a
+  // PROJECT mother under the default Mac-side-ritual mode — that's what lets
+  // zero-mother run a durable birth as her own job. The global mother and the
+  // legacy in-cell-ritual mode stay refused (see motherJobRefusalReason).
+  const motherRefusal = motherJobRefusalReason(cellName, process.env.CELLS_USE_MOTHER_CELL === "1");
+  if (motherRefusal) {
+    console.error(`! jobs on '${cellName}' are refused — ${motherRefusal}`);
     process.exit(1);
   }
   await requireCell(cellName);

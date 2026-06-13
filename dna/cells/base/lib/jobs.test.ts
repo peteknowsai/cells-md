@@ -57,6 +57,19 @@ describe("buildJobScript", () => {
     if (r.ok) return;
     expect(r.error).toContain("hermes");
   });
+
+  test("every harness sources cells-env.sh so the job unit gets the proxy bearer", () => {
+    // systemd-run units don't inherit well-site's env; without this a pi/codex
+    // job fails "No API key for openai-codex" and a claude job has no Anthropic
+    // bearer. Sourcing must precede the harness pipeline.
+    for (const h of ["claude-code", "codex", "pi"]) {
+      const r = buildJobScript(h, P);
+      expect(r.ok).toBe(true);
+      if (!r.ok) return;
+      expect(r.script).toContain(". /etc/profile.d/cells-env.sh");
+      expect(r.script.indexOf("cells-env.sh")).toBeLessThan(r.script.indexOf(`> '${P.out}'`));
+    }
+  });
 });
 
 describe("transient units", () => {

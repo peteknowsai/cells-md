@@ -125,6 +125,13 @@ export function buildJobScript(
   }
   const script =
     `export HOME=/root IS_SANDBOX=1; cd /root; ` +
+    // A job runs in a `systemd-run` transient unit, which does NOT inherit
+    // well-site's environment — so unlike a talk fork (spawned as a supervisor
+    // child, inheriting its env), a job starts without the proxy bearer. Source
+    // cells-env.sh to load it: OPENAI_CODEX_API_KEY for pi/codex, ANTHROPIC_OAUTH_TOKEN
+    // for claude. Without this, every pi-cell background job (advisor self-config,
+    // heartbeat drains) dies with "No API key found for openai-codex".
+    `[ -r /etc/profile.d/cells-env.sh ] && . /etc/profile.d/cells-env.sh; ` +
     `${pipeline} > ${q(p.out)} 2> ${q(p.err)}; echo $? > ${q(p.exit)}`;
   return { ok: true, script };
 }
