@@ -117,9 +117,24 @@ export function buildJobScript(
   } else if (harness === "pi") {
     // Fresh session in a throwaway dir — same shape as the adapter's
     // no-mainRef fork. pi resolves provider config from cwd /root/.pi.
+    //
+    // pi-ai has NO env-var fallback for the openai-codex provider: the
+    // codex-proxy EXTENSION is what authenticates it (it reads
+    // OPENAI_CODEX_API_KEY and calls registerProvider with the proxy
+    // baseUrl). Under `pi --print --session-dir <tmp>`, pi's automatic
+    // extension discovery does NOT load it (discovery anchors away from
+    // /root/.pi — proven on zero-advisor-testbuyer 2026-06-13: every pi job
+    // died "No API key found for openai-codex" while claude-code jobs, which
+    // read the bearer straight from the env, ran fine). Sourcing cells-env.sh
+    // (below) puts the key in the env but that is necessary-not-sufficient —
+    // the extension still has to load to consume it. So load it EXPLICITLY by
+    // absolute path. Guard on existence so a pi cell somehow baked without it
+    // still runs (it just won't have codex auth — same as before this fix).
+    const codexProxyExt = "/root/.pi/extensions/codex-proxy/index.ts";
     pipeline =
       `JOB_PROMPT=$(cat ${q(p.prompt)}); ` +
-      `pi --print --session-dir ${q(`/tmp/job-session-${pathId(p)}`)} "$JOB_PROMPT"`;
+      `PI_EXT=; [ -f ${codexProxyExt} ] && PI_EXT='-e ${codexProxyExt}'; ` +
+      `pi --print $PI_EXT --session-dir ${q(`/tmp/job-session-${pathId(p)}`)} "$JOB_PROMPT"`;
   } else {
     return { ok: false, error: `jobs unsupported on harness ${harness} (v1)` };
   }
