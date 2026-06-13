@@ -11,6 +11,15 @@ import { createHash, randomBytes } from "node:crypto";
 import { planReconcileEvictions, selectStaleRevCull } from "./lib/reconcile";
 import { findOrphanWells } from "./lib/orphan-wells";
 import { dnaRev, summarizeDnaDrift } from "./lib/dna-rev";
+import { CELLS_ENV_SH_BODY } from "./lib/cells-env";
+import {
+  parseSecretArgs,
+  buildSecretSetScript,
+  buildSecretRmScript,
+  buildSecretListScript,
+  parseSecretListOutput,
+  type SecretSource,
+} from "./lib/secret-cli";
 import { ulid } from "./shared/agent-envelope";
 import { needsSeal } from "./lib/hibernate-ready";
 import { SECRETS_PATH, readSecret } from "./lib/secrets";
@@ -1894,6 +1903,142 @@ async function cmdExec(name: string, rest: string[]) {
     { stdin: "inherit", stdout: "inherit", stderr: "inherit" },
   );
   process.exit(await proc.exited);
+}
+
+function die(msg: string): never {
+  console.error(`! ${msg}`);
+  process.exit(1);
+}
+
+// Read a value with the terminal echo off (interactive `cells secret set` with
+// no source flag and a TTY). On a non-TTY (piped / background job) this never
+// fires — cmdSecret routes "auto" to stdin there instead.
+async function readHiddenLine(prompt: string): Promise<string> {
+  process.stderr.write(prompt);
+  const isTTY = !!process.stdin.isTTY;
+  if (isTTY) Bun.spawnSync(["stty", "-echo"], { stdin: "inherit" });
+  try {
+    const rl = (await import("node:readline")).createInterface({ input: process.stdin });
+    const line: string = await new Promise((res) => rl.once("line", (l: string) => res(l)));
+    rl.close();
+    return line;
+  } finally {
+    if (isTTY) {
+      Bun.spawnSync(["stty", "echo"], { stdin: "inherit" });
+      process.stderr.write("\n");
+    }
+  }
+}
+
+// Resolve the secret value from its source. IO lives here (the pure parse in
+// lib/secret-cli decided WHICH source); the value never round-trips through
+// that module. Strips trailing newlines — a trailing \n silently breaks
+// bearer tokens, and the in-cell write strips them too, so the reported
+// byte-length matches what's stored.
+async function resolveSecretValue(source: SecretSource, key: string): Promise<string> {
+  let raw: string;
+  switch (source.kind) {
+    case "env": {
+      const v = process.env[source.name];
+      if (v == null) die(`--from-env ${source.name}: not set in this environment`);
+      raw = v;
+      break;
+    }
+    case "file": {
+      try { raw = await Bun.file(source.path).text(); }
+      catch (e) { die(`--from-file ${source.path}: ${(e as Error).message}`); }
+      break;
+    }
+    case "stdin": {
+      raw = await Bun.stdin.text();
+      break;
+    }
+    case "auto": {
+      // Piped → read all of stdin; interactive TTY → hidden prompt.
+      raw = process.stdin.isTTY
+        ? await readHiddenLine(`secret value for ${key} (input hidden): `)
+        : await Bun.stdin.text();
+      break;
+    }
+  }
+  return raw.replace(/\r?\n+$/, "");
+}
+
+// `cells secret set|list|rm` — per-cell app secrets. Mac-side only (like
+// birth/kill): an in-cell caller can't reach welld, so secret plumbing stays
+// with the keeper. Value is read from --from-env/--from-file/stdin/hidden-
+// prompt and piped via exec stdin — never argv, never echoed, never in DNA.
+// Lands as a root:root 0600 file under /etc/cells.secrets.d/<KEY>, picked up
+// by cells-env.sh (shells + jobs + supervisor). See docs/proposals/cell-secrets.html.
+async function cmdSecret(rest: string[]): Promise<void> {
+  const cmd = parseSecretArgs(rest);
+  if (cmd.action === "usage") {
+    if (cmd.error) console.error(`! ${cmd.error}`);
+    console.error("usage:");
+    console.error("  cells secret set <cell[,cell2,…]> <KEY> [--from-env VAR | --from-file PATH | --stdin]");
+    console.error("  cells secret list <cell>");
+    console.error("  cells secret rm  <cell[,cell2,…]> <KEY>");
+    console.error("");
+    console.error("  the value is read from the named source (or, with no flag: piped stdin,");
+    console.error("  else a hidden prompt) — never passed as an argument. Stored root:root 0600");
+    console.error("  under /etc/cells.secrets.d/ and exported into every shell, job, and the");
+    console.error("  site supervisor via cells-env.sh. `list` shows key NAMES only.");
+    process.exit(cmd.error ? 1 : 0);
+  }
+
+  // Resolve each named cell → its well up front, so a typo fails before any write.
+  const wells: Array<{ cell: string; well: string }> = [];
+  for (const cell of cmd.cells) {
+    await requireCell(cell);
+    wells.push({ cell, well: await wellNameForCell(cell) });
+  }
+
+  if (cmd.action === "list") {
+    const { cell, well } = wells[0]!;
+    const r = await wellExecCapture(well, buildSecretListScript());
+    if (!r.ok) die(`secret list on ${cell} failed: ${r.stderr.slice(0, 300)}`);
+    const keys = parseSecretListOutput(r.stdout);
+    if (keys.length === 0) {
+      console.log(`${cell}: (no cells-managed secrets)`);
+    } else {
+      console.log(`${cell}: ${keys.length} secret${keys.length === 1 ? "" : "s"}`);
+      for (const k of keys) console.log(`  ${k}`);
+    }
+    return;
+  }
+
+  if (cmd.action === "rm") {
+    let removed = 0;
+    for (const { cell, well } of wells) {
+      const r = await wellExecCapture(well, buildSecretRmScript(cmd.key));
+      if (!r.ok) { console.error(`! ${cell}: rm ${cmd.key} failed: ${r.stderr.slice(0, 200)}`); continue; }
+      const state = r.stdout.includes("REMOVED") ? "removed" : "absent";
+      console.log(`${cell}: ${cmd.key} ${state}`);
+      if (state === "removed") removed++;
+    }
+    console.log(`✓ removed ${cmd.key} from ${removed}/${wells.length} cell${wells.length === 1 ? "" : "s"}`);
+    return;
+  }
+
+  // action === "set": resolve the value ONCE, fan it out to every cell.
+  const value = await resolveSecretValue(cmd.source, cmd.key);
+  if (!value) die(`refusing to set an empty ${cmd.key} (source produced no value)`);
+  const script = buildSecretSetScript(cmd.key);
+  let ok = 0;
+  for (const { cell, well } of wells) {
+    const r = await wellExecStdin(well, script, value);
+    if (r.ok && r.stdout.includes("SET")) {
+      // Byte-length only — the value itself is never printed or logged.
+      console.log(`${cell}: set ${cmd.key} (${Buffer.byteLength(value)} bytes, 0600)`);
+      ok++;
+    } else {
+      console.error(`! ${cell}: set ${cmd.key} failed: ${(r.stderr || r.stdout).slice(0, 200)}`);
+    }
+  }
+  console.log(`✓ ${cmd.key} set on ${ok}/${wells.length} cell${wells.length === 1 ? "" : "s"}`);
+  console.log("  (new shells, jobs, and the next supervisor start see it; a running supervisor");
+  console.log("   picks it up on its next restart — jobs are fresh processes, so immediate.)");
+  if (ok < wells.length) process.exit(1);
 }
 
 async function cmdSleep(name: string) {
@@ -8016,6 +8161,37 @@ async function wellExecCapture(
   return { ok: false, stdout: "", stderr: "wellExecCapture: unreachable" };
 }
 
+// Like wellExecCapture, but feeds `input` to the remote command's stdin. The
+// default `well exec` path is plain `ssh` (no PTY) with stdin inherited, so
+// whatever we hand Bun's stdin flows: cells.ts → well → ssh → the remote
+// `bash -lc`. This is how `cells secret set` ships a value WITHOUT it ever
+// appearing in argv (ps/history/exec logs) — the script reads it with `cat`.
+async function wellExecStdin(
+  name: string,
+  script: string,
+  input: string,
+): Promise<{ ok: boolean; stdout: string; stderr: string }> {
+  const KEX_RESET = /kex_exchange_identification|Connection reset by peer/i;
+  const args = ["well", "exec", "-s", name, "--", "bash", "-lc", script];
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const proc = Bun.spawn(args, {
+      stdin: new Blob([input]),
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    const stdout = await new Response(proc.stdout).text();
+    const stderr = await new Response(proc.stderr).text();
+    const code = await proc.exited;
+    if (code === 0) return { ok: true, stdout, stderr };
+    if (attempt === 0 && KEX_RESET.test(stderr)) {
+      await new Promise((r) => setTimeout(r, 1500));
+      continue;
+    }
+    return { ok: false, stdout, stderr };
+  }
+  return { ok: false, stdout: "", stderr: "wellExecStdin: unreachable" };
+}
+
 async function pullMarkdown(nameOrCell: string, vaultPath: string): Promise<{ persona: string | null }> {
   // Accept cell name OR well name; resolve internally so hatched cells
   // (cell name ≠ well name) well_exec hits the right target.
@@ -9274,101 +9450,10 @@ ln -sf /root/bin/cells ~/.local/bin/cells`);
   }
 }
 
-// Shared template body for /etc/profile.d/cells-env.sh. Single source
-// of truth used at bake time (bakeWriteProfileD) AND at shell time
-// (refreshShellNiceness, called from cmdShell for self-healing on
-// pre-existing cells). Keep both call sites pointing here.
-const CELLS_ENV_SH_BODY = `# /etc/environment carries CELLS_PROXY_SECRET (welld writes it when the
-# well is created). PAM loads it for interactive login sessions — but
-# systemd services (the site supervisor) and the bash -lc children its
-# agent-comms forkAndAsk spawns never go through PAM, so the secret would
-# be missing there. Source it here so it's in scope wherever cells-env.sh
-# is read, not just on PAM logins.
-if [ -r /etc/environment ]; then
-  set -a
-  . /etc/environment
-  set +a
-fi
-
-# Re-export CELLS_PROXY_SECRET under the names pi-ai's auth dispatch +
-# codex-proxy expect.
-if [ -n "\${CELLS_PROXY_SECRET:-}" ]; then
-  export ANTHROPIC_OAUTH_TOKEN="\$CELLS_PROXY_SECRET"
-  export ANTHROPIC_AUTH_TOKEN="\$CELLS_PROXY_SECRET"
-  export OPENAI_CODEX_API_KEY="\$CELLS_PROXY_SECRET"
-  unset ANTHROPIC_API_KEY
-fi
-# /root/bin on PATH for the cells CLI. Bun is installed for root at
-# /root/.bun (= \$HOME/.bun, since the agent runs as root) and also ships
-# system-wide at /usr/local/bin/bun from ubuntu-base. /root/.local/bin is
-# where the claude CLI installs itself — the claude-code harness and its
-# agent-comms forkAndAsk shell out to \`claude\`, so it has to resolve on
-# a plain login-shell PATH.
-export PATH="\$HOME/.bun/bin:/root/bin:/root/.local/bin:\$PATH"
-
-# Cell identity. The substrate hostname is the well's egg-id (e.g.
-# egg-403c69) — unfriendly and *not* the cell name. The real name is the
-# first heading of the harness entrypoint: AGENTS.md (pi) or CLAUDE.md
-# (claude-code/codex/hermes), sed'd in at birth. \`cells talk\` builds
-# reply_to = https://\$CELL_NAME.cells.md/inbox/append from this, so every
-# shell — including the non-interactive bash -lc that runs \`cells talk\` —
-# must have CELL_NAME set, not just interactive tmux logins. Without this
-# the reply routes to https://egg-XXXXXX.cells.md and 404s.
-if [ -z "\${CELL_NAME:-}" ]; then
-  CELL_NAME=\$(sed -n '1s/^# //p' /root/AGENTS.md 2>/dev/null)
-  [ -z "\$CELL_NAME" ] && CELL_NAME=\$(sed -n '1s/^# //p' /root/CLAUDE.md 2>/dev/null)
-  : "\${CELL_NAME:=\$(hostname)}"
-  export CELL_NAME
-fi
-
-# Standard terminal-editing toolkit (apt-installed at bake: micro, fzf,
-# ripgrep, batcat). FZF gitignore-aware via ripgrep, preview via bat.
-# The two helpers below — \`mf\` (pick one + open in micro) and \`mft\`
-# (browse mode: descend folders, open files, .. to go up) — are the
-# "scroll through files with live preview" UX. Designed to be obvious
-# from the keyboard, no vim ninja required.
-export FZF_DEFAULT_COMMAND='rg --files --hidden --glob "!.git"'
-export FZF_DEFAULT_OPTS='--height 80% --reverse --border --preview "batcat --style=numbers --color=always --line-range=:300 {} 2>/dev/null || ls -la {}" --preview-window=right:60%'
-
-alias mf='f=\$(fzf) && [ -n "\$f" ] && micro "\$f"'
-
-mft() {
-  local cur="\$PWD"
-  while true; do
-    local pick
-    pick=\$( { echo ".."; ls -A1 "\$cur"; } | fzf --prompt="\$cur > " ) || return
-    if [ "\$pick" = ".." ]; then
-      cur=\$(dirname "\$cur")
-    elif [ -d "\$cur/\$pick" ]; then
-      cur="\$cur/\$pick"
-    else
-      micro "\$cur/\$pick"
-      return
-    fi
-  done
-}
-
-# Niceness for interactive tmux shells (i.e. cells shell <name>): a
-# violet prompt with the cell's name + a one-shot welcome banner per
-# pane. Skips one-off well_exec commands (no \$PS1, no \$TMUX) so
-# automation stays quiet. CELL_NAME is already resolved + exported above.
-if [ -n "\${PS1:-}" ] && [ -n "\${TMUX:-}" ]; then
-  export PS1="\\[\\e[38;5;141m\\]\${CELL_NAME}\\[\\e[0m\\] \\w \\\$ "
-  _banner_marker="/tmp/.cells-banner-\${TMUX_PANE//[^A-Za-z0-9]/_}"
-  if [ ! -f "\$_banner_marker" ]; then
-    touch "\$_banner_marker" 2>/dev/null || true
-    echo
-    echo "🧬 \${CELL_NAME}"
-    echo "   /root              anatomy (AGENTS.md, SOUL.md, …)"
-    echo "   /root/state/memory persistent memory"
-    echo "   cells, well        fleet + substrate CLIs"
-    echo "   mf, mft            fuzzy-pick / browse files with live preview"
-    echo "   Ctrl-d             exit this shell"
-    echo
-  fi
-  unset _banner_marker
-fi
-`;
+// CELLS_ENV_SH_BODY — the body of /etc/profile.d/cells-env.sh — now lives in
+// ./lib/cells-env.ts (imported at the top) so it's unit-testable in isolation.
+// Used at bake time (bakeWriteProfileD), shell time (refreshShellNiceness),
+// and birth (provisioning).
 
 async function bakeWriteProfileD(name: string): Promise<void> {
   // System-wide env shim. Replaces the old per-user ~/.bashrc.d/ +
@@ -9749,6 +9834,7 @@ switch (sub) {
   case "doctor":             rest.includes("--json") ? await cmdDoctorJson() : await cmdDoctor(); break;
   case "shell":              await cmdShell(needName(rest, "shell")); break;
   case "exec":               await cmdExec(needName(rest, "exec"), rest.slice(1)); break;
+  case "secret":             await cmdSecret(rest); break;
   case "see":                await cmdSee(needName(rest, "see")); break;
   case "pool":               await cmdPool(rest); break;
   case "egg":                await cmdPool(rest); break;  // deprecated alias
@@ -9791,6 +9877,11 @@ switch (sub) {
     console.log("  cells doctor                inspect mother OAuth state + proxy health (run when cells act 401-y)");
     console.log("  cells shell <name>          drop into a bash shell on a cell (separate tmux from the agent; Ctrl+D exits)");
     console.log("  cells exec <name> [--] <cmd>  run a command as root on a cell, non-interactively (HOME=/root, cells-env sourced)");
+    console.log("  cells secret set <cell[,…]> <KEY> [--from-env VAR|--from-file PATH|--stdin]");
+    console.log("                              ship a secret to N cells: root:root 0600 under /etc/cells.secrets.d/,");
+    console.log("                              value via stdin (never argv/echoed), exported into shells+jobs+supervisor.");
+    console.log("  cells secret list <cell>    list a cell's secret KEY names (never values)");
+    console.log("  cells secret rm <cell[,…]> <KEY>  remove a secret from N cells");
     console.log("  cells see <name>            open https://<name>.cells.md in the browser");
     console.log("  cells schedule-pi-patches   install launchd watcher (re-applies pi patches when pi-ai is reinstalled)");
     console.log("  cells unschedule-pi-patches remove launchd watcher");
