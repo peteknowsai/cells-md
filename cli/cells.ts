@@ -19,6 +19,7 @@ import {
   isMotherName,
   projectOfMother,
   projectMotherName,
+  projectCellName,
 } from "./lib/cell-name";
 import { loadPostworkSummary, removePostwork, type PostworkSummary } from "./lib/postwork";
 import { compileBrief, type BriefVocab } from "./lib/brief";
@@ -2858,6 +2859,11 @@ async function cmdCreate(name: string | undefined, opts: CreateOpts): Promise<vo
     channels = opts.channels ?? (opts.slackChannel ? ["slack"] : []);
   }
   name = name ?? generateCellName();
+  // Project cells are name-prefixed (<project>-<name>) so two projects can each
+  // have an "abstractor" without colliding, and a fleet name self-documents its
+  // project — same convention as <project>-mother. Idempotent if already
+  // prefixed. Applies however the project was set (positional or --project=).
+  if (opts.project) name = projectCellName(opts.project, name);
 
   // ── 2. Validate ──
   const nameCheck = validateCellName(name);
