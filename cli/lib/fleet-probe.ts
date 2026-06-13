@@ -21,11 +21,15 @@
 //                 docs/proposals/jobs.html)
 //   jobs_stale    running jobs whose output hasn't grown in >10 min —
 //                 watchdog-should-have-fired territory (runner dead?)
+//   dna_rev       runtime-DNA fingerprint stamped at this cell's last
+//                 bake/refresh (/root/.dna-rev) — compared Mac-side against
+//                 the repo's current rev to surface stale platform code.
 export const GUEST_PROBE_SCRIPT = `
 UA=$(systemctl is-active well-site 2>/dev/null || true)
 UP=false; [ -f /etc/systemd/system/well-site.service ] && UP=true
 H=$(curl -sS -m 2 http://localhost:8080/health 2>/dev/null || true)
 OOM=$(journalctl -u well-site --since "-48 hours" 2>/dev/null | grep -c oom-kill || true)
+DR=$(cat /root/.dna-rev 2>/dev/null | tr -d '[:space:]' || true)
 NOW=$(date +%s)
 JR=0; JS=0
 if [ -d /root/state/jobs ]; then
@@ -46,7 +50,7 @@ if [ -d /root/state/jobs ]; then
     [ "$AGE" -gt 600 ] && JS=$((JS+1))
   done
 fi
-echo "CELLPROBE {\\"unit_active\\":\\"$UA\\",\\"unit_present\\":$UP,\\"health\\":\\"$H\\",\\"oom_48h\\":\${OOM:-0},\\"epoch\\":\${NOW:-0},\\"jobs_running\\":\${JR:-0},\\"jobs_stale\\":\${JS:-0}}"
+echo "CELLPROBE {\\"unit_active\\":\\"$UA\\",\\"unit_present\\":$UP,\\"health\\":\\"$H\\",\\"oom_48h\\":\${OOM:-0},\\"epoch\\":\${NOW:-0},\\"jobs_running\\":\${JR:-0},\\"jobs_stale\\":\${JS:-0},\\"dna_rev\\":\\"$DR\\"}"
 `.trim();
 
 export type GuestProbe = {
@@ -57,6 +61,7 @@ export type GuestProbe = {
   epoch: number;
   jobs_running: number;
   jobs_stale: number;
+  dna_rev: string; // "" when /root/.dna-rev is absent (pre-DNA-rev cell)
 };
 
 export function parseGuestProbe(raw: string): GuestProbe | null {
@@ -73,6 +78,7 @@ export function parseGuestProbe(raw: string): GuestProbe | null {
       epoch: Number(p.epoch) || 0,
       jobs_running: Number(p.jobs_running) || 0,
       jobs_stale: Number(p.jobs_stale) || 0,
+      dna_rev: String(p.dna_rev ?? ""),
     };
   } catch {
     return null;

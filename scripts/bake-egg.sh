@@ -24,6 +24,12 @@ THINKING=$(echo "$BLOB" | jq -r '.thinking // "high"')
 CHAIN_JSON=$(echo "$BLOB" | jq -c '.chain // []')
 EXTENSIONS=$(echo "$BLOB" | jq -r '.extensions[]? // empty')
 PACKAGES=$(echo "$BLOB" | jq -r '.packages[]? // empty')
+# Runtime-DNA rev (cli/lib/dna-rev.ts), computed Mac-side from the same DNA
+# tree the overlay below tars in. Stamped onto /root/.dna-rev so a cell born
+# from a stale egg reads CURRENT — the re-overlay made it current. Empty if
+# an older caller didn't supply it; the stamp is then skipped (cell reads as
+# "unknown", which the doctor/steward treat as don't-touch, not stale).
+DNA_REV=$(echo "$BLOB" | jq -r '.dna_rev // empty')
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 
@@ -131,6 +137,15 @@ tar czf - -C "$REPO_ROOT/dna/cells/base" . \
   # bin/ entries are executable regardless of how the working copy was
   # checked out (git mode bits don't always survive every clone/zip path).
   echo "sudo chmod +x /root/bin/* 2>/dev/null || true"
+
+  # ===dna rev stamp ===
+  # Record the runtime-DNA rev the overlay above landed at. The doctor
+  # compares this against the repo's current rev; the steward refreshes a
+  # cell whose stamp falls behind. Skipped (left absent → "unknown") when no
+  # rev was supplied, so this never breaks an older birth path.
+  if [ -n "$DNA_REV" ]; then
+    echo "echo '$DNA_REV' | sudo tee /root/.dna-rev > /dev/null"
+  fi
 
   echo "# ===identity ==="
   echo "sudo sed -i 's/__NAME__/$NAME/g' /root/AGENTS.md /root/CLAUDE.md /root/SOUL.md /root/IDENTITY.md /root/CELLS.md /root/CONTACTS.md /root/HEARTBEAT.md /root/package.json 2>/dev/null || true"

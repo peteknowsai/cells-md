@@ -2,7 +2,7 @@
 //   bun test cli/lib/reconcile.test.ts
 
 import { test, expect } from "bun:test";
-import { planReconcileEvictions, type PoolMemberLike, type WelldRow } from "./reconcile";
+import { planReconcileEvictions, selectStaleRevCull, type PoolMemberLike, type WelldRow } from "./reconcile";
 
 function mem(over: Partial<PoolMemberLike>): PoolMemberLike {
   return {
@@ -125,4 +125,66 @@ test("mixed pool: some keep, some evict, deterministic", () => {
   expect(r.keep.map((m) => m.id).sort()).toEqual(["aaaaaa", "cccccc"]);
   expect(r.evicted.length).toBe(2);
   expect(r.evicted.map((e) => e.id).sort()).toEqual(["bbbbbb", "dddddd"]);
+});
+
+// ── selectStaleRevCull ────────────────────────────────────────────────
+
+function openMem(id: string, rev: string | undefined, born: string): PoolMemberLike {
+  return { id, well_name: `egg-opus-${id}`, state: "open", tier: 2, dna_rev: rev, born_at: born };
+}
+
+test("stale-rev cull: empty currentRev culls nothing", () => {
+  const open = [openMem("aaaaaa", "old", "2026-06-01T00:00:00Z")];
+  expect(selectStaleRevCull(open, "", { cap: 2, floor: 2 })).toEqual([]);
+});
+
+test("stale-rev cull: members at current rev are kept", () => {
+  const open = [
+    openMem("aaaaaa", "cur", "2026-06-01T00:00:00Z"),
+    openMem("bbbbbb", "cur", "2026-06-02T00:00:00Z"),
+    openMem("cccccc", "cur", "2026-06-03T00:00:00Z"),
+  ];
+  expect(selectStaleRevCull(open, "cur", { cap: 2, floor: 2 })).toEqual([]);
+});
+
+test("stale-rev cull: legacy eggs (no dna_rev) are never culled", () => {
+  const open = [
+    openMem("aaaaaa", undefined, "2026-06-01T00:00:00Z"),
+    openMem("bbbbbb", "", "2026-06-02T00:00:00Z"),
+    openMem("cccccc", "cur", "2026-06-03T00:00:00Z"),
+  ];
+  expect(selectStaleRevCull(open, "cur", { cap: 2, floor: 2 })).toEqual([]);
+});
+
+test("stale-rev cull: picks stale eggs oldest-first, capped", () => {
+  const open = [
+    openMem("new111", "old", "2026-06-05T00:00:00Z"),
+    openMem("old111", "old", "2026-06-01T00:00:00Z"), // oldest stale → first
+    openMem("mid111", "old", "2026-06-03T00:00:00Z"),
+    openMem("cur111", "cur", "2026-06-04T00:00:00Z"),
+    openMem("cur222", "cur", "2026-06-06T00:00:00Z"),
+  ];
+  const victims = selectStaleRevCull(open, "cur", { cap: 2, floor: 2 });
+  expect(victims.map((m) => m.id)).toEqual(["old111", "mid111"]);
+});
+
+test("stale-rev cull: floor keeps the pool from emptying", () => {
+  // All 4 open are stale; floor=2 → at most 2 removable; cap=10 doesn't override.
+  const open = [
+    openMem("aaaaaa", "old", "2026-06-01T00:00:00Z"),
+    openMem("bbbbbb", "old", "2026-06-02T00:00:00Z"),
+    openMem("cccccc", "old", "2026-06-03T00:00:00Z"),
+    openMem("dddddd", "old", "2026-06-04T00:00:00Z"),
+  ];
+  const victims = selectStaleRevCull(open, "cur", { cap: 10, floor: 2 });
+  expect(victims.length).toBe(2);
+  expect(victims.map((m) => m.id)).toEqual(["aaaaaa", "bbbbbb"]);
+});
+
+test("stale-rev cull: floor >= open count culls nothing", () => {
+  const open = [
+    openMem("aaaaaa", "old", "2026-06-01T00:00:00Z"),
+    openMem("bbbbbb", "old", "2026-06-02T00:00:00Z"),
+  ];
+  expect(selectStaleRevCull(open, "cur", { cap: 5, floor: 2 })).toEqual([]);
 });

@@ -39,6 +39,18 @@ failure class sit silently.
      (e.g. an OOM alert on a cell that just got resized is stale history
      aging out of the 48h window — say so), append one line of judgment
      to `state/memory/steward.log` via `mac_exec`.
+   - **DNA drift** (fix class added with `dna_rev`): the sweep auto-culls
+     stale-rev pool eggs (refilling at current DNA) and refreshes running
+     cells behind the current platform code — both only when the cells
+     repo's working tree is CLEAN. Judgment cues:
+     - A `"...working tree is dirty — commit DNA changes..."` alert means
+       Pete (or you, on his behalf) left uncommitted DNA edits on the Mac:
+       auto-refresh is paused on purpose. Surface it; don't try to force it.
+     - A cell that shows up as `refreshed to current DNA rev` every sweep is
+       FLAPPING — its rev won't hold (refresh succeeds, health check passes,
+       but it reads stale again next sweep). That's a real bug worth Pete:
+       check whether the refresh is rolling back (`cells refresh <name>` by
+       hand and read the detail line).
 
 3. Never do any of these:
    - Bounce welld (substrate is wells's; a sick welld is an alert, not a fix).

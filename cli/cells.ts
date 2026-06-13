@@ -8,8 +8,9 @@ import { execSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import * as readline from "node:readline/promises";
 import { createHash, randomBytes } from "node:crypto";
-import { planReconcileEvictions } from "./lib/reconcile";
+import { planReconcileEvictions, selectStaleRevCull } from "./lib/reconcile";
 import { findOrphanWells } from "./lib/orphan-wells";
+import { dnaRev, summarizeDnaDrift } from "./lib/dna-rev";
 import { ulid } from "./shared/agent-envelope";
 import { needsSeal } from "./lib/hibernate-ready";
 import { SECRETS_PATH, readSecret } from "./lib/secrets";
@@ -2148,6 +2149,11 @@ type TransportRow = {
   power: "running" | "hibernated" | "unknown";
   status: "ok" | "warn" | "fail";
   reasons: string[];
+  // Runtime-DNA rev read from the running cell's /root/.dna-rev ("" when
+  // hibernated/unprobed/pre-DNA-rev). Compared Mac-side in the doctor's dna
+  // block — kept OUT of the transport verdict so DNA staleness never reads
+  // as a transport fault (the steward's transport fixes must not fire on it).
+  dna_rev: string;
 };
 
 async function collectFleetTransport(): Promise<TransportRow[]> {
@@ -2208,7 +2214,7 @@ async function collectFleetTransport(): Promise<TransportRow[]> {
         guest,
         macEpochS: Math.floor(Date.now() / 1000),
       });
-      rows.push({ name: c.name, well: wellName, power, status: verdict.status, reasons: verdict.reasons });
+      rows.push({ name: c.name, well: wellName, power, status: verdict.status, reasons: verdict.reasons, dna_rev: guest?.dna_rev ?? "" });
     }),
   );
   rows.sort((a, b) => a.name.localeCompare(b.name));
@@ -2270,6 +2276,21 @@ async function cmdDoctorJson() {
 
   const cells = await collectFleetTransport();
 
+  // DNA drift: current runtime-DNA rev vs what eggs/cells carry. Pool eggs
+  // judged from pool.json (zero wakes); live cells from the probe's dna_rev
+  // (running only). tree_clean gates the steward's auto-refresh — see
+  // dnaTreeClean(). The steward consumes .dna.stale_cells + .dna.tree_clean.
+  const dna = summarizeDnaDrift({
+    currentRev: dnaRev(DNA_DIR),
+    treeClean: dnaTreeClean(),
+    poolRevs: pool.members
+      .filter((m: any) => m.state === "open" && m.variant_signature === V1_POOL_VARIANT_SIGNATURE)
+      .map((m: any) => m.dna_rev),
+    cellRevs: cells
+      .filter((c) => c.power === "running")
+      .map((c) => ({ name: c.name, rev: c.dna_rev })),
+  });
+
   console.log(
     JSON.stringify(
       {
@@ -2289,6 +2310,7 @@ async function cmdDoctorJson() {
           outboundAgeS: typeof waBridge?.lastOutboundAgeS === "number" ? waBridge.lastOutboundAgeS : null,
         },
         pool: { open, target: V1_POOL_TARGET_DEPTH },
+        dna,
         specials,
         cells,
       },
@@ -2541,6 +2563,41 @@ async function cmdDoctor() {
     }
     if (transportFails > 0) {
       console.log(`  ${red}${transportFails} cell(s) cannot complete a talk round-trip. Fix before trusting the fleet.${reset}`);
+    }
+
+    // 8b. DNA drift — does each egg/cell carry the current runtime DNA?
+    // Reuses the transport probe's dna_rev (no extra round-trips). Pool eggs
+    // judged from pool.json (zero wakes). A stale running cell self-heals on
+    // the steward's next sweep (when the tree is clean); a stale egg is
+    // culled + rebaked by reconcile. Informational here — never a hard fail.
+    try {
+      const pool = await loadPool();
+      const drift = summarizeDnaDrift({
+        currentRev: dnaRev(DNA_DIR),
+        treeClean: dnaTreeClean(),
+        poolRevs: pool.members
+          .filter((m) => m.state === "open" && m.variant_signature === V1_POOL_VARIANT_SIGNATURE)
+          .map((m) => m.dna_rev),
+        cellRevs: rows.filter((r) => r.power === "running").map((r) => ({ name: r.name, rev: r.dna_rev })),
+      });
+      const treeNote = drift.tree_clean ? "" : ` ${yellow}(working tree dirty — auto-heal paused)${reset}`;
+      console.log(`\nDNA rev:        ${drift.current ? `${dim}${drift.current}${reset}` : `${yellow}unknown${reset}`}${treeNote}`);
+      const poolColor = drift.pool.stale > 0 ? yellow : green;
+      console.log(
+        `  pool:         ${poolColor}${drift.pool.current}/${drift.pool.total} current${reset}` +
+          (drift.pool.stale > 0 ? `${dim}, ${drift.pool.stale} stale${reset}` : "") +
+          (drift.pool.unknown > 0 ? `${dim}, ${drift.pool.unknown} unknown (pre-rev egg)${reset}` : ""),
+      );
+      const unknownCells = drift.cells.filter((c) => c.state === "unknown").map((c) => c.name);
+      if (drift.stale_cells.length > 0) {
+        console.log(`  live cells:   ${yellow}${drift.stale_cells.length} stale${reset} ${dim}— ${drift.stale_cells.join(", ")} ${drift.tree_clean ? "(steward refreshes next sweep)" : "(commit DNA to let the steward refresh)"}${reset}`);
+      } else if (unknownCells.length > 0) {
+        console.log(`  live cells:   ${green}${drift.cells.length - unknownCells.length} current${reset}${dim}, ${unknownCells.length} pre-rev (refresh to adopt: ${unknownCells.join(", ")})${reset}`);
+      } else if (drift.cells.length > 0) {
+        console.log(`  live cells:   ${green}all current${reset} ${dim}(running, probed)${reset}`);
+      }
+    } catch (e) {
+      console.log(`\nDNA rev:        ${yellow}skipped${reset} ${dim}(${String(e).slice(0, 80)})${reset}`);
     }
   }
 
@@ -3073,6 +3130,11 @@ async function cmdCreate(name: string | undefined, opts: CreateOpts): Promise<vo
     packages,
     channels,
     chain,
+    // Runtime-DNA rev at birth time. bake-egg.sh re-overlays current DNA
+    // onto the claimed egg, then stamps this onto /root/.dna-rev so a cell
+    // born from a stale egg reads as CURRENT (the overlay made it current).
+    // Computed Mac-side from the same working tree the overlay tars.
+    dna_rev: dnaRev(DNA_DIR),
   };
 
   // Which mother owns this birth (project's own if registered + alive, else
@@ -3896,6 +3958,20 @@ echo "hermes: $(sudo bash -lc 'export HOME=/root; hermes --version' 2>&1 | head 
   if (!chownAll.ok) {
     throw new Error(`chown -R root:root /root failed: ${chownAll.stderr.slice(0, 200)}`);
   }
+  // 8c. Stamp the runtime-DNA rev this overlay landed at (cli/lib/dna-rev.ts).
+  //     pushLocalDirToWell above just copied DNA_DIR; the rev fingerprints
+  //     the same tree, so this records exactly what's on disk. The doctor
+  //     compares it against the repo's current rev; reconcile culls stale
+  //     open eggs; the steward refreshes stale running cells. Best-effort:
+  //     a `cells doctor`/steward degrades to "unknown" on a missing stamp,
+  //     so don't let an echo failure tank a bake against Pete's 100% bar.
+  const dnaStamp = await wellExecCapture(
+    wellName,
+    `echo ${dnaRev(DNA_DIR)} | sudo tee /root/.dna-rev > /dev/null`,
+  );
+  if (!dnaStamp.ok) {
+    console.warn(`  ! dna-rev stamp didn't land (best-effort): ${dnaStamp.stderr.slice(0, 160)}`);
+  }
   // 9. sync — empirically needed so hibernate's stop+save doesn't lose
   // /root content / sudoers / pi-patched node_modules (ext4 commit=30
   // can lag behind the disk-detach).
@@ -4052,6 +4128,12 @@ async function bakePoolMember(): Promise<string> {
         variant_signature: V1_POOL_VARIANT_SIGNATURE,
         state: "open",
         tier,
+        // Runtime-DNA rev baked into this egg — the SAME value stamped onto
+        // /root/.dna-rev in provisionCellInWell (dnaRev is memoized per dir,
+        // so this is one walk). Lets the doctor judge pool staleness from
+        // pool.json with ZERO wakes, and the reconcile stale-rev cull retire
+        // eggs that fell behind without ever waking a hibernated egg.
+        dna_rev: dnaRev(DNA_DIR),
         born_at: new Date().toISOString(),
         claimed_at: null,
         claimed_by: null,
@@ -5262,6 +5344,35 @@ async function promoteOneHibernatedToRunning(): Promise<boolean> {
   return true;
 }
 
+// Is the DNA that auto-heal might push committed (clean)? Gates the
+// AUTOMATIC DNA-rev actions — the reconcile stale-rev cull and the steward's
+// auto-refresh — so an in-progress edit can't shift the rev and stampede the
+// pool/fleet to chase uncommitted code. Visibility is never gated (the doctor
+// shows drift regardless); only the destroy/refresh side effects wait for a
+// clean tree. Conservative on any git error: returns false (pause auto-heal)
+// rather than risk acting on an unknown state.
+//
+// Covers BOTH dna/cells/base AND dna/specials: a special's refresh overlays
+// dna/specials/<name> on top of base, so uncommitted special runtime files
+// would be pushed by an auto-refresh of a stale special (mother/pulse). The
+// rev itself is base-only, but the clean GATE must cover everything a refresh
+// would write. (Slightly conservative for the pool cull — a dirty special
+// tree pauses generic-egg culling too — but pausing on any uncommitted DNA is
+// the safe direction.) Memoized — the tree doesn't change mid-run.
+let _dnaTreeCleanCache: boolean | null = null;
+function dnaTreeClean(): boolean {
+  if (_dnaTreeCleanCache !== null) return _dnaTreeCleanCache;
+  try {
+    const out = execSync("git status --porcelain -- dna/cells/base dna/specials", {
+      cwd: REPO_ROOT,
+    }).toString().trim();
+    _dnaTreeCleanCache = out.length === 0;
+  } catch {
+    _dnaTreeCleanCache = false;
+  }
+  return _dnaTreeCleanCache;
+}
+
 // ─── reconcilePool ────────────────────────────────────────────────────
 // Diffs pool.json against welld's actual state. Evicts members welld
 // no longer knows about (W.68 class: pool says open, welld has no bundle)
@@ -5286,6 +5397,7 @@ type ReconcileReport = {
   welld_known: number;
   evicted: { id: string; well_name: string; reason: string }[];
   culled: { id: string; well_name: string }[];
+  stale_culled: { id: string; well_name: string; rev: string }[];
   resealed: { id: string; well_name: string }[];
   unrecoverable: { id: string; well_name: string; reason: string }[];
   pool_size_after: number;
@@ -5302,6 +5414,7 @@ async function reconcilePool(
     welld_known: 0,
     evicted: [],
     culled: [],
+    stale_culled: [],
     resealed: [],
     unrecoverable: [],
     pool_size_after: 0,
@@ -5406,6 +5519,44 @@ async function reconcilePool(
   }
   report.pool_size_after -= report.culled.length;
 
+  // Stale-rev cull pass: retire open eggs carrying old platform code so the
+  // pool rotates toward the current runtime DNA instead of handing births a
+  // stale supervisor/lib (the "pre-merge egg ships stale code" class). Gated
+  // on a CLEAN working tree: an uncommitted edit to a sync file would shift
+  // the computed rev and make every committed-rev egg look stale — auto-
+  // evicting the whole pool to chase a dirty tree. Visibility (doctor) still
+  // shows drift on a dirty tree; only the automatic destroy waits for clean.
+  // Capped + floored (cli/lib/reconcile.ts) so a big rev jump rotates over a
+  // few passes and never empties the pool mid-rebake. Refill (below) bakes
+  // the replacements at the current rev.
+  if (dnaTreeClean()) {
+    const currentRev = dnaRev(DNA_DIR);
+    let staleVictims: PoolMember[] = [];
+    {
+      const file = await loadPool();
+      const open = file.members.filter(
+        (m) => m.state === "open" && m.variant_signature === V1_POOL_VARIANT_SIGNATURE,
+      );
+      staleVictims = selectStaleRevCull(open, currentRev, { cap: 2, floor: 2 });
+    }
+    for (const v of staleVictims) {
+      let stillOpen = false;
+      await withPoolLock(async () => {
+        const m = (await loadPool()).members.find((x) => x.id === v.id);
+        stillOpen = !!m && m.state === "open";
+      });
+      if (!stillOpen) continue;
+      await directWellDestroy(v.well_name).catch(() => {});
+      await withPoolLock(async () => {
+        const f = await loadPool();
+        f.members = f.members.filter((x) => x.id !== v.id);
+        await savePool(f);
+      });
+      report.stale_culled.push({ id: v.id, well_name: v.well_name, rev: v.dna_rev ?? "" });
+    }
+    report.pool_size_after -= report.stale_culled.length;
+  }
+
   // hibernate_ready recheck: covers welld transition-storm clears that
   // leave a successfully-sealed pool member with hibernate_ready=false
   // (see the existing note at sealWell's ensureHibernateReady — we
@@ -5448,8 +5599,15 @@ async function reconcilePool(
   const shrank =
     report.evicted.length > 0 ||
     report.culled.length > 0 ||
+    report.stale_culled.length > 0 ||
     report.unrecoverable.length > 0;
-  if (shrank && !opts.skipRefill) {
+  // Single-flight: don't stack a reconcile-triggered refill on top of one
+  // already running (the steward's depth-block fires `cells pool refill`
+  // separately, and a stale-rev cull here would otherwise trigger a second
+  // concurrent bake loop — two refills racing welld). isRefillInFlight()
+  // sees the separate `cells.ts pool refill` process; if one's up, let it
+  // top the pool back up instead of starting a rival.
+  if (shrank && !opts.skipRefill && !(await isRefillInFlight())) {
     report.refill_triggered = true;
     refillPoolToDepth().catch((e) => {
       if (!opts.silent) {
@@ -5462,12 +5620,14 @@ async function reconcilePool(
     !opts.silent &&
     (report.evicted.length > 0 ||
       report.culled.length > 0 ||
+      report.stale_culled.length > 0 ||
       report.resealed.length > 0 ||
       report.unrecoverable.length > 0)
   ) {
     const parts: string[] = [];
     if (report.evicted.length > 0) parts.push(`evicted ${report.evicted.length} stale`);
     if (report.culled.length > 0) parts.push(`culled ${report.culled.length} over-target`);
+    if (report.stale_culled.length > 0) parts.push(`culled ${report.stale_culled.length} stale-rev`);
     if (report.resealed.length > 0) parts.push(`resealed ${report.resealed.length}`);
     if (report.unrecoverable.length > 0) parts.push(`dropped ${report.unrecoverable.length} unrecoverable`);
     console.error(
@@ -7319,6 +7479,13 @@ async function refreshOneCell(
       if (execSync("git status --porcelain", { cwd: REPO_ROOT }).toString().trim()) sha += "+dirty";
     } catch { /* not fatal — version stamp is best-effort */ }
 
+    // Runtime-DNA rev of what this refresh pushes (cli/lib/dna-rev.ts). Both
+    // version stamps are written ONLY on the healthy branch below — a refresh
+    // that health-checks red and rolls back must NOT leave the cell claiming
+    // the new rev (else the steward would think it's current while running
+    // the OLD code). Base-rev: refresh of a special still overlays the
+    // special dir, but the rev tracks the universal platform surface.
+    const rev = dnaRev(DNA_DIR);
     const ts = new Date().toISOString().replace(/[:.]/g, "-");
     const remote = `set -e
 sudo bash -c '
@@ -7335,7 +7502,6 @@ sudo bash -c '
     mkdir -p "/root/$(dirname "$rel")"
     cp -a "$f" "/root/$rel"
   done
-  echo "${sha} ${ts}" > /root/.dna-version
   sync
   # keep the 3 newest backups, prune the rest
   ls -dt /root/.refresh-backup-* 2>/dev/null | tail -n +4 | xargs -r rm -rf
@@ -7346,6 +7512,11 @@ sudo bash -c '
     [ "$(curl -s -m 2 http://localhost:8080/health)" = "ok" ] && ok=1 && break
   done
   if [ "$ok" = "1" ]; then
+    # Stamp the rev ONLY now that the new code is live and healthy — never
+    # before the rollback decision (the stale-rev-after-rollback trap).
+    echo "${sha} ${ts}" > /root/.dna-version
+    echo "${rev}" > /root/.dna-rev
+    sync
     rm -rf /root/.refresh-stage
     echo REFRESH_HEALTHY
   else
@@ -8577,6 +8748,16 @@ async function cmdPoolReconcile() {
     console.log(`culled (${report.culled.length} over-target):`);
     for (const c of report.culled) {
       console.log(`  ${c.id}  ${c.well_name}`);
+    }
+  }
+  // Stale-rev culls are destructive (eggs carrying old platform DNA get
+  // destroyed + rebaked at current rev) — surface them, never silently.
+  if (report.stale_culled.length === 0) {
+    console.log("stale-rev culled:  (none — open eggs at current DNA rev)");
+  } else {
+    console.log(`stale-rev culled (${report.stale_culled.length} — old DNA, rebaking at current):`);
+    for (const c of report.stale_culled) {
+      console.log(`  ${c.id}  ${c.well_name}  ← rev ${c.rev || "?"}`);
     }
   }
   if (report.errors.length > 0) {
