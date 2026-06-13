@@ -93,3 +93,26 @@ export function anthropicRouteVerdict(
     reason: `harness '${harness}' doesn't ride the Max sub — Anthropic models are claude-code-only; use gpt-5.5 via /codex`,
   };
 }
+
+// ── Gate-cache reload policy ────────────────────────────────────────────
+//
+// The proxy caches the registry for the gate (a 30s TTL keeps the hot path
+// off the disk). But a claude-code cell mid-birth registers as "warming"
+// only moments before its end-test fires its first Anthropic call — and if
+// that call hits a stale cache the cell isn't in yet, the gate 403s and birth
+// fails. So on a *miss* we reload once (bounded by a short floor so an unknown
+// caller can't force a disk read per request), making a just-registered cell
+// visible without waiting a full TTL.
+export function gateCacheNeedsReload(
+  cacheAt: number | null,
+  now: number,
+  nameFound: boolean,
+  ttlMs: number,
+  missFloorMs: number,
+): boolean {
+  if (cacheAt === null) return true; // no cache yet
+  const age = now - cacheAt;
+  if (age > ttlMs) return true; // stale by TTL
+  if (!nameFound && age > missFloorMs) return true; // maybe just-registered
+  return false;
+}

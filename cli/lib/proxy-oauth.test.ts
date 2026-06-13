@@ -5,6 +5,7 @@ import {
   ensurePreamble,
   classifyOAuthRoute,
   anthropicRouteVerdict,
+  gateCacheNeedsReload,
 } from "./proxy-oauth";
 
 // Convenience: the block shape ensurePreamble emits for the preamble.
@@ -249,5 +250,35 @@ describe("anthropicRouteVerdict", () => {
 
   it("legacy entry with no modelChain at all → denied without throwing", () => {
     expect(anthropicRouteVerdict({ harness: "pi" }).allowed).toBe(false);
+  });
+});
+
+// The gate caches the registry (30s TTL). A claude-code cell mid-birth
+// registers ("warming") moments before its end-test's first Anthropic call —
+// a miss must reload so that call isn't 403'd on a stale cache, but bounded so
+// an unknown caller can't force a disk read per request.
+describe("gateCacheNeedsReload", () => {
+  const TTL = 30_000;
+  const FLOOR = 1_000;
+  const T = 1_700_000_000_000;
+
+  it("no cache yet → reload", () => {
+    expect(gateCacheNeedsReload(null, T, true, TTL, FLOOR)).toBe(true);
+  });
+
+  it("fresh cache, name found → no reload (the hot path stays off disk)", () => {
+    expect(gateCacheNeedsReload(T, T + 5_000, true, TTL, FLOOR)).toBe(false);
+  });
+
+  it("stale by TTL → reload even when the name was found", () => {
+    expect(gateCacheNeedsReload(T, T + TTL + 1, true, TTL, FLOOR)).toBe(true);
+  });
+
+  it("miss on a cache older than the floor → reload (cell may have just registered)", () => {
+    expect(gateCacheNeedsReload(T, T + FLOOR + 1, false, TTL, FLOOR)).toBe(true);
+  });
+
+  it("miss within the floor → no reload (bounds unknown-caller disk reads)", () => {
+    expect(gateCacheNeedsReload(T, T + 500, false, TTL, FLOOR)).toBe(false);
   });
 });
