@@ -26,11 +26,11 @@ another mother's roster or history.
 
 ## Infra
 
-- `project_mother_proxy.md` — mother's proxy at mother.cells.md: cells route Anthropic
-  API calls through the laptop, single OAuth principal, no token race.
-  Includes wiring details, pi quirks, and what birth must do.
-- `reference_pi_internals.md` — pi auth dispatch, base URL handling, env
-  reading, tool parallelism. Read before debugging anything pi-shaped.
+Infra/host notes (the proxy wiring, pi internals, substrate references) are NOT
+seeded — they drift, and a frozen-stale copy misleads more than it helps. Read
+the live source instead: `docs/oauth-refresh.md` for the proxy, `cells doctor`
+for fleet health, and the repo for everything else. Build your own infra notes
+from what you observe.
 
 ## Open yearnings
 

@@ -4391,15 +4391,18 @@ async function bakeSpecial(spec: SpecialSpec, specialChain: string[]): Promise<v
   const overlaySrc = join(SPECIALS_DIR, spec.dnaName);
   // A project mother bakes from the SHARED mother DNA, whose state/memory holds
   // the GLOBAL mother's LIVE accumulators (a per-mother roster + a large
-  // append-only birth-activity log). Those are her continuity, not seed — a
-  // fresh project mother must build her own, not inherit another mother's
-  // history. Exclude them from a project-mother bake; the committed seed
-  // memories (feedback_*, reference_*, project_mother_proxy, MEMORY.md) still
-  // ride along, so she's born knowing births go through the cells CLI.
+  // append-only birth-activity log) and her infra/host notes (the proxy wiring,
+  // pi internals, substrate references — which drift and would mislead a fresh
+  // mother if frozen). None of those are seed — exclude them from a project
+  // mother's bake. The committed behavioral priors (feedback_* + MEMORY.md) ride
+  // along regardless, so she's born knowing births go through the cells CLI.
   const overlayExcludes =
     spec.dnaName === "mother" && spec.project
       ? ["--exclude=./state/memory/project_cells_activity.md",
-         "--exclude=./state/memory/project_cells_roster.md"]
+         "--exclude=./state/memory/project_cells_roster.md",
+         "--exclude=./state/memory/project_mother_proxy.md",
+         "--exclude=./state/memory/reference_pi_internals.md",
+         "--exclude=./state/memory/reference_sprite_hibernation.md"]
       : [];
   const overlayTar = Bun.spawn(["tar", "czhf", "-", ...overlayExcludes, "-C", overlaySrc, "."], {
     stdio: ["ignore", "pipe", "pipe"],
@@ -4565,6 +4568,43 @@ echo "name-subst: $(grep -lc __NAME__ AGENTS.md CLAUDE.md SOUL.md package.json .
       );
     }
     console.log(`  verified .claude/settings.json is runnable (claude-code)`);
+  }
+
+  // A claude-code MOTHER needs a captured main session, the same as a normal
+  // claude-code pool cell gets from bake-egg.sh: site/server.ts resumes
+  // /root/.cell/claude-main-session so conversation survives a well-site restart
+  // and agent-comms forks (`cells talk <mother>`) carry context. The special
+  // bake skips bake-egg.sh, so capture it here — warm up `claude --print` once
+  // and cache the session id. BEST-EFFORT: a transient miss must NOT fail the
+  // birth (that would trade continuity for reliability — the wrong way against
+  // a 100% bar), so we warn and move on; she falls back to a fresh first turn,
+  // exactly as today. The cell is already registered "warming" (claude-code), so
+  // the proxy Max-policy gate admits this warm-up. (Pulse is intentionally NOT
+  // captured — its always-on loop drives its own session; leaving its bake
+  // unchanged avoids a behavior change on a path that already works.)
+  if (spec.dnaName === "mother" && spec.harness === "claude-code") {
+    const capture = await wellExecCapture(
+      spec.wellName,
+      `set -uo pipefail
+sudo mkdir -p /root/.cell
+MAIN_ID=$(timeout 150 sudo bash -lc 'export HOME=/root IS_SANDBOX=1; cd /root && claude --print ping --output-format stream-json --verbose --permission-mode bypassPermissions 2>/dev/null' < /dev/null | jq -rs 'map(select(.type=="system" and .subtype=="init")) | .[0].session_id // ""')
+if [ -n "$MAIN_ID" ]; then
+  echo "$MAIN_ID" | sudo tee /root/.cell/claude-main-session > /dev/null
+  echo "MAIN_OK $MAIN_ID"
+else
+  echo "MAIN_EMPTY"
+fi`,
+    );
+    if (capture.ok && capture.stdout.includes("MAIN_OK")) {
+      const id = capture.stdout.match(/MAIN_OK (\S+)/)?.[1] ?? "";
+      console.log(`  captured claude main session: ${id}`);
+    } else {
+      console.warn(
+        `  ! claude-main-session capture didn't land (best-effort) — ${spec.name} will start a fresh session on first talk; ` +
+        `re-run \`cells birth-special ${spec.name} --rebuild\` later if continuity matters. ` +
+        `detail: ${(capture.stderr || capture.stdout).slice(0, 160)}`,
+      );
+    }
   }
 
   // 7c. Seal — make the well hibernate-capable (hibernation model,
