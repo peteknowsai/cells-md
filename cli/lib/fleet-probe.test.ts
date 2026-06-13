@@ -12,7 +12,7 @@ function guest(over: Partial<ReturnType<typeof base>> = {}) {
   return { ...base(), ...over };
 }
 function base() {
-  return { unit_active: "active", unit_present: true, health: "ok", oom_48h: 0, epoch: MAC_EPOCH, jobs_running: 0, jobs_stale: 0 };
+  return { unit_active: "active", unit_present: true, health: "ok", oom_48h: 0, epoch: MAC_EPOCH, jobs_running: 0, jobs_stale: 0, dna_rev: "" };
 }
 
 describe("parseGuestProbe", () => {
@@ -20,7 +20,7 @@ describe("parseGuestProbe", () => {
     const raw = [
       "Warning: Permanently added '192.168.64.203' (ED25519) to the list of known hosts.",
       "motd junk",
-      'CELLPROBE {"unit_active":"active","unit_present":true,"health":"ok","oom_48h":2,"epoch":123}',
+      'CELLPROBE {"unit_active":"active","unit_present":true,"health":"ok","oom_48h":2,"epoch":123,"dna_rev":"abc123def456"}',
     ].join("\n");
     expect(parseGuestProbe(raw)).toEqual({
       unit_active: "active",
@@ -30,6 +30,7 @@ describe("parseGuestProbe", () => {
       epoch: 123,
       jobs_running: 0,
       jobs_stale: 0,
+      dna_rev: "abc123def456",
     });
   });
   test("no CELLPROBE line / bad JSON → null", () => {
@@ -38,7 +39,7 @@ describe("parseGuestProbe", () => {
   });
   test("missing fields degrade to defaults", () => {
     const p = parseGuestProbe('CELLPROBE {"unit_active":"active"}');
-    expect(p).toEqual({ unit_active: "active", unit_present: false, health: "", oom_48h: 0, epoch: 0, jobs_running: 0, jobs_stale: 0 });
+    expect(p).toEqual({ unit_active: "active", unit_present: false, health: "", oom_48h: 0, epoch: 0, jobs_running: 0, jobs_stale: 0, dna_rev: "" });
   });
 });
 

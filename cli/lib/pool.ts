@@ -32,6 +32,7 @@ export type PoolMember = {
   claimed_by: string | null;   // cell name that hatched this egg
   max_age_at: string;          // born_at + 7 days; not enforced in Phase 1
   tier?: 2 | 4;                // optional in storage; V1 members carry it
+  dna_rev?: string;            // runtime-DNA fingerprint at bake (cli/lib/dna-rev.ts); absent on pre-DNA-rev eggs
 };
 
 export type PoolFile = { version: 1; members: PoolMember[] };

@@ -19,6 +19,8 @@ export type PoolMemberLike = {
   well_name: string;
   state: string;          // PoolMemberState — "open" | "claimed" | "live" | "culling"
   tier?: 2 | 4;           // optional in storage; v1 pool members carry it
+  dna_rev?: string;       // runtime-DNA fingerprint baked into this egg (cli/lib/dna-rev.ts)
+  born_at?: string;       // ISO; oldest-first ordering for the stale-rev cull
 };
 
 export type WelldRow = { name: string; status: string };
@@ -54,4 +56,34 @@ export function planReconcileEvictions<T extends PoolMemberLike>(
     keep.push(m);
   }
   return { keep, evicted };
+}
+
+// Stale-rev cull selection (pure). Given the OPEN pool members and the
+// repo's current runtime-DNA rev, pick which open eggs to retire because
+// they carry old platform code. The IO (destroy + refill) lives in
+// reconcilePool; this is the testable kernel.
+//
+// Policy, deliberately gentle:
+//   - Only eggs with a NON-EMPTY dna_rev that differs from current are
+//     stale. A missing/empty rev is a legacy egg baked before the field
+//     existed — treated as UNKNOWN, never auto-culled. That avoids a
+//     deploy-day mass-cull of the whole pool; legacy eggs age out as
+//     births consume them and refill bakes current-rev replacements.
+//   - Oldest first (born_at) — the same staleness proxy the over-target
+//     cull uses.
+//   - Never empty the pool: keep at least `floor` open members. Refill
+//     backfills culled slots with current-rev eggs, so a big rev jump
+//     rotates the pool over several reconcile passes instead of
+//     blackholing births in one. `cap` bounds churn per pass.
+export function selectStaleRevCull<T extends PoolMemberLike>(
+  open: T[],
+  currentRev: string,
+  opts: { cap: number; floor: number },
+): T[] {
+  if (!currentRev) return []; // unknown current rev → never cull (can't compare)
+  const stale = open
+    .filter((m) => m.state === "open" && !!m.dna_rev && m.dna_rev !== currentRev)
+    .sort((a, b) => Date.parse(a.born_at ?? "") - Date.parse(b.born_at ?? ""));
+  const maxRemovable = Math.max(0, open.length - opts.floor);
+  return stale.slice(0, Math.min(Math.max(0, opts.cap), maxRemovable));
 }
