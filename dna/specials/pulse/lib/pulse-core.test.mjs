@@ -77,8 +77,10 @@ try {
     cron1.includes("0 8 * * * root") && cron1.includes("refresh the dataset"));
   check("saveSchedule: crontab line sources cells-env.sh",
     cron1.includes(". /etc/profile.d/cells-env.sh"));
-  check("saveSchedule: crontab line tees to cron-fires.log",
-    cron1.includes(">> /root/.cells/logs/cron-fires.log"));
+  // The fire is wrapped in cron-fire.sh, which owns the cron-fires.log
+  // redirect (it used to be inline on the crontab line — moved 2026-05).
+  check("saveSchedule: crontab line invokes cron-fire.sh",
+    cron1.includes("/root/bin/cron-fire.sh"));
 
   // --- replacing a cell's schedule replaces the block, not appends ---
   const f2 = path.join(inbox, `testcell-${Date.now() + 5}.md`);

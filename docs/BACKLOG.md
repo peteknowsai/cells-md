@@ -20,6 +20,17 @@ pulse but which is missing from the global pulse's `pulse-cache`. Fold it into
 the existing 30-min steward on mother (agent-first; no new daemon). The manual
 `cells heartbeat reseed <project>` handle already exists as the building block.
 
+## `cells heartbeat` digest is global-pulse-only
+
+`cells heartbeat` (no args) prints `dna/specials/pulse/state/heartbeats.md`,
+which is the *global* pulse's digest only. Once a project runs its own
+`<project>-pulse`, that pulse's schedule rows live in its own well and don't
+show up in the digest. (`cells heartbeat --tail` already aggregates fires
+across every registered pulse — this is just the digest.) Low severity:
+partial observability, not a correctness gap. **Fix:** aggregate per-well
+`heartbeats.md` across all registered pulses, or footer-note which projects
+run their own pulse and how to read it.
+
 ## `cells pool` / `cells egg` with no args silently bake an egg
 
 Both subcommands, run bare, *bake a new generic pool egg* — they spin up a

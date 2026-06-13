@@ -1107,13 +1107,15 @@ async function bridgeInboxPulse(body: { cell: string; content: string }): Promis
   const pulseWell = await wellNameForCell(
     pulseOwner(owner?.project, reg.cells, process.env.CELLS_PULSE_CELL ?? "pulse"),
   );
+  // base64 the (cell-authored) HEARTBEAT.md so a line equal to a heredoc
+  // delimiter can't truncate the write and run trailing lines as root in the
+  // pulse well — base64 output is shell-inert. Decoded well-side.
+  const b64 = Buffer.from(body.content, "utf-8").toString("base64");
   const script = `set -euo pipefail
 sudo mkdir -p /root/.cells/pulse-inbox
 TS=$(date +%s%N)
 F=/root/.cells/pulse-inbox/${body.cell}-$TS.md
-sudo tee "$F" >/dev/null <<'__INBOX_EOF__'
-${body.content}
-__INBOX_EOF__
+printf %s '${b64}' | base64 -d | sudo tee "$F" >/dev/null
 echo "$F"`;
   const proc = Bun.spawn(["well", "exec", "-s", pulseWell, "--", "bash", "-c", script], {
     stdio: ["ignore", "pipe", "pipe"],
