@@ -245,7 +245,11 @@ export async function loadFleet(): Promise<FleetSnapshot> {
   const welldReachable = wells !== null;
   const byWell = new Map<string, WellRow>((wells ?? []).map((w) => [w.name, w]));
 
-  const cells: FleetCell[] = reg.cells.map((c) => {
+  const cells: FleetCell[] = reg.cells
+    // A "warming" entry is a cell mid-birth (not yet alive) or a leaked crash
+    // artifact — keep it out of the fleet view until it's promoted to alive.
+    .filter((c) => c.status !== "warming")
+    .map((c) => {
     const wellName = wellNameFor(c, members);
     const well = byWell.get(wellName);
     return {

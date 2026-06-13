@@ -14,9 +14,15 @@ import { REGISTRY_DIR, REGISTRY_PATH } from "./paths";
 export type Cell = {
   name: string;
   created_at: string;
-  // Birth registers a cell straight as "alive" — mother's end-test has
-  // already proven it works. "warming" is legacy (the retired async-tail
-  // path); kept readable for older registry entries.
+  // Birth is two-phase against the registry: a cell is registered "warming"
+  // BEFORE mother's end-test (the end-test's Anthropic call needs the proxy's
+  // Max-policy gate to find the cell + its harness — see cli/lib/proxy-oauth.ts),
+  // then promoted to "alive" once the ritual proves it, or removed on failure.
+  // A leaked "warming" entry (birth HARD-crashed mid-ritual) is NON-authoritative:
+  // the duplicate-name check ignores it (isNameTaken) and fleet readers
+  // (doctor / peers / cockpit) skip it, so it can't wedge a name or raise a
+  // phantom "cell can't talk" failure. It clears on the next birth/kill of that
+  // name, and the steward's stale-warming cull reaps any that outlive a birth.
   status?: "warming" | "alive";
   // The egg id this cell hatched from (the hex suffix of egg-<id>).
   hatched_from?: string;
@@ -61,6 +67,43 @@ export function parseRegistry(raw: string): Registry {
 
 export function findCellIn(cells: Cell[], name: string): Cell | undefined {
   return cells.find((c) => c.name === name);
+}
+
+// ── Birth-lifecycle mutations (pure; the caller wraps load/save) ────────
+// These return a fresh cells[] for the caller to load → mutate → save. NOTE on
+// concurrency: registry writes are currently lock-free. saveRegistry is atomic
+// (tmp+rename, so no torn file) but that does NOT prevent a lost update — and
+// the mother lock does NOT serialize these (it wraps only the LLM handoff). So
+// a concurrent operator write during a birth (cells model/kill/project/chain)
+// can clobber the warming entry. A shared withRegistryLock around every
+// cells.json read-modify-write is the durable fix (landing next).
+
+// Register a cell as "warming" (mid-birth, before the end-test). Replaces any
+// existing entry of the same name so a leaked warming entry from a crashed
+// prior birth doesn't block the retry. The caller verifies no *alive* cell
+// owns the name first (see isNameTaken).
+export function upsertBirthingCell(cells: Cell[], entry: Omit<Cell, "status">): Cell[] {
+  return [...cells.filter((c) => c.name !== entry.name), { ...entry, status: "warming" }];
+}
+
+// Promote a warming cell to "alive", patching any fields the birth retry loop
+// changed (e.g. hatched_from points at the final egg). No-op if name absent.
+export function promoteCell(cells: Cell[], name: string, patch: Partial<Cell> = {}): Cell[] {
+  return cells.map((c) => (c.name === name ? { ...c, ...patch, status: "alive" as const } : c));
+}
+
+// Remove a cell — birth rollback, or kill.
+export function removeCell(cells: Cell[], name: string): Cell[] {
+  return cells.filter((c) => c.name !== name);
+}
+
+// Whether a name is taken by a *real* (alive) cell. A "warming" entry is a
+// birth in flight or a leaked crash artifact — it does NOT reserve the name
+// (otherwise a crashed birth would wedge the name forever). Births serialize,
+// so a warming entry is never a concurrent birth of the same name.
+export function isNameTaken(cells: Cell[], name: string): boolean {
+  const c = findCellIn(cells, name);
+  return !!c && c.status !== "warming";
 }
 
 // ── IO ─────────────────────────────────────────────────────────────────

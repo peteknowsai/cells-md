@@ -19,6 +19,11 @@ import {
   loadRegistry,
   saveRegistry,
   findCell,
+  findCellIn,
+  isNameTaken,
+  upsertBirthingCell,
+  promoteCell,
+  removeCell,
   type Cell,
   type Registry,
 } from "./lib/registry";
@@ -2111,7 +2116,9 @@ async function collectFleetTransport(): Promise<TransportRow[]> {
   const reg = await loadRegistry();
   const rows: TransportRow[] = [];
   await Promise.all(
-    reg.cells.map(async (c) => {
+    // Skip "warming" entries: a cell mid-birth (or a leaked crash artifact) is
+    // not yet a probeable live cell — probing it yields a false transport FAIL.
+    reg.cells.filter((c) => c.status !== "warming").map(async (c) => {
       const wellName = await wellNameForCell(c.name);
       const well = wellsByName.get(wellName);
       const power: "running" | "hibernated" | "unknown" =
@@ -2799,7 +2806,7 @@ async function cmdCreate(name: string | undefined, opts: CreateOpts): Promise<vo
     console.error(`'${name}' is reserved. Pick another name.`);
     process.exit(1);
   }
-  if (await findCell(name)) {
+  if (isNameTaken((await loadRegistry()).cells, name)) {
     console.error(`cell '${name}' already exists in registry`);
     process.exit(1);
   }
@@ -2959,6 +2966,46 @@ async function cmdCreate(name: string | undefined, opts: CreateOpts): Promise<vo
     });
   };
 
+  // ── 4.5 Pre-register the cell as "warming" BEFORE the handoff ──
+  // Mother's end-test (ritual step 2) fires the cell's first Anthropic call
+  // through the proxy, whose Max-policy gate (anthropicRouteVerdict) 403s any
+  // cell it can't find in the registry. Registration is the gate's allowlist
+  // (name + harness) — distinct from "proven alive" (the status, set on
+  // success below). Without this the end-test of a fresh claude-code cell
+  // always 403'd. Rolled back on every failure path.
+  {
+    const reg = await loadRegistry();
+    reg.cells = upsertBirthingCell(reg.cells, {
+      name,
+      created_at: new Date().toISOString(),
+      hatched_from: claim.id,
+      modelChain: chain,
+      harness,
+      ...(opts.project ? { project: opts.project } : {}),
+    });
+    await saveRegistry(reg);
+  }
+  const rollbackRegistration = async () => {
+    try {
+      const reg = await loadRegistry();
+      reg.cells = removeCell(reg.cells, name);
+      await saveRegistry(reg);
+    } catch { /* best-effort — a leaked "warming" entry is non-authoritative */ }
+  };
+  // Failure cleanup (caller follows with process.exit(1) so TS narrows the
+  // outcome guards via the never-returning exit). Order matters: roll the
+  // warming entry back FIRST (critical — a leaked "warming" entry causes
+  // phantom cells / a 403 on the next birth of the same name), THEN reclaim
+  // the egg as best-effort, so a pool-lock/disk error inside sweepEgg can
+  // never strand the warming entry. Reads eggWell at call-time (a retry may
+  // have reassigned it).
+  const cleanupFailedBirth = async () => {
+    await rollbackRegistration();
+    await sweepEgg(eggWell).catch((e) =>
+      console.warn(`note: egg sweep failed (reconcile will reclaim): ${e instanceof Error ? e.message : String(e)}`),
+    );
+  };
+
   // ── 5. Hand off to mother — she reads docs/birthing-ritual.html ──
   // Mother's registry modelChain encodes harness selection (mother is the
   // only cell with this today). Each entry is "<harness>:<provider>/<model>:<thinking>"
@@ -3009,20 +3056,36 @@ async function cmdCreate(name: string | undefined, opts: CreateOpts): Promise<vo
   let outcome: Outcome | null = null;
   let usedMotherHarness: string | null = null;
   if (useMotherCell) {
-    // talkAndAwaitOutcome handles its own birth-log entry.
-    const r = await talkAndAwaitOutcome("cell-create", [name, eggWell, JSON.stringify(blob)], { progressName: name });
-    outcome = r.outcome;
+    // talkAndAwaitOutcome handles its own birth-log entry. A throw here (the
+    // legacy mother-cell path can fail mid-talk) must NOT leak the warming
+    // entry — treat it as a no-outcome attempt so the !outcome handler rolls
+    // the warming entry back.
+    try {
+      const r = await talkAndAwaitOutcome("cell-create", [name, eggWell, JSON.stringify(blob)], { progressName: name });
+      outcome = r.outcome;
+    } catch (e) {
+      console.warn(`! mother-cell birth threw: ${e instanceof Error ? e.message : String(e)}`);
+      outcome = null;
+    }
   } else {
     for (let attempt = 0; attempt < motherChain.length; attempt++) {
       const { harness: motherHarness } = parseChainEntry(motherChain[attempt]!);
       const which = motherHarness ?? "pi";
       if (attempt > 0) {
         console.warn(`! retrying birth with mother harness '${which}' (fresh egg)`);
-        await sweepEgg(eggWell);
-        const fresh = await claimAndReady();
+        let fresh: Awaited<ReturnType<typeof claimAndReady>> = null;
+        try {
+          await sweepEgg(eggWell);
+          fresh = await claimAndReady();
+        } catch (e) {
+          // sweepEgg/claimAndReady can throw on a pool-lock/disk error — don't
+          // let that leak the warming entry; fall into the !fresh rollback.
+          console.error(`birth failed: retry egg prep threw: ${e instanceof Error ? e.message : String(e)}`);
+        }
         if (!fresh) {
           console.error(`birth failed: could not claim a fresh egg for retry`);
           await writeBirthLog(which, null);
+          await rollbackRegistration();
           process.exit(1);
         }
         claim = fresh;
@@ -3032,19 +3095,29 @@ async function cmdCreate(name: string | undefined, opts: CreateOpts): Promise<vo
       await writeBirthLog(which);  // start record (refreshed per attempt)
       // claude-code mother uses /birth (her skill name); pi mother uses
       // /cell-create (her existing prompt name). Same args either way.
-      const r = which === "claude-code"
-        ? await runClaudeWithOutcome(
-            "birth",
-            [name, eggWell, JSON.stringify(blob)],
-            wellsEnv(),
-            { progressName: name },
-          )
-        : await runPiWithOutcome(
-            "cell-create",
-            [name, eggWell, JSON.stringify(blob)],
-            wellsEnv(),
-            { progressName: name },
-          );
+      let r: Awaited<ReturnType<typeof runClaudeWithOutcome>>;
+      try {
+        r = which === "claude-code"
+          ? await runClaudeWithOutcome(
+              "birth",
+              [name, eggWell, JSON.stringify(blob)],
+              wellsEnv(),
+              { progressName: name },
+            )
+          : await runPiWithOutcome(
+              "cell-create",
+              [name, eggWell, JSON.stringify(blob)],
+              wellsEnv(),
+              { progressName: name },
+            );
+      } catch (e) {
+        // A throw here (e.g. Bun.spawn when the harness binary isn't on PATH)
+        // must NOT leak the pre-registered "warming" entry — treat it as a
+        // no-outcome attempt so the chain falls over and, if none succeed, the
+        // !outcome handler below rolls the warming entry back.
+        console.warn(`! mother harness '${which}' threw: ${e instanceof Error ? e.message : String(e)}`);
+        r = { outcome: null, exit: -1 };
+      }
       if (r.outcome) {
         outcome = r.outcome;
         break;
@@ -3058,12 +3131,12 @@ async function cmdCreate(name: string | undefined, opts: CreateOpts): Promise<vo
   }
   if (!outcome) {
     console.error(`birth failed: mother did not report an outcome — sweeping egg ${eggWell}`);
-    await sweepEgg(eggWell);
+    await cleanupFailedBirth();
     process.exit(1);
   }
   if (!outcome.success) {
     console.error(`birth failed: ${outcome.message} — sweeping egg ${eggWell}`);
-    await sweepEgg(eggWell);
+    await cleanupFailedBirth();
     process.exit(1);
   }
 
@@ -3076,23 +3149,44 @@ async function cmdCreate(name: string | undefined, opts: CreateOpts): Promise<vo
     console.error(
       `birth failed: '${name}' not hibernate-ready (${e instanceof Error ? e.message : String(e)}) — sweeping egg ${eggWell}`,
     );
-    await sweepEgg(eggWell);
+    await cleanupFailedBirth();
     process.exit(1);
   }
 
-  // ── 6. Success: registry + pool bookkeeping ──
-  await markPoolMemberLive(eggWell);
-  const reg = await loadRegistry();
-  reg.cells.push({
-    name,
-    created_at: new Date().toISOString(),
-    status: "alive",
-    hatched_from: claim.id,
-    modelChain: chain,
-    harness,
-    ...(opts.project ? { project: opts.project } : {}),
-  });
-  await saveRegistry(reg);
+  // ── 6. Success: promote the warming entry to alive (authoritative) ──
+  // Promote BEFORE the pool bookkeeping below so a markPoolMemberLive failure
+  // can't strand a proven-alive cell as "warming". A throw here (the promote
+  // never persisted → the cell isn't authoritatively alive yet) rolls the
+  // warming entry back; once promoted, no later step ever un-registers it.
+  try {
+    const reg = await loadRegistry();
+    // hatched_from + modelChain are patched in case a retry swept the original
+    // egg and re-claimed a fresh one. If the warming entry somehow vanished,
+    // re-insert so a successful birth always lands a registered, alive cell.
+    reg.cells = promoteCell(reg.cells, name, { hatched_from: claim.id, modelChain: chain });
+    if (!findCellIn(reg.cells, name)) {
+      reg.cells.push({
+        name,
+        created_at: new Date().toISOString(),
+        status: "alive",
+        hatched_from: claim.id,
+        modelChain: chain,
+        harness,
+        ...(opts.project ? { project: opts.project } : {}),
+      });
+    }
+    await saveRegistry(reg);
+  } catch (e) {
+    await rollbackRegistration();
+    throw e;
+  }
+
+  // Pool bookkeeping is best-effort AFTER the promote — the cell is already a
+  // live, registered VM, so a pool.json error must not crash or unregister it
+  // (reconcile reconciles pool↔registry).
+  await markPoolMemberLive(eggWell).catch((e) =>
+    console.warn(`note: pool bookkeeping for ${name} failed (reconcile will fix): ${e instanceof Error ? e.message : String(e)}`),
+  );
 
   // Kick host-bridge to spawn ssh+pi now so the first talk connects warm.
   void prewarmHostBridge(name);

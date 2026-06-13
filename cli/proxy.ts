@@ -63,7 +63,7 @@ import {
 import { isValidCellName } from "./lib/cell-name";
 import { loadRegistry, loadRegistrySafe, saveRegistry, type Registry } from "./lib/registry";
 import { cellRows, type CellRow } from "./lib/status-rows";
-import { ensurePreamble, classifyOAuthRoute, anthropicRouteVerdict } from "./lib/proxy-oauth";
+import { ensurePreamble, classifyOAuthRoute, anthropicRouteVerdict, gateCacheNeedsReload } from "./lib/proxy-oauth";
 import { latestOpusFrom, normalizeAnthropicModel } from "./lib/model-normalizer";
 
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
@@ -513,7 +513,9 @@ async function handlePeers(req: Request): Promise<Response> {
     const reg = await loadRegistrySafe();
     const cells: any[] = Array.isArray(reg?.cells) ? reg.cells : [];
     const peers = cells
-      .filter((c) => c?.status !== "killed")
+      // "warming" = a cell mid-birth or a leaked crash artifact — not a
+      // contactable peer; don't advertise it to agent-comms discovery.
+      .filter((c) => c?.status !== "killed" && c?.status !== "warming")
       .map((c) => ({
         name: c.name,
         status: c.status ?? "unknown",
@@ -538,17 +540,33 @@ function checkClientAuth(req: Request): { ok: true; cell: string } | { ok: false
 }
 
 // Registry lookup for the Max-policy gate (anthropicRouteVerdict), cached so
-// the hot path doesn't re-read cells.json per request. 30s staleness is fine:
-// the gate's job is policy, not liveness — a just-born claude-code cell waits
-// at most one TTL before its first Anthropic call clears.
+// the hot path doesn't re-read cells.json per request. 30s staleness is fine
+// for the policy decision — but a miss reloads once (see below), because a
+// claude-code cell mid-birth registers ("warming") only moments before its
+// end-test's first Anthropic call, and a stale-cache 403 there fails the birth.
 const REGISTRY_CACHE_TTL_MS = 30_000;
+// Floor on miss-triggered reloads: an unknown caller can force at most one
+// disk read per this window, while a just-registered cell still surfaces to
+// its end-test within ~a second (bake takes far longer, so no race).
+const GATE_MISS_RELOAD_FLOOR_MS = 1_000;
 let registryCache: { at: number; byName: Map<string, { harness?: string; modelChain?: string[] }> } | null = null;
+async function refreshGateCache(): Promise<void> {
+  const reg = await loadRegistrySafe();
+  registryCache = { at: Date.now(), byName: new Map(reg.cells.map((c) => [c.name, c])) };
+}
 async function lookupCellForGate(name: string) {
-  if (!registryCache || Date.now() - registryCache.at > REGISTRY_CACHE_TTL_MS) {
-    const reg = await loadRegistrySafe();
-    registryCache = { at: Date.now(), byName: new Map(reg.cells.map((c) => [c.name, c])) };
+  // Cold cache or TTL staleness (nameFound=true skips the miss branch here).
+  if (gateCacheNeedsReload(registryCache?.at ?? null, Date.now(), true, REGISTRY_CACHE_TTL_MS, GATE_MISS_RELOAD_FLOOR_MS)) {
+    await refreshGateCache();
   }
-  return registryCache.byName.get(name);
+  let cell = registryCache!.byName.get(name);
+  // Miss → the name may have just been registered (a cell mid-birth running
+  // its end-test). Reload once (bounded by the floor) before the gate denies.
+  if (gateCacheNeedsReload(registryCache!.at, Date.now(), cell !== undefined, REGISTRY_CACHE_TTL_MS, GATE_MISS_RELOAD_FLOOR_MS)) {
+    await refreshGateCache();
+    cell = registryCache!.byName.get(name);
+  }
+  return cell;
 }
 
 // ── "opus means latest opus" ────────────────────────────────────────
