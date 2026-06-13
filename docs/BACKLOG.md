@@ -5,6 +5,26 @@ Newest at top. Clear an item when it's done (git history keeps the record).
 
 ---
 
+## Pool eggs bake a pre-jobs-lane worker → fresh births can't take `cells run`
+
+A pool egg is baked once and carries whatever per-cell Cloudflare Worker
+shipped at bake time. The jobs-lane Worker (the Durable Object that honors
+`kind:"job"` events) postdates some eggs in the pool, so a freshly-claimed
+egg's `<cell>.cells.md` Worker rejects a `cells run` job with "worker predates
+the jobs lane — redeploy it first". Surfaced 2026-06-13 by homezero's
+decoupled birth: Phase B (advisor self-config) runs as a `cells run` job on the
+just-born advisor, which fails until the Worker is redeployed.
+
+**Workaround in use (homezero):** `birth-orchestrate.sh` runs
+`scripts/deploy-cell-worker.sh <cell>` right after birth, before the Phase-B
+job. ~few-second cost, idempotent, harmless after the root fix.
+
+**Root fix (cells-side):** bake the current jobs-lane Worker into the pool eggs
+— `scripts/bake-egg.sh` and the Worker-refresh path — so a fresh birth is
+jobs-lane-ready with no post-birth redeploy. Touches the pool bake (every
+birth), so it wants its own test against a real egg bake, separate from the
+project-mother work.
+
 ## Crash-failback reconcile for a project pulse
 
 Per-project pulse (shipped 2026-06-13) fails a project's cells back to the

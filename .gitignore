@@ -1,4 +1,24 @@
 state/
+
+# ...EXCEPT the curated DNA seed memories every mother inherits at birth. The
+# special bake tars this tree onto a fresh mother, so these must be committed —
+# otherwise a clean checkout (or any machine without Pete's working-tree copies)
+# births a memory-less mother that re-learns "births go through the cells CLI"
+# the hard way. git can't re-include files under an ignored dir without
+# re-including each parent level first, hence the staircase. SEED only accurate,
+# harness-agnostic BEHAVIORAL priors — never infra/host notes that drift (the
+# proxy/pi-internals/sprite references stay the global mother's untracked live
+# memory, and are excluded from project-mother bakes). The global mother's LIVE
+# accumulators (roster + activity log) stay ignored too — per-mother churn.
+!dna/specials/mother/state/
+dna/specials/mother/state/*
+!dna/specials/mother/state/memory/
+dna/specials/mother/state/memory/*
+!dna/specials/mother/state/memory/MEMORY.md
+!dna/specials/mother/state/memory/feedback_use_cells_cli.md
+!dna/specials/mother/state/memory/feedback_explain_jargon.md
+!dna/specials/mother/state/memory/feedback_memory_freshness.md
+
 .env
 .env.local
 .envrc

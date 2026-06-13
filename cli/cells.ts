@@ -9,6 +9,7 @@ import { fileURLToPath } from "node:url";
 import * as readline from "node:readline/promises";
 import { createHash, randomBytes } from "node:crypto";
 import { planReconcileEvictions } from "./lib/reconcile";
+import { findOrphanWells } from "./lib/orphan-wells";
 import { ulid } from "./shared/agent-envelope";
 import { needsSeal } from "./lib/hibernate-ready";
 import { SECRETS_PATH, readSecret } from "./lib/secrets";
@@ -2534,6 +2535,60 @@ async function cmdDoctor() {
     }
     console.log(`\nwa-bridge:     ${line}`);
   }
+
+  // 10. Orphan wells — welld VMs that nothing in cells owns. The signature of a
+  // half-finished birth (classically `bake-egg.sh` run outside `cells birth`,
+  // the wrapper that owns warming-register → promote): a configured well left
+  // running, its egg consumed from the pool, never written to cells.json. It
+  // "looks born" but is absent from `cells list`, holding RAM/disk no command
+  // reaps. Advisory only — the known set below is GENEROUS (every naming
+  // convention a real cell's well could carry, warming cells included) so a live
+  // cell is never mistaken for junk; a flag is a candidate to inspect, not an
+  // auto-reap target. welld unreachable → skip silently (section 3/8 surface that).
+  try {
+    const base = process.env.WELL_API_URL ?? "http://127.0.0.1:7878";
+    const wr = await fetch(`${base}/v1/wells`, {
+      headers: { Authorization: `Bearer ${await wellsToken()}` },
+      signal: AbortSignal.timeout(3000),
+    });
+    if (wr.ok) {
+      const body: any = await wr.json();
+      const welldWells = (Array.isArray(body?.wells) ? body.wells : [])
+        .map((w: any) => String(w?.name ?? "")).filter(Boolean);
+      // The registry AND pool.json are both load-bearing: without either we
+      // can't tell an owned cell/egg from an orphan. They throw on a malformed
+      // file — DO NOT swallow that into an empty set, because then every real
+      // cell/egg welld reports would be flagged an orphan and the operator told
+      // to destroy valid wells (a state-file glitch becoming data loss). Skip
+      // the check loudly instead.
+      let known: string[] | null = null;
+      let poolWells: string[] | null = null;
+      try {
+        const reg = (await loadRegistry()).cells;
+        known = [];
+        for (const c of reg) {
+          known.push(await wellNameForCell(c.name), `cells-${c.name}`, c.name);
+          if (c.hatched_from) known.push(`egg-${c.hatched_from}`);
+        }
+        poolWells = (await loadPool()).members.map((m: any) => String(m?.well_name ?? "")).filter(Boolean);
+      } catch (e) {
+        console.log(`\norphan wells:  ${yellow}skipped${reset} ${dim}(registry or pool.json unreadable — can't distinguish orphans from owned wells: ${String(e).slice(0, 80)})${reset}`);
+      }
+      if (known && poolWells) {
+        const orphans = findOrphanWells({ welldWells, knownWells: known, poolWells });
+        if (orphans.length === 0) {
+          console.log(`\norphan wells:  ${green}none${reset} ${dim}(every welld VM is a registered cell or a pool egg)${reset}`);
+        } else {
+          console.log(`\norphan wells:  ${red}${orphans.length}${reset} ${dim}— welld VMs nothing in cells owns (half-finished birth? bake-egg.sh run outside \`cells birth\`?):${reset}`);
+          for (const w of orphans) {
+            console.log(`  ${red}${w}${reset} ${dim}— unowned. If confirmed orphan (not a birth in flight), destroy the well via welld.${reset}`);
+          }
+        }
+      }
+    }
+  } catch {
+    // welld unreachable / token missing — other sections already flag that.
+  }
 }
 
 async function checkPiPatches(): Promise<{ ok: boolean; detail: string }> {
@@ -4178,6 +4233,30 @@ async function cmdBirthSpecial(rawArgs: string[]): Promise<void> {
   }
   const rebuild = flags.has("--rebuild");
 
+  // --harness override: a PROJECT mother may be born on the claude-code harness
+  // instead of the default pi, so her own agentic loop reasons on Opus (set the
+  // depth with `cells model <project>-mother anthropic/opus:medium`). The global
+  // mother and every pulse keep their fixed harness — their model lane is settled
+  // and overriding it has no use case. Applied here, before pre-register (1b) and
+  // the bake both read spec.harness.
+  const harnessFlag = [...flags].find((f) => f.startsWith("--harness="));
+  if (harnessFlag) {
+    const want = harnessFlag.slice("--harness=".length).trim();
+    if (want !== "pi" && want !== "claude-code") {
+      console.error(`bad --harness '${want}' — choose pi or claude-code`);
+      process.exit(2);
+    }
+    if (spec.dnaName !== "mother" || !spec.project) {
+      console.error(
+        `--harness is only settable on a project mother (<project>-mother). ` +
+        `${spec.name}'s harness is fixed by design.`,
+      );
+      process.exit(2);
+    }
+    spec.harness = want;
+    console.log(`  harness override: ${spec.name} → ${want}`);
+  }
+
   // A project pulse is an always-on pinned cell (~1.9GB RAM, never hibernates).
   // The universal pulse already schedules every project for free, so a project
   // pulse is opt-in + steady-state costly — gate it behind an explicit confirm.
@@ -4323,7 +4402,22 @@ async function bakeSpecial(spec: SpecialSpec, specialChain: string[]): Promise<v
   // mother/scripts → ../../../scripts) so deref at archive time with -h.
   // Also pass --overwrite so files overlay base DNA cleanly.
   const overlaySrc = join(SPECIALS_DIR, spec.dnaName);
-  const overlayTar = Bun.spawn(["tar", "czhf", "-", "-C", overlaySrc, "."], {
+  // A project mother bakes from the SHARED mother DNA, whose state/memory holds
+  // the GLOBAL mother's LIVE accumulators (a per-mother roster + a large
+  // append-only birth-activity log) and her infra/host notes (the proxy wiring,
+  // pi internals, substrate references — which drift and would mislead a fresh
+  // mother if frozen). None of those are seed — exclude them from a project
+  // mother's bake. The committed behavioral priors (feedback_* + MEMORY.md) ride
+  // along regardless, so she's born knowing births go through the cells CLI.
+  const overlayExcludes =
+    spec.dnaName === "mother" && spec.project
+      ? ["--exclude=./state/memory/project_cells_activity.md",
+         "--exclude=./state/memory/project_cells_roster.md",
+         "--exclude=./state/memory/project_mother_proxy.md",
+         "--exclude=./state/memory/reference_pi_internals.md",
+         "--exclude=./state/memory/reference_sprite_hibernation.md"]
+      : [];
+  const overlayTar = Bun.spawn(["tar", "czhf", "-", ...overlayExcludes, "-C", overlaySrc, "."], {
     stdio: ["ignore", "pipe", "pipe"],
   });
   const overlayExtract = Bun.spawn(
@@ -4458,12 +4552,89 @@ for f in AGENTS.md CLAUDE.md SOUL.md IDENTITY.md CELLS.md CONTACTS.md HEARTBEAT.
   [ -f "$f" ] && sudo sed -i "s/__NAME__/${spec.name}/g" "$f" || true
 done
 [ -f .tmux.conf ] && sudo sed -i "s|__CELL_BG__|${bg}|g; s|__CELL_FG__|${fg}|g" .tmux.conf || true
+# A claude-code special boots straight from .claude/settings.json. The pool path
+# (bake-egg.sh) fills the model/effort placeholders there, but specials skip that
+# path — so a literal __MODEL__/__THINKING__ would leave an unrunnable config and
+# wedge the supervisor. Substitute opus/high here (cells model adjusts post-birth);
+# a no-op when the DNA already ships a concrete file (e.g. pulse).
+[ -f .claude/settings.json ] && sudo sed -i "s/__MODEL__/opus/g; s/__THINKING__/high/g" .claude/settings.json || true
 echo "name-subst: $(grep -lc __NAME__ AGENTS.md CLAUDE.md SOUL.md package.json .tmux.conf .claude/settings.json 2>/dev/null | wc -l) files still with __NAME__ (want 0)"`;
   const sub = await wellExecCapture(spec.wellName, subScript);
   if (!sub.ok) {
     throw new Error(`name substitution failed: ${sub.stderr.slice(0, 300)}`);
   }
   console.log(`  substituted __NAME__ → ${spec.name} + tmux color (${bg}/${fg})`);
+
+  // A claude-code special's first supervisor spawn reads .claude/settings.json
+  // directly — verify it's valid JSON with a concrete model before we promote.
+  // This is exactly the failure that would silently drop a claude-code mother's
+  // birth-reliability below Pete's bar, so fail the bake loudly instead.
+  if (spec.harness === "claude-code") {
+    const check = await wellExecCapture(
+      spec.wellName,
+      `jq -e '((.model // "") | test("__|^$") | not) and ((.effortLevel // "") | test("__|^$") | not)' /root/.claude/settings.json >/dev/null && echo ok`,
+    );
+    if (!check.ok || check.stdout.trim() !== "ok") {
+      throw new Error(
+        `claude-code special ${spec.name} has an unrunnable /root/.claude/settings.json ` +
+        `(model/effortLevel unset or still a placeholder): ${(check.stderr || check.stdout).slice(0, 200)}`,
+      );
+    }
+    console.log(`  verified .claude/settings.json is runnable (claude-code)`);
+  }
+
+  // A claude-code MOTHER needs a captured main session, the same as a normal
+  // claude-code pool cell gets from bake-egg.sh: site/server.ts resumes
+  // /root/.cell/claude-main-session so conversation survives a well-site restart
+  // and agent-comms forks (`cells talk <mother>`) carry context. The special
+  // bake skips bake-egg.sh, so capture it here — warm up `claude --print` once
+  // and cache the session id. BEST-EFFORT: a transient miss must NOT fail the
+  // birth (that would trade continuity for reliability — the wrong way against
+  // a 100% bar), so we warn and move on; she falls back to a fresh first turn,
+  // exactly as today. The cell is already registered "warming" (claude-code), so
+  // the proxy Max-policy gate admits this warm-up. (Pulse is intentionally NOT
+  // captured — its always-on loop drives its own session; leaving its bake
+  // unchanged avoids a behavior change on a path that already works.)
+  if (spec.dnaName === "mother" && spec.harness === "claude-code") {
+    const capture = await wellExecCapture(
+      spec.wellName,
+      `set -uo pipefail
+sudo mkdir -p /root/.cell
+MAIN_ID=$(timeout 150 sudo bash -lc 'export HOME=/root IS_SANDBOX=1; cd /root && claude --print ping --output-format stream-json --verbose --permission-mode bypassPermissions 2>/dev/null' < /dev/null | jq -rs 'map(select(.type=="system" and .subtype=="init")) | .[0].session_id // ""')
+if [ -n "$MAIN_ID" ]; then
+  echo "$MAIN_ID" | sudo tee /root/.cell/claude-main-session > /dev/null
+  echo "MAIN_OK $MAIN_ID"
+else
+  echo "MAIN_EMPTY"
+fi`,
+    );
+    if (capture.ok && capture.stdout.includes("MAIN_OK")) {
+      const id = capture.stdout.match(/MAIN_OK (\S+)/)?.[1] ?? "";
+      console.log(`  captured claude main session: ${id}`);
+    } else {
+      console.warn(
+        `  ! claude-main-session capture didn't land (best-effort) — ${spec.name} will start a fresh session on first talk; ` +
+        `re-run \`cells birth-special ${spec.name} --rebuild\` later if continuity matters. ` +
+        `detail: ${(capture.stderr || capture.stdout).slice(0, 160)}`,
+      );
+    }
+    // register-site-service (6c) already started well-site, which read its
+    // harness config + main-session id at boot — BEFORE the __MODEL__/__THINKING__
+    // substitution and the capture just above. site/server.ts caches the resume
+    // id at module load, so the live supervisor is still running on placeholder
+    // model + no --resume. Restart it now so it re-reads the finalized
+    // .claude/settings.json and resumes the captured session. REQUIRED (not
+    // best-effort like the capture): a mother left on a placeholder model is a
+    // non-functional birth, so fail loudly rather than promote a broken cell.
+    const restart = await wellExecCapture(spec.wellName, "sudo systemctl restart well-site");
+    if (!restart.ok) {
+      throw new Error(
+        `well-site restart after claude-code config prep failed for ${spec.name} — ` +
+        `the supervisor would keep running on placeholder config: ${(restart.stderr || restart.stdout).slice(0, 200)}`,
+      );
+    }
+    console.log(`  restarted well-site (picks up final claude model + main session)`);
+  }
 
   // 7c. Seal — make the well hibernate-capable (hibernation model,
   //     invariant 4). Specials are pinned and won't hibernate in practice,
