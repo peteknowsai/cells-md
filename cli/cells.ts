@@ -17,13 +17,14 @@ import { loadPostworkSummary, removePostwork, type PostworkSummary } from "./lib
 import { REGISTRY_DIR } from "./lib/paths";
 import {
   loadRegistry,
-  saveRegistry,
+  mutateRegistry,
   findCell,
   findCellIn,
   isNameTaken,
   upsertBirthingCell,
   promoteCell,
   removeCell,
+  cullStaleWarming,
   type Cell,
   type Registry,
 } from "./lib/registry";
@@ -2973,23 +2974,30 @@ async function cmdCreate(name: string | undefined, opts: CreateOpts): Promise<vo
   // (name + harness) — distinct from "proven alive" (the status, set on
   // success below). Without this the end-test of a fresh claude-code cell
   // always 403'd. Rolled back on every failure path.
-  {
-    const reg = await loadRegistry();
-    reg.cells = upsertBirthingCell(reg.cells, {
-      name,
-      created_at: new Date().toISOString(),
-      hatched_from: claim.id,
-      modelChain: chain,
-      harness,
-      ...(opts.project ? { project: opts.project } : {}),
-    });
-    await saveRegistry(reg);
+  const warmingEntry = {
+    name,
+    created_at: new Date().toISOString(),
+    hatched_from: claim.id,
+    modelChain: chain,
+    harness,
+    ...(opts.project ? { project: opts.project } : {}),
+  };
+  // One locked read-modify-write: reap any warming orphans from a hard-crashed
+  // prior birth, then register this cell. withRegistryLock keeps a concurrent
+  // operator write (cells model/kill/...) from clobbering the warming entry.
+  // The egg is already claimed + booted + SSH-ready by here, so a registry-lock
+  // failure must SWEEP it, not strand a running VM with no registry entry
+  // (reconcile never reclaims a "claimed" pool member that welld still knows).
+  try {
+    await mutateRegistry((cells) => upsertBirthingCell(cullStaleWarming(cells, Date.now()), warmingEntry));
+  } catch (e) {
+    console.error(`birth failed: could not register ${name} (${e instanceof Error ? e.message : String(e)}) — sweeping egg ${eggWell}`);
+    await sweepEgg(eggWell).catch(() => {});
+    process.exit(1);
   }
   const rollbackRegistration = async () => {
     try {
-      const reg = await loadRegistry();
-      reg.cells = removeCell(reg.cells, name);
-      await saveRegistry(reg);
+      await mutateRegistry((cells) => removeCell(cells, name));
     } catch { /* best-effort — a leaked "warming" entry is non-authoritative */ }
   };
   // Failure cleanup (caller follows with process.exit(1) so TS narrows the
@@ -3159,23 +3167,24 @@ async function cmdCreate(name: string | undefined, opts: CreateOpts): Promise<vo
   // never persisted → the cell isn't authoritatively alive yet) rolls the
   // warming entry back; once promoted, no later step ever un-registers it.
   try {
-    const reg = await loadRegistry();
-    // hatched_from + modelChain are patched in case a retry swept the original
-    // egg and re-claimed a fresh one. If the warming entry somehow vanished,
-    // re-insert so a successful birth always lands a registered, alive cell.
-    reg.cells = promoteCell(reg.cells, name, { hatched_from: claim.id, modelChain: chain });
-    if (!findCellIn(reg.cells, name)) {
-      reg.cells.push({
-        name,
-        created_at: new Date().toISOString(),
-        status: "alive",
-        hatched_from: claim.id,
-        modelChain: chain,
-        harness,
-        ...(opts.project ? { project: opts.project } : {}),
-      });
-    }
-    await saveRegistry(reg);
+    await mutateRegistry((cells) => {
+      // hatched_from + modelChain are patched in case a retry swept the original
+      // egg and re-claimed a fresh one. If the warming entry somehow vanished,
+      // re-insert so a successful birth always lands a registered, alive cell.
+      let next = promoteCell(cells, name, { hatched_from: claim.id, modelChain: chain });
+      if (!findCellIn(next, name)) {
+        next = [...next, {
+          name,
+          created_at: new Date().toISOString(),
+          status: "alive" as const,
+          hatched_from: claim.id,
+          modelChain: chain,
+          harness,
+          ...(opts.project ? { project: opts.project } : {}),
+        }];
+      }
+      return next;
+    });
   } catch (e) {
     await rollbackRegistration();
     throw e;
@@ -3983,20 +3992,74 @@ async function cmdBirthSpecial(rawArgs: string[]): Promise<void> {
 
   console.log(`birth-special ${spec.name} → ${spec.wellName}`);
 
-  // 1. Idempotency: refuse if registry already lists this cell unless --rebuild.
-  const reg = await loadRegistry();
-  const existing = reg.cells.find(c => c.name === spec.name);
-  if (existing) {
-    if (!rebuild) {
-      console.error(`${spec.name} already registered (born ${existing.created_at}). pass --rebuild to rebake.`);
-      process.exit(1);
-    }
-    console.log(`rebuild: destroying existing ${spec.wellName} and clearing registry…`);
-    await directWellDestroy(spec.wellName).catch(() => {});
-    reg.cells = reg.cells.filter(c => c.name !== spec.name);
-    await saveRegistry(reg);
+  // 1. Idempotency: refuse if registry already lists this cell as a real
+  //    (alive) special unless --rebuild. A leaked "warming" entry from a
+  //    crashed prior birth-special is non-authoritative — treat it like
+  //    absent (the cull/pre-register below replaces it).
+  const existing = findCellIn((await loadRegistry()).cells, spec.name);
+  if (existing && existing.status !== "warming" && !rebuild) {
+    console.error(`${spec.name} already registered (born ${existing.created_at}). pass --rebuild to rebake.`);
+    process.exit(1);
   }
 
+  // 1b. Pre-register "warming" BEFORE the slow birth (and before the --rebuild
+  //     well destroy below). A claude-code special (pulse, a project mother)
+  //     starts its always-on loop — installPulseLoop fires pulse.service, which
+  //     makes proxy Anthropic calls — before we'd otherwise register it at the
+  //     end. The Max-policy gate 403s a cell it can't find, so the loop's first
+  //     ticks would fail. Registration is the gate's allowlist (name + harness);
+  //     promoted to "alive" once the bake proves out. The DNA settings.json is
+  //     the single source of truth for the model chain (read once, reused at
+  //     promote). Doing this upsert (warming replaces any old alive entry)
+  //     BEFORE the destroy means a registry-lock failure here leaves the old
+  //     special + its well fully intact — nothing half-torn-down.
+  const specialChain = await readSpecialModelChain(spec.name);
+  try {
+    await mutateRegistry((cells) =>
+      upsertBirthingCell(cullStaleWarming(cells, Date.now()), {
+        name: spec.name,
+        created_at: new Date().toISOString(),
+        harness: spec.harness,
+        modelChain: specialChain,
+        special: true,
+        pinned: true,
+      }),
+    );
+  } catch (e) {
+    console.error(`birth-special failed: could not pre-register ${spec.name} (${e instanceof Error ? e.message : String(e)})`);
+    process.exit(1);
+  }
+
+  // 1c. NOW destroy any existing well — the registry already points at the
+  //     warming rebake, so even if this or the bake fails the old well is simply
+  //     gone (rollbackSpecial below clears the warming entry). We destroy on a
+  //     leaked *warming* leftover too (a hard-crashed prior birth-special can
+  //     strand both a warming entry AND its well), so bakeSpecial's create never
+  //     hits a name conflict. directWellDestroy is a safe no-op if absent.
+  if (existing) {
+    console.log(`${rebuild ? "rebuild" : "cleanup"}: destroying any existing ${spec.wellName}…`);
+    await directWellDestroy(spec.wellName).catch(() => {});
+  }
+  // Any throw during the long bake rolls the warming entry back so a failed
+  // birth-special doesn't strand a non-authoritative entry (the cull would
+  // also reap it after STALE_WARMING_MS, but rolling back is immediate).
+  const rollbackSpecial = async () => {
+    try { await mutateRegistry((cells) => removeCell(cells, spec.name)); } catch { /* best-effort */ }
+  };
+  try {
+    await bakeSpecial(spec, specialChain);
+  } catch (e) {
+    await rollbackSpecial();
+    throw e;
+  }
+}
+
+// The long, fallible body of birth-special: create the well, provision, seal,
+// pin, install the cell-specific kicker, then promote the pre-registered
+// "warming" entry to "alive". Factored out so cmdBirthSpecial can wrap it in a
+// single rollback-on-throw guard (the warming entry is registered before this
+// runs). Every step is idempotent, so --rebuild needs no special-casing here.
+async function bakeSpecial(spec: SpecialSpec, specialChain: string[]): Promise<void> {
   // 2. Auth env for in-well pi (CELLS_PROXY_SECRET, etc.) — same shape as pool eggs.
   const baseEnv = await collectCellLlmEnv();
   if (!baseEnv.CELLS_PROXY_SECRET) {
@@ -4200,20 +4263,32 @@ echo "name-subst: $(grep -lc __NAME__ AGENTS.md CLAUDE.md SOUL.md package.json .
   //    pin step reads where you'd expect it.)
   await setAutoSleep(spec.wellName, null);
 
-  // 9. Register. Read the model chain from the DNA settings.json — that file
-  //    is the single source of truth for what the special actually runs on.
-  //    (Previously we recorded a parallel hardcoded value here; drift bit us.)
-  const modelChain = await readSpecialModelChain(spec.name);
-  reg.cells.push({
-    name: spec.name,
-    created_at: new Date().toISOString(),
-    status: "alive",
-    harness: spec.harness,
-    modelChain,
-    special: true,
-    pinned: true,
+  // 9. Promote the pre-registered "warming" entry to "alive" (authoritative).
+  //    specialChain came from the DNA settings.json — the single source of
+  //    truth for what the special runs on (recording a parallel hardcoded
+  //    value here once drifted and bit us). Re-read fresh under the lock and
+  //    re-insert if the warming entry somehow vanished (a concurrent kill),
+  //    so a proven special always lands registered + alive.
+  await mutateRegistry((cells) => {
+    let next = promoteCell(cells, spec.name, {
+      modelChain: specialChain,
+      harness: spec.harness,
+      special: true,
+      pinned: true,
+    });
+    if (!findCellIn(next, spec.name)) {
+      next = [...next, {
+        name: spec.name,
+        created_at: new Date().toISOString(),
+        status: "alive" as const,
+        harness: spec.harness,
+        modelChain: specialChain,
+        special: true,
+        pinned: true,
+      }];
+    }
+    return next;
   });
-  await saveRegistry(reg);
 
   console.log(`✓ ${spec.name} born in ${spec.wellName}, pinned (auto_sleep_seconds=null).`);
   console.log(`  next: cells talk ${spec.name}`);
@@ -5016,10 +5091,14 @@ async function cmdDestroyOne(name: string): Promise<boolean> {
   // Local cleanup — always runs, even if the well destroy reported a
   // failure, so a half-gone cell doesn't strand registry/channel/vault
   // state. Each helper is best-effort with internal existsSync/try-catch.
-  const reg = await loadRegistry();
-  const killedCell = reg.cells.find((c) => c.name === name);
-  reg.cells = reg.cells.filter((c) => c.name !== name);
-  await saveRegistry(reg);
+  const killedCell = findCellIn((await loadRegistry()).cells, name);
+  // The well is already destroyed above — a registry-lock failure here must NOT
+  // abort the rest of teardown (channels/vault/worker/pool), or we'd strand a
+  // phantom entry pointing at a gone well AND orphan its side state. Best-effort
+  // + continue; re-running kill clears the entry (destroy is idempotent).
+  await mutateRegistry((cells) => removeCell(cells, name)).catch((e) =>
+    console.warn(`note: registry removal for ${name} failed (${e instanceof Error ? e.message : String(e)}); continuing teardown — re-run \`cells kill ${name}\` to clear the entry`),
+  );
   await evictPulseStateForCell(name);
   await archiveSlackChannelsForCell(name);
   await evictChannelBindingsForCell(name);
@@ -8593,21 +8672,22 @@ async function cmdProject(args: string[]): Promise<void> {
     process.exit(1);
   }
   const project = args.slice(1).join(" ").trim();
-  const reg = await loadRegistry();
-  const cell = reg.cells.find((c) => c.name === name);
-  if (!cell) {
+  if (!findCellIn((await loadRegistry()).cells, name)) {
     console.error(`cell '${name}' not found in registry`);
     process.exit(1);
   }
-  if (!project || project.toLowerCase() === "none") {
-    delete cell.project;
-    await saveRegistry(reg);
-    console.log(`cleared ${name}'s project`);
-  } else {
-    cell.project = project;
-    await saveRegistry(reg);
-    console.log(`${name} → project '${project}'`);
-  }
+  const clearing = !project || project.toLowerCase() === "none";
+  await mutateRegistry((cells) =>
+    cells.map((c) => {
+      if (c.name !== name) return c;
+      if (clearing) {
+        const { project: _drop, ...rest } = c;
+        return rest;
+      }
+      return { ...c, project };
+    }),
+  );
+  console.log(clearing ? `cleared ${name}'s project` : `${name} → project '${project}'`);
 }
 
 // cells chain <cell> [--add <entry>] [--remove <entry>] — inspect or edit a
@@ -8623,13 +8703,12 @@ async function cmdChain(args: string[]): Promise<void> {
     console.error('  entry format: [<harness>:]<provider>/<model>:<thinking>  e.g. claude-code:anthropic/opus:high');
     process.exit(1);
   }
-  const reg = await loadRegistry();
-  const cell = reg.cells.find((c) => c.name === name);
-  if (!cell) {
+  const existing = findCellIn((await loadRegistry()).cells, name);
+  if (!existing) {
     console.error(`cell '${name}' not found in registry`);
     process.exit(1);
   }
-  const chain: string[] = Array.isArray(cell.modelChain) ? cell.modelChain : [];
+  const chain: string[] = Array.isArray(existing.modelChain) ? [...existing.modelChain] : [];
   let changed = false;
   for (let i = 1; i < args.length; i++) {
     if (args[i] === "--add") {
@@ -8649,8 +8728,9 @@ async function cmdChain(args: string[]): Promise<void> {
     }
   }
   if (changed) {
-    cell.modelChain = chain;
-    await saveRegistry(reg);
+    // Re-read fresh under the lock and replace only this cell's chain, so a
+    // concurrent writer (a birth promoting, cells model) isn't clobbered.
+    await mutateRegistry((cells) => cells.map((c) => (c.name === name ? { ...c, modelChain: chain } : c)));
   }
   console.log(`${name} modelChain:`);
   for (const e of chain) console.log(`  ${e}`);
@@ -8674,8 +8754,7 @@ async function cmdModel(args: string[]): Promise<void> {
     console.error("  e.g. cells model advisor-pete openai-codex/gpt-5.5:low");
     process.exit(1);
   }
-  const reg = await loadRegistry();
-  const cell = reg.cells.find((c) => c.name === name);
+  const cell = findCellIn((await loadRegistry()).cells, name);
   if (!cell) {
     console.error(`cell '${name}' not found in registry`);
     process.exit(1);
@@ -8742,11 +8821,19 @@ sync`;
     process.exit(1);
   }
 
-  const chain: string[] = Array.isArray(cell.modelChain) ? cell.modelChain : [];
-  if (chain.length > 0) chain[0] = entry;
-  else chain.push(entry);
-  cell.modelChain = chain;
-  await saveRegistry(reg);
+  // Mirror the new head into the registry chain AFTER the slow well-exec, by
+  // re-reading fresh under the lock — the old code held a snapshot loaded
+  // before the supervisor restart and saved it back, clobbering any write that
+  // landed in between (a birth promoting, another cells model/chain).
+  await mutateRegistry((cells) =>
+    cells.map((c) => {
+      if (c.name !== name) return c;
+      const chain: string[] = Array.isArray(c.modelChain) ? [...c.modelChain] : [];
+      if (chain.length > 0) chain[0] = entry;
+      else chain.push(entry);
+      return { ...c, modelChain: chain };
+    }),
+  );
   console.log(`${name}: conversation model → ${entry} (supervisor restarted, registry updated)`);
 }
 

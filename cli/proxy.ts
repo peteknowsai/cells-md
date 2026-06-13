@@ -61,7 +61,7 @@ import {
   withPoolLock,
 } from "./lib/pool";
 import { isValidCellName } from "./lib/cell-name";
-import { loadRegistry, loadRegistrySafe, saveRegistry, type Registry } from "./lib/registry";
+import { loadRegistry, loadRegistrySafe, saveRegistry, withRegistryLock, isStaleWarming, type Cell, type Registry } from "./lib/registry";
 import { cellRows, type CellRow } from "./lib/status-rows";
 import { ensurePreamble, classifyOAuthRoute, anthropicRouteVerdict, gateCacheNeedsReload } from "./lib/proxy-oauth";
 import { latestOpusFrom, normalizeAnthropicModel } from "./lib/model-normalizer";
@@ -986,9 +986,29 @@ async function bridgeRegistryWrite(body: { cells: any[] }): Promise<Response> {
   if (!body || !Array.isArray(body.cells)) {
     return new Response("bad body: {cells: []}", { status: 400 });
   }
-  // saveRegistry centralizes the write AND makes it atomic (tmp+rename),
-  // so a crash mid-write can't truncate cells.json.
-  await saveRegistry(body as Registry);
+  // This is a full-document overwrite from mother's registry_write tool
+  // (she read-modify-writes the roster across the bridge). Take the registry
+  // lock so it serializes with every Mac-side writer (a birth pre-registering
+  // /promoting, cells model/kill/project/chain) instead of racing them — and
+  // PRESERVE any "warming" entry the incoming body omits. Warming entries are
+  // owned by an in-flight Mac-side birth and are transient; a stale mother
+  // snapshot dropping one would re-introduce the end-test 403 this hardening
+  // exists to prevent. saveRegistry stays atomic (tmp+rename) within the lock.
+  await withRegistryLock(async () => {
+    const current = await loadRegistrySafe();
+    const incoming = new Set(
+      body.cells.map((c: any) => c?.name).filter((n: any): n is string => typeof n === "string"),
+    );
+    // Preserve only FRESH warming entries (an in-flight Mac-side birth). A
+    // stale warming orphan (>15min, from a hard-crashed birth) is dropped here
+    // rather than re-preserved forever — births are the only other reaper, and
+    // they might not run for a while.
+    const now = Date.now();
+    const preservedWarming = current.cells.filter(
+      (c) => c.status === "warming" && !isStaleWarming(c, now) && !incoming.has(c.name),
+    );
+    await saveRegistry({ cells: [...(body.cells as Cell[]), ...preservedWarming] } as Registry);
+  });
   return new Response(null, { status: 204 });
 }
 
