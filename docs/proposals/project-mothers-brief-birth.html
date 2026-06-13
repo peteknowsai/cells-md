@@ -1,0 +1,219 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Project mothers &amp; brief-driven birth</title>
+<link rel="stylesheet" href="../_assets/doc.css">
+<script defer src="../_assets/doc.js"></script>
+</head>
+<body>
+<header>
+  <h1>Project mothers &amp; brief-driven birth</h1>
+  <p class="subtitle">Two changes to <code>cells birth</code>: a project can own its own mother, and you birth a cell by describing it in plain language instead of memorizing flags. Designed 2026-06-13 with Pete. <strong>Shipped 2026-06-13</strong> — Stages 1a/1b on <code>main</code>, Stages 2/3 on <code>feature/project-mothers</code>.</p>
+</header>
+
+<section>
+  <h2>Plain-English summary</h2>
+  <p>
+    Today there is exactly one <strong>mother</strong> — the operator that bakes every new cell — and
+    you birth a cell by spelling out every knob as a flag:
+    <code>cells birth abstractor --harness=claude-code --model=opus --thinking=medium --seed=off</code>.
+  </p>
+  <p>
+    Two things change. First, a <strong>project gets its own mother</strong>: <code>zero-mother</code>
+    bakes homezero's cells, tagged to the <code>zero</code> project, so each project owns and can
+    evolve how it births — without touching the shared global mother. Second, you can
+    <strong>describe the cell you want</strong> and let the mother figure out the knobs:
+    <code>cells birth zero abstractor "national parcel resolver, opus, medium thinking"</code>.
+    Flags still work and still <em>pin</em> any field you name; the brief fills the rest; the mother
+    infers gaps and applies the project's defaults. The brief does double duty — it's both the
+    config and the cell's seed purpose.
+  </p>
+  <p>
+    The load-bearing design choice that keeps this safe: <strong>the brief compiles down to the same
+    deterministic config blob the ritual already runs.</strong> The judgment lives in one
+    previewable "brief → blob" step; the proven, deterministic bake/end-test/postwork ritual is
+    untouched. You get "just figure it out" without trading away the 99%-reliable birth.
+  </p>
+</section>
+
+<section>
+  <h2>The one idea underneath both features</h2>
+  <p>
+    <strong>A mother is a role, not a singleton — and the key that scopes the role is the project.</strong>
+    There is one global <code>mother</code> by default; a project opts into its own. A "project mother"
+    is nothing exotic: an ordinary special cell named <code>&lt;project&gt;-mother</code>, born the same
+    deterministic Mac-side bootstrap the global mother is, running the <em>same</em> birth skill.
+  </p>
+  <p>
+    And the seam between "create a cell" (a job — produce an artifact) and "talk to that cell" (a
+    conversation) is the <strong>durable artifact, not a shared session</strong>: the mother bakes the
+    cell and writes it to the registry; conversation picks it up from there. In homezero the creator
+    and the conversationalist are even <em>different cells</em> (the market cell writes Briefs; the
+    advisor cells chat with buyers) — so artifact-mediation isn't just cleaner, it's the only thing
+    that works.
+  </p>
+</section>
+
+<section>
+  <h2>Feature A — project mothers <span class="tag">shipped</span></h2>
+  <p>The grammar makes creating one fall out for free — "mother" inside a project means that project's mother:</p>
+  <pre><code>cells birth zero mother        # create zero's mother (zero-mother), born Mac-side
+cells birth zero abstractor    # birth abstractor, tagged project=zero</code></pre>
+  <p>Concretely, the touchpoints (every other piece of the bake was already name-generic):</p>
+  <ol>
+    <li><strong>Make one.</strong> <code>cells birth &lt;project&gt; mother</code> reuses
+      <code>cmdBirthSpecial</code>'s deterministic bootstrap (well create → DNA overlay → seal → pin →
+      register). <code>SpecialSpec</code> grew a <code>dnaName</code> + <code>project</code>;
+      <code>resolveSpecialSpec</code> synthesizes a <code>&lt;project&gt;-mother</code> spec from the
+      <em>shared</em> <code>dna/specials/mother/</code> template (well <code>cells-&lt;project&gt;-mother</code>,
+      mother's harness + harnessChain), and <code>__NAME__</code> substitution personalizes it.
+      Registers <code>special:true, pinned:true, project:&lt;p&gt;</code>. No global mother is in the loop.</li>
+    <li><strong>Route births by project.</strong> <code>motherFor(project)</code> resolves the owning
+      mother — <code>&lt;project&gt;-mother</code> if registered + alive, else global <code>mother</code>.
+      The ritual, bake-egg, and postwork are unchanged; only attribution + the project tag change.</li>
+    <li><strong>The role test is a pure helper.</strong> <code>isMotherName</code> /
+      <code>projectOfMother</code> / <code>projectMotherName</code> in <code>lib/cell-name.ts</code> are
+      the single place the naming convention lives. The mother-only rules (the <code>cells run</code>
+      jobs-refusal) key off <code>isMotherName</code> so a project mother gets them too. The
+      <code>&lt;project&gt;-mother</code> namespace is <strong>reserved on the regular birth path</strong>,
+      so every <code>*-mother</code> cell is a real special mother and the name alone is a reliable marker.</li>
+  </ol>
+
+  <h3>Honest caveat: project mothers ≠ parallel births (and the lock stays global)</h3>
+  <p>
+    Per-mother locks <em>look</em> like they buy cross-project parallelism, but mother's ritual
+    reasoning runs as <code>claude --print</code> on Pete's <strong>one</strong> native Mac Claude Code
+    → Max session. Two mothers running rituals at once contend on that single session — which is the
+    real root of the historical ~175s concurrency SIGTERM, not just the lock. So the value of project
+    mothers is <strong>isolation + ownership + a per-project brief front door</strong>, not throughput.
+  </p>
+  <p>
+    <strong>As built, the lock stayed global.</strong> The design floated <code>mother-&lt;name&gt;.lock</code>,
+    but a per-mother lock would let two rituals enter the one Max session concurrently — re-opening the
+    exact contention that caused the SIGTERM. So the single global birth-ritual lock is kept; project
+    mothers serialize their rituals through it. Intra-project births are serial by design (the
+    reliability guarantee); cross-project births serialize too. We do not promise parallel births and
+    deliberately don't build for it. A true per-mother lock only becomes safe once the ritual no longer
+    depends on a single shared Max session.
+  </p>
+</section>
+
+<section>
+  <h2>Feature B — brief-driven birth <span class="tag">shipped</span></h2>
+  <pre><code>cells birth &lt;project&gt; &lt;name&gt; ["freeform brief"] [--flags]
+
+cells birth zero abstractor "national parcel resolver, opus, medium thinking"
+cells birth zero abstractor "..." --model=opus     # flags PIN / override the brief
+cells birth zero parcelbot "..." --dry-run          # print the plan, spend no egg</code></pre>
+
+  <h3>The blob is the contract</h3>
+  <p>
+    The ritual consumes an opaque 8-field config blob. The brief-compiler's <em>only</em> job is to
+    pre-fill <code>opts</code>, which flows through cmdCreate's existing resolution + validators to emit
+    exactly this shape; everything downstream (bake-egg.sh, birth-postwork.sh) is untouched.
+  </p>
+  <table>
+    <thead><tr><th>field</th><th>role</th><th>load-bearing invariant</th></tr></thead>
+    <tbody>
+      <tr><td><code>harness</code></td><td>pi / claude-code / codex / hermes</td><td>selects config tree + end-test + update branch</td></tr>
+      <tr><td><code>model</code></td><td>the model <em>id string</em></td><td>must be <code>MODEL_IDS[key].modelId</code>, NOT the friendly key</td></tr>
+      <tr><td><code>provider</code></td><td>anthropic / openai-codex / openai</td><td>must match the model's provider + the harness↔provider rule</td></tr>
+      <tr><td><code>thinking</code></td><td>effort</td><td>valid for the harness scale; adaptive is opus-only; sub-medium auto-bumps on some models</td></tr>
+      <tr><td><code>chain</code></td><td>fallback model chain</td><td>rebuilt LAST from (provider, model, thinking) via buildDefaultChain — never free-form</td></tr>
+      <tr><td><code>extensions</code></td><td>pi extensions</td><td>optional; pi-branch only; must be OPTIONAL_EXTENSIONS values</td></tr>
+      <tr><td><code>packages</code></td><td>npm packages</td><td>optional; pi-branch only</td></tr>
+      <tr><td><code>channels</code></td><td>slack / email</td><td>optional; bound async in postwork (NOT live at birth-return)</td></tr>
+    </tbody>
+  </table>
+
+  <h3>The compiler lives Mac-side, and is deterministic</h3>
+  <p>
+    The whole validation gauntlet (harness↔provider↔thinking compatibility, <code>MODEL_IDS</code>
+    lookup, <code>buildDefaultChain</code>, the thinking auto-bump) already runs Mac-side in
+    <code>cmdCreate</code> <em>before</em> the blob is built. Compiling the brief there
+    (<code>lib/brief.ts#compileBrief</code>) means the compiled hints flow through those validators for
+    free, and the preview shows a blob that's already proven legal. As built the compiler is
+    <strong>deterministic keyword extraction</strong>, not an LLM call — config hints are
+    <strong>a trailing run of comma-separated tokens</strong> it recognizes (a model key, a thinking
+    level — bare or "<code>&lt;level&gt; thinking</code>" / "<code>thinking &lt;level&gt;</code>" /
+    "<code>&lt;level&gt; effort</code>" — or a harness, bare or "<code>&lt;harness&gt; harness</code>").
+    Everything before the trailing config run is the purpose, so a config-like word <em>inside</em> the
+    purpose ("<code>keep it low, friendly</code>") is never silently consumed. An LLM-assisted resolver
+    can later replace the extractor behind the same <code>(brief, vocab) → CompiledBrief</code> shape —
+    that's the documented "later" layer, not this stage.
+  </p>
+  <p>
+    <strong>Precedence:</strong> an explicit <code>--flag</code> PINS a field; otherwise the brief fills
+    it; otherwise cmdCreate's per-harness default fills it. One inference: an Anthropic model with no
+    harness pinned implies <code>claude-code</code> (the Max policy), rather than the <code>pi</code>
+    default that would fail validation. The leftover purpose becomes the cell's seed (its first
+    message) unless <code>--seed</code> pinned one.
+  </p>
+
+  <h3>Grammar disambiguation</h3>
+  <p>The brief must be quoted (the shell keeps it one argv element). Rule, applied after the flag parse:</p>
+  <ul>
+    <li>strip a trailing positional that <em>contains whitespace</em> — that's the brief;</li>
+    <li>of what remains: <strong>0</strong> → <code>cells birth</code> (auto-name, unchanged); <strong>1</strong> → <code>cells birth &lt;name&gt;</code> (unchanged); <strong>2</strong> → <code>cells birth &lt;project&gt; &lt;name&gt;</code>.</li>
+  </ul>
+  <p>So <code>cells birth bob "be helpful"</code> (name + brief) and <code>cells birth zero api "fast chat cell"</code> (project + name + brief) are both unambiguous, and <code>cells birth &lt;name&gt;</code> / <code>cells birth</code> keep working. <code>cells birth &lt;project&gt; mother "..."</code> is refused with a clear message (a project mother takes no brief).</p>
+  <p>Brief-driven births preview the compiled plan and confirm before spending an egg; <code>--yes</code> skips the confirm, <code>--dry-run</code>/<code>--plan</code> prints the plan and exits with no egg — matching the "trade speed for visibility" rule birth already lives by.</p>
+</section>
+
+<section>
+  <h2>Hard findings from the surface map (what bit, and how it was handled)</h2>
+  <ul>
+    <li><strong>Registry lock was a prerequisite.</strong> The registry's read-modify-write writes were
+      lock-free and only <em>incidentally</em> safe because the single global mother lock serialized
+      births. Shipped as Stage 1b: a shared <code>withRegistryLock</code> (atomic <code>O_EXCL</code>,
+      dead-holder reclaim) around every <code>cells.json</code> writer.</li>
+    <li><strong>~8 sites hardcoded <code>name === "mother"</code>.</strong> Audited: only the
+      <code>cells run</code> jobs-refusal needed generalizing (a project mother serializes births too).
+      The talk/shell/dream/sync sites are global-mother <em>bootstrap</em> fall-throughs a project
+      mother (always a real cell) correctly passes through.</li>
+    <li><strong><code>SPECIALS</code> was a closed <code>"mother"|"pulse"</code> union</strong> —
+      generalized via <code>resolveSpecialSpec</code> + a <code>dnaName</code> field. Both the
+      synthesized cell name and well name are DNS-label validated (closing the &gt;63-char and
+      bad-character cases on the direct <code>birth-special &lt;project&gt;-mother</code> path).</li>
+    <li><strong>"mother" is in <code>RESERVED_NAMES</code>.</strong> <code>cells birth &lt;project&gt;
+      mother</code> routes to project-mother creation before the guard; bare <code>cells birth
+      mother</code> stays blocked; and the whole <code>*-mother</code> namespace is reserved on the
+      regular birth path so the name stays a reliable mother marker.</li>
+    <li><strong>No end-test in <code>birth-special</code>.</strong> Project mothers are baked
+      deterministically with no smoke test (like the global mother), so they don't hit the
+      register-before-end-test bug — but pre-register-as-warming (Stage 1b) still guards their
+      always-on loop's first proxy call. A broken project mother surfaces on her first ritual.</li>
+  </ul>
+</section>
+
+<section>
+  <h2>Staged plan — all shipped</h2>
+  <ol>
+    <li><strong>Stage 1a — register-before-end-test fix</strong> <span class="tag">done</span> (PR #1, on <code>main</code>). Two-phase registry (warming → alive), proxy reload-on-miss, throw-safety, fleet readers skip warming.</li>
+    <li><strong>Stage 1b — registry-lock foundation</strong> <span class="tag">done</span> (PR #2, on <code>main</code>). <code>withRegistryLock</code> + <code>mutateRegistry</code> across every <code>cells.json</code> writer; dead-holder reclaim; pre-register the pulse special before its loop; stale-warming cull.</li>
+    <li><strong>Stage 2 — project mothers</strong> <span class="tag">done</span> (<code>feature/project-mothers</code>). Generalized <code>SPECIALS</code>; <code>motherFor(project)</code>; the <code>name === "mother"</code> audit; <code>cells birth &lt;project&gt; mother</code>. Per-mother lock deferred (see the caveat) — the lock stays global.</li>
+    <li><strong>Stage 3 — brief-driven birth</strong> <span class="tag">done</span> (<code>feature/project-mothers</code>). The <code>&lt;project&gt; &lt;name&gt; "brief"</code> grammar; the deterministic Mac-side trailing-run compiler (flag-pinned, default-filled, Anthropic→claude-code inferred); preview/confirm + <code>--yes</code> + <code>--dry-run</code>.</li>
+    <li><strong>Later — slash-command recipes</strong> in the brief (named blob-templates the compiler recognizes), and an LLM-assisted resolver behind the same compiler interface.</li>
+  </ol>
+</section>
+
+<section>
+  <h2>Deliberately not built</h2>
+  <ul>
+    <li><strong>Per-project birth-DNA forks.</strong> All mothers share the one birth ritual; project
+      specifics ride in the blob / birth template.</li>
+    <li><strong>Per-mother locks.</strong> Deferred — they'd let two rituals hit the one Max session at
+      once. The lock stays global until the ritual stops depending on a single shared session.</li>
+    <li><strong>Mother hierarchies / auto-spawn-on-first-birth.</strong> A project mother is just a special
+      cell you create explicitly.</li>
+    <li><strong>True parallel births.</strong> The single Max session is the bottleneck (see the caveat).</li>
+    <li><strong>NL compilation inside the ritual.</strong> The ritual stays deterministic; the brief
+      compiles Mac-side to the same blob.</li>
+  </ul>
+  <p>If a project never makes a mother, nothing changes — the global mother handles everything exactly as today. The pattern generalizes for free later: the same "role tagged to a project" shape would give a project its own <code>pulse</code> or <code>steward</code> if ever wanted.</p>
+</section>
+
+</body>
+</html>

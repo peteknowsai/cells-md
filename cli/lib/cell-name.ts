@@ -27,6 +27,34 @@ export function describeCellNameRules(): string {
   return `cell names must be ${CELL_NAME_MIN}–${CELL_NAME_MAX} chars, lowercase letters/digits/hyphen, no leading or trailing hyphen`;
 }
 
+// ── Mother naming ────────────────────────────────────────────────────────
+// A mother is a ROLE keyed by project, not a singleton: the global `mother`,
+// or a project's `<project>-mother`. These pure helpers are the single place
+// the naming convention lives, so the role test, the project derivation, and
+// the name construction can't drift apart.
+
+const MOTHER_SUFFIX = "-mother";
+
+// True for the global mother and every project mother.
+export function isMotherName(name: string): boolean {
+  return name === "mother" || name.endsWith(MOTHER_SUFFIX);
+}
+
+// The project a mother name belongs to: "" for the global `mother`, the project
+// for "<project>-mother", or null if the name isn't a mother at all.
+export function projectOfMother(name: string): string | null {
+  if (name === "mother") return "";
+  if (name.endsWith(MOTHER_SUFFIX) && name.length > MOTHER_SUFFIX.length) {
+    return name.slice(0, -MOTHER_SUFFIX.length);
+  }
+  return null;
+}
+
+// The mother name for a project: "<project>-mother".
+export function projectMotherName(project: string): string {
+  return `${project}${MOTHER_SUFFIX}`;
+}
+
 export function validateCellName(name: string): { ok: true } | { ok: false; reason: string } {
   if (typeof name !== "string" || name.length === 0) {
     return { ok: false, reason: "cell name is empty" };
