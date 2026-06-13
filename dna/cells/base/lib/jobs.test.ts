@@ -47,8 +47,23 @@ describe("buildJobScript", () => {
     const r = buildJobScript("pi", P);
     expect(r.ok).toBe(true);
     if (!r.ok) return;
-    expect(r.script).toContain("pi --print --session-dir");
+    expect(r.script).toContain("pi --print $PI_EXT --session-dir");
     expect(r.script).not.toContain("--fork");
+  });
+
+  test("pi: explicitly loads the codex-proxy extension (pi-ai has no env-var fallback for openai-codex)", () => {
+    // pi's auto-discovery doesn't load the extension under --print --session-dir,
+    // so the provider goes unauthenticated and the job dies "No API key found for
+    // openai-codex" even with the key in the env. Load it by absolute path,
+    // guarded so a cell without it still runs. Regression guard for the
+    // 2026-06-13 jobs-lane codex-auth bug.
+    const r = buildJobScript("pi", P);
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.script).toContain("-e /root/.pi/extensions/codex-proxy/index.ts");
+    expect(r.script).toContain("[ -f /root/.pi/extensions/codex-proxy/index.ts ]");
+    // the -e flag must come before the prompt is consumed (i.e. on the pi line)
+    expect(r.script.indexOf("PI_EXT")).toBeLessThan(r.script.indexOf("pi --print"));
   });
 
   test("hermes: fails fast with a clear error", () => {
