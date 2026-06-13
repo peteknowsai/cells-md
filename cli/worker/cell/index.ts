@@ -19,6 +19,8 @@
  *                         token is a Worker secret — it never lands on
  *                         a cell VM. Returns the delivery URL.
  *   GET  /debug         — dump current DO state (ws status, active turn).
+ *   GET  /jobs          — job-lane status map (docs/proposals/jobs.html);
+ *                         answers without waking the cell.
  *
  * Public route (no auth — this is the cell's public face):
  *   GET  /*             — <cell>.cells.md, served from the snapshot the
@@ -110,7 +112,8 @@ export default {
       path === "/inbox/append" ||
       path === "/site/publish" ||
       path === "/image/upload" ||
-      path === "/debug"
+      path === "/debug" ||
+      path === "/jobs"
     ) {
       const auth = req.headers.get("authorization") ?? "";
       if (auth !== `Bearer ${env.CELLS_PROXY_SECRET}`) {
@@ -130,13 +133,19 @@ export default {
       if (req.method === "POST" && path === "/inbox/append") {
         const bodyText = await req.text();
         // Forward into the DO, which owns the WebSocket to the well and
-        // the per-turn Slack message lifecycle.
+        // the per-turn Slack message lifecycle. Pass the DO's status and
+        // body through — the jobs lane returns the job id on 202 and a
+        // reason on refusal (400/413/429), and swallowing them made every
+        // failure look the same to the submitter.
         const r = await doStub(env).fetch("https://do/append", {
           method: "POST",
           headers: { "content-type": "application/json" },
           body: bodyText,
         });
-        return new Response(null, { status: r.ok ? 202 : r.status });
+        return new Response(r.body, {
+          status: r.status,
+          headers: { "content-type": r.headers.get("content-type") ?? "text/plain" },
+        });
       }
 
       if (req.method === "POST" && path === "/site/publish") {
@@ -157,6 +166,12 @@ export default {
 
       if (req.method === "GET" && path === "/debug") {
         return doStub(env).fetch("https://do/debug");
+      }
+
+      // Job status without waking the cell — the DO's view, fed by the
+      // runner's job_accepted/job_done frames (docs/proposals/jobs.html).
+      if (req.method === "GET" && path === "/jobs") {
+        return doStub(env).fetch("https://do/jobs");
       }
 
       return new Response("not found", { status: 404 });

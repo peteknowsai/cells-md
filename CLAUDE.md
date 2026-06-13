@@ -78,6 +78,8 @@ Lifecycle: `birth`/`create`, `birth-special` (mother/pulse), `kill`/`destroy`,
 `sleep`, `wake`, `stop`, `pin`/`unpin`, `checkpoint`.
 Talk: `talk` (ask a peer), `verify` (cross-check a decision across peers), `tui`,
 `shell`, `exec`, `see`.
+Jobs: `run` (durable background work — fresh detached session + watchdog;
+talk is chat, run is work), `jobs` (status/results; docs/proposals/jobs.html).
 Fleet: `agents`/`fleet` (the cockpit — full-screen Ink TUI, every cell grouped
 by **project**, jump into a TUI / talk / birth without leaving the grid;
 `docs/agents.html`), `project <cell> [<name>]` (tag/clear a cell's project).

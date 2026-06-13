@@ -9,6 +9,7 @@ import { fileURLToPath } from "node:url";
 import * as readline from "node:readline/promises";
 import { createHash, randomBytes } from "node:crypto";
 import { planReconcileEvictions } from "./lib/reconcile";
+import { ulid } from "./shared/agent-envelope";
 import { needsSeal } from "./lib/hibernate-ready";
 import { SECRETS_PATH, readSecret } from "./lib/secrets";
 import { validateCellName } from "./lib/cell-name";
@@ -1292,6 +1293,193 @@ async function runTalkOnCell(
     return { ok: false, exitCode, error: stderrRaw.trim(), text: stdoutTrimmed };
   }
   return { ok: true, text: stdoutTrimmed };
+}
+
+// ── jobs lane — `cells run` / `cells jobs` (docs/proposals/jobs.html) ──
+//
+// Talk is conversation; run is work. A job submit POSTs a kind:"job" event
+// to the cell's DO and prints the job id immediately — no wake, no SSH, no
+// held socket. The on-cell runner executes it in a fresh detached session
+// under a frame-progress watchdog (kill, retry once, durably mark failed).
+
+async function cmdRun(cellName: string, rest: string[]): Promise<void> {
+  if (cellName === "mother") {
+    console.error("! jobs on mother are refused — mother serializes births on mother.lock; a detached job racing a ritual is the known silent-deadlock");
+    process.exit(1);
+  }
+  await requireCell(cellName);
+  let timeoutS = 3600;
+  const positional: string[] = [];
+  for (let i = 0; i < rest.length; i++) {
+    const a = rest[i]!;
+    if (a === "--timeout" || a.startsWith("--timeout=")) {
+      const raw = a.includes("=") ? a.slice("--timeout=".length) : (rest[++i] ?? "");
+      const m = raw.match(/^(\d+)([smh]?)$/);
+      if (!m) {
+        console.error(`! bad --timeout value: '${raw}' (use 90s / 30m / 2h)`);
+        process.exit(1);
+      }
+      const n = Number(m[1]);
+      timeoutS = m[2] === "h" ? n * 3600 : m[2] === "m" ? n * 60 : n;
+    } else if (a.startsWith("--")) {
+      console.error(`! unknown flag for run: ${a}`);
+      process.exit(1);
+    } else {
+      positional.push(a);
+    }
+  }
+  const task = positional.join(" ").trim();
+  if (!task) {
+    console.error(`usage: cells run <name> "<task>" [--timeout 30m]`);
+    process.exit(1);
+  }
+  const secret = await readSecret("CELLS_PROXY_SECRET");
+  if (!secret) {
+    console.error(`! no CELLS_PROXY_SECRET in ${SECRETS_PATH}`);
+    process.exit(1);
+  }
+  const base = `https://${cellName}.cells.md`;
+
+  // Capability probe — an old worker misroutes kind:"job" into the
+  // conversation path (the DO's default kind is a slack prompt), which
+  // would inject the task into the cell's chat. /debug grew a `jobs` key
+  // with the lane; refuse to submit without it.
+  let debug: any = null;
+  try {
+    const res = await fetch(`${base}/debug`, {
+      headers: { authorization: `Bearer ${secret}` },
+      signal: AbortSignal.timeout(15_000),
+    });
+    if (res.ok) debug = await res.json();
+  } catch {}
+  if (!debug || !Array.isArray(debug.jobs)) {
+    console.error(`! ${cellName}'s worker predates the jobs lane — redeploy it first:`);
+    console.error(`    bash scripts/deploy-cell-worker.sh ${cellName}`);
+    process.exit(1);
+  }
+
+  const jobId = ulid();
+  let lastErr = "";
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    try {
+      const res = await fetch(`${base}/inbox/append`, {
+        method: "POST",
+        headers: { "content-type": "application/json", authorization: `Bearer ${secret}` },
+        body: JSON.stringify({
+          event: { kind: "job", job_id: jobId, text: task, timeout_seconds: timeoutS },
+        }),
+        signal: AbortSignal.timeout(15_000),
+      });
+      if (res.ok) {
+        console.log(`job ${jobId}  queued at ${cellName} (timeout ${timeoutS}s)`);
+        console.log(`      check: cells jobs ${cellName}`);
+        return;
+      }
+      lastErr = `${res.status}: ${(await res.text()).slice(0, 200)}`;
+      // Policy refusals are deterministic — retrying re-asks the same question.
+      if ([400, 413, 429].includes(res.status)) break;
+    } catch (e) {
+      lastErr = String(e).slice(0, 200);
+    }
+    await new Promise((r) => setTimeout(r, 2000 * attempt));
+  }
+  console.error(`! job submit failed: ${lastErr}`);
+  process.exit(1);
+}
+
+async function isWellServing(wellName: string): Promise<boolean> {
+  const base = process.env.WELL_API_URL ?? "http://127.0.0.1:7878";
+  try {
+    const token = await wellsToken();
+    const info = await fetch(`${base}/v1/wells/${encodeURIComponent(wellName)}`, {
+      headers: { Authorization: `Bearer ${token}` },
+      signal: AbortSignal.timeout(3000),
+    }).then((r) => r.json());
+    return info?.status === "running";
+  } catch {
+    return false;
+  }
+}
+
+async function cmdJobs(cellName: string, rest: string[]): Promise<void> {
+  await requireCell(cellName);
+  const jobId = rest.find((a) => !a.startsWith("--")) ?? "";
+  // The id is interpolated into a root `bash -lc` on the cell (the awake
+  // path curls http://127.0.0.1:8080/jobs/<id>). Constrain it to the job-id
+  // charset BEFORE it can reach a shell — a metacharacter would otherwise
+  // execute as root inside the VM (codex P2).
+  if (jobId && !/^[0-9A-Za-z][0-9A-Za-z_-]{7,39}$/.test(jobId)) {
+    console.error(`! invalid job id: ${jobId}`);
+    process.exit(1);
+  }
+  const wellName = await wellNameForCell(cellName);
+
+  // Awake cell: full detail straight from the job files. If the local
+  // /jobs endpoint is missing (running cell, supervisor not yet refreshed
+  // to a jobs-capable build — the documented version-skew window), don't
+  // error out: fall through to the DO status view, which the new Worker
+  // serves regardless of supervisor version.
+  if (wellName && (await isWellServing(wellName))) {
+    const path = jobId ? `/jobs/${jobId}` : "/jobs";
+    // The /jobs route is bearer-gated (it serves durable result text). The
+    // secret is in the guest env via cells-env.sh; -lc sources it. jobId is
+    // already validated to the job-id charset above, so the interpolation
+    // is shell-safe.
+    const r = await wellExecCapture(
+      wellName,
+      `curl -sf --max-time 5 -H "Authorization: Bearer $CELLS_PROXY_SECRET" http://127.0.0.1:8080${path}`,
+      { user: "root" },
+    );
+    let j: any = null;
+    if (r.ok) { try { j = JSON.parse(r.stdout); } catch { j = null; } }
+    if (j) {
+      if (jobId) {
+        const { result, ...meta } = j;
+        console.log(JSON.stringify(meta, null, 2));
+        if (result) console.log(`\n── result ──\n${result}`);
+        return;
+      }
+      const jobs: any[] = Array.isArray(j.jobs) ? j.jobs : [];
+      if (!jobs.length) { console.log(`no jobs on ${cellName}`); return; }
+      for (const rec of jobs) {
+        const flags = [rec.reason, rec.attempts > 1 ? `attempts=${rec.attempts}` : ""].filter(Boolean).join(" ");
+        console.log(`${rec.id}  ${String(rec.status).padEnd(7)}  ${rec.created_at}${flags ? `  [${flags}]` : ""}`);
+      }
+      console.log(`\ndetail: cells jobs ${cellName} <job-id>`);
+      return;
+    }
+    // Local read failed — note it and fall through to the DO view.
+    console.error(`(note: ${cellName} is awake but its /jobs endpoint didn't answer — supervisor may predate the jobs lane; showing the DO view)`);
+  }
+
+  const secret = await readSecret("CELLS_PROXY_SECRET");
+  if (!secret) {
+    console.error(`! no CELLS_PROXY_SECRET in ${SECRETS_PATH}`);
+    process.exit(1);
+  }
+  let j: any = null;
+  try {
+    const res = await fetch(`https://${cellName}.cells.md/jobs`, {
+      headers: { authorization: `Bearer ${secret}` },
+      signal: AbortSignal.timeout(15_000),
+    });
+    if (res.ok) j = await res.json();
+    else if (res.status === 404) {
+      console.error(`! ${cellName}'s worker predates the jobs lane — redeploy it: bash scripts/deploy-cell-worker.sh ${cellName}`);
+      process.exit(1);
+    }
+  } catch {}
+  if (!j) {
+    console.error(`! could not reach ${cellName}.cells.md/jobs`);
+    process.exit(1);
+  }
+  const jobs: any[] = Array.isArray(j.jobs) ? j.jobs : [];
+  const filtered = jobId ? jobs.filter((r) => r.id === jobId) : jobs;
+  if (!filtered.length) { console.log(`no jobs at ${cellName} (DO view — cell is asleep)`); return; }
+  for (const rec of filtered) {
+    console.log(`${rec.id}  ${String(rec.status).padEnd(7)}  ${rec.created_at}${rec.summary ? `  ${String(rec.summary).split("\n")[0].slice(0, 100)}` : ""}`);
+  }
+  console.log(`\n(cell asleep — DO status view; wake it for full detail + results)`);
 }
 
 // `cells verify` — fan out a decision to N peers in parallel, return their
@@ -8485,6 +8673,8 @@ switch (sub) {
     break;
   }
   case "verify":     await cmdVerify(rest); break;
+  case "run":        await cmdRun(needName(rest, "run"), rest.slice(1)); break;
+  case "jobs":       await cmdJobs(needName(rest, "jobs"), rest.slice(1)); break;
   case "list":       await cmdList(); break;
   case "agents":
   case "fleet":      await cmdAgents(rest); break;
@@ -8545,6 +8735,10 @@ switch (sub) {
     console.log("  cells talk <name> [msg]     interactive bridge chat (no msg) or one-shot (with msg).");
     console.log("                              Reply streams in this terminal AND mirrors to Slack — same session as Slack.");
     console.log("                              'mother' is special: accepts any pi flag (-c, -r, --session=<id>, -p ...).");
+    console.log("  cells run <name> \"<task>\" [--timeout 30m]");
+    console.log("                              hand the cell a background JOB: returns a job id immediately, runs in a");
+    console.log("                              fresh detached session under a progress watchdog. Talk = chat; run = work.");
+    console.log("  cells jobs <name> [<job-id>]  job status + results (DO view if the cell is asleep — never wakes it)");
     console.log("  cells tui <name>            drop into a well-side tmux shell (debug, file poking, etc).");
     console.log("  cells list                  list known cells");
     console.log("  cells sleep <name>          hibernate a cell — releases VM RAM, wakes on inbound traffic");

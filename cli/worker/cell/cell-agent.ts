@@ -39,6 +39,18 @@ import {
   sortedThreadId,
   type AgentEnvelope,
 } from "../../shared/agent-envelope";
+import {
+  admitJob,
+  applyJobAccepted,
+  applyJobDone,
+  evictTerminal,
+  isTerminal,
+  jobFrame,
+  jobSummary,
+  MAX_ACTIVE_JOBS,
+  validateJobSubmit,
+  type DoJobRecord,
+} from "../../shared/jobs";
 
 interface Env {
   CELL_NAME: string;
@@ -157,6 +169,12 @@ type PersistedState = {
   // frame_ack; unacked frames re-send on reconnect and on the alarm tick
   // until acked or expired. The supervisor dedupes by corr_id.
   pendingFrames?: [string, { frame: string; at: number }][];
+  // Jobs lane (docs/proposals/jobs.html): durable background work records.
+  // A queued record holds the prompt and is re-sent to the supervisor on
+  // every alarm tick + reconnect until job_accepted — deliberately NOT on
+  // pendingFrames, whose 10-minute expiry is tuned to talk timeouts and
+  // would silently drop a job aimed at a long-unreachable cell.
+  jobs?: [string, DoJobRecord][];
   flushBackoffMs: number;
   last429At: number;
 };
@@ -190,6 +208,7 @@ export class CellAgent {
   private last429At = 0;
   private pendingAgentForks: Map<string, { reply_to: string; from: string; thread_id: string }> = new Map();
   private pendingFrames: Map<string, { frame: string; at: number }> = new Map();
+  private jobs: Map<string, DoJobRecord> = new Map();
 
   constructor(state: DurableObjectState, env: Env) {
     this.state = state;
@@ -222,6 +241,7 @@ export class CellAgent {
     this.wsQueue = Array.isArray(p.wsQueue) ? p.wsQueue : [];
     this.pendingAgentForks = new Map(Array.isArray(p.agentForks) ? p.agentForks : []);
     this.pendingFrames = new Map(Array.isArray(p.pendingFrames) ? p.pendingFrames : []);
+    this.jobs = new Map(Array.isArray(p.jobs) ? p.jobs : []);
     this.flushBackoffMs = p.flushBackoffMs ?? FLUSH_INTERVAL_MS;
     this.last429At = p.last429At ?? 0;
   }
@@ -243,6 +263,7 @@ export class CellAgent {
       wsQueue: this.wsQueue,
       agentForks: [...this.pendingAgentForks.entries()],
       pendingFrames: [...this.pendingFrames.entries()],
+      jobs: [...this.jobs.entries()],
       flushBackoffMs: this.flushBackoffMs,
       last429At: this.last429At,
     };
@@ -275,6 +296,7 @@ export class CellAgent {
     if (req.method === "POST" && url.pathname === "/append") return this.handleAppend(req);
     if (req.method === "POST" && url.pathname === "/site-publish") return this.handleSitePublish(req);
     if (req.method === "GET" && url.pathname === "/debug") return this.handleDebug();
+    if (req.method === "GET" && url.pathname === "/jobs") return this.handleJobsList();
     // Public site serve — the worker names this route and passes the real
     // request path in x-site-path, so public traffic can never reach the
     // control-plane routes above.
@@ -303,7 +325,20 @@ export class CellAgent {
     if (this.pendingFrames.size) {
       this.resendPendingFrames(this.bridgeWs());
     }
-    if (this.currentTurn?.pendingDelivery || this.pendingFrames.size) {
+    // Queued jobs re-send until the runner's job_accepted — no expiry; the
+    // job file on the cell is the dedupe, so duplicates are harmless.
+    await this.resendQueuedJobs(null);
+    if (this.currentTurn?.pendingDelivery || this.pendingFrames.size || this.queuedJobCount() > 0) {
+      // Reliable work still pending a full alarm tick later means delivery
+      // is broken even if the socket LOOKS healthy: a cell that hibernated
+      // seconds ago leaves a zombie WS that Cloudflare reports OPEN, every
+      // send into it vanishes, and nothing would ever ring the doorbell
+      // (advisor-pete job stuck queued forever, 2026-06-13). A wake on an
+      // already-running well is a ~100ms no-op; a real wake replaces the
+      // zombie with a fresh dial-in and acceptBridge re-sends everything.
+      if (this.pendingFrames.size || this.queuedJobCount() > 0) {
+        await this.ringDoorbell();
+      }
       await this.state.storage.setAlarm(Date.now() + ALARM_INTERVAL_MS);
     }
     await this.persist();
@@ -325,6 +360,13 @@ export class CellAgent {
     // and email continue through their existing path below.
     if (event.kind === "agent") {
       return this.handleAgentEnvelope(event);
+    }
+
+    // Jobs lane — durable background work (docs/proposals/jobs.html).
+    // Acks on ENQUEUE: persist the record, 202 with the job id, and let
+    // delivery ride the alarm. Never the conversation path below.
+    if (event.kind === "job") {
+      return this.handleJobSubmit(event);
     }
 
     const channel = String(event.channel ?? "");
@@ -520,6 +562,108 @@ export class CellAgent {
     }
   }
 
+  // ---- jobs lane (docs/proposals/jobs.html) ----
+
+  private queuedJobCount(): number {
+    let n = 0;
+    for (const rec of this.jobs.values()) if (rec.status === "queued") n++;
+    return n;
+  }
+
+  // POST /inbox/append with event.kind === "job". The 202 means "enqueued at
+  // the DO" — it must return immediately, so the doorbell is fired without
+  // being awaited (the agent path's 202 blocks on `well start` for a
+  // hibernated cell; a job submit must not inherit that).
+  private async handleJobSubmit(event: any): Promise<Response> {
+    const v = validateJobSubmit(event);
+    if (!v.ok) return new Response(v.reason, { status: v.status });
+    const decision = admitJob(this.jobs.values(), v.job.id);
+    if (decision.kind === "duplicate") {
+      // At-least-once submitters re-POST; same id = same job.
+      return Response.json({ job_id: decision.rec.id, status: decision.rec.status });
+    }
+    if (decision.kind === "full") {
+      return new Response(`job queue full (${MAX_ACTIVE_JOBS} active)`, { status: 429 });
+    }
+    const rec: DoJobRecord = {
+      id: v.job.id,
+      created_at: new Date().toISOString(),
+      timeout_seconds: v.job.timeoutSeconds,
+      status: "queued",
+    };
+    // The prompt gets its own storage key — packed into the snapshot, a few
+    // max-size queued prompts would blow the 128 KiB per-value cap and take
+    // every other piece of DO state down with them.
+    await this.state.storage.put(`job-prompt:${rec.id}`, v.job.prompt);
+    this.jobs.set(rec.id, rec);
+    console.log(`[${this.env.CELL_NAME}] job ${rec.id} enqueued (${v.job.prompt.length}B, timeout=${rec.timeout_seconds}s)`);
+    // Opportunistic send AND a doorbell either way: an open-looking socket
+    // can be a fresh-hibernation zombie that swallows the frame silently,
+    // and only a wake replaces it. The ring is deduped and a no-op on a
+    // running well; the alarm keeps both up until job_accepted.
+    const ws = this.bridgeWs();
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      try { ws.send(jobFrame(rec, v.job.prompt)); } catch { /* alarm re-sends */ }
+    }
+    void this.ringDoorbell();
+    // The alarm is the delivery engine — re-sends until job_accepted.
+    if ((await this.state.storage.getAlarm()) == null) {
+      await this.state.storage.setAlarm(Date.now() + 5_000);
+    }
+    await this.persist();
+    return Response.json({ job_id: rec.id, status: "queued" }, { status: 202 });
+  }
+
+  // Re-send every still-queued job frame. Reconnect passes the fresh socket;
+  // the alarm passes null and we ring the doorbell if nothing is live. The
+  // runner dedupes by job-file existence, so duplicates are harmless.
+  private async resendQueuedJobs(ws: WebSocket | null): Promise<void> {
+    const queued = [...this.jobs.values()].filter((r) => r.status === "queued");
+    if (!queued.length) return;
+    const live = ws ?? this.bridgeWs();
+    if (live && live.readyState === WebSocket.OPEN) {
+      for (const rec of queued) {
+        try {
+          const prompt = await this.state.storage.get<string>(`job-prompt:${rec.id}`);
+          if (typeof prompt !== "string") {
+            // Prompt vanished (manual storage surgery?) — the job can never
+            // run; fail it durably instead of re-sending an empty frame.
+            rec.status = "failed";
+            rec.ok = false;
+            rec.summary = "job prompt missing from DO storage";
+            rec.finished_at = new Date().toISOString();
+            continue;
+          }
+          live.send(jobFrame(rec, prompt));
+          console.log(`[${this.env.CELL_NAME}] re-sent job frame ${rec.id}`);
+        } catch (e) {
+          console.error(`[${this.env.CELL_NAME}] job frame re-send failed: ${String(e).slice(0, 120)}`);
+        }
+      }
+    } else {
+      await this.ringDoorbell();
+    }
+  }
+
+  // Tell the runner we've durably recorded its completion so it stops
+  // re-sending job_done. Best-effort: if the WS is down the runner re-sends
+  // on its next tick and we ack then.
+  private ackJobDone(id: string): void {
+    if (!id) return;
+    const ws = this.bridgeWs();
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      try { ws.send(JSON.stringify({ type: "job_done_ack", id })); } catch {}
+    }
+  }
+
+  private async handleJobsList(): Promise<Response> {
+    await this.ensureLoaded();
+    return Response.json({
+      cell: this.env.CELL_NAME,
+      jobs: [...this.jobs.values()].map(jobSummary),
+    });
+  }
+
   private async handleDebug(): Promise<Response> {
     await this.ensureLoaded();
     const siteMeta = await this.state.storage.get<SiteMeta>("site:__meta__");
@@ -528,6 +672,9 @@ export class CellAgent {
       cell: this.env.CELL_NAME,
       wsState: ws ? ws.readyState : null,
       queued: this.wsQueue.length,
+      // Presence of this key is the `cells run` capability probe — an older
+      // worker would misroute kind:"job" into the conversation path.
+      jobs: [...this.jobs.values()].map(jobSummary),
       site: siteMeta
         ? { files: siteMeta.paths.length, paths: siteMeta.paths, publishedAt: siteMeta.publishedAt }
         : null,
@@ -682,6 +829,8 @@ export class CellAgent {
     // Frames sent into the previous (zombie) socket and never acked get a
     // second life on the fresh one. The supervisor dedupes by corr_id.
     if (this.pendingFrames.size) this.resendPendingFrames(server);
+    // Jobs still awaiting job_accepted ride the fresh socket too.
+    await this.resendQueuedJobs(server);
     await this.persist();
 
     return new Response(null, { status: 101, webSocket: client });
@@ -817,6 +966,56 @@ export class CellAgent {
       return;
     }
 
+    // job_accepted — the runner wrote the job file durably; stop re-sending
+    // and drop the prompt storage key (the cell owns it now). Persist the
+    // running transition BEFORE deleting the prompt: if a crash kept the
+    // delete but lost the transition, the reloaded queued record would
+    // resend and fail "prompt missing" on a job that's actually running
+    // (codex P2). Worst case after this ordering is a harmless orphan
+    // prompt key (running jobs never read it).
+    if (type === "job_accepted") {
+      const rec = typeof ev.id === "string" ? this.jobs.get(ev.id) : undefined;
+      if (rec && rec.status === "queued") {
+        applyJobAccepted(rec);
+        const id = rec.id;
+        void this.persist().then(() => this.state.storage.delete(`job-prompt:${id}`));
+        console.log(`[${this.env.CELL_NAME}] job ${rec.id} accepted by runner`);
+      }
+      return;
+    }
+
+    // job_done — terminal outcome from the runner. Persist the transition
+    // BEFORE acking: webSocketMessage's trailing persist() could fail or the
+    // DO could crash between this send and that write, leaving the runner
+    // stopped (notified) while the DO reloads stale running state — a job
+    // stuck "running" forever despite a result on the cell (codex P2).
+    if (type === "job_done") {
+      const id = typeof ev.id === "string" ? ev.id : "";
+      const rec = id ? this.jobs.get(id) : undefined;
+      if (rec && !isTerminal(rec.status)) {
+        // If job_accepted was lost and job_done arrives straight from queued,
+        // the prompt key was never dropped by the accept path — delete it
+        // here too, or a completed job leaks its prompt in DO storage forever
+        // (the exact lost-frame case this at-least-once path tolerates).
+        const wasQueued = rec.status === "queued";
+        applyJobDone(rec, ev, new Date().toISOString());
+        console.log(`[${this.env.CELL_NAME}] job ${id} ${rec.status}${rec.summary ? `: ${rec.summary.slice(0, 80).replace(/\n/g, " ")}` : ""}`);
+        const pruned = evictTerminal([...this.jobs.entries()]);
+        if (pruned.length !== this.jobs.size) this.jobs = new Map(pruned);
+        // job_done is rare (one per job) — a synchronous persist here is
+        // cheap insurance that the ack never outruns durability.
+        void this.persist().then(() => {
+          if (wasQueued) void this.state.storage.delete(`job-prompt:${id}`);
+          this.ackJobDone(id);
+        });
+      } else {
+        // Unknown or already-terminal id: ack anyway so the runner stops
+        // (an earlier ack was lost, or eviction already dropped the record).
+        this.ackJobDone(id);
+      }
+      return;
+    }
+
     // agent_response — supervisor's reply to an agent_message we forwarded.
     // Look up the pending corr_id and POST a kind:"agent" envelope back to
     // the sender's reply_to. Does not touch turn state — main is untouched
@@ -945,8 +1144,14 @@ export class CellAgent {
       if (this.currentTurn !== t) return;
       if (delivered) {
         // Clean exit — drop the alarm chain. handleAppend re-arms on next
-        // inbound. Storing alarm=null cancels any scheduled fire.
-        try { await this.state.storage.deleteAlarm(); } catch {}
+        // inbound. BUT the alarm is shared: it also drives queued-job frame
+        // resends and unacked reliable frames. Cancelling it here while a
+        // job waits for job_accepted (or a frame is unacked) would strand
+        // that work until unrelated traffic reconnects the cell (codex P2).
+        // Only delete when this turn's delivery is the alarm's last consumer.
+        if (this.pendingFrames.size === 0 && this.queuedJobCount() === 0) {
+          try { await this.state.storage.deleteAlarm(); } catch {}
+        }
       } else {
         // Delivery stranded (429s, upstream failure). Keep the alarm
         // running so retryPendingDelivery() fires on the next tick.

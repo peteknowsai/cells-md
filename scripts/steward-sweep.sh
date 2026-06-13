@@ -90,6 +90,9 @@ while IFS=$'\t' read -r name well status reasons; do
         sudo systemctl restart chrony && sleep 4 && sudo chronyc makestep > /dev/null 2>&1; sync' > /dev/null 2>&1 \
         && FIXED+=("$name: clock stepped + makestep fixed") || ALERTS+=("$name: clock fix failed")
       ;;&
+    *"jobs watchdog may be dead"*)
+      ALERTS+=("$name: $reasons")
+      ;;&
     *"oom-kill"*)
       ALERTS+=("$name: recent OOM kill — RAM sizing is an operator call")
       ;;

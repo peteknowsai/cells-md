@@ -17,13 +17,36 @@
 //   health        the supervisor's localhost:8080/health body ("ok" when up)
 //   oom_48h       oom-kill count for the unit in the last 48h of journal
 //   epoch         guest clock, seconds — compared Mac-side for skew
+//   jobs_running  job-lane records in status "running" (jobs lane,
+//                 docs/proposals/jobs.html)
+//   jobs_stale    running jobs whose output hasn't grown in >10 min —
+//                 watchdog-should-have-fired territory (runner dead?)
 export const GUEST_PROBE_SCRIPT = `
 UA=$(systemctl is-active well-site 2>/dev/null || true)
 UP=false; [ -f /etc/systemd/system/well-site.service ] && UP=true
 H=$(curl -sS -m 2 http://localhost:8080/health 2>/dev/null || true)
 OOM=$(journalctl -u well-site --since "-48 hours" 2>/dev/null | grep -c oom-kill || true)
 NOW=$(date +%s)
-echo "CELLPROBE {\\"unit_active\\":\\"$UA\\",\\"unit_present\\":$UP,\\"health\\":\\"$H\\",\\"oom_48h\\":\${OOM:-0},\\"epoch\\":\${NOW:-0}}"
+JR=0; JS=0
+if [ -d /root/state/jobs ]; then
+  for M in /root/state/jobs/*.json; do
+    [ -f "$M" ] || continue
+    grep -q '"status": *"running"' "$M" || continue
+    JR=$((JR+1))
+    ID=$(basename "$M" .json)
+    # Newest mtime across out AND err — the watchdog treats either growing
+    # as progress, so a job that logs only to stderr must not read stale.
+    NEWEST=0
+    for F in "/root/state/jobs/$ID.out.jsonl" "/root/state/jobs/$ID.err"; do
+      [ -f "$F" ] || continue
+      MT=$(stat -c %Y "$F" 2>/dev/null || echo 0)
+      [ "$MT" -gt "$NEWEST" ] && NEWEST=$MT
+    done
+    AGE=$(( NOW - NEWEST ))
+    [ "$AGE" -gt 600 ] && JS=$((JS+1))
+  done
+fi
+echo "CELLPROBE {\\"unit_active\\":\\"$UA\\",\\"unit_present\\":$UP,\\"health\\":\\"$H\\",\\"oom_48h\\":\${OOM:-0},\\"epoch\\":\${NOW:-0},\\"jobs_running\\":\${JR:-0},\\"jobs_stale\\":\${JS:-0}}"
 `.trim();
 
 export type GuestProbe = {
@@ -32,6 +55,8 @@ export type GuestProbe = {
   health: string; // "ok" when the supervisor answered
   oom_48h: number;
   epoch: number;
+  jobs_running: number;
+  jobs_stale: number;
 };
 
 export function parseGuestProbe(raw: string): GuestProbe | null {
@@ -46,6 +71,8 @@ export function parseGuestProbe(raw: string): GuestProbe | null {
       health: String(p.health ?? ""),
       oom_48h: Number(p.oom_48h) || 0,
       epoch: Number(p.epoch) || 0,
+      jobs_running: Number(p.jobs_running) || 0,
+      jobs_stale: Number(p.jobs_stale) || 0,
     };
   } catch {
     return null;
@@ -114,6 +141,12 @@ export function classifyCellTransport(input: {
   }
   if (g.oom_48h > 0) {
     warn(`${g.oom_48h} oom-kill(s) of well-site in 48h — RAM too tight for this cell`);
+  }
+  if (g.jobs_stale > 0) {
+    // The watchdog kills a stalled job inside ~5-10 min; output silent past
+    // 10 min means the watchdog itself isn't firing (runner dead, interval
+    // wedged) — the 23h-invisible class the jobs lane exists to prevent.
+    warn(`${g.jobs_stale} running job(s) with no output >10min — jobs watchdog may be dead`);
   }
   if (g.epoch > 0) {
     const skew = Math.abs(g.epoch - input.macEpochS);

@@ -12,7 +12,7 @@ function guest(over: Partial<ReturnType<typeof base>> = {}) {
   return { ...base(), ...over };
 }
 function base() {
-  return { unit_active: "active", unit_present: true, health: "ok", oom_48h: 0, epoch: MAC_EPOCH };
+  return { unit_active: "active", unit_present: true, health: "ok", oom_48h: 0, epoch: MAC_EPOCH, jobs_running: 0, jobs_stale: 0 };
 }
 
 describe("parseGuestProbe", () => {
@@ -28,6 +28,8 @@ describe("parseGuestProbe", () => {
       health: "ok",
       oom_48h: 2,
       epoch: 123,
+      jobs_running: 0,
+      jobs_stale: 0,
     });
   });
   test("no CELLPROBE line / bad JSON → null", () => {
@@ -36,7 +38,7 @@ describe("parseGuestProbe", () => {
   });
   test("missing fields degrade to defaults", () => {
     const p = parseGuestProbe('CELLPROBE {"unit_active":"active"}');
-    expect(p).toEqual({ unit_active: "active", unit_present: false, health: "", oom_48h: 0, epoch: 0 });
+    expect(p).toEqual({ unit_active: "active", unit_present: false, health: "", oom_48h: 0, epoch: 0, jobs_running: 0, jobs_stale: 0 });
   });
 });
 
@@ -134,5 +136,24 @@ describe("classifyCellTransport", () => {
   test("running but exec failed → warn, not fail", () => {
     const v = classifyCellTransport({ defPresent: true, power: "running", guest: null, macEpochS: MAC_EPOCH });
     expect(v.status).toBe("warn");
+  });
+
+  test("stale running job → warn naming the dead watchdog (jobs lane)", () => {
+    const v = classifyCellTransport({
+      defPresent: true,
+      power: "running",
+      guest: guest({ jobs_running: 2, jobs_stale: 1 }),
+      macEpochS: MAC_EPOCH,
+    });
+    expect(v.status).toBe("warn");
+    expect(v.reasons[0]).toContain("watchdog");
+    // Running jobs with fresh output are healthy — no noise.
+    const busy = classifyCellTransport({
+      defPresent: true,
+      power: "running",
+      guest: guest({ jobs_running: 3, jobs_stale: 0 }),
+      macEpochS: MAC_EPOCH,
+    });
+    expect(busy).toEqual({ status: "ok", reasons: [] });
   });
 });

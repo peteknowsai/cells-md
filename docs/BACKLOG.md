@@ -51,17 +51,29 @@ the same situation (seen on the now-deleted `hbtest`).
 **Fix:** give the hermes adapter the same no-main fallback, or add a
 birth-time main-session warm-up for hermes the way claude-code has one.
 
-## forkAndAsk's 150s ceiling kills ritual-length talks (2026-06-11, from Zero)
+## ~~forkAndAsk's 150s ceiling kills ritual-length talks~~ — CLOSED by the jobs lane (2026-06-13)
 
-`cells talk mother "/birth ..."` can't work: the supervisor's forkAndAsk
-kills talk-triggered work at 150s, and mother's ritual takes 3-6 min. Zero
-works around it by running births Mac-side. `cells talk --main` (the
-long-turn escape hatch) is still "not yet implemented (Phase 4)".
+`cells run` (docs/proposals/jobs.html) is the prescribed ack-then-work
+shape: submit returns a job id immediately, the work runs in a fresh
+detached session under a frame-progress watchdog, completion flows back
+durably. Long work belongs on jobs, not on longer talk leashes. (Note the
+original entry's "`cells talk --main` is not yet implemented" line was
+stale — --main shipped in `f8ca1dc` as envelope `target:"main"`; it's the
+durable-conversation path, still leashed, still not for ritual-length work.)
+Jobs against mother remain refused — births stay Mac-side via the
+deterministic handoff.
 
-**Fix shape:** ack-then-work — the fork acks receipt immediately and the
-reply arrives later via the normal envelope path (reply_to), instead of
-holding the fork open. A longer leash for ritual-shaped messages is the
-worse version of this.
+## Proxy zero-token stream hang — root cause open (2026-06-13, from homezero)
+
+delta-market's `claude --print --resume <main>` runs wedged at ZERO output
+tokens through proxy.cells.md — ESTAB socket to Anthropic, no frames ever,
+one process sat 23h40m. A fresh session answered in seconds; the next long
+run wedged again, so it's not only a poisoned session. Nothing currently
+detects a zero-token stream that stays open (the only filed proxy-hang
+artifact was Bun.serve's idleTimeout, fixed earlier). The jobs-lane
+watchdog CONTAINS this (kill + retry + visible failure) but does not
+explain it. Investigate proxy-side: per-stream first-byte timeout +
+logging, upstream connection reuse, Max-OAuth refresh races.
 
 ## Eval: add the negative birth row for the Max policy (2026-06-11)
 

@@ -29,12 +29,20 @@
  */
 
 import { type Subprocess, spawn } from "bun";
-import { existsSync, mkdirSync, readFileSync, watch } from "node:fs";
+import {
+  existsSync, mkdirSync, readFileSync, readdirSync, renameSync, statSync,
+  unlinkSync, watch, writeFileSync,
+} from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { getAdapter, turnLeashMs, type AdapterHost, type HarnessAdapter } from "../lib/harness-adapters";
 import { isInsideDir } from "../lib/path-guard";
 import { MIME, collectSiteFiles } from "../lib/site-files";
+import {
+  buildJobScript, extractJobResult, freshWatchState, jobPaths, jobUnitName,
+  JOBS_DIR, parseJobRecord, parseMainPid, summarize, watchdogTick,
+  WATCH_TICK_MS, type JobRecord, type WatchState,
+} from "../lib/jobs";
 
 const PORT = Number(process.env.PORT ?? 8080);
 const NAME = process.env.CELL_NAME ?? "unknown";
@@ -65,20 +73,24 @@ mkdirSync(SESSION_DIR, { recursive: true });
 
 // claude-code / codex resume ids captured at birth (bake-egg.sh). Empty
 // string if missing — the harness will start a fresh session on spawn and
-// the supervisor logs a warning. Phase B birth always seeds these; existing
-// pre-fix cells get a one-time manual warm-up before upgrade.
+// the supervisor logs a warning. Read fresh at every use, NOT cached in a
+// module const: a session swap (minting a new main after a wedge) used to
+// leave the supervisor resuming the stale in-memory id until a service
+// restart (homezero, 2026-06-13).
 function readIdCache(path: string): string {
   try { return readFileSync(path, "utf8").trim(); } catch { return ""; }
 }
-const CLAUDE_MAIN_ID = HARNESS === "claude-code" ? readIdCache("/root/.cell/claude-main-session") : "";
-const CODEX_MAIN_THREAD = HARNESS === "codex" ? readIdCache("/root/.cell/codex-main-thread") : "";
+const claudeMainId = () =>
+  HARNESS === "claude-code" ? readIdCache("/root/.cell/claude-main-session") : "";
+const codexMainThread = () =>
+  HARNESS === "codex" ? readIdCache("/root/.cell/codex-main-thread") : "";
 
 // Per-harness reference to the cell's main session, passed to the adapter's
 // forkAndAsk. Format is harness-specific (see HarnessAdapter doc).
 function getMainRef(): string {
   if (HARNESS === "pi") return SESSION_FILE;
-  if (HARNESS === "claude-code") return CLAUDE_MAIN_ID;
-  if (HARNESS === "codex") return CODEX_MAIN_THREAD;
+  if (HARNESS === "claude-code") return claudeMainId();
+  if (HARNESS === "codex") return codexMainThread();
   return "";
 }
 
@@ -212,7 +224,7 @@ const pendingTurns: string[] = [];
 // AdapterHost shim — adapters read/write codexThreadId / awaitingSwitchAck /
 // hermesSessionId here, and call writeLine/log/err/onPiSetupAcked on us.
 const hostState: AdapterHost = {
-  codexThreadId: HARNESS === "codex" ? (CODEX_MAIN_THREAD || null) : null,
+  codexThreadId: HARNESS === "codex" ? (codexMainThread() || null) : null,
   awaitingSwitchAck: null,
   hermesSessionId: null,
   writeLine: (line) => writeToHarness(line),
@@ -304,6 +316,379 @@ async function signalLifecycle(state: "busy" | "idle") {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Jobs lane — durable background work (docs/proposals/jobs.html).
+//
+// A `job` frame from the DO becomes a job file under /root/state/jobs/ (the
+// durable ack `job_accepted` fires only after that write), then a DETACHED
+// fresh-session harness run in its own transient systemd unit — survives
+// well-site restarts (the unit's cgroup outlives this service), never
+// --resume'ing the main session (the serialized-main wedge is the incident
+// class this lane exists to contain). A 30s watchdog counts ticks without
+// output growth: a wedged-at-zero-tokens process gets killed and retried
+// once, then durably marked failed. Completion flows back to the DO as
+// `job_done`, re-sent every tick until `job_done_ack` — the supervisor→DO
+// direction has no other at-least-once machinery.
+// ---------------------------------------------------------------------------
+
+// id → watchdog state for jobs this supervisor is watching. Rebuilt from
+// the job files at boot (adoptJobs) — restarts are routine.
+const runningJobs = new Map<string, WatchState>();
+// Terminal jobs whose job_done the DO hasn't acked yet.
+const unnotifiedDones = new Set<string>();
+// Mirror of the DO-side id rule — ids become filenames here.
+const JOB_ID_RE = /^[0-9A-Za-z][0-9A-Za-z_-]{7,39}$/;
+
+// Jobs hold the cell awake. welld's watchdog only sees the busy/idle
+// signal, and a detached job process is invisible to it — without this
+// gate the VM gets checkpointed mid-job.
+function signalIdleIfQuiet() {
+  if (runningJobs.size === 0) void signalLifecycle("idle");
+}
+
+function loadJobRecord(id: string): JobRecord | null {
+  try { return parseJobRecord(readFileSync(jobPaths(JOBS_DIR, id).meta, "utf8")); }
+  catch { return null; }
+}
+
+function saveJobRecord(rec: JobRecord) {
+  const meta = jobPaths(JOBS_DIR, rec.id).meta;
+  writeFileSync(`${meta}.tmp`, JSON.stringify(rec, null, 2));
+  renameSync(`${meta}.tmp`, meta);
+}
+
+function fileSize(path: string): number {
+  try { return statSync(path).size; } catch { return 0; }
+}
+
+function pidAlive(pid: number): boolean {
+  try { process.kill(pid, 0); return true; }
+  catch (e: any) { return e?.code === "EPERM"; }
+}
+
+// Is the job's transient unit still alive? systemd is the source of truth
+// for the cgroup, so this — not a possibly-racing MainPID — is the liveness
+// signal. "activating"/"active"/"deactivating" all mean the run hasn't
+// exited; "inactive"/"failed"/missing mean it's gone. Synchronous so the
+// watchdog stays a simple per-tick pass.
+function jobUnitAlive(unit: string): boolean {
+  try {
+    const r = Bun.spawnSync(["systemctl", "is-active", unit], { stdout: "pipe", stderr: "ignore" });
+    const out = r.stdout.toString().trim();
+    return out === "active" || out === "activating" || out === "deactivating";
+  } catch {
+    return false;
+  }
+}
+
+// Whether the run behind a record is still alive. Prefer the unit (the
+// cgroup truth); fall back to the pid for pre-unit records.
+function jobRunAlive(rec: JobRecord): boolean {
+  if (rec.unit) return jobUnitAlive(rec.unit);
+  if (rec.pid) return pidAlive(rec.pid);
+  return false;
+}
+
+// Kill the job's run and WAIT for the cgroup to actually die before
+// returning. The retry path truncates the shared .out/.err files and
+// launches the next attempt — if the old harness is still alive it would
+// keep writing into them, interleaving two attempts' output (codex P2).
+async function killJobRun(rec: JobRecord): Promise<void> {
+  if (rec.unit) {
+    // The transient unit's cgroup is the whole job tree — systemctl kill
+    // takes harness + children in one shot. NEVER fall through to the raw
+    // pid kill for a unit-backed record: a vanished unit's saved pid may
+    // already have been recycled by an unrelated root process (codex P2).
+    try { spawn(["systemctl", "kill", "--signal=SIGKILL", rec.unit], { stdout: "ignore", stderr: "ignore" }); } catch {}
+    // Bounded wait (~3s) for systemd to reap the cgroup. If it somehow
+    // outlives this, the next attempt still uses a DIFFERENT unit name, so
+    // only the shared files overlap — acceptable worst case after the wait.
+    for (let i = 0; i < 20; i++) {
+      if (!jobUnitAlive(rec.unit)) return;
+      await new Promise((r) => setTimeout(r, 150));
+    }
+    return;
+  }
+  // Legacy (pre-unit setsid) records only: the pid/pgid IS the handle.
+  if (rec.pgid) { try { process.kill(-rec.pgid, "SIGKILL"); } catch {} }
+  if (rec.pid) { try { process.kill(rec.pid, "SIGKILL"); } catch {} }
+}
+
+// A `job` frame arrived over the bridge. Durable-write-then-ack: the job
+// file is the dedupe (at-least-once delivery re-sends across reconnects),
+// so a duplicate just re-acks.
+async function handleJobFrame(cmd: any): Promise<void> {
+  const id = typeof cmd?.id === "string" ? cmd.id : "";
+  if (!JOB_ID_RE.test(id)) {
+    console.error(`[jobs] dropping job frame with bad id: ${String(cmd?.id).slice(0, 40)}`);
+    return;
+  }
+  const existing = loadJobRecord(id);
+  if (existing) {
+    broadcastToClients(JSON.stringify({ type: "job_accepted", id }));
+    return;
+  }
+  const prompt = typeof cmd.prompt === "string" ? cmd.prompt : "";
+  if (!prompt.trim()) {
+    console.error(`[jobs] job ${id} has no prompt — dropping`);
+    return;
+  }
+  const timeoutS =
+    typeof cmd.timeout_seconds === "number" && Number.isFinite(cmd.timeout_seconds)
+      ? Math.max(60, Math.min(86_400, Math.round(cmd.timeout_seconds)))
+      : 3600;
+  mkdirSync(JOBS_DIR, { recursive: true });
+  const p = jobPaths(JOBS_DIR, id);
+  writeFileSync(p.prompt, prompt);
+  const rec: JobRecord = {
+    id,
+    created_at: new Date().toISOString(),
+    status: "queued",
+    harness: HARNESS,
+    timeout_seconds: timeoutS,
+    attempts: 0,
+  };
+  saveJobRecord(rec);
+  broadcastToClients(JSON.stringify({ type: "job_accepted", id }));
+  console.log(`[jobs] ${id} accepted (${prompt.length}B, timeout=${timeoutS}s)`);
+  await startJobAttempt(rec);
+}
+
+// Spawn one (re)attempt as a transient systemd unit. Its own cgroup is
+// what survives well-site restarts — a setsid'd child stays in this
+// service's cgroup and systemd's KillMode=control-group takes it down on
+// every routine restart (caught live, 2026-06-13). --collect reaps the
+// unit on exit either way; the .exit file the script writes is the
+// completion signal (the run is not our child).
+async function startJobAttempt(rec: JobRecord): Promise<void> {
+  const p = jobPaths(JOBS_DIR, rec.id);
+  rec.attempts += 1;
+  const built = buildJobScript(rec.harness, p);
+  if (!built.ok) {
+    finalizeJob(rec, { ok: false, text: built.error, reason: "unsupported", exitCode: null });
+    return;
+  }
+  // Clear prior-attempt artifacts so the watchdog and finalize read this run.
+  // The stale pid from a previous attempt MUST go — left set, the watchdog
+  // could probe a recycled pid and misjudge liveness (codex P2).
+  for (const stale of [p.exit]) { try { unlinkSync(stale); } catch {} }
+  for (const trunc of [p.out, p.err]) { try { writeFileSync(trunc, ""); } catch {} }
+  delete rec.pid;
+  const unit = jobUnitName(rec.id, rec.attempts);
+  rec.unit = unit;
+  rec.status = "running";
+  rec.started_at = new Date().toISOString();
+  // Persist running+unit BEFORE the spawn: a well-site crash between
+  // systemd-run starting the unit and a later save would otherwise leave a
+  // live unit behind a record still reading "queued", and adoption would
+  // launch a DUPLICATE (codex P2). With the record already running+unit,
+  // adoption re-watches and the watchdog reconciles via the unit's own
+  // state. A queued record now unambiguously means "never spawned".
+  saveJobRecord(rec);
+  try {
+    const run = spawn(
+      ["systemd-run", "--collect", "--quiet", `--unit=${unit}`, "/bin/bash", "-lc", built.script],
+      { cwd: "/root", stdin: "ignore", stdout: "ignore", stderr: "pipe" },
+    );
+    const code = await run.exited;
+    if (code !== 0) {
+      const err = await new Response(run.stderr).text();
+      finalizeJob(rec, { ok: false, text: `systemd-run exited ${code}: ${err.slice(0, 300)}`, reason: "spawn", exitCode: null });
+      return;
+    }
+  } catch (e) {
+    finalizeJob(rec, { ok: false, text: `job spawn threw: ${String(e).slice(0, 300)}`, reason: "spawn", exitCode: null });
+    return;
+  }
+  // The record is already saved as running+unit (before the spawn). The
+  // unit IS the liveness source of truth (its cgroup), so the watchdog
+  // probes the unit, not a pid that may not have resolved yet. Best-effort
+  // MainPID is a nicety for logs + the legacy kill belt; poll briefly since
+  // it can read 0 in the first moments before the harness is exec'd, then
+  // persist it so adoption after a restart has it too.
+  for (let i = 0; i < 3; i++) {
+    try {
+      const show = spawn(["systemctl", "show", "-p", "MainPID", "--value", unit], { stdout: "pipe", stderr: "ignore" });
+      const pid = parseMainPid(await new Response(show.stdout).text());
+      if (pid) { rec.pid = pid; break; }
+    } catch {}
+    // A fast job may already be inactive (unit collected) — stop polling.
+    if (!jobUnitAlive(unit)) break;
+    await new Promise((r) => setTimeout(r, 300));
+  }
+  if (rec.pid) saveJobRecord(rec);
+  runningJobs.set(rec.id, freshWatchState());
+  void signalLifecycle("busy");
+  console.log(`[jobs] ${rec.id} attempt ${rec.attempts} running (unit=${unit} pid=${rec.pid ?? "?"})`);
+}
+
+// Terminal transition + durable result + completion frame.
+function finalizeJob(
+  rec: JobRecord,
+  outcome: { ok: boolean; text: string; reason?: string; exitCode: number | null },
+) {
+  const p = jobPaths(JOBS_DIR, rec.id);
+  try { writeFileSync(p.result, outcome.text); } catch {}
+  rec.status = outcome.ok ? "done" : "failed";
+  rec.ok = outcome.ok;
+  rec.exit_code = outcome.exitCode;
+  rec.finished_at = new Date().toISOString();
+  if (!outcome.ok && outcome.reason) rec.reason = outcome.reason;
+  saveJobRecord(rec);
+  runningJobs.delete(rec.id);
+  unnotifiedDones.add(rec.id);
+  sendJobDone(rec);
+  if (!mainSessionBusy) signalIdleIfQuiet();
+  console.log(`[jobs] ${rec.id} ${rec.status}${rec.reason ? ` (${rec.reason})` : ""} after ${rec.attempts} attempt(s)`);
+}
+
+// The wrapper's .exit file appeared — read the verdict out of the stream.
+function finalizeFromFiles(rec: JobRecord) {
+  const p = jobPaths(JOBS_DIR, rec.id);
+  let exitCode: number | null = null;
+  try {
+    const n = parseInt(readFileSync(p.exit, "utf8").trim(), 10);
+    if (Number.isInteger(n)) exitCode = n;
+  } catch {}
+  let outText = "";
+  try { outText = readFileSync(p.out, "utf8"); } catch {}
+  const r = extractJobResult(rec.harness, outText, exitCode);
+  // A failed run with silent stdout (auth errors, spawn-time refusals)
+  // explains itself only on stderr — surface that tail in the result so
+  // `cells jobs` answers "why" without SSH archaeology.
+  let text = r.text;
+  if (!r.ok && !text.trim()) {
+    try { text = readFileSync(p.err, "utf8").trim().slice(-1000); } catch {}
+  }
+  finalizeJob(rec, {
+    ok: r.ok,
+    text,
+    ...(r.ok ? {} : { reason: "exit" }),
+    exitCode,
+  });
+}
+
+function sendJobDone(rec: JobRecord) {
+  let resultText = "";
+  try { resultText = readFileSync(jobPaths(JOBS_DIR, rec.id).result, "utf8"); } catch {}
+  broadcastToClients(JSON.stringify({
+    type: "job_done",
+    id: rec.id,
+    ok: rec.ok === true,
+    summary: summarize(resultText),
+    finished_at: rec.finished_at ?? "",
+  }));
+}
+
+// One watchdog pass. Tick-counted, not wall-clock — timestamps lie across
+// hibernate/restore, and a checkpoint freezes this interval together with
+// the job process, so the count stays honest.
+function jobsWatchdogTick() {
+  for (const [id, state] of runningJobs) {
+    const rec = loadJobRecord(id);
+    if (!rec || rec.status !== "running") { runningJobs.delete(id); continue; }
+    const p = jobPaths(JOBS_DIR, id);
+    const action = watchdogTick(rec, {
+      exitFilePresent: existsSync(p.exit),
+      pidAlive: jobRunAlive(rec),
+      bytes: fileSize(p.out) + fileSize(p.err),
+    }, state);
+    if (action.act === "finalize") {
+      finalizeFromFiles(rec);
+    } else if (action.act === "wait") {
+      runningJobs.set(id, action.state);
+    } else if (action.act === "kill") {
+      // Delete from runningJobs synchronously so the next tick (the kill
+      // wait spans ticks) doesn't re-handle this job. The kill is AWAITED
+      // before the retry truncates the shared files + spawns, so the old
+      // and new attempts can't interleave output.
+      runningJobs.delete(id);
+      void (async () => {
+        await killJobRun(rec);
+        // The job may have exited cleanly in the kill-wait window — honor a
+        // real completion instead of discarding it for a retry (codex P2).
+        if (existsSync(p.exit)) { finalizeFromFiles(rec); return; }
+        if (action.retry) {
+          console.error(`[jobs] ${id} ${action.reason} (attempt ${rec.attempts}) — killed, retrying once`);
+          await startJobAttempt(rec);
+        } else {
+          finalizeJob(rec, {
+            ok: false,
+            text: `[${action.reason}] no output progress within the ${action.reason === "leash" ? "job timeout" : "stall window"} — killed`,
+            reason: action.reason,
+            exitCode: null,
+          });
+        }
+      })();
+    } else if (action.act === "vanished") {
+      // Process already gone (unit inactive, no exit file) — no kill to
+      // wait on, but still confirm-kill any stray pid belt before retry.
+      runningJobs.delete(id);
+      void (async () => {
+        await killJobRun(rec);
+        // Same window: an exit file that appeared between the probe and now
+        // is a real completion.
+        if (existsSync(p.exit)) { finalizeFromFiles(rec); return; }
+        if (action.retry) {
+          console.error(`[jobs] ${id} process vanished (attempt ${rec.attempts}) — retrying once`);
+          await startJobAttempt(rec);
+        } else {
+          finalizeJob(rec, { ok: false, text: "job process vanished (OOM kill or external)", reason: "vanished", exitCode: null });
+        }
+      })();
+    }
+  }
+  // Completion is at-least-once toward the DO: re-send until acked.
+  for (const id of unnotifiedDones) {
+    const rec = loadJobRecord(id);
+    if (!rec) { unnotifiedDones.delete(id); continue; }
+    if (rec.notified_at) { unnotifiedDones.delete(id); continue; }
+    sendJobDone(rec);
+  }
+}
+
+// Boot-time re-adoption — well-site restarts are routine (refresh, steward,
+// `cells model`), and the detached jobs outlive them. Nothing is orphaned:
+// running jobs get re-watched, a never-spawned queued one starts, unacked
+// completions resume re-sending. startJobAttempt persists running+unit
+// BEFORE spawning, so a record reading "queued" here genuinely never
+// spawned a unit — but we still probe for an already-live unit or a
+// finished run before launching, belt-and-suspenders against duplicate work.
+function adoptJobs() {
+  mkdirSync(JOBS_DIR, { recursive: true });
+  let files: string[] = [];
+  try { files = readdirSync(JOBS_DIR).filter((f) => f.endsWith(".json")); } catch { return; }
+  for (const f of files) {
+    const rec = loadJobRecord(f.slice(0, -5));
+    if (!rec) continue;
+    if (rec.status === "running") {
+      runningJobs.set(rec.id, freshWatchState());
+      console.log(`[jobs] adopted running job ${rec.id} (unit=${rec.unit ?? "?"})`);
+    } else if (rec.status === "queued") {
+      const p = jobPaths(JOBS_DIR, rec.id);
+      // A unit/output/exit for the NEXT attempt name means a spawn already
+      // happened (in-memory gap before the running save) — adopt it as
+      // running instead of launching a duplicate.
+      const nextUnit = jobUnitName(rec.id, rec.attempts + 1);
+      if (existsSync(p.exit) || jobUnitAlive(nextUnit) || fileSize(p.out) > 0) {
+        rec.attempts += 1;
+        rec.unit = nextUnit;
+        rec.status = "running";
+        if (!rec.started_at) rec.started_at = new Date().toISOString();
+        saveJobRecord(rec);
+        runningJobs.set(rec.id, freshWatchState());
+        console.log(`[jobs] adopted in-flight queued job ${rec.id} as running (unit=${nextUnit})`);
+      } else {
+        console.log(`[jobs] adopted queued job ${rec.id} — starting`);
+        void startJobAttempt(rec);
+      }
+    } else if (!rec.notified_at) {
+      unnotifiedDones.add(rec.id);
+    }
+  }
+  if (runningJobs.size > 0) void signalLifecycle("busy");
+}
+
 // Send one pi-shaped event line up the bridge to the cell Worker DO.
 // (Kept the "broadcast" name through the direction flip — there is now
 // exactly one bridge, so this is a single send when it's up, a no-op
@@ -384,7 +769,7 @@ function onTranslatedLine(line: string) {
   try {
     const evt = JSON.parse(line);
     if (evt?.type === "agent_end") {
-      void signalLifecycle("idle");
+      signalIdleIfQuiet();
       mainSessionBusy = false;
       if (activeMainTurn) {
         finishMainTurn(activeMainTurn.acc.trim() || "(empty reply)");
@@ -503,8 +888,9 @@ function persistentSpawnArgs(): { cmd: string[]; env: Record<string, string> } |
       "--include-partial-messages",
       "--permission-mode", "bypassPermissions",
     ];
-    if (CLAUDE_MAIN_ID) {
-      argv.push("--resume", CLAUDE_MAIN_ID);
+    const mainId = claudeMainId();
+    if (mainId) {
+      argv.push("--resume", mainId);
     } else {
       console.error(`[bridge] claude-main-session cache missing — running without --resume; first turn creates a fresh session, conversation won't survive restarts`);
     }
@@ -541,10 +927,11 @@ function spawnHarness() {
     // No persistent process to spawn. Mark ready so prompts flow into runTurn().
     harnessReady = true;
     broadcastToClients(JSON.stringify({ type: "bridge_ready" }));
-    if (HARNESS === "codex" && !CODEX_MAIN_THREAD) {
+    const thread = codexMainThread();
+    if (HARNESS === "codex" && !thread) {
       console.error(`[bridge] codex-main-thread cache missing — first turn creates a fresh thread, conversation won't survive restarts`);
     } else if (HARNESS === "codex") {
-      console.log(`[bridge] codex per-turn ready (resuming thread ${CODEX_MAIN_THREAD.slice(0, 8)})`);
+      console.log(`[bridge] codex per-turn ready (resuming thread ${thread.slice(0, 8)})`);
     }
     return;
   }
@@ -571,8 +958,9 @@ function spawnHarness() {
     console.error(`[bridge] ${HARNESS} exited code=${code}; respawning in ${HARNESS_RESPAWN_DELAY_MS}ms`);
     harnessProc = null;
     // If the harness died mid-turn welld would otherwise wait forever for
-    // agent_end. Force-clear busy so the well is hibernate-eligible.
-    void signalLifecycle("idle");
+    // agent_end. Force-clear busy so the well is hibernate-eligible —
+    // unless a detached job still needs the cell awake.
+    signalIdleIfQuiet();
     harnessRespawnTimer = setTimeout(() => {
       harnessRespawnTimer = null;
       spawnHarness();
@@ -823,10 +1211,37 @@ const server = Bun.serve({
       });
     }
 
+    // /jobs — job-lane status, read from the durable job files. /jobs/<id>
+    // serves a job's RESULT text, which is durable task output — gate it on
+    // the same bearer the Worker-facing route uses (codex P2). Unlike
+    // /health and /agent-wait (which carry nothing sensitive and stay open),
+    // this route shouldn't be readable if :8080 is ever reachable past the
+    // guest's localhost. The on-cell `cells jobs` helper passes the secret.
+    if (url.pathname === "/jobs" || url.pathname.startsWith("/jobs/")) {
+      if (!SECRET || req.headers.get("authorization") !== `Bearer ${SECRET}`) {
+        return new Response("unauthorized", { status: 401 });
+      }
+      const id = url.pathname.startsWith("/jobs/") ? url.pathname.slice(6) : "";
+      if (id) {
+        const rec = JOB_ID_RE.test(id) ? loadJobRecord(id) : null;
+        if (!rec) return new Response("unknown job", { status: 404 });
+        let result = "";
+        try { result = readFileSync(jobPaths(JOBS_DIR, id).result, "utf8"); } catch {}
+        return Response.json({ ...rec, result: result.slice(0, 64 * 1024) });
+      }
+      let files: string[] = [];
+      try { files = readdirSync(JOBS_DIR).filter((f) => f.endsWith(".json")); } catch {}
+      const jobs = files
+        .map((f) => loadJobRecord(f.slice(0, -5)))
+        .filter((r): r is JobRecord => r !== null)
+        .sort((a, b) => b.created_at.localeCompare(a.created_at));
+      return Response.json({ cell: NAME, watching: runningJobs.size, jobs });
+    }
+
     // The bridge WebSocket is no longer served here — post-direction-flip
     // the supervisor dials OUT to the cell Worker (see connectBridge
     // below). This server keeps only the local HTTP surface: /health,
-    // /agent-wait, and the in-cell static site preview.
+    // /agent-wait, /jobs, and the in-cell static site preview.
 
     const staticHit = serveStatic(url.pathname);
     if (staticHit) return staticHit;
@@ -882,6 +1297,26 @@ function handleBridgeFrame(line: string) {
   // earlier ack was lost, so it needs acking again either way.
   if (typeof cmd?.ack_key === "string" && cmd.ack_key) {
     broadcastToClients(JSON.stringify({ type: "frame_ack", key: cmd.ack_key }));
+  }
+
+  // job — the DO is handing us durable background work. Never the
+  // conversation path: a fresh detached session, watched by the jobs
+  // watchdog (docs/proposals/jobs.html).
+  if (cmd?.type === "job") {
+    void handleJobFrame(cmd);
+    return;
+  }
+
+  // job_done_ack — the DO recorded our completion; stop re-sending it.
+  if (cmd?.type === "job_done_ack") {
+    const id = typeof cmd.id === "string" ? cmd.id : "";
+    const rec = id ? loadJobRecord(id) : null;
+    if (rec && !rec.notified_at) {
+      rec.notified_at = new Date().toISOString();
+      saveJobRecord(rec);
+    }
+    unnotifiedDones.delete(id);
+    return;
   }
 
   // agent_reply — forwarded by our DO when an in_reply_to envelope landed
@@ -1155,3 +1590,5 @@ connectBridge();
 setInterval(bridgeHeartbeat, BRIDGE_PING_MS);
 spawnHarness();
 startSitePublishing();
+adoptJobs();
+setInterval(jobsWatchdogTick, WATCH_TICK_MS);

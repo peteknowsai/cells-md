@@ -1,0 +1,241 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>cells run — the jobs lane</title>
+<link rel="stylesheet" href="../_assets/doc.css">
+<script defer src="../_assets/doc.js"></script>
+</head>
+<body>
+<header>
+  <h1>cells run — the jobs lane</h1>
+  <p class="subtitle">A durable job primitive alongside <code>cells talk</code>. Designed 2026-06-12 with the homezero team after the delta-market wedge incident.</p>
+</header>
+
+<section>
+  <h2>Plain-English summary</h2>
+  <p>
+    Today, handing a cell a big task works like a phone call: the caller asks and <em>stays on
+    the line</em> until the work is done. Two things break. If the work outlasts the caller's
+    patience (the timeout), the answer is lost. And if the worker silently wedges — as
+    delta-market's did on 2026-06-12, hanging at zero output tokens for 23 hours — the silence is
+    indistinguishable from "still working" and nothing anywhere notices.
+  </p>
+  <p>
+    <strong><code>cells run</code></strong> replaces the phone call with a work order: drop the
+    task in the cell's mailbox, get a ticket number back immediately, hang up. On the cell, a
+    babysitter (the watchdog) checks that the worker is actually producing output; a worker that
+    goes quiet gets killed and retried once, then marked failed — visibly. When the work
+    finishes, the result is written down on the cell and the status flows back to the mailbox, so
+    <strong><code>cells jobs</code></strong> can answer "what happened?" without even waking the
+    cell. <code>cells talk</code> goes back to being what it is: conversation.
+  </p>
+</section>
+
+<section>
+  <h2>The incident that forced this</h2>
+  <ul>
+    <li>delta-market's main session (318KB accreted since birth) wedged: every
+        <code>claude --print --resume &lt;main&gt;</code> spawned by well-site hung at
+        <strong>zero output tokens</strong> — ESTAB socket to the proxy, no frames, ever. One
+        process sat 23h40m. Found only via <code>ps</code> on the cell.</li>
+    <li>Retries piled more wedged processes onto the same serialized main session. No job id, no
+        status, no log — structurally invisible.</li>
+    <li>A fresh no-resume session answered in seconds, but the <em>next</em> long task wedged
+        again — so this is not only a poisoned session; long streams through the proxy hang
+        intermittently. That root cause is a separate open investigation
+        (<code>docs/BACKLOG.md</code>); the watchdog below <em>contains</em> it meanwhile.</li>
+  </ul>
+  <p>
+    The design problem, as homezero put it: talk conflates the task payload, the wake, and the
+    reply into one fragile synchronous socket — a chat primitive used as a job system. The fix is
+    the pattern cells-world already trusts: <em>the queue is the truth, the ring is just the
+    wake</em>.
+  </p>
+</section>
+
+<section>
+  <h2>Shape of the lane</h2>
+  <pre><code>cells run delta-market "drain the event queue per RUNBOOK.md §2"
+job 01JXM2K8...  queued at delta-market (cells jobs delta-market to check)
+
+cells jobs delta-market
+01JXM2K8...  done    2m41s  exit 0  "Drained 14 events; 2 takes recorded..."</code></pre>
+
+  <table>
+    <tr><th></th><th>talk (conversation)</th><th>run (job)</th></tr>
+    <tr><td>caller waits</td><td>yes — held socket, sender timeout</td><td>no — 202 + job id, immediately</td></tr>
+    <tr><td>session</td><td>main (durable) or fork of main</td><td><strong>fresh session, never --resume main</strong></td></tr>
+    <tr><td>process</td><td>child of well-site</td><td>transient systemd unit (own cgroup); survives supervisor restarts</td></tr>
+    <tr><td>progress check</td><td>absolute leash only</td><td>output-growth watchdog, tick-counted</td></tr>
+    <tr><td>failure</td><td>sender times out, work lost</td><td>kill → retry once → <code>failed</code>, durably recorded</td></tr>
+    <tr><td>result</td><td>reply frame (droppable)</td><td>files on the cell (truth) + status at the DO</td></tr>
+  </table>
+  <p>Jobs are fire-and-forget by design: no <code>reply_to</code>, no waiter. A job that needs to
+  tell a human something uses the cell's own tools (whatsapp_send, channels) — that's its work,
+  not the transport's. Operators poll <code>cells jobs</code>.</p>
+</section>
+
+<section>
+  <h2>Path of a job</h2>
+  <ol>
+    <li><strong>Submit (Mac, &lt;1s):</strong> <code>cells run &lt;name&gt; "&lt;task&gt;"</code>
+        generates a ULID job id and POSTs <code>{kind:"job", job_id, text, timeout_seconds}</code>
+        to <code>https://&lt;name&gt;.cells.md/inbox/append</code> (Bearer
+        <code>CELLS_PROXY_SECRET</code>, 15s abort, 3 retries). No wake, no SSH. Before posting it
+        probes <code>GET /debug</code> for the DO's <code>jobs</code> capability — an old worker
+        would misroute <code>kind:"job"</code> into the conversation path, so a missing capability
+        aborts with "redeploy this cell's worker". Measured live: 0.16–0.18s to job id, awake
+        or hibernated.</li>
+    <li><strong>Enqueue (DO):</strong> a <code>kind:"job"</code> branch in
+        <code>handleAppend</code> persists the job into a new optional
+        <code>PersistedState.jobs</code> map and answers <code>202 {job_id}</code>
+        <em>immediately</em> — the doorbell is fired without being awaited (today's agent path
+        awaits <code>well start</code> inside the 202; jobs must not). The prompt does
+        <em>not</em> go in that map — it gets its own <code>job-prompt:&lt;id&gt;</code> storage
+        key, deleted on <code>job_accepted</code>; packed into the single snapshot value, a
+        handful of max-size queued prompts would blow the DO's 128&nbsp;KiB per-value cap and
+        take all cross-event state down with them. Re-submitting an existing id is
+        idempotent.</li>
+    <li><strong>Deliver (DO → supervisor, at-least-once):</strong> the job frame does
+        <em>not</em> ride <code>pendingFrames</code> (its 10-minute expiry is tuned to talk
+        timeouts and would silently drop jobs). Instead the DO's existing 25s alarm re-sends every
+        job still in <code>status:"queued"</code> — no expiry — until the supervisor answers
+        <code>job_accepted</code>, which it sends only <em>after the job file is durably on
+        disk</em>. (A plain <code>frame_ack</code> means "process received the frame", which a
+        crash can orphan.) On-cell dedupe is the job file itself, not the in-memory corr set —
+        duplicates across zombie-WS reconnects are expected and harmless. One subtlety found
+        live: a cell that hibernated <em>seconds</em> earlier leaves a zombie socket Cloudflare
+        still reports OPEN — sends vanish and nothing would ever wake the cell. So whenever
+        reliable work (queued jobs <em>or</em> pending talk frames) outlives an alarm tick, the
+        DO rings the doorbell unconditionally; a wake on a running well is a ~100ms no-op, a
+        real wake replaces the zombie with a fresh dial-in.</li>
+    <li><strong>Run (cell):</strong> well-site writes
+        <code>/root/state/jobs/&lt;id&gt;.json</code> + <code>.prompt</code>, then spawns the
+        harness in a <em>transient systemd unit</em>
+        (<code>systemd-run --collect --unit=cell-job-&lt;id&gt;-a&lt;attempt&gt;</code>; output to
+        <code>.out.jsonl</code> / <code>.err</code>, exit code to <code>.exit</code>). The
+        unit's own cgroup is the restart-survival mechanism — a <code>setsid</code> child
+        stays in well-site's cgroup and systemd's default <code>KillMode=control-group</code>
+        kills it on every routine service restart (caught live during rollout). Fresh
+        session, never <code>--resume</code> the main id. claude-code uses
+        <code>--output-format stream-json --verbose</code> so every token grows the output file —
+        the same spawn+parse recipe <code>bake-egg.sh</code> already proves at every birth.
+        <code>state/</code> is a <code>cells refresh</code> never-path, so job records survive
+        both refresh pushes and rollbacks.</li>
+    <li><strong>Watch (cell):</strong> a 30s watchdog tick scans running jobs. Output grew →
+        reset that job's stall counter. No growth for N ticks (claude-code: 10 ticks = 5 min;
+        pi/codex: 20 ticks) → <code>systemctl kill</code> the unit's cgroup, retry once, then
+        <code>failed: stalled</code>. An absolute leash (<code>--timeout</code>, default 1h, max
+        24h) is counted in ticks too. <em>Ticks, not wall-clock</em>: timestamps lie across
+        hibernate/restore (the bridge heartbeat counts missed pings for the same reason), and a
+        VM checkpoint freezes the interval together with the process, so the count stays honest.
+        Liveness is the <em>unit's</em> state (<code>systemctl is-active</code>), not a MainPID —
+        a not-yet-resolved or recycled pid must never read as "vanished" and trigger a spurious
+        retry while the real run is streaming.</li>
+    <li><strong>Hold awake:</strong> a detached process is invisible to the busy/idle lifecycle
+        — welld (the sole hibernation decider) would checkpoint the VM mid-job. The runner
+        signals <code>busy</code> while any job runs and releases <code>idle</code> only when the
+        job count hits zero and the main session is quiet. The watchdog is the guarantee that a
+        wedged job can't hold the cell awake forever.</li>
+    <li><strong>Adopt (cell, after restarts):</strong> well-site restarts are routine (refresh,
+        steward, <code>cells model</code>). At boot the runner re-scans the jobs dir:
+        pid alive → re-watch; <code>.exit</code> present → finalize; pid dead with no exit file
+        (OOM, restore edge) → retry-or-fail. Nothing is orphaned.</li>
+    <li><strong>Complete:</strong> watchdog sees the <code>.exit</code> file → extracts the
+        result text from the stream output into <code>.result.txt</code>, updates the job file,
+        and sends <code>job_done {id, ok, summary}</code> to the DO — re-sent on every tick and
+        reconnect until <code>job_done_ack</code> lands, because the supervisor→DO direction has
+        no reliable-delivery machinery today and a lost completion would otherwise be lost
+        forever. The DO <em>persists the terminal transition before it acks</em>: were it to ack
+        first and then fail the storage write, the runner would stop re-sending while the DO
+        reloaded stale <code>running</code> state — a job stuck running forever despite a result
+        on the cell. The files on the cell remain the source of truth regardless.</li>
+    <li><strong>Inspect (Mac):</strong> <code>cells jobs &lt;name&gt;</code> — awake cell:
+        <code>well exec</code> reads the job files (full detail). Hibernated cell: <code>GET
+        https://&lt;name&gt;.cells.md/jobs</code> returns the DO's status map — <em>jobs never
+        wake a cell to be listed</em>, same stance as <code>doctor</code>.</li>
+  </ol>
+</section>
+
+<section>
+  <h2>Per-harness runners (v1)</h2>
+  <table>
+    <tr><th>harness</th><th>spawn</th><th>watchdog signal</th><th>status</th></tr>
+    <tr><td>claude-code</td><td><code>HOME=/root IS_SANDBOX=1 claude --print --output-format stream-json --verbose --permission-mode bypassPermissions</code>, prompt on stdin, fresh session</td><td>stream-json frames — bytes per token</td><td><strong>primary</strong> (the incident class)</td></tr>
+    <tr><td>codex</td><td><code>codex exec --json "&lt;prompt&gt;"</code>, fresh thread</td><td><code>item.*</code> events per step</td><td>supported</td></tr>
+    <tr><td>pi</td><td><code>pi --print "&lt;prompt&gt;"</code>, fresh session</td><td>byte growth (out+err), generous 20-tick window — pi may buffer</td><td>supported, but inherits the known pi one-shot auth gap (fresh <code>pi --print</code> can't resolve the openai-codex key the way the long-lived supervisor session can — same failure as <code>cells verify</code> against pi cells; fails fast with the stderr surfaced)</td></tr>
+    <tr><td>hermes</td><td>—</td><td>—</td><td>fails fast with a clear error; revisit on demand</td></tr>
+  </table>
+  <p>Each cell runs jobs on its <em>own</em> harness, so the Max policy is untouched: claude-code
+  cells reach Anthropic exactly as they do for conversation; pi/codex cells ride their own
+  subscriptions. <code>cells run mother</code> is refused — mother serializes the birth ritual on
+  <code>mother.lock</code>, and a detached job racing a birth is the known silent-deadlock.</p>
+</section>
+
+<section>
+  <h2>Bounds and caps</h2>
+  <ul>
+    <li>Prompt ≤ 32KB at submit (413 otherwise) — the DO snapshot lives under a 128KiB-per-value
+        storage cap, and prompts are dropped from the DO record once <code>job_accepted</code>
+        lands.</li>
+    <li>≤ 8 non-terminal jobs per cell (429) — a cell is one small VM; jobs are not a work
+        queue for fan-out, they're "go do this and report".</li>
+    <li>The DO keeps the last 32 terminal job records (oldest evicted); the cell keeps all files
+        under <code>/root/state/jobs/</code>.</li>
+    <li>Result summary stored at the DO ≤ 2KB; the full result stays on the cell.</li>
+  </ul>
+</section>
+
+<section>
+  <h2>Observability</h2>
+  <ul>
+    <li><code>cells doctor --json</code>: the guest probe gains <code>jobs_running</code> /
+        <code>jobs_stalled</code> (running jobs whose output hasn't grown inside the stall
+        window) and the classifier flags them — pure logic, unit-tested like the incident
+        tests.</li>
+    <li>steward: wedged-job detection is <strong>alert-only</strong> in v1 (the on-cell watchdog
+        is the deterministic fix; if it isn't firing, that's judgment territory per the steward
+        contract).</li>
+    <li>The DO's <code>/debug</code> output includes the jobs map for per-cell spelunking.</li>
+  </ul>
+</section>
+
+<section>
+  <h2>Rollout and version skew</h2>
+  <ol>
+    <li>Supervisor + bin + lib ship to live cells via <code>cells refresh --all</code> (running
+        cells; hibernated ones pick it up at next wake). Newborns get it free at claim-time
+        bake.</li>
+    <li>DO change ships per cell via <code>scripts/deploy-cell-worker.sh</code> — a manual sweep;
+        no fleet redeploy command exists.</li>
+    <li>Skew is safe in both directions: a new supervisor with an old DO simply never receives
+        job frames; a new DO with an old supervisor re-sends the queued job each alarm until the
+        supervisor is refreshed (unknown frame types are ignored today). The CLI's capability
+        probe refuses to submit into an old DO at all.</li>
+  </ol>
+</section>
+
+<section>
+  <h2>What this closes / touches</h2>
+  <ul>
+    <li>Closes the BACKLOG "forkAndAsk 150s ceiling kills ritual-length talks" item with exactly
+        the prescribed shape (ack-then-work) — long work moves to jobs instead of longer
+        leashes.</li>
+    <li>Honors the standing reasons never to resume/replay main for background work
+        (fork-context growth; the serialized-main wedge).</li>
+    <li>Fixes in passing: well-site re-reads <code>claude-main-session</code> per spawn instead
+        of caching it in a module const at boot (stale after any session swap).</li>
+    <li>Corrects the stale BACKLOG line claiming <code>cells talk --main</code> is
+        unimplemented (it shipped as envelope <code>target:"main"</code>).</li>
+    <li>Does <em>not</em> root-cause the proxy zero-token stream hang — that's a separate
+        investigation; the watchdog contains it.</li>
+  </ul>
+</section>
+
+<footer>
+  <p>cells · docs/proposals/jobs.html · 2026-06-12</p>
+</footer>
+</body>
+</html>
