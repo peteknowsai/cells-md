@@ -18,7 +18,7 @@
 // the pool to target, so a second loop would only add load. Acquire returns
 // true → run; false → no-op.
 
-import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { REFILL_LOCK_PATH } from "./paths.ts";
 
@@ -53,6 +53,19 @@ export function refillLockHolder(
   }
 }
 
+// O_CREAT|O_EXCL create: succeeds only if the path doesn't already exist, so
+// at most one racer wins. Returns whether we created (and now own) the lock.
+function tryCreate(lockPath: string, now: number): boolean {
+  try {
+    writeFileSync(lockPath, JSON.stringify({ pid: process.pid, at: now }), {
+      flag: "wx",
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 // Try to acquire. Returns true if the caller now owns the lock (run the
 // refill), false if a live refill already holds it (skip). `now`/`lockPath`
 // are injectable for tests. Steals a lock whose holder pid is dead or older
@@ -62,26 +75,38 @@ export function tryAcquireRefillLock(
   lockPath: string = REFILL_LOCK_PATH,
 ): boolean {
   mkdirSync(dirname(lockPath), { recursive: true });
-  if (existsSync(lockPath)) {
-    const holder = refillLockHolder(lockPath);
-    const recent = holder?.at != null && now - holder.at < REFILL_LOCK_STALE_MS;
-    const live = holder?.pid == null || pidAlive(holder.pid);
-    if (recent && live) return false; // a live refill holds it — coalesce
-    try {
-      unlinkSync(lockPath);
-    } catch {
-      /* vanished mid-steal — fall through to the O_EXCL create */
-    }
+
+  // Fast path: no lock yet → claim it atomically.
+  if (tryCreate(lockPath, now)) return true;
+
+  // A lock exists. A live, recent holder means a refill is already running —
+  // coalesce.
+  const holder = refillLockHolder(lockPath);
+  const recent = holder?.at != null && now - holder.at < REFILL_LOCK_STALE_MS;
+  const live = holder?.pid == null || pidAlive(holder.pid);
+  if (recent && live) return false;
+
+  // Stale (crashed holder, or alive-but-wedged past the backstop). Claim the
+  // right to recreate by ATOMICALLY renaming the stale lock aside: rename of a
+  // given path has exactly one winner, the rest get ENOENT and coalesce. This
+  // never deletes a lock by pathname — the old unlink-then-create could delete
+  // another process's freshly-created lock and let two refills run (codex P2).
+  // In the realistic stale case (a crashed holder's orphaned lock) there is no
+  // concurrent fresh lock to move, so the rename is unambiguous.
+  const tmp = `${lockPath}.stale.${process.pid}.${now}`;
+  try {
+    renameSync(lockPath, tmp);
+  } catch {
+    return false; // another racer renamed it first — let them run
   }
   try {
-    // wx = O_CREAT|O_EXCL: fails if another process won the steal race.
-    writeFileSync(lockPath, JSON.stringify({ pid: process.pid, at: now }), {
-      flag: "wx",
-    });
-    return true;
+    unlinkSync(tmp);
   } catch {
-    return false;
+    /* ignore */
   }
+  // The path is now free; recreate atomically. Loses to any racer that
+  // created in the gap (then we coalesce), so still at most one owner.
+  return tryCreate(lockPath, now);
 }
 
 export function releaseRefillLock(lockPath: string = REFILL_LOCK_PATH): void {

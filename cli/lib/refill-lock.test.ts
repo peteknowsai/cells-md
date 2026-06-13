@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, rmSync, writeFileSync, existsSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync, existsSync, readdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -69,5 +69,21 @@ describe("refill single-flight lock", () => {
     // Malformed holder → no recent/live holder → steal.
     expect(tryAcquireRefillLock(Date.now(), lock)).toBe(true);
     expect(refillLockHolder(lock)?.pid).toBe(process.pid);
+  });
+
+  test("after stealing a dead lock, a second acquire coalesces (single owner)", () => {
+    // Stale dead holder → first acquire steals + recreates with our live pid.
+    writeFileSync(lock, JSON.stringify({ pid: 999999999, at: Date.now() }));
+    expect(tryAcquireRefillLock(Date.now(), lock)).toBe(true);
+    // The recreated lock is now fresh + live (our pid) → no second steal.
+    expect(tryAcquireRefillLock(Date.now(), lock)).toBe(false);
+    expect(refillLockHolder(lock)?.pid).toBe(process.pid);
+  });
+
+  test("steal leaves no leftover .stale temp files", () => {
+    writeFileSync(lock, JSON.stringify({ pid: 999999999, at: Date.now() }));
+    expect(tryAcquireRefillLock(Date.now(), lock)).toBe(true);
+    const leftovers = readdirSync(dir).filter((f) => f.includes(".stale."));
+    expect(leftovers).toEqual([]);
   });
 });
