@@ -2555,21 +2555,34 @@ async function cmdDoctor() {
       const body: any = await wr.json();
       const welldWells = (Array.isArray(body?.wells) ? body.wells : [])
         .map((w: any) => String(w?.name ?? "")).filter(Boolean);
-      const reg = (await loadRegistry()).cells;
-      const known: string[] = [];
-      for (const c of reg) {
-        known.push(await wellNameForCell(c.name), `cells-${c.name}`, c.name);
-        if (c.hatched_from) known.push(`egg-${c.hatched_from}`);
+      // The registry AND pool.json are both load-bearing: without either we
+      // can't tell an owned cell/egg from an orphan. They throw on a malformed
+      // file — DO NOT swallow that into an empty set, because then every real
+      // cell/egg welld reports would be flagged an orphan and the operator told
+      // to destroy valid wells (a state-file glitch becoming data loss). Skip
+      // the check loudly instead.
+      let known: string[] | null = null;
+      let poolWells: string[] | null = null;
+      try {
+        const reg = (await loadRegistry()).cells;
+        known = [];
+        for (const c of reg) {
+          known.push(await wellNameForCell(c.name), `cells-${c.name}`, c.name);
+          if (c.hatched_from) known.push(`egg-${c.hatched_from}`);
+        }
+        poolWells = (await loadPool()).members.map((m: any) => String(m?.well_name ?? "")).filter(Boolean);
+      } catch (e) {
+        console.log(`\norphan wells:  ${yellow}skipped${reset} ${dim}(registry or pool.json unreadable — can't distinguish orphans from owned wells: ${String(e).slice(0, 80)})${reset}`);
       }
-      const poolWells = (await loadPool().catch(() => ({ members: [] as any[] })))
-        .members.map((m: any) => String(m?.well_name ?? "")).filter(Boolean);
-      const orphans = findOrphanWells({ welldWells, knownWells: known, poolWells });
-      if (orphans.length === 0) {
-        console.log(`\norphan wells:  ${green}none${reset} ${dim}(every welld VM is a registered cell or a pool egg)${reset}`);
-      } else {
-        console.log(`\norphan wells:  ${red}${orphans.length}${reset} ${dim}— welld VMs nothing in cells owns (half-finished birth? bake-egg.sh run outside \`cells birth\`?):${reset}`);
-        for (const w of orphans) {
-          console.log(`  ${red}${w}${reset} ${dim}— unowned. If confirmed orphan (not a birth in flight), destroy the well via welld.${reset}`);
+      if (known && poolWells) {
+        const orphans = findOrphanWells({ welldWells, knownWells: known, poolWells });
+        if (orphans.length === 0) {
+          console.log(`\norphan wells:  ${green}none${reset} ${dim}(every welld VM is a registered cell or a pool egg)${reset}`);
+        } else {
+          console.log(`\norphan wells:  ${red}${orphans.length}${reset} ${dim}— welld VMs nothing in cells owns (half-finished birth? bake-egg.sh run outside \`cells birth\`?):${reset}`);
+          for (const w of orphans) {
+            console.log(`  ${red}${w}${reset} ${dim}— unowned. If confirmed orphan (not a birth in flight), destroy the well via welld.${reset}`);
+          }
         }
       }
     }
