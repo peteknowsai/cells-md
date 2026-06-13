@@ -22,7 +22,7 @@ import {
   groupFleet,
   loadFleet,
 } from "./lib/fleet";
-import { loadRegistrySafe, saveRegistry } from "./lib/registry";
+import { mutateRegistry } from "./lib/registry";
 
 const VIOLET = "#9D7CD8"; // the fleet color (shared with birth-ui.tsx)
 const REFRESH_MS = 4000;
@@ -257,13 +257,16 @@ export function AgentsView({
   const doRetag = async () => {
     const name = retagName;
     const project = input.trim();
-    const reg = await loadRegistrySafe();
-    const cell = reg.cells.find((c) => c.name === name);
-    if (cell) {
-      if (project) cell.project = project;
-      else delete cell.project;
-      await saveRegistry(reg);
-    }
+    // Locked read-modify-write so the cockpit retag can't clobber a concurrent
+    // birth/operator write (mirrors cells project).
+    await mutateRegistry((cells) =>
+      cells.map((c) => {
+        if (c.name !== name) return c;
+        if (project) return { ...c, project };
+        const { project: _drop, ...rest } = c;
+        return rest;
+      }),
+    );
     setStatus(project ? `retagged ${name} → ${project}` : `cleared ${name}'s project`);
     setMode("list");
     setInput("");

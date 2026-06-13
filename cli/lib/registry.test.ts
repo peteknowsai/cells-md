@@ -6,6 +6,11 @@ import {
   promoteCell,
   removeCell,
   isNameTaken,
+  isStaleWarming,
+  cullStaleWarming,
+  STALE_WARMING_MS,
+  shouldReclaimLock,
+  LOCK_STALE_HOLDER_MS,
   type Cell,
 } from "./registry";
 
@@ -120,4 +125,99 @@ test("isNameTaken: a legacy entry with no status is a real cell → taken", () =
 
 test("isNameTaken: absent name is free", () => {
   expect(isNameTaken([cell({ name: "alice" })], "ghost")).toBe(false);
+});
+
+// ── stale-warming cull ─────────────────────────────────────────────────
+// A "warming" entry only outlives its birth on a hard crash between
+// pre-register and promote/rollback; the cull reaps orphans older than any
+// plausible birth so they never accumulate.
+
+const NOW = new Date("2026-06-13T12:00:00Z").getTime();
+const FRESH = new Date(NOW - 30_000).toISOString(); // 30s old
+const OLD = new Date(NOW - STALE_WARMING_MS - 60_000).toISOString(); // past threshold
+
+test("isStaleWarming: a fresh warming entry (in-flight birth) is NOT stale", () => {
+  expect(isStaleWarming(cell({ status: "warming", created_at: FRESH }), NOW)).toBe(false);
+});
+
+test("isStaleWarming: a warming entry older than the threshold is stale", () => {
+  expect(isStaleWarming(cell({ status: "warming", created_at: OLD }), NOW)).toBe(true);
+});
+
+test("isStaleWarming: an alive cell is never stale, however old", () => {
+  expect(isStaleWarming(cell({ status: "alive", created_at: OLD }), NOW)).toBe(false);
+});
+
+test("isStaleWarming: a legacy entry with no status is never stale", () => {
+  expect(isStaleWarming(cell({ created_at: OLD }), NOW)).toBe(false);
+});
+
+test("isStaleWarming: a warming entry with an unparseable timestamp is reaped", () => {
+  expect(isStaleWarming(cell({ status: "warming", created_at: "not-a-date" }), NOW)).toBe(true);
+});
+
+test("isStaleWarming: honors a custom maxAgeMs", () => {
+  const oneMinOld = new Date(NOW - 60_000).toISOString();
+  expect(isStaleWarming(cell({ status: "warming", created_at: oneMinOld }), NOW, 30_000)).toBe(true);
+  expect(isStaleWarming(cell({ status: "warming", created_at: oneMinOld }), NOW, 120_000)).toBe(false);
+});
+
+test("cullStaleWarming drops only stale warming entries, keeping alive + in-flight", () => {
+  const cells = [
+    cell({ name: "alive-old", status: "alive", created_at: OLD }),
+    cell({ name: "warming-fresh", status: "warming", created_at: FRESH }),
+    cell({ name: "warming-orphan", status: "warming", created_at: OLD }),
+    cell({ name: "legacy", created_at: OLD }),
+  ];
+  const out = cullStaleWarming(cells, NOW);
+  expect(out.map((c) => c.name)).toEqual(["alive-old", "warming-fresh", "legacy"]);
+});
+
+test("cullStaleWarming does not mutate the input array", () => {
+  const cells = [cell({ name: "warming-orphan", status: "warming", created_at: OLD })];
+  cullStaleWarming(cells, NOW);
+  expect(cells.length).toBe(1);
+});
+
+test("cullStaleWarming on an all-alive registry is a no-op", () => {
+  const cells = [cell({ name: "a", status: "alive" }), cell({ name: "b", status: "alive" })];
+  expect(cullStaleWarming(cells, NOW)).toEqual(cells);
+});
+
+// ── shouldReclaimLock (registry-lock reclaim policy) ───────────────────
+// The load-bearing decision: when may a contended ~/.cells/.registry.lock be
+// force-cleared? A dead holder → instantly (the fix for the strand findings);
+// a malformed file → after a 1s floor; a live holder → only if wedged >30s.
+
+const held = (over: Partial<{ pid: number; startedAt: string }> = {}) => ({
+  pid: 999,
+  startedAt: new Date(NOW - 1_000).toISOString(),
+  ...over,
+});
+
+test("shouldReclaimLock: a dead holder is reclaimed immediately", () => {
+  expect(shouldReclaimLock(held(), "dead", NOW, 0)).toBe(true);
+});
+
+test("shouldReclaimLock: a live holder is NOT reclaimed while fresh", () => {
+  expect(shouldReclaimLock(held({ startedAt: new Date(NOW - 5_000).toISOString() }), "alive", NOW, 0)).toBe(false);
+});
+
+test("shouldReclaimLock: a live but wedged (>30s) holder is force-cleared", () => {
+  const wedged = held({ startedAt: new Date(NOW - LOCK_STALE_HOLDER_MS - 1_000).toISOString() });
+  expect(shouldReclaimLock(wedged, "alive", NOW, 0)).toBe(true);
+});
+
+test("shouldReclaimLock: unknown liveness (EPERM/no probe) waits, never reclaims a present holder", () => {
+  const old = held({ startedAt: new Date(NOW - 60_000).toISOString() });
+  expect(shouldReclaimLock(old, "unknown", NOW, 0)).toBe(false);
+});
+
+test("shouldReclaimLock: a malformed/empty lock file is reclaimed only past the 1s floor", () => {
+  expect(shouldReclaimLock(null, "unknown", NOW, 500)).toBe(false); // brand-new, mid-creation
+  expect(shouldReclaimLock(null, "unknown", NOW, 2_000)).toBe(true);
+});
+
+test("shouldReclaimLock: a live holder with an unparseable startedAt is left alone", () => {
+  expect(shouldReclaimLock(held({ startedAt: "not-a-date" }), "alive", NOW, 0)).toBe(false);
 });

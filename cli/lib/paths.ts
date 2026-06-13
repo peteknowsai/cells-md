@@ -9,8 +9,12 @@ import { join } from "node:path";
 
 export const REGISTRY_DIR = join(homedir(), ".cells");
 
-// The cell registry (live cells: name, harness, model, hatched_from, …).
+// The cell registry (live cells: name, harness, model, hatched_from, …)
+// and its cooperative lock. Every cells.json read-modify-write goes through
+// withRegistryLock so concurrent writers (a birth pre-registering/promoting,
+// `cells model/kill/project/chain`) can't clobber each other's update.
 export const REGISTRY_PATH = join(REGISTRY_DIR, "cells.json");
+export const REGISTRY_LOCK_PATH = join(REGISTRY_DIR, ".registry.lock");
 
 // The egg pool + its cooperative lock, and the pre-2026-05-13 legacy
 // filename that loadPool migrates from on first read.
