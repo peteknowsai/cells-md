@@ -40,9 +40,14 @@ REPO_ROOT="$(cd -P "$(dirname "$0")/.." && pwd)"
 TEMPLATE="$REPO_ROOT/cli/worker/cell/wrangler.toml"
 [ -f "$TEMPLATE" ] || { echo "missing template $TEMPLATE"; exit 1; }
 
-# Render alongside index.ts so wrangler resolves main = "index.ts"
-# correctly (it's relative to the config file, not cwd).
-RENDERED="$REPO_ROOT/cli/worker/cell/.wrangler.${NAME}.toml"
+# Render alongside index.ts so wrangler resolves main = "index.ts" correctly
+# (it's relative to the config file, not cwd). Unique per-invocation ($$ = this
+# process's pid) so two concurrent deploys of the SAME cell — e.g. a self-healing
+# `cells run` and a still-running birth-postwork worker_deploy — don't share one
+# rendered file and have one's EXIT-trap `rm` yank it out from under the other
+# mid-`wrangler secret put`. Concurrent processes always have distinct pids, so
+# this is collision-free where it matters.
+RENDERED="$REPO_ROOT/cli/worker/cell/.wrangler.${NAME}.$$.toml"
 LOG="$(mktemp -t deploy-cell-${NAME}.XXXXXX)"
 trap 'rm -f "$RENDERED" "$LOG"' EXIT
 sed -e "s/{{CELL}}/${NAME}/g" \
