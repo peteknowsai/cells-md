@@ -1,0 +1,164 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>DNA-rev — stale platform code as a visible, self-healing fact</title>
+<link rel="stylesheet" href="../_assets/doc.css">
+<script defer src="../_assets/doc.js"></script>
+</head>
+<body>
+<header>
+  <h1>DNA-rev</h1>
+  <p class="subtitle">A content fingerprint that makes "is this egg/cell running current platform code?" a checked, self-correcting fact instead of an invisible one. Designed + shipped 2026-06-13.</p>
+</header>
+
+<section>
+  <h2>Plain-English summary</h2>
+  <p>
+    Every cell is born with a copy of the genome — the platform code in
+    <code>dna/cells/base/</code> (the supervisor, the libs, the in-cell tools). The word
+    <em>copy</em> is the whole problem. DNA is stamped into an egg when it's baked and into a
+    cell when it's born; after that it's frozen. Improve a lib on the Mac and nothing already
+    alive notices — not the spare eggs in the pool, not the cells already running. The change
+    just… doesn't arrive, and nothing says so.
+  </p>
+  <p>
+    That silence caused three incidents in one week: a cell running a stale supervisor, another
+    missing a lib module its code expected, and a pool egg that shipped a cell with a
+    months-old jobs lane. Each time the fix existed in the repo and simply hadn't travelled.
+  </p>
+  <p>
+    <strong>DNA-rev</strong> gives the genome a version number — a fingerprint of the runtime
+    code, computed from the repo. It's stamped onto every egg and cell at bake/birth/refresh and
+    read back by <code>cells doctor</code>. Now "this egg is two revisions behind" is a fact you
+    can see. And two pieces of machinery you already have act on it: the pool reconciler retires
+    stale eggs and bakes fresh ones; the steward refreshes running cells that fell behind. Stale
+    platform code can no longer ship quietly.
+  </p>
+</section>
+
+<section>
+  <h2>What the rev fingerprints — and what it deliberately ignores</h2>
+  <p>
+    The rev (<code>cli/lib/dna-rev.ts</code>) is a 12-hex SHA-256 over the <strong>sync class</strong>
+    from <code>cli/lib/refresh.ts</code> — exactly the universal platform surface
+    <code>cells refresh</code> pushes to <em>every</em> cell unconditionally:
+  </p>
+  <pre><code>site/server.ts   site/package.json   lib/   bin/   scripts/</code></pre>
+  <p>Three things are excluded on purpose:</p>
+  <table>
+    <tr><th>Excluded</th><th>Why</th></tr>
+    <tr><td>Markdown (<code>*.md</code>)</td><td>Prose and docs must not churn the rev. The point is content-addressing to <em>behavior</em>, not text — a comment-only edit is a no-op.</td></tr>
+    <tr><td>Tests (<code>*.test.ts</code>)</td><td>Never ship to a cell.</td></tr>
+    <tr><td>Per-cell capability code (<code>.pi/extensions</code>, skills, prompts — the <em>if-present</em> class)</td><td>A cell carries only what it opted into. Folding these into one global rev would mark a cell that <em>lacks</em> an extension as "stale" the instant that extension changed, and make the steward's auto-refresh storm the whole fleet on any extension edit. They have their own <code>cells refresh-extensions</code> path.</td></tr>
+  </table>
+  <p>
+    So a rev mismatch means precisely one thing: <em>a <code>cells refresh</code> would change a
+    platform file on this cell</em> — genuine, uniformly-fixable staleness. The fingerprint is
+    LF-normalized and content-only (no mode bits) so it's stable across checkouts and machines,
+    and memoized per process.
+  </p>
+</section>
+
+<section>
+  <h2>The three phases</h2>
+
+  <h3>Phase 1 — visibility</h3>
+  <p>
+    The rev is <strong>stamped at every bake/refresh site</strong>, all reading the same
+    memoized value:
+  </p>
+  <ul>
+    <li><strong>Pool eggs:</strong> into <code>pool.json</code> (<code>bakePoolMember</code>) and onto
+        <code>/root/.dna-rev</code> (<code>provisionCellInWell</code>). The pool.json copy lets the
+        doctor judge egg staleness with <em>zero VM wakes</em>.</li>
+    <li><strong>Born cells:</strong> <code>bake-egg.sh</code> re-overlays current DNA onto the claimed
+        egg, then stamps <code>/root/.dna-rev</code> — so a cell born from a stale egg reads
+        <em>current</em>, because the overlay made it current.</li>
+    <li><strong>Refreshed cells:</strong> <code>cells refresh</code> stamps the rev <em>only on the
+        healthy branch</em> — never before the rollback decision. (Previously the version stamp was
+        written before the health check, so a refresh that health-checked red and rolled back left
+        the cell claiming the new rev while running the old code. Fixed here.)</li>
+  </ul>
+  <p>
+    The in-guest probe (<code>cli/lib/fleet-probe.ts</code>) carries <code>/root/.dna-rev</code> back,
+    and both <code>cells doctor</code> and <code>cells doctor --json</code> show pool + live-cell
+    drift. DNA staleness is kept <em>out</em> of the transport verdict, so it never reads as a
+    transport fault.
+  </p>
+
+  <h3>Phase 2 — the pool heals itself</h3>
+  <p>
+    The reconciler (<code>cli/lib/reconcile.ts</code> → <code>selectStaleRevCull</code>) retires open
+    eggs whose rev is behind current, then refill bakes replacements at the current rev. It is
+    <strong>capped and floored</strong>: never empties the pool, and a big rev jump rotates over
+    several passes instead of blackholing births in one.
+  </p>
+
+  <h3>Phase 3 — running cells heal themselves</h3>
+  <p>
+    The steward (<code>scripts/steward-sweep.sh</code>, fired every 30 min) refreshes running cells
+    that are behind current — at most three per sweep, so a fleet-wide jump rotates over a few
+    sweeps rather than restarting every supervisor at once. This is the durable form of the manual
+    <code>cells refresh &lt;cell&gt;</code> bridge the homezero team had been running by hand.
+  </p>
+</section>
+
+<section>
+  <h2>Two safety rails</h2>
+  <h3>Clean-tree gate</h3>
+  <p>
+    Every <em>automatic</em> action — the pool cull and the steward's refresh — gates on a clean
+    working tree (<code>git status --porcelain -- dna/cells/base</code>). An uncommitted edit to a
+    sync file shifts the computed rev; chasing it would stampede the pool and fleet toward
+    <em>uncommitted</em> code. Visibility is never gated: <code>cells doctor</code> still shows the
+    drift on a dirty tree, and the steward alerts ("commit DNA changes to enable auto-refresh")
+    rather than acting.
+  </p>
+  <h3>Conservative rollout</h3>
+  <p>
+    A missing or empty rev — a pre-DNA-rev egg, or a cell whose probe couldn't read the file —
+    reads <code>unknown</code>, and unknown is <em>never</em> treated as stale. Nothing gets
+    mass-culled or mass-refreshed on the day this ships. Existing cells adopt a rev the first time
+    they're refreshed (or reborn); the pool rotates to stamped eggs as it refills. Steady-state
+    drift detection switches on only once an egg/cell actually carries a rev to compare.
+  </p>
+</section>
+
+<section>
+  <h2>Why a separate field, not the variant signature</h2>
+  <p>
+    The tempting design was to fold the fingerprint into the pool's variant signature. Adversarial
+    review killed it: pool matching keys on the literal constant <code>v1-generic</code>
+    (<code>cli/lib/pool.ts</code>), not a computed signature — the signature path it would have
+    extended is dormant V2 code. A <strong>separate field</strong> marks staleness without touching
+    the live pool-matching key. Content-addressing from the working tree also makes rollback
+    symmetric: <code>git checkout</code> the good tree and the rev flips back, and the same cull +
+    refresh machinery converges in reverse.
+  </p>
+</section>
+
+<section>
+  <h2>Known limits &amp; follow-ups</h2>
+  <ul>
+    <li><strong>First request after wake.</strong> A hibernated cell judged from its last-known rev
+        may serve one request on stale DNA before the next sweep refreshes it.</li>
+    <li><strong>Specials track the base rev.</strong> A project mother carries the universal platform
+        surface like any cell; a special that overrides its own non-platform files is out of the
+        global rev's scope by design (specials are hand-managed; <code>cells refresh</code> handles
+        them on demand).</li>
+    <li><strong>Health-check proves boot, not function.</strong> Refresh's gate proves well-site
+        restarted, not that every code path works — the same limit the existing refresh has.</li>
+    <li><strong>Comment-in-code still moves the rev.</strong> Only whole markdown files are excluded;
+        a comment edit inside a hashed <code>.ts</code> file shifts it. Conservative on purpose.</li>
+  </ul>
+</section>
+
+<footer>
+  <p>Tests: <code>cli/lib/dna-rev.test.ts</code>, <code>cli/lib/reconcile.test.ts</code>,
+  <code>cli/lib/fleet-probe.test.ts</code>. Origin: the design workflow of 2026-06-13 (four
+  candidate designs, adversarial review — DNA-rev was the sole survivor).</p>
+</footer>
+</body>
+</html>
