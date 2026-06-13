@@ -21,6 +21,7 @@ import {
   projectMotherName,
 } from "./lib/cell-name";
 import { loadPostworkSummary, removePostwork, type PostworkSummary } from "./lib/postwork";
+import { compileBrief, type BriefVocab } from "./lib/brief";
 import { REGISTRY_DIR } from "./lib/paths";
 import {
   loadRegistry,
@@ -2566,7 +2567,19 @@ type CreateOpts = {
   seedOff?: boolean;    // true if --seed=off — no seed greeting
   noPool?: boolean;     // deprecated no-op — birth is pool-only now (parsed for back-compat)
   project?: string;     // fleet-grouping label recorded in the registry (see `cells agents`)
+  brief?: string;       // freeform brief (compiled to config + seed purpose); triggers preview
+  yes?: boolean;        // --yes: skip the brief preview/confirm
+  dryRun?: boolean;     // --dry-run/--plan: print the resolved birth plan and exit (no egg)
 };
+
+// Vocabulary the brief compiler recognizes as config tokens. Models come from
+// MODEL_IDS (the single source of truth); harnesses + thinking levels are the
+// fixed sets the validators in cmdCreate already enforce.
+const BRIEF_THINKING_VOCAB = ["minimal", "low", "medium", "high", "xhigh", "max", "adaptive"];
+const BRIEF_HARNESS_VOCAB = ["pi", "claude-code", "codex", "hermes"];
+function briefVocab(): BriefVocab {
+  return { models: Object.keys(MODEL_IDS), harnesses: BRIEF_HARNESS_VOCAB, thinkingLevels: BRIEF_THINKING_VOCAB };
+}
 
 // Default seed: the cell greets the user back in one sentence + offers help.
 // Surfaces the magical-first-talk wedge — `cells birth bob` returns with bob
@@ -2658,6 +2671,10 @@ function parseCreateArgs(args: string[]): { name: string | undefined; opts: Crea
       }
     } else if (a === "--no-pool") {
       opts.noPool = true;
+    } else if (a === "--yes" || a === "-y") {
+      opts.yes = true;
+    } else if (a === "--dry-run" || a === "--plan") {
+      opts.dryRun = true;
     } else if (a.startsWith("--project=")) {
       opts.project = a.slice("--project=".length).trim();
     } else if (a.startsWith("--")) {
@@ -2667,8 +2684,13 @@ function parseCreateArgs(args: string[]): { name: string | undefined; opts: Crea
       positionals.push(a);
     }
   }
-  // Positional grammar (Stage 3 strips a trailing whitespace-containing brief
-  // before this). What remains:
+  // The brief is the trailing positional that contains whitespace — names and
+  // projects are single DNS tokens, so whitespace unambiguously marks the brief.
+  // Strip it first, then disambiguate the remaining name/project positionals.
+  if (positionals.length > 0 && /\s/.test(positionals[positionals.length - 1]!)) {
+    opts.brief = positionals.pop()!.trim();
+  }
+  // Positional grammar on what remains:
   //   0 → auto-name (v1 fast-path);  1 → <name>;  2 → <project> <name>.
   let name: string | undefined;
   if (positionals.length === 1) {
@@ -2683,8 +2705,26 @@ function parseCreateArgs(args: string[]): { name: string | undefined; opts: Crea
     if (!opts.project) opts.project = project;
     name = positionals[1];
   } else if (positionals.length > 2) {
-    console.error(`too many arguments: ${positionals.join(" ")}\n  usage: cells birth [<project>] [<name>] [--flags]`);
+    console.error(`too many arguments: ${positionals.join(" ")}\n  usage: cells birth [<project>] [<name>] ["brief"] [--flags]`);
     process.exit(1);
+  }
+  // Compile the brief into config hints + the seed purpose. Precedence: an
+  // explicit --flag PINS (so ??= leaves it); otherwise the brief fills it;
+  // otherwise cmdCreate's per-harness defaults fill it. The leftover purpose
+  // becomes the cell's seed (its first message) unless --seed pinned one.
+  if (opts.brief) {
+    const c = compileBrief(opts.brief, briefVocab());
+    if (c.harness !== undefined) opts.harness ??= c.harness;
+    if (c.model !== undefined) opts.model ??= c.model as ModelKey;
+    if (c.thinking !== undefined) opts.thinking ??= c.thinking;
+    // Infer the harness from an Anthropic model when neither flags nor brief
+    // pinned one: opus/sonnet/haiku only run on claude-code (the Max policy),
+    // so the default "pi" would fail validation. This is the "mother infers
+    // gaps" step, done deterministically Mac-side. Flags still win (??=).
+    if (opts.harness === undefined && opts.model && MODEL_IDS[opts.model]?.provider === "anthropic") {
+      opts.harness = "claude-code";
+    }
+    if (c.purpose && opts.seed === undefined && !opts.seedOff) opts.seed = c.purpose;
   }
   return { name, opts };
 }
@@ -2709,7 +2749,7 @@ async function cmdCreate(name: string | undefined, opts: CreateOpts): Promise<vo
     opts.harness === undefined && opts.model === undefined &&
     opts.thinking === undefined && opts.extensions === undefined &&
     opts.packages === undefined && opts.channels === undefined &&
-    opts.slackChannel === undefined &&
+    opts.slackChannel === undefined && opts.brief === undefined &&
     opts.seed === undefined && !opts.seedOff && !opts.noPool;
 
   let harness: string;
@@ -2914,6 +2954,36 @@ async function cmdCreate(name: string | undefined, opts: CreateOpts): Promise<vo
     chain,
   };
 
+  // Which mother owns this birth (project's own if registered + alive, else
+  // global). Resolved here for the preview and reused at the birth line below.
+  const owningMother = await motherFor(opts.project);
+
+  // ── 3.5 Preview the resolved plan ──
+  // A brief inferred config, so show exactly what will run and confirm before
+  // spending an egg — the "trade speed for visibility" rule birth lives by.
+  // --dry-run prints the plan and exits (no egg) regardless of TTY; otherwise
+  // the confirm is shown only for a brief on a TTY, and --yes skips it.
+  if (opts.dryRun || (opts.brief && !opts.yes && process.stdout.isTTY)) {
+    const seedText = opts.seedOff ? "(none)" : (opts.seed ?? DEFAULT_SEED);
+    console.log(`\nbirth plan for '${name}'${opts.project ? ` in project '${opts.project}'` : ""}:`);
+    if (opts.project) console.log(`  mother:     ${owningMother}`);
+    console.log(`  harness:    ${harness}`);
+    console.log(`  model:      ${choice.modelId}  (${choice.provider}, thinking=${thinking})`);
+    if (extensions.length) console.log(`  extensions: ${extensions.join(", ")}`);
+    if (packages.length) console.log(`  packages:   ${packages.join(", ")}`);
+    if (channels.length) console.log(`  channels:   ${channels.join(", ")}`);
+    console.log(`  seed:       ${seedText}`);
+    if (opts.dryRun) {
+      console.log(`\n(dry run — no cell born)`);
+      process.exit(0);
+    }
+    const ans = (await ask(`\nbirth ${name}? [Y/n] `)).toLowerCase();
+    if (ans === "n" || ans === "no") {
+      console.log("birth cancelled.");
+      process.exit(0);
+    }
+  }
+
   // ── 4. Claim a generic egg from the pool ──
   if (!(await readSecret("CELLS_PROXY_SECRET"))) {
     console.error("CELLS_PROXY_SECRET missing from ~/.cells/secrets.json");
@@ -3048,13 +3118,11 @@ async function cmdCreate(name: string | undefined, opts: CreateOpts): Promise<vo
   // Legacy gate CELLS_USE_MOTHER_CELL=1 still routes through cells-mother
   // via talkAndAwaitOutcome; that path is single-harness (pi on her well)
   // and bypasses the chain for now.
-  // Which mother owns this birth: the project's own mother if registered, else
-  // the global mother. Stage 2 keeps the ritual itself the shared MOTHER_ROOT
-  // skill on Pete's one Max session (the birth-ritual lock serializes it
-  // globally — project mothers are isolation/ownership, NOT parallel births),
-  // so this is attribution: who's responsible, and (Stage 3) whose project
-  // defaults fill the blob.
-  const owningMother = await motherFor(opts.project);
+  // owningMother (resolved above for the preview) attributes the birth: the
+  // project's own mother if registered, else the global mother. Stage 2 keeps
+  // the ritual itself the shared MOTHER_ROOT skill on Pete's one Max session
+  // (the birth-ritual lock serializes it globally — project mothers are
+  // isolation/ownership, NOT parallel births).
   if (!process.stdout.isTTY) {
     console.log(owningMother === "mother" ? `birthing ${name}…` : `birthing ${name} (${owningMother})…`);
   }
