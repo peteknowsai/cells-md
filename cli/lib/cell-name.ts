@@ -55,6 +55,29 @@ export function projectMotherName(project: string): string {
   return `${project}${MOTHER_SUFFIX}`;
 }
 
+// Whether `cells run` must refuse a job on this cell because it's a mother.
+// The original guard refused ALL mothers ("a detached job racing the birth
+// ritual is the known silent deadlock"). That deadlock only exists when the
+// ritual runs THROUGH the mother cell — the legacy CELLS_USE_MOTHER_CELL mode.
+// Under the default (births run Mac-side in MOTHER_ROOT, never talking to the
+// mother cell), a PROJECT mother's job can't re-enter its own ritual, so it's
+// safe — and that's exactly what lets a project mother run a durable birth as
+// her own job. Still refuse the GLOBAL mother (her births are Mac-CLI-initiated;
+// a self-job has no use case and would only risk racing the global lock), and
+// refuse ANY mother under CELLS_USE_MOTHER_CELL where the deadlock is real.
+// Returns a reason string when refused, or null when the job is allowed.
+export function motherJobRefusalReason(name: string, useMotherCell: boolean): string | null {
+  const project = projectOfMother(name);
+  if (project === null) return null; // not a mother — no mother-specific refusal
+  if (project === "") {
+    return "the global mother births Mac-side via the deterministic handoff; a detached job would only race the birth-ritual lock";
+  }
+  if (useMotherCell) {
+    return "CELLS_USE_MOTHER_CELL routes the birth ritual through the mother cell, so a detached job races it — the known silent deadlock";
+  }
+  return null; // project mother, default Mac-side-ritual mode — allowed
+}
+
 // ── Pulse naming ──────────────────────────────────────────────────────────
 // Pulse is the family scheduler, and — like mother — a ROLE keyed by project,
 // not a singleton: the global `pulse`, or a project's `<project>-pulse`. The

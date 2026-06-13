@@ -3,6 +3,7 @@ import {
   isValidCellName,
   validateCellName,
   isMotherName,
+  motherJobRefusalReason,
   projectOfMother,
   projectMotherName,
   projectCellName,
@@ -10,6 +11,27 @@ import {
   projectOfPulse,
   projectPulseName,
 } from "./cell-name";
+
+test("motherJobRefusalReason: non-mother cells are never refused", () => {
+  expect(motherJobRefusalReason("advisor-pete", false)).toBeNull();
+  expect(motherJobRefusalReason("zero-advisor-x", false)).toBeNull();
+  expect(motherJobRefusalReason("pulse", false)).toBeNull();
+  expect(motherJobRefusalReason("zero-pulse", true)).toBeNull();
+});
+
+test("motherJobRefusalReason: the global mother is always refused", () => {
+  expect(motherJobRefusalReason("mother", false)).toBeTruthy();
+  expect(motherJobRefusalReason("mother", true)).toBeTruthy();
+});
+
+test("motherJobRefusalReason: a project mother is allowed under the default Mac-side-ritual mode", () => {
+  expect(motherJobRefusalReason("zero-mother", false)).toBeNull();
+  expect(motherJobRefusalReason("acme-mother", false)).toBeNull();
+});
+
+test("motherJobRefusalReason: a project mother is refused under CELLS_USE_MOTHER_CELL (real deadlock)", () => {
+  expect(motherJobRefusalReason("zero-mother", true)).toBeTruthy();
+});
 
 test("accepts plain lowercase names", () => {
   expect(isValidCellName("alice")).toBe(true);
