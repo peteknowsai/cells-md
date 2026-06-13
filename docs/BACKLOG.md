@@ -5,6 +5,26 @@ Newest at top. Clear an item when it's done (git history keeps the record).
 
 ---
 
+## In-cell `cells` CLI reads still point at the retired sprites API
+
+`dna/cells/base/bin/cells` is "read + talk only." The TALK surface (`cells
+talk`, `cells verify`, `cells talk --list`) is current — it routes through
+`<peer>.cells.md/inbox/append` + `proxy.cells.md/peers`, no token. But the
+READ surface (`cells list`, `cells self`, `cells checkpoint`, the `peers`
+listing path) still hits `https://api.sprites.dev` with `$SPRITES_TOKEN` —
+the retired pre-wells substrate. On a wells-era cell that token is absent, so
+`cells list` dies with "SPRITES_TOKEN not set in env (check ~/.bashrc.d/
+sprites)". Surfaced 2026-06-13 when homezero probed zero-mother for whether
+she could drive the fleet from inside a job.
+
+Not a blocker: peer discovery has a live equivalent (`cells talk --list`), and
+`cells birth`/`run`/`exec` are intentionally NOT in the in-cell CLI (Mac-only
+— the wells/cells boundary). **Fix:** re-point the in-cell read commands at
+the cells.md edge (`proxy.cells.md/peers` + the per-cell Worker `/debug`)
+the way `cells talk --list` already does, and delete the `api.sprites.dev` /
+`$SPRITES_TOKEN` path entirely. Removes a dead dependency and a confusing
+error that reads like an auth gap but is really a legacy-CLI gap.
+
 ## A cell's worker can lag the jobs lane → `cells run` now self-heals it
 
 A `cells run` job is rejected if the cell's `<cell>.cells.md` Worker predates
