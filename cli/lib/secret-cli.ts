@@ -55,7 +55,10 @@ export function validateSecretKey(
         `Keys are env-var names and filenames; no spaces, slashes, or metacharacters.`,
     };
   }
-  if (RESERVED_SECRET_KEYS.has(key)) {
+  // Case-insensitive: env-var names are case-sensitive at the OS level (so a
+  // lowercase `path` wouldn't hijack command resolution), but blocking the
+  // lowercase forms too is free defense-in-depth and avoids a confusing key.
+  if (RESERVED_SECRET_KEYS.has(key.toUpperCase())) {
     return {
       ok: false,
       reason:
@@ -64,6 +67,14 @@ export function validateSecretKey(
     };
   }
   return { ok: true };
+}
+
+// Strip ALL trailing CR/LF in any combination. A trailing newline silently
+// breaks bearer tokens, and the in-cell `v=$(cat)` strips trailing newlines
+// too, so this keeps the Mac-side byte-length report matching what's stored.
+// (Plain /\r?\n+$/ would leave a stray \r on Windows-style "x\r\n\r\n".)
+export function stripTrailingNewlines(s: string): string {
+  return s.replace(/[\r\n]+$/, "");
 }
 
 // Where the secret value comes from on the Mac side. "auto" = decide at
@@ -126,11 +137,26 @@ export function parseSecretArgs(rest: string[]): SecretCmd {
 
   if (action === "list") {
     if (cells.length === 0) return { action: "usage", error: "list needs a cell name" };
+    if (positional.length > 1) return { action: "usage", error: `unexpected extra argument(s): ${positional.slice(1).join(" ")}` };
     if (sawSourceFlag) return { action: "usage", error: "list takes no value-source flag" };
     return { action: "list", cells };
   }
 
-  // set / rm both need a key.
+  // set / rm both need a key — and EXACTLY a key. An extra positional on `set`
+  // is almost always someone typing the value as an argument (the exact leak
+  // this command exists to prevent), so refuse it loudly rather than silently
+  // dropping it after it's already landed in argv/history.
+  if (positional.length > 2) {
+    const extra = positional.slice(2).join(" ");
+    return {
+      action: "usage",
+      error:
+        action === "set"
+          ? `unexpected extra argument(s): "${extra}". If that's the secret value, pass it via ` +
+            `--from-env/--from-file/stdin — never as an argument (it leaks into ps, history, logs).`
+          : `unexpected extra argument(s): "${extra}"`,
+    };
+  }
   const key = positional[1] ?? "";
   if (cells.length === 0 || !key) {
     return { action: "usage", error: `${action} needs <cell[,cell2,…]> <KEY>` };

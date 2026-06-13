@@ -9,6 +9,7 @@ import {
   buildSecretRmScript,
   buildSecretListScript,
   parseSecretListOutput,
+  stripTrailingNewlines,
 } from "./secret-cli.ts";
 
 describe("isValidSecretKey", () => {
@@ -48,6 +49,11 @@ describe("validateSecretKey", () => {
   test("accepts an ordinary app-secret name", () => {
     expect(validateSecretKey("CONVEX_DEPLOY_KEY")).toEqual({ ok: true });
     expect(validateSecretKey("STRIPE_SK")).toEqual({ ok: true });
+  });
+  test("reserved check is case-insensitive (lowercase path/bash_env also blocked)", () => {
+    expect(validateSecretKey("path").ok).toBe(false);
+    expect(validateSecretKey("Ld_Preload").ok).toBe(false);
+    expect(validateSecretKey("bash_env").ok).toBe(false);
   });
   test("malformed key reports a format reason", () => {
     const r = validateSecretKey("bad key");
@@ -91,6 +97,14 @@ describe("parseSecretArgs — set", () => {
     expect(r.action).toBe("usage");
     if (r.action === "usage") expect(r.error).toMatch(/never as KEY=VALUE/);
   });
+  test("rejects an extra positional (value-as-argument leak)", () => {
+    const r = parseSecretArgs(["set", "c", "KEY", "supersecretvalue"]);
+    expect(r.action).toBe("usage");
+    if (r.action === "usage") {
+      expect(r.error).toMatch(/unexpected extra argument/);
+      expect(r.error).toMatch(/--from-env/);
+    }
+  });
   test("rejects reserved key", () => {
     const r = parseSecretArgs(["set", "c", "PATH", "--from-env", "V"]);
     expect(r.action).toBe("usage");
@@ -120,6 +134,12 @@ describe("parseSecretArgs — list / rm", () => {
   });
   test("rm validates the key", () => {
     expect(parseSecretArgs(["rm", "c", "bad key"]).action).toBe("usage");
+  });
+  test("rm rejects an extra positional", () => {
+    expect(parseSecretArgs(["rm", "c", "KEY", "extra"]).action).toBe("usage");
+  });
+  test("list rejects an extra positional", () => {
+    expect(parseSecretArgs(["list", "c", "extra"]).action).toBe("usage");
   });
   test("unknown action → usage with error", () => {
     const r = parseSecretArgs(["frobnicate", "c"]);
@@ -152,6 +172,25 @@ describe("script builders", () => {
     const s = buildSecretListScript();
     expect(s).toContain(`ls -1 ${SECRETS_DIR}`);
     expect(s).toContain("|| true");
+  });
+});
+
+describe("stripTrailingNewlines", () => {
+  test("strips a single trailing newline", () => {
+    expect(stripTrailingNewlines("token\n")).toBe("token");
+  });
+  test("strips multiple CRLF without leaving a stray CR (the bug)", () => {
+    expect(stripTrailingNewlines("token\r\n\r\n")).toBe("token");
+    expect(stripTrailingNewlines("token\r\n")).toBe("token");
+    expect(stripTrailingNewlines("token\n\n\n")).toBe("token");
+  });
+  test("preserves internal newlines and leading/trailing spaces in the value", () => {
+    expect(stripTrailingNewlines("a\nb\n")).toBe("a\nb");
+    expect(stripTrailingNewlines("  spaced  \n")).toBe("  spaced  ");
+  });
+  test("empty / newline-only → empty", () => {
+    expect(stripTrailingNewlines("")).toBe("");
+    expect(stripTrailingNewlines("\r\n\r\n")).toBe("");
   });
 });
 

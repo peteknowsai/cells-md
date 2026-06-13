@@ -18,6 +18,7 @@ import {
   buildSecretRmScript,
   buildSecretListScript,
   parseSecretListOutput,
+  stripTrailingNewlines,
   type SecretSource,
 } from "./lib/secret-cli";
 import { ulid } from "./shared/agent-envelope";
@@ -1961,7 +1962,23 @@ async function resolveSecretValue(source: SecretSource, key: string): Promise<st
       break;
     }
   }
-  return raw.replace(/\r?\n+$/, "");
+  return stripTrailingNewlines(raw);
+}
+
+// Push the current /etc/profile.d/cells-env.sh to a cell (idempotent). A cell
+// baked before the app-secret sourcing block existed won't export a secret we
+// write until its shim is refreshed — so `secret set` refreshes it first,
+// making the secret immediately live for new shells/jobs (a running supervisor
+// still picks it up on its next restart). Body goes via stdin → no heredoc
+// escaping. New births/bakes already carry the current shim; this is the
+// catch-up for existing cells.
+async function ensureCellsEnvShim(well: string): Promise<{ ok: boolean; stderr: string }> {
+  const r = await wellExecStdin(
+    well,
+    `sudo tee /etc/profile.d/cells-env.sh >/dev/null && sudo chmod 644 /etc/profile.d/cells-env.sh && echo SHIM_OK`,
+    CELLS_ENV_SH_BODY,
+  );
+  return { ok: r.ok && r.stdout.includes("SHIM_OK"), stderr: r.stderr || r.stdout };
 }
 
 // `cells secret set|list|rm` — per-cell app secrets. Mac-side only (like
@@ -2008,15 +2025,19 @@ async function cmdSecret(rest: string[]): Promise<void> {
   }
 
   if (cmd.action === "rm") {
-    let removed = 0;
+    let cleared = 0; // confirmed gone on the cell (removed OR already-absent)
+    let failed = 0;  // couldn't reach/run on the cell — the key may still be there
     for (const { cell, well } of wells) {
       const r = await wellExecCapture(well, buildSecretRmScript(cmd.key));
-      if (!r.ok) { console.error(`! ${cell}: rm ${cmd.key} failed: ${r.stderr.slice(0, 200)}`); continue; }
+      if (!r.ok) { console.error(`! ${cell}: rm ${cmd.key} failed: ${r.stderr.slice(0, 200)}`); failed++; continue; }
       const state = r.stdout.includes("REMOVED") ? "removed" : "absent";
       console.log(`${cell}: ${cmd.key} ${state}`);
-      if (state === "removed") removed++;
+      cleared++;
     }
-    console.log(`✓ removed ${cmd.key} from ${removed}/${wells.length} cell${wells.length === 1 ? "" : "s"}`);
+    console.log(`✓ ${cmd.key} cleared on ${cleared}/${wells.length} cell${wells.length === 1 ? "" : "s"}`);
+    // Exit nonzero on any failure so a revocation/rotation script can't mistake
+    // a partial removal for a complete one (mirrors `set` below).
+    if (failed > 0) process.exit(1);
     return;
   }
 
@@ -2026,6 +2047,14 @@ async function cmdSecret(rest: string[]): Promise<void> {
   const script = buildSecretSetScript(cmd.key);
   let ok = 0;
   for (const { cell, well } of wells) {
+    // Refresh the env shim first so the secret is actually sourced on cells
+    // baked before the app-secret block existed. If the shim push fails, don't
+    // claim success — the value would land but never be exported.
+    const shim = await ensureCellsEnvShim(well);
+    if (!shim.ok) {
+      console.error(`! ${cell}: could not refresh env shim, skipping set: ${shim.stderr.slice(0, 160)}`);
+      continue;
+    }
     const r = await wellExecStdin(well, script, value);
     if (r.ok && r.stdout.includes("SET")) {
       // Byte-length only — the value itself is never printed or logged.
@@ -2036,8 +2065,8 @@ async function cmdSecret(rest: string[]): Promise<void> {
     }
   }
   console.log(`✓ ${cmd.key} set on ${ok}/${wells.length} cell${wells.length === 1 ? "" : "s"}`);
-  console.log("  (new shells, jobs, and the next supervisor start see it; a running supervisor");
-  console.log("   picks it up on its next restart — jobs are fresh processes, so immediate.)");
+  console.log("  (new shells and jobs see it immediately — they're fresh processes; a running");
+  console.log("   supervisor picks it up on its next restart.)");
   if (ok < wells.length) process.exit(1);
 }
 
