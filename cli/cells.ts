@@ -5344,19 +5344,26 @@ async function promoteOneHibernatedToRunning(): Promise<boolean> {
   return true;
 }
 
-// Is the runtime DNA in the working tree committed (clean)? Gates the
+// Is the DNA that auto-heal might push committed (clean)? Gates the
 // AUTOMATIC DNA-rev actions — the reconcile stale-rev cull and the steward's
-// auto-refresh — so an in-progress edit to a sync file can't shift the rev
-// and stampede the pool/fleet to chase uncommitted code. Visibility is never
-// gated (the doctor shows drift regardless); only the destroy/refresh side
-// effects wait for a clean tree. Conservative on any git error: returns
-// false (pause auto-heal) rather than risk acting on an unknown state.
-// Memoized — one git call per process, and the tree doesn't change mid-run.
+// auto-refresh — so an in-progress edit can't shift the rev and stampede the
+// pool/fleet to chase uncommitted code. Visibility is never gated (the doctor
+// shows drift regardless); only the destroy/refresh side effects wait for a
+// clean tree. Conservative on any git error: returns false (pause auto-heal)
+// rather than risk acting on an unknown state.
+//
+// Covers BOTH dna/cells/base AND dna/specials: a special's refresh overlays
+// dna/specials/<name> on top of base, so uncommitted special runtime files
+// would be pushed by an auto-refresh of a stale special (mother/pulse). The
+// rev itself is base-only, but the clean GATE must cover everything a refresh
+// would write. (Slightly conservative for the pool cull — a dirty special
+// tree pauses generic-egg culling too — but pausing on any uncommitted DNA is
+// the safe direction.) Memoized — the tree doesn't change mid-run.
 let _dnaTreeCleanCache: boolean | null = null;
 function dnaTreeClean(): boolean {
   if (_dnaTreeCleanCache !== null) return _dnaTreeCleanCache;
   try {
-    const out = execSync("git status --porcelain -- dna/cells/base", {
+    const out = execSync("git status --porcelain -- dna/cells/base dna/specials", {
       cwd: REPO_ROOT,
     }).toString().trim();
     _dnaTreeCleanCache = out.length === 0;
@@ -5594,7 +5601,13 @@ async function reconcilePool(
     report.culled.length > 0 ||
     report.stale_culled.length > 0 ||
     report.unrecoverable.length > 0;
-  if (shrank && !opts.skipRefill) {
+  // Single-flight: don't stack a reconcile-triggered refill on top of one
+  // already running (the steward's depth-block fires `cells pool refill`
+  // separately, and a stale-rev cull here would otherwise trigger a second
+  // concurrent bake loop — two refills racing welld). isRefillInFlight()
+  // sees the separate `cells.ts pool refill` process; if one's up, let it
+  // top the pool back up instead of starting a rival.
+  if (shrank && !opts.skipRefill && !(await isRefillInFlight())) {
     report.refill_triggered = true;
     refillPoolToDepth().catch((e) => {
       if (!opts.silent) {
@@ -8735,6 +8748,16 @@ async function cmdPoolReconcile() {
     console.log(`culled (${report.culled.length} over-target):`);
     for (const c of report.culled) {
       console.log(`  ${c.id}  ${c.well_name}`);
+    }
+  }
+  // Stale-rev culls are destructive (eggs carrying old platform DNA get
+  // destroyed + rebaked at current rev) — surface them, never silently.
+  if (report.stale_culled.length === 0) {
+    console.log("stale-rev culled:  (none — open eggs at current DNA rev)");
+  } else {
+    console.log(`stale-rev culled (${report.stale_culled.length} — old DNA, rebaking at current):`);
+    for (const c of report.stale_culled) {
+      console.log(`  ${c.id}  ${c.well_name}  ← rev ${c.rev || "?"}`);
     }
   }
   if (report.errors.length > 0) {

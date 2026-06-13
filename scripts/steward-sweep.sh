@@ -114,32 +114,37 @@ if [ "$OPEN" -lt "$TARGET" ] 2>/dev/null; then
   fi
 fi
 
-# ── DNA-rev pool rotation (Phase 2) ─────────────────────────────────
-# Reconcile culls open eggs carrying old runtime DNA (capped per pass, never
-# empties the pool) and triggers a refill that bakes current-rev eggs, so the
-# pool rotates toward current platform code. Self-gates on a clean working
-# tree INSIDE reconcile — a no-op on a dirty tree — so this is always safe to
-# run. Quiet when healthy; the cull/refill log to their own channels.
-POOL_STALE=$(echo "$J1" | jq -r '.dna.pool.stale // 0')
-if [ "$POOL_STALE" != "0" ] && [ -n "$POOL_STALE" ]; then
-  bun cli/cells.ts pool reconcile >/dev/null 2>&1 \
-    && FIXED+=("pool reconcile ran ($POOL_STALE stale-rev egg(s) — cull+refill toward current DNA)") \
-    || ALERTS+=("pool reconcile failed (stale-rev eggs remain)")
-fi
-
-# ── DNA-rev live-cell refresh (Phase 3) ─────────────────────────────
-# Refresh RUNNING cells whose stamped rev is behind current — the durable
-# version of homezero's manual `cells refresh <advisor>` bridge. Gated on a
-# clean tree: a dirty tree's rev reflects uncommitted edits, so refreshing
-# would push unfinished code fleet-wide (doctor still SHOWS the drift). Cap
-# 3/sweep so a fleet-wide DNA jump rotates over a few sweeps rather than
-# restarting every supervisor at once. `cells refresh` re-stamps /root/.dna-
-# rev only on the healthy branch, so a refreshed cell reads current next sweep
-# and a rollback leaves it correctly still-stale. stale_cells is running-only
-# (hibernated cells refresh when they next wake) — this never wakes a sleeper.
+# ── DNA-rev auto-heal (Phases 2 + 3) ────────────────────────────────
+# Pool eggs carrying old DNA get culled + rebaked at the current rev; running
+# cells behind the current rev get refreshed. BOTH gate on a CLEAN working
+# tree: a dirty tree's rev reflects uncommitted edits, so acting would chase
+# or push unfinished code (the doctor still SHOWS the drift — visibility is
+# never gated). On a dirty tree WITH drift, emit ONE paused alert rather than
+# a misleading "fixed" line for a reconcile that no-op'd.
 TREE_CLEAN=$(echo "$J1" | jq -r '.dna.tree_clean')
+POOL_STALE=$(echo "$J1" | jq -r '.dna.pool.stale // 0')
 mapfile -t STALE_CELLS < <(echo "$J1" | jq -r '.dna.stale_cells[]?' 2>/dev/null)
-if [ "$TREE_CLEAN" = "true" ] && [ "${#STALE_CELLS[@]}" -gt 0 ]; then
+
+if [ "$TREE_CLEAN" != "true" ]; then
+  if { [ -n "$POOL_STALE" ] && [ "$POOL_STALE" != "0" ]; } || [ "${#STALE_CELLS[@]}" -gt 0 ]; then
+    ALERTS+=("DNA auto-heal PAUSED — ${POOL_STALE:-0} stale-rev egg(s) + ${#STALE_CELLS[@]} stale cell(s), but the cells working tree is dirty. Commit DNA changes to let the steward cull/refresh.")
+  fi
+else
+  # Phase 2 — pool rotation. reconcile culls stale-rev eggs (capped, never
+  # empties the pool) and tops it back up; its refill single-flights against
+  # an in-flight `cells pool refill` (the depth block above) so no double bake.
+  if [ -n "$POOL_STALE" ] && [ "$POOL_STALE" != "0" ]; then
+    if bun cli/cells.ts pool reconcile >/dev/null 2>&1; then
+      FIXED+=("pool reconcile ran ($POOL_STALE stale-rev egg(s) — cull+refill toward current DNA)")
+    else
+      ALERTS+=("pool reconcile failed (stale-rev eggs remain)")
+    fi
+  fi
+  # Phase 3 — refresh running cells behind the current rev. Cap 3/sweep so a
+  # fleet-wide jump rotates over a few sweeps rather than restarting every
+  # supervisor at once. `cells refresh` re-stamps /root/.dna-rev only on the
+  # healthy branch (a rollback leaves it correctly still-stale). stale_cells
+  # is running-only — this never wakes a sleeper.
   n=0
   for cell in "${STALE_CELLS[@]}"; do
     [ -z "$cell" ] && continue
@@ -154,11 +159,6 @@ if [ "$TREE_CLEAN" = "true" ] && [ "${#STALE_CELLS[@]}" -gt 0 ]; then
     fi
     n=$((n+1))
   done
-elif [ "$TREE_CLEAN" != "true" ]; then
-  STALE_N=$(echo "$J1" | jq -r '.dna.stale_cells | length' 2>/dev/null || echo 0)
-  if [ "$STALE_N" != "0" ] && [ -n "$STALE_N" ]; then
-    ALERTS+=("DNA: $STALE_N running cell(s) behind current DNA, but the working tree is dirty — commit DNA changes to enable steward auto-refresh")
-  fi
 fi
 
 # ── re-check what we touched ────────────────────────────────────────
