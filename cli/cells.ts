@@ -1394,16 +1394,22 @@ async function cmdRun(cellName: string, rest: string[]): Promise<void> {
       console.error(`! worker redeploy failed for ${cellName} — fix manually: bash scripts/deploy-cell-worker.sh ${cellName}`);
       process.exit(1);
     }
+    // A fresh `wrangler deploy` takes a few seconds to go live at the edge, so
+    // re-probing once immediately would race the propagation and false-fail the
+    // exact just-born case this self-heal targets. Poll with backoff (~15s).
     debug = null;
-    try {
-      const res2 = await fetch(`${base}/debug`, {
-        headers: { authorization: `Bearer ${secret}` },
-        signal: AbortSignal.timeout(15_000),
-      });
-      if (res2.ok) debug = await res2.json();
-    } catch {}
+    for (let attempt = 0; attempt < 6 && (!debug || !Array.isArray(debug.jobs)); attempt++) {
+      await new Promise((r) => setTimeout(r, 2500));
+      try {
+        const res2 = await fetch(`${base}/debug`, {
+          headers: { authorization: `Bearer ${secret}` },
+          signal: AbortSignal.timeout(15_000),
+        });
+        if (res2.ok) debug = await res2.json();
+      } catch {}
+    }
     if (!debug || !Array.isArray(debug.jobs)) {
-      console.error(`! ${cellName}'s worker still lacks the jobs lane after redeploy — investigate the worker deploy.`);
+      console.error(`! ${cellName}'s worker still lacks the jobs lane ~15s after redeploy — investigate the worker deploy.`);
       process.exit(1);
     }
     console.error(`  ✓ worker redeployed; jobs lane present`);
