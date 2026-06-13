@@ -2869,6 +2869,16 @@ async function cmdCreate(name: string | undefined, opts: CreateOpts): Promise<vo
     console.error(`'${name}' is reserved. Pick another name.`);
     process.exit(1);
   }
+  // The `<project>-mother` namespace belongs to project mothers (special cells
+  // born via `cells birth <project> mother`). Reserving it on the regular birth
+  // path keeps the name a reliable mother marker: every `*-mother` cell is a
+  // real mother, so the jobs-refusal + role checks can key off the name alone
+  // and a non-mother cell can never accidentally claim a mother's identity.
+  if (isMotherName(name)) {
+    const proj = projectOfMother(name);
+    console.error(`'${name}' is reserved for project mothers. To create it: cells birth ${proj} mother`);
+    process.exit(1);
+  }
   if (isNameTaken((await loadRegistry()).cells, name)) {
     console.error(`cell '${name}' already exists in registry`);
     process.exit(1);
@@ -4007,6 +4017,13 @@ function resolveSpecialSpec(arg: string): SpecialSpec | null {
   if (arg === "mother" || arg === "pulse") return SPECIALS[arg];
   const project = projectOfMother(arg);
   if (project) {
+    // Both the cell name (arg, a worker subdomain label) and the well name
+    // (cells-<arg>) must be valid DNS labels ≤63 chars. The `cells birth
+    // <project> mother` dispatch path guards the project, but the direct
+    // `birth-special <project>-mother` form lands here unguarded — without this
+    // a bad name (uppercase, space, too long) would half-create a malformed
+    // well before failing late and messily.
+    if (!isValidCellName(arg) || !isValidCellName(`cells-${arg}`)) return null;
     return {
       name: arg,
       wellName: `cells-${arg}`,
@@ -8995,15 +9012,26 @@ switch (sub) {
     // reserved-name guard, which both reject "mother" — so the grammar
     // ("mother" inside a project means that project's mother) falls out cleanly.
     // Bare `cells birth mother` (no project) is NOT this and stays blocked.
-    const positionals = rest.filter((a) => !a.startsWith("--"));
-    if (positionals.length === 2 && positionals[1] === "mother") {
-      const project = positionals[0]!;
-      if (!isValidCellName(project)) {
-        console.error(`bad project '${project}' — ${describeCellNameRules()}`);
-        process.exit(1);
+    {
+      const positionals = rest.filter((a) => !a.startsWith("--"));
+      // Mirror parseCreateArgs' brief-strip so `birth <project> mother "brief"`
+      // is recognized as the mother form (and refused with a clear message)
+      // instead of falling through to the misleading "'mother' is reserved".
+      const hadBrief = positionals.length > 0 && /\s/.test(positionals[positionals.length - 1]!);
+      const core = hadBrief ? positionals.slice(0, -1) : positionals;
+      if (core.length === 2 && core[1] === "mother") {
+        const project = core[0]!;
+        if (!isValidCellName(project)) {
+          console.error(`bad project '${project}' — ${describeCellNameRules()}`);
+          process.exit(1);
+        }
+        if (hadBrief) {
+          console.error(`a project mother takes no brief — she bakes from the shared mother template.\n  try: cells birth ${project} mother`);
+          process.exit(1);
+        }
+        await cmdBirthSpecial([projectMotherName(project), ...rest.filter((a) => a.startsWith("--"))]);
+        break;
       }
-      await cmdBirthSpecial([projectMotherName(project), ...rest.filter((a) => a.startsWith("--"))]);
-      break;
     }
     const { name, opts } = parseCreateArgs(rest);
     await cmdCreate(name, opts);

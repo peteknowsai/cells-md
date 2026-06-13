@@ -48,10 +48,22 @@ test("a config-only brief leaves an empty purpose", () => {
   expect(r.purpose).toBe("");
 });
 
-test("first recognized token of each kind wins; extras fall to purpose", () => {
+test("trailing run: a duplicate model is consumed (dropped), first-from-end wins", () => {
   const r = compileBrief("resolver, opus, sonnet", VOCAB);
-  expect(r.model).toBe("opus");
-  expect(r.purpose).toBe("resolver, sonnet"); // second model isn't config
+  expect(r.model).toBe("sonnet"); // last in the trailing run wins
+  expect(r.purpose).toBe("resolver"); // both opus+sonnet are trailing config
+});
+
+test("a config-like word INSIDE the purpose is NOT consumed (only a trailing run is)", () => {
+  const r = compileBrief("keep it low, friendly", VOCAB);
+  expect(r.thinking).toBeUndefined(); // "low" is mid-purpose, not trailing
+  expect(r.purpose).toBe("keep it low, friendly");
+});
+
+test("config trailing the purpose IS consumed", () => {
+  const r = compileBrief("keep it friendly, low", VOCAB);
+  expect(r.thinking).toBe("low");
+  expect(r.purpose).toBe("keep it friendly");
 });
 
 test("case-insensitive matching; purpose preserves original casing", () => {

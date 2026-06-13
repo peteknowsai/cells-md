@@ -56,20 +56,26 @@ function matchHarness(words: string[], harnesses: string[]): string | null {
 
 export function compileBrief(brief: string, vocab: BriefVocab): CompiledBrief {
   const out: CompiledBrief = { purpose: "" };
-  const leftover: string[] = [];
   const segments = brief.split(",").map((s) => s.trim()).filter(Boolean);
-  for (const seg of segments) {
-    const words = seg.toLowerCase().split(/\s+/);
+  // Config hints are a TRAILING run of recognized tokens — config trails the
+  // purpose (as in "national parcel resolver, opus, medium thinking"). Walk
+  // from the end consuming config segments; stop at the first segment that is
+  // NOT config. This way a config-like word INSIDE the purpose ("keep it low,
+  // friendly") is never silently consumed — only a trailing run is. Within the
+  // run, the first-from-the-end value of each kind wins; a repeat of an
+  // already-filled kind is still consumed (dropped) rather than left in purpose.
+  let cut = segments.length;
+  for (let i = segments.length - 1; i >= 0; i--) {
+    const words = segments[i]!.toLowerCase().split(/\s+/);
     const lvl = matchThinking(words, vocab.thinkingLevels);
-    if (lvl && out.thinking === undefined) { out.thinking = lvl; continue; }
     const harn = matchHarness(words, vocab.harnesses);
-    if (harn && out.harness === undefined) { out.harness = harn; continue; }
-    if (words.length === 1 && vocab.models.includes(words[0]!) && out.model === undefined) {
-      out.model = words[0]!;
-      continue;
-    }
-    leftover.push(seg); // unrecognized → purpose (preserve original casing)
+    const isModel = words.length === 1 && vocab.models.includes(words[0]!);
+    if (!lvl && !harn && !isModel) break; // first non-config → purpose boundary
+    if (lvl && out.thinking === undefined) out.thinking = lvl;
+    else if (harn && out.harness === undefined) out.harness = harn;
+    else if (isModel && out.model === undefined) out.model = words[0]!;
+    cut = i;
   }
-  out.purpose = leftover.join(", ");
+  out.purpose = segments.slice(0, cut).join(", "); // original casing preserved
   return out;
 }
