@@ -52,19 +52,13 @@ partial observability, not a correctness gap. **Fix:** aggregate per-well
 `heartbeats.md` across all registered pulses, or footer-note which projects
 run their own pulse and how to read it.
 
-## `cells pool` / `cells egg` with no args silently bake an egg
+## ~~`cells pool` / `cells egg` with no args silently bake an egg~~ — FIXED 2026-06-13
 
-Both subcommands, run bare, *bake a new generic pool egg* — they spin up a
-real VM as a side effect. There's no read-only "show me the pool" form, so
-anyone (or any agent) reaching for an obvious status command instead grows
-the pool by one VM per call. Surfaced 2026-05-22 when a debugging session
-ran `cells pool` and `cells egg` expecting a listing and created two stray
-eggs.
-
-**Fix:** no-arg `pool`/`egg` should print pool status (counts by
-standing/power, ages); move baking behind an explicit `pool bake` /
-`egg bake` subcommand. Harmless spare eggs get claimed or culled, but the
-footgun shouldn't exist.
+Both subcommands, run bare, used to *bake a new generic pool egg* (spin up a
+real VM as a side effect), so any status-style invocation grew the pool by
+one. **Fixed:** bare `cells pool` / `cells egg` now print pool status
+(routes to `cmdPoolList`); baking moved behind an explicit `cells pool bake`
+(`create` kept as a back-compat alias). Unknown-subcommand usage updated.
 
 ## pi fork-and-ask is slow and gets slower over time
 
