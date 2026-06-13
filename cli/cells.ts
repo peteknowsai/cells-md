@@ -4605,6 +4605,22 @@ fi`,
         `detail: ${(capture.stderr || capture.stdout).slice(0, 160)}`,
       );
     }
+    // register-site-service (6c) already started well-site, which read its
+    // harness config + main-session id at boot — BEFORE the __MODEL__/__THINKING__
+    // substitution and the capture just above. site/server.ts caches the resume
+    // id at module load, so the live supervisor is still running on placeholder
+    // model + no --resume. Restart it now so it re-reads the finalized
+    // .claude/settings.json and resumes the captured session. REQUIRED (not
+    // best-effort like the capture): a mother left on a placeholder model is a
+    // non-functional birth, so fail loudly rather than promote a broken cell.
+    const restart = await wellExecCapture(spec.wellName, "sudo systemctl restart well-site");
+    if (!restart.ok) {
+      throw new Error(
+        `well-site restart after claude-code config prep failed for ${spec.name} — ` +
+        `the supervisor would keep running on placeholder config: ${(restart.stderr || restart.stdout).slice(0, 200)}`,
+      );
+    }
+    console.log(`  restarted well-site (picks up final claude model + main session)`);
   }
 
   // 7c. Seal — make the well hibernate-capable (hibernation model,
