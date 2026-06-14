@@ -1207,8 +1207,8 @@ echo "$F"`;
 //
 // (The mother.cells.md fleet-activity page that used to live here was
 // retired 2026-05-21 when cells-mother got a per-cell Worker and the
-// agent-comms bridge. The births/kills surface now lives in the cells
-// dashboard — see buildFleetSnapshot in cli/dashboard.ts.)
+// agent-comms bridge. The fleet view now lives in `cells agents` — the
+// Ink cockpit — and this proxy's own status page at `/`.)
 
 function escapeHtml(s: string | null | undefined): string {
   if (s == null) return "";
