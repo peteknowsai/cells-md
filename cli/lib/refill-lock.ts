@@ -17,6 +17,19 @@
 // a refill that finds the lock held SKIPS: the running refill already drives
 // the pool to target, so a second loop would only add load. Acquire returns
 // true → run; false → no-op.
+//
+// Scope — this is best-effort COALESCING, not a hard mutex. Race-free
+// reclamation of a crashed holder's lock is impossible with O_EXCL + rename
+// alone (it needs OS advisory locks / flock, which Bun doesn't expose without
+// FFI — not worth a control-plane dependency whose failure would break every
+// refill). The implementation below is correct for every realistic case (0/1/2
+// reclaimers of a crashed holder; a live holder is NEVER stolen); only a
+// pathological 3-process, sub-millisecond steal-during-stale-recovery race can
+// still let two loops run. That residual is benign: the worst case is one
+// extra concurrent bake, and overshoot past target is already cleaned by
+// reconcile's over-target cull. So the HARD invariant (pool never grows
+// without bound) lives in reconcile; this lock just eliminates the common,
+// non-racy redundant-refill case (the seal-contention driver we saw live).
 
 import { linkSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
