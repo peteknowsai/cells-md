@@ -66,6 +66,7 @@ import {
   type PoolMemberState,
   type PoolFile,
 } from "./lib/pool";
+import { tryAcquireRefillLock, releaseRefillLock, refillLockHolder } from "./lib/refill-lock";
 import {
   CHANNELS_PATH,
   type ChannelKind,
@@ -5833,7 +5834,25 @@ async function reconcilePool(
 // Serial bakes are required: wells's mother concurrency limit + welld
 // traffic stability. Returns the number of members baked (does not count
 // promotions).
+// Single-flight wrapper. Fired fire-and-forget from several triggers in
+// possibly-different processes; without coalescing they run concurrent bake
+// loops that oversubscribe the host (the seal-contention root) and overshoot
+// target. A refill that finds another already running SKIPS — the live one
+// already drives the pool to target. See cli/lib/refill-lock.ts.
 async function refillPoolToDepth(target: number = V1_POOL_TARGET_DEPTH): Promise<number> {
+  if (!tryAcquireRefillLock()) {
+    const h = refillLockHolder();
+    console.error(`  (refill already in progress${h?.pid ? ` (pid ${h.pid})` : ""} — skipping)`);
+    return 0;
+  }
+  try {
+    return await refillPoolToDepthInner(target);
+  } finally {
+    releaseRefillLock();
+  }
+}
+
+async function refillPoolToDepthInner(target: number = V1_POOL_TARGET_DEPTH): Promise<number> {
   // Pass 1: promote hibernated→running until the running count is at
   // target. Caps at the smaller of (running target, current pool size) —
   // never promotes more than exists to promote.
@@ -8912,12 +8931,22 @@ async function cmdPool(args: string[]) {
     console.log(`✓ egg '${wellName}' ${state} (${((Date.now() - t0) / 1000).toFixed(1)}s)`);
     return;
   }
-  if (sub === "create" || sub === undefined) {
+  // Baking is an explicit verb. `bake` is the clear name; `create` is kept
+  // as a back-compat alias. NOT the no-arg default — a bare `cells pool`
+  // (or `cells egg`) used to fall through here and silently spin up a VM,
+  // so any status-style invocation grew the pool by one. Bare now shows
+  // status (docs/BACKLOG.md "cells pool / cells egg with no args …").
+  if (sub === "bake" || sub === "create") {
     await cmdPoolCreate(args.slice(1));
     return;
   }
+  if (sub === undefined || sub === "status") {
+    await cmdPoolList();
+    return;
+  }
   console.error(`unknown pool subcommand: ${sub}`);
-  console.error(`usage: cells pool <create|list|cull|refill|drain|reconcile>`);
+  console.error(`usage: cells pool [status|list|bake|cull|refill|drain|reconcile]`);
+  console.error(`       (bare 'cells pool' shows status; 'cells pool bake' bakes one egg)`);
   process.exit(1);
 }
 
