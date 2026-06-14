@@ -18,7 +18,7 @@
 // the pool to target, so a second loop would only add load. Acquire returns
 // true → run; false → no-op.
 
-import { mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
+import { linkSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { REFILL_LOCK_PATH } from "./paths.ts";
 
@@ -66,10 +66,19 @@ function tryCreate(lockPath: string, now: number): boolean {
   }
 }
 
+// A holder is stale (reclaimable) if it's malformed, its pid is dead, or it's
+// older than the backstop. A live, recent holder is a running refill.
+function isStale(holder: RefillLockHolder | null, now: number): boolean {
+  if (!holder) return true; // malformed/empty → reclaimable
+  const recent = holder.at != null && now - holder.at < REFILL_LOCK_STALE_MS;
+  const live = holder.pid == null || pidAlive(holder.pid);
+  return !(recent && live);
+}
+
 // Try to acquire. Returns true if the caller now owns the lock (run the
 // refill), false if a live refill already holds it (skip). `now`/`lockPath`
-// are injectable for tests. Steals a lock whose holder pid is dead or older
-// than the backstop.
+// are injectable for tests. Reclaims a lock whose holder pid is dead or older
+// than the backstop, without ever stealing a live holder's lock.
 export function tryAcquireRefillLock(
   now: number = Date.now(),
   lockPath: string = REFILL_LOCK_PATH,
@@ -79,34 +88,48 @@ export function tryAcquireRefillLock(
   // Fast path: no lock yet → claim it atomically.
   if (tryCreate(lockPath, now)) return true;
 
-  // A lock exists. A live, recent holder means a refill is already running —
-  // coalesce.
-  const holder = refillLockHolder(lockPath);
-  const recent = holder?.at != null && now - holder.at < REFILL_LOCK_STALE_MS;
-  const live = holder?.pid == null || pidAlive(holder.pid);
-  if (recent && live) return false;
+  // A lock exists; a live, recent holder means a refill is already running.
+  if (!isStale(refillLockHolder(lockPath), now)) return false;
 
-  // Stale (crashed holder, or alive-but-wedged past the backstop). Claim the
-  // right to recreate by ATOMICALLY renaming the stale lock aside: rename of a
-  // given path has exactly one winner, the rest get ENOENT and coalesce. This
-  // never deletes a lock by pathname — the old unlink-then-create could delete
-  // another process's freshly-created lock and let two refills run (codex P2).
-  // In the realistic stale case (a crashed holder's orphaned lock) there is no
-  // concurrent fresh lock to move, so the rename is unambiguous.
+  // Stale (crashed holder, or alive-but-wedged past the backstop). Move it
+  // aside ATOMICALLY — rename of a given path has exactly one winner, the rest
+  // get ENOENT and coalesce.
   const tmp = `${lockPath}.stale.${process.pid}.${now}`;
   try {
     renameSync(lockPath, tmp);
   } catch {
-    return false; // another racer renamed it first — let them run
+    return false; // another reclaimer moved it first — let them run
+  }
+
+  // Verify what we actually grabbed. Between our staleness read and the rename,
+  // the stale holder's lock could have been reclaimed AND a fresh lock created
+  // by another process — in which case we just moved a LIVE owner's lock aside
+  // (codex P2). If so, put it back and coalesce; never run two refills. Only
+  // when the moved lock is confirmed stale do we discard it and take over.
+  const moved = refillLockHolder(tmp);
+  if (isStale(moved, now)) {
+    try {
+      unlinkSync(tmp);
+    } catch {
+      /* ignore */
+    }
+    return tryCreate(lockPath, now); // loses to a racer that created in the gap
+  }
+  // We grabbed a fresh lock — restore it for its live owner and coalesce.
+  // linkSync (not rename) so we never CLOBBER a lock created at lockPath under
+  // us: it fails if the path is occupied again, in which case that new lock
+  // stands and we just drop our moved copy. Either way we never run a refill.
+  try {
+    linkSync(tmp, lockPath);
+  } catch {
+    /* lockPath already re-taken — leave it; our copy gets dropped below */
   }
   try {
     unlinkSync(tmp);
   } catch {
     /* ignore */
   }
-  // The path is now free; recreate atomically. Loses to any racer that
-  // created in the gap (then we coalesce), so still at most one owner.
-  return tryCreate(lockPath, now);
+  return false;
 }
 
 export function releaseRefillLock(lockPath: string = REFILL_LOCK_PATH): void {
