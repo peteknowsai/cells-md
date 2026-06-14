@@ -117,7 +117,6 @@ LLM routing (all roads go through proxy.cells.md or a direct key)
 | `com.pete.cells-proxy` | `proxy.cells.md` (via cloudflared) | Subscription LLM proxy — swaps `CELLS_PROXY_SECRET` for the real Max / codex OAuth tokens. |
 | `com.pete.cells-pool-reconcile` | — | Reconciles `pool.json` vs welld + culls excess every 5 min (available; not auto-installed). |
 | `com.pete.cells-tunnel` | `*.cells.md` (cloudflared) | Public DNS for `proxy.cells.md` and the per-cell Workers. |
-| `com.pete.cells-dashboard` | `:7881` | Pool + cells observability. Optional. |
 
 Restart any of them after editing its `.ts`: `launchctl kickstart -k gui/$(id -u)/<service>`.
 

@@ -47,7 +47,7 @@ hibernate-ready, reconcile) and `dna/cells/base/lib/harness-adapters.test.ts`.
 ## Repo layout
 
 ```
-cli/        Mac-side control plane (the CLI, dashboard, proxy, bridge, Cloudflare worker)
+cli/        Mac-side control plane (the CLI, proxy, bridge, Cloudflare worker)
 dna/        The genome every cell inherits at birth — base anatomy, specials, skills
 colonies/   Multi-cell colony recipes (e.g. jurypool)
 projects/   Reference colonies under construction (jury)
@@ -63,14 +63,13 @@ state/      Local state — state/memory/ holds the fleet activity log
   file in the repo; most CLI work lands here.
 - **proxy.ts** — inbound reverse proxy: wakes cells on traffic, pushes heartbeats,
   routes LLM-fallback, handles Slack/email webhooks.
-- **host-bridge.ts** / **host-forwarder.ts** — Mac↔VM bridge (SSH relay, exec, TCP fwd).
-- **dashboard.ts** — realtime fleet UI, served at `cells-dashboard.cells.md`.
+- **host-bridge.ts** — Mac↔VM bridge (SSH relay, exec, TCP fwd).
 - **birth-ui.tsx** — interactive birth prompts (React via Ink).
 - **lib/** — tested units: `channels.ts`, `variant-signature.ts` (cell config
   fingerprint), `reconcile.ts` (pool culling), `hibernate-ready.ts`, `resolve.ts`,
   `secrets.ts`.
 - **worker/** — per-cell Cloudflare Worker + Durable Object (the `<name>.cells.md`
-  presence that survives hibernation), plus dashboard/slack/email/front workers.
+  presence that survives hibernation), plus slack/email/front workers.
 
 ### The `cells` CLI subcommands
 
