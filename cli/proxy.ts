@@ -66,6 +66,7 @@ import { loadRegistry, loadRegistrySafe, saveRegistry, withRegistryLock, isStale
 import { cellRows, type CellRow } from "./lib/status-rows";
 import { ensurePreamble, classifyOAuthRoute, anthropicRouteVerdict, gateCacheNeedsReload } from "./lib/proxy-oauth";
 import { latestOpusFrom, normalizeAnthropicModel } from "./lib/model-normalizer";
+import { firstByteTimeoutStream, requestWantsStream } from "./lib/stream-timeout";
 
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = dirname(SCRIPT_DIR);
@@ -491,6 +492,124 @@ function forwardableHeaders(upstream: Headers): Headers {
   return h;
 }
 
+// Streaming-request guards (docs/BACKLOG.md "Proxy zero-token stream hang").
+// A streaming LLM request returns headers ~immediately and its first SSE
+// frame within seconds; a wedged upstream produces neither and nothing
+// detected it (one process sat 23h40m). Both guards apply ONLY to streaming
+// requests — a non-streaming request legitimately takes minutes to its first
+// byte, so guarding it would cut healthy long completions. Generous defaults
+// (60s) so normal thinking-before-first-token never trips them; env-tunable.
+const STREAM_HEADERS_TIMEOUT_MS = Number(
+  process.env.PROXY_STREAM_HEADERS_TIMEOUT_MS ?? 60_000,
+);
+const STREAM_FIRST_BYTE_TIMEOUT_MS = Number(
+  process.env.PROXY_STREAM_FIRST_BYTE_TIMEOUT_MS ?? 60_000,
+);
+
+// Shared upstream-forward tail for both the Anthropic and Codex proxy paths:
+// fetch (with a headers timeout for streaming requests), the one 401-refresh
+// retry, the access log, and a first-byte-timeout wrapper on the streamed
+// body. Both handlers prepared identical tails inline; this unifies them and
+// adds the wedge guards in one place.
+async function forwardWithStreamGuards(opts: {
+  label: string; // "api" | "codex" — access-log + warn prefix
+  cell: string;
+  method: string;
+  pathname: string;
+  upstreamUrl: string;
+  baseHeaders: Headers;
+  bodyBytes: Uint8Array | undefined;
+  access: string;
+  refreshAndReadFresh: () => Promise<string>; // force-refresh, return fresh token
+}): Promise<Response> {
+  const { label, cell, method, pathname, upstreamUrl, baseHeaders, bodyBytes, access } = opts;
+  const wantStream = requestWantsStream(bodyBytes);
+
+  const callUpstream = async (
+    bearer: string,
+  ): Promise<{ resp: Response; controller: AbortController }> => {
+    const headers = new Headers(baseHeaders);
+    headers.set("authorization", `Bearer ${bearer}`);
+    const controller = new AbortController();
+    // Headers timeout: for a streaming request the upstream returns headers
+    // almost immediately; if it never does (the wedge — socket open, no frames
+    // ever) abort so fetch() rejects instead of hanging forever. Streaming-only
+    // because a non-streaming response's headers arrive only after generation.
+    const headersTimer = wantStream
+      ? setTimeout(() => controller.abort(), STREAM_HEADERS_TIMEOUT_MS)
+      : null;
+    try {
+      const resp = await fetch(upstreamUrl, {
+        method,
+        headers,
+        body: bodyBytes,
+        signal: controller.signal,
+      });
+      return { resp, controller };
+    } finally {
+      if (headersTimer) clearTimeout(headersTimer);
+    }
+  };
+
+  const startedAt = Date.now();
+  let chosen: { resp: Response; controller: AbortController };
+  try {
+    chosen = await callUpstream(access);
+  } catch (e) {
+    const ms = Date.now() - startedAt;
+    console.error(
+      `[${new Date().toISOString()}] ${label} ${cell} ${method} ${pathname} -> NO-HEADERS (${ms}ms) ${e instanceof Error ? e.message : String(e)}`,
+    );
+    return new Response(
+      `upstream timeout: no response headers within ${STREAM_HEADERS_TIMEOUT_MS}ms`,
+      { status: 504 },
+    );
+  }
+
+  // Self-heal on 401 at the boundary of an access-token expiry the proactive
+  // timer hasn't caught — force a refresh and retry once.
+  if (chosen.resp.status === 401) {
+    console.warn(`[${label}-proxy] upstream 401 for ${cell} — forcing refresh and retrying once`);
+    try {
+      const fresh = await opts.refreshAndReadFresh();
+      if (fresh !== access) chosen = await callUpstream(fresh);
+    } catch (e) {
+      console.error(`[${label}-proxy] retry-after-refresh failed: ${e}`);
+    }
+  }
+
+  const upstream = chosen.resp;
+  const elapsed = Date.now() - startedAt;
+  console.log(
+    `[${new Date().toISOString()}] ${label} ${cell} ${method} ${pathname} -> ${upstream.status} (${elapsed}ms)`,
+  );
+
+  let body = upstream.body;
+  const isEventStream = (upstream.headers.get("content-type") ?? "").includes(
+    "text/event-stream",
+  );
+  if (wantStream && body && isEventStream) {
+    body = firstByteTimeoutStream(body, {
+      timeoutMs: STREAM_FIRST_BYTE_TIMEOUT_MS,
+      onTimeout: () => {
+        console.error(
+          `[${new Date().toISOString()}] ${label} ${cell} ${method} ${pathname} -> FIRST-BYTE-TIMEOUT (${STREAM_FIRST_BYTE_TIMEOUT_MS}ms) — aborting upstream`,
+        );
+        try {
+          chosen.controller.abort();
+        } catch {
+          /* best-effort socket teardown */
+        }
+      },
+    });
+  }
+  return new Response(body, {
+    status: upstream.status,
+    statusText: upstream.statusText,
+    headers: forwardableHeaders(upstream.headers),
+  });
+}
+
 // ───────────────────── well-host routing — removed ─────────────────────
 //
 // Until the bridge-direction flip (2026-05-22) the proxy carried a whole
@@ -729,41 +848,19 @@ async function handleApiProxy(req: Request): Promise<Response> {
     }
   }
 
-  const callUpstream = async (bearer: string): Promise<Response> => {
-    const headers = new Headers(baseHeaders);
-    headers.set("authorization", `Bearer ${bearer}`);
-    return fetch(upstreamUrl, {
-      method: req.method,
-      headers,
-      body: bodyBytes,
-    });
-  };
-
-  const startedAt = Date.now();
-  let upstream = await callUpstream(access);
-
-  // Self-heal on 401: this can happen at the boundary of an access-token
-  // expiry that the proactive timer hasn't caught yet. Force a refresh
-  // and retry once.
-  if (upstream.status === 401) {
-    console.warn(`[proxy] upstream 401 for ${auth.cell} — forcing refresh and retrying once`);
-    try {
+  return forwardWithStreamGuards({
+    label: "api",
+    cell: auth.cell,
+    method: req.method,
+    pathname: url.pathname,
+    upstreamUrl,
+    baseHeaders,
+    bodyBytes,
+    access,
+    refreshAndReadFresh: async () => {
       await refreshIfNeeded(true);
-      const fresh = (await readAccessToken()).access;
-      if (fresh !== access) upstream = await callUpstream(fresh);
-    } catch (e) {
-      console.error(`[proxy] retry-after-refresh failed: ${e}`);
-    }
-  }
-
-  const elapsed = Date.now() - startedAt;
-  console.log(
-    `[${new Date().toISOString()}] api ${auth.cell} ${req.method} ${url.pathname} -> ${upstream.status} (${elapsed}ms)`,
-  );
-  return new Response(upstream.body, {
-    status: upstream.status,
-    statusText: upstream.statusText,
-    headers: forwardableHeaders(upstream.headers),
+      return (await readAccessToken()).access;
+    },
   });
 }
 
@@ -833,38 +930,19 @@ async function handleCodexProxy(req: Request): Promise<Response> {
   const bodyBytes =
     req.method === "GET" || req.method === "HEAD" ? undefined : new Uint8Array(await req.arrayBuffer());
 
-  const callUpstream = async (bearer: string): Promise<Response> => {
-    const headers = new Headers(baseHeaders);
-    headers.set("authorization", `Bearer ${bearer}`);
-    return fetch(upstreamUrl, {
-      method: req.method,
-      headers,
-      body: bodyBytes,
-    });
-  };
-
-  const startedAt = Date.now();
-  let upstream = await callUpstream(access);
-
-  if (upstream.status === 401) {
-    console.warn(`[codex-proxy] upstream 401 for ${auth.cell} — forcing refresh and retrying once`);
-    try {
+  return forwardWithStreamGuards({
+    label: "codex",
+    cell: auth.cell,
+    method: req.method,
+    pathname: url.pathname,
+    upstreamUrl,
+    baseHeaders,
+    bodyBytes,
+    access,
+    refreshAndReadFresh: async () => {
       await refreshCodexIfNeeded(true);
-      const fresh = (await readCodexAuth()).access;
-      if (fresh !== access) upstream = await callUpstream(fresh);
-    } catch (e) {
-      console.error(`[codex-proxy] retry-after-refresh failed: ${e}`);
-    }
-  }
-
-  const elapsed = Date.now() - startedAt;
-  console.log(
-    `[${new Date().toISOString()}] codex ${auth.cell} ${req.method} ${url.pathname} -> ${upstream.status} (${elapsed}ms)`,
-  );
-  return new Response(upstream.body, {
-    status: upstream.status,
-    statusText: upstream.statusText,
-    headers: forwardableHeaders(upstream.headers),
+      return (await readCodexAuth()).access;
+    },
   });
 }
 
