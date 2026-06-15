@@ -587,6 +587,20 @@ export class CellAgent {
     if (decision.kind === "full") {
       return new Response(`job queue full (${MAX_ACTIVE_JOBS} active)`, { status: 429 });
     }
+    // Defense in depth: a non-fresh session target may only be queued when the
+    // cell-side supervisor has advertised it honors them. The CLI gates this up
+    // front, but a hand-rolled /inbox/append submitter could bypass it — and an
+    // old supervisor would silently run the job FRESH (wrong context). Reject
+    // here so the wrong-context job is never queued, regardless of submitter.
+    if (v.job.sessionTarget && v.job.sessionTarget !== "fresh") {
+      const supOk = (await this.state.storage.get<boolean>("supervisor:session_targets")) === true;
+      if (!supOk) {
+        return new Response(
+          `--session ${v.job.sessionTarget} not supported on this cell — its supervisor hasn't advertised session-target support (refresh the cell and enable interactive jobs: CELLS_JOBS_INTERACTIVE=1)`,
+          { status: 409 },
+        );
+      }
+    }
     const rec: DoJobRecord = {
       id: v.job.id,
       created_at: new Date().toISOString(),

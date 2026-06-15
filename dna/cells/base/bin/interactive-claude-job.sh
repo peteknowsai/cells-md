@@ -223,10 +223,20 @@ if [ ! -f "$DONE" ]; then
 fi
 
 # --- recover THIS turn's answer from the transcript -----------------------
-# Transcript path from the Stop payload (authoritative; for a fork the id is
-# generated post-launch, so SessionStart's path is the pre-fork one).
+# Transcript path from the Stop payload (authoritative). For a FORK the id is
+# generated post-launch, so SessionStart's path is the PRE-FORK main transcript
+# — falling back to it would parse the main conversation and could report an
+# unrelated prior answer as this job's result. So only use the SessionStart path
+# as a fallback for fresh (where it IS this session's own path); for fork, a
+# missing Stop transcript_path is unrecoverable — fail rather than read main.
 TP="$(python3 -c "import json;print(json.load(open('$STOP')).get('transcript_path',''))" 2>/dev/null)"
-[ -z "$TP" ] && TP="$(python3 -c "import json;print(json.load(open('$SS')).get('transcript_path',''))" 2>/dev/null)"
+if [ -z "$TP" ]; then
+  if [ "$TARGET" = "fresh" ]; then
+    TP="$(python3 -c "import json;print(json.load(open('$SS')).get('transcript_path',''))" 2>/dev/null)"
+  else
+    fail "[interactive-job] fork completed but the Stop payload carried no transcript_path — refusing to read the main transcript to avoid returning a stale answer." 1
+  fi
+fi
 
 # Re-emit THIS turn's final answer as the stream-json frames extractJobResult()
 # already parses. THIS turn is identified by POSITION, not timestamps (which are
