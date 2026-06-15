@@ -209,6 +209,8 @@ export class CellAgent {
   private pendingAgentForks: Map<string, { reply_to: string; from: string; thread_id: string }> = new Map();
   private pendingFrames: Map<string, { frame: string; at: number }> = new Map();
   private jobs: Map<string, DoJobRecord> = new Map();
+  // Staged by a bridge_hello frame, flushed (awaited) in webSocketMessage.
+  private pendingSupervisorCap: boolean | undefined;
 
   constructor(state: DurableObjectState, env: Env) {
     this.state = state;
@@ -857,6 +859,12 @@ export class CellAgent {
         if (line) this.onPiEvent(line);
       }
     }
+    // Persist a supervisor capability staged by a bridge_hello in the AWAITED
+    // path, so it can't be lost on hibernation or read stale right after a wake.
+    if (this.pendingSupervisorCap !== undefined) {
+      await this.state.storage.put("supervisor:session_targets", this.pendingSupervisorCap);
+      this.pendingSupervisorCap = undefined;
+    }
     await this.persist();
   }
 
@@ -969,9 +977,10 @@ export class CellAgent {
     if (type === "bridge_hello") {
       // Record whether the connected supervisor honors session targets, so the
       // CLI can certify the CELL-SIDE supervisor (not just the Worker) before
-      // submitting a `--session fork` job. Persisted so it survives DO eviction
-      // / hibernation — reflects the last supervisor that dialed in.
-      void this.state.storage.put("supervisor:session_targets", ev?.session_targets === true);
+      // submitting a `--session fork` job. Stage it for webSocketMessage to
+      // persist in its AWAITED flow — a fire-and-forget put could be lost on DO
+      // hibernation or read stale by an immediate post-wake /debug probe.
+      this.pendingSupervisorCap = ev?.session_targets === true;
       return;
     }
     if (type === "pong" || type === "response") return;
