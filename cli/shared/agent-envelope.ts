@@ -19,6 +19,9 @@ export interface AgentEnvelope {
   corr_id: string;
   thread_id: string;
   target: AgentTarget;
+  // Named durable session (e.g. "buyer", "staff") → the cell's interactive talk
+  // pool, overriding target routing. "main" ≡ target:"main". Absent = target.
+  session?: string;
   reply_to: string;
   hops: number;
   sent_at: string;
@@ -81,6 +84,7 @@ export function validateEnvelope(e: any): { ok: true; env: AgentEnvelope } | { o
       corr_id: e.corr_id,
       thread_id: typeof e.thread_id === "string" ? e.thread_id : sortedThreadId(e.from, e.to),
       target,
+      ...(typeof e.session === "string" && e.session ? { session: e.session } : {}),
       reply_to: typeof e.reply_to === "string" ? e.reply_to : "",
       hops,
       sent_at: typeof e.sent_at === "string" ? e.sent_at : new Date().toISOString(),

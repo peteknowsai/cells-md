@@ -1451,9 +1451,30 @@ function handleBridgeFrame(line: string) {
     const timeoutS =
       typeof cmd.timeout_seconds === "number" && cmd.timeout_seconds > 0 ? cmd.timeout_seconds : 0;
     console.log(
-      `[bridge] agent_message corr=${corrId.slice(0, 10)} from=${from} target=${target}${timeoutS ? ` leash=${timeoutS}s` : ""} text=${text.slice(0, 100).replace(/\n/g, " ")}`,
+      `[bridge] agent_message corr=${corrId.slice(0, 10)} from=${from} target=${target}${cmd.session ? ` session=${cmd.session}` : ""}${timeoutS ? ` leash=${timeoutS}s` : ""} text=${text.slice(0, 100).replace(/\n/g, " ")}`,
     );
-    if (target === "main") {
+    // Named durable session: `--session=<name>` (or a channel binding) routes to
+    // a specific warm session in the pool, independent of main. "main" falls
+    // through to the main path below; any other name needs the pool (else we'd
+    // silently fork with the wrong context — fail loudly instead).
+    const reqSession = typeof cmd.session === "string" && cmd.session ? cmd.session : "";
+    if (reqSession && reqSession !== "main") {
+      const name = validateSessionName(reqSession);
+      if (!name) {
+        broadcastToClients(JSON.stringify({ type: "agent_response", in_reply_to: corrId, text: `[error] invalid session name: ${reqSession.slice(0, 40)}` }));
+        return;
+      }
+      if (!talkPool) {
+        broadcastToClients(JSON.stringify({ type: "agent_response", in_reply_to: corrId, text: `[error] this cell isn't running interactive talk sessions — named --session needs CELLS_TALK_INTERACTIVE on a claude-code cell` }));
+        return;
+      }
+      talkPool.enqueue(name, {
+        corrId, from, leashMs: turnLeashMs((timeoutS || 180) * 1000), acc: "",
+        text: `[message from ${from} — your reply goes back to them] ${text}`,
+      });
+      return;
+    }
+    if (target === "main" || reqSession === "main") {
       // Durable-conversation path: drive the cell's MAIN session (the same
       // process and session file Slack/CLI stream) instead of a throwaway
       // fork. The exchange lands in session history, so the cell remembers

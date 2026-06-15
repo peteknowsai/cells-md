@@ -1253,6 +1253,7 @@ async function cmdTalk(name: string, args: string[]) {
   // Anything we don't recognize falls through to streamCellBridge so older
   // habits (cells talk <name> --foo "msg") still surface a useful error.
   let useMain = false;
+  let session = "";
   // 180s — must clear the peer's forkAndAsk ceiling (pi: 150s) plus
   // inbox→DO→WS→reply routing. See dna/.../bin/cells parseTalkArgs.
   let timeoutS = 180;
@@ -1261,6 +1262,8 @@ async function cmdTalk(name: string, args: string[]) {
     const a = args[i] ?? "";
     if (a === "--await") { /* await is the default for one-shot; flag harmless */ continue; }
     if (a === "--main") { useMain = true; continue; }
+    if (a.startsWith("--session=")) { session = a.slice("--session=".length); continue; }
+    if (a === "--session") { session = args[++i] ?? ""; continue; }
     if (a.startsWith("--timeout=")) {
       const v = a.slice("--timeout=".length);
       const m = v.match(/^(\d+)\s*([smh]?)$/);
@@ -1282,18 +1285,23 @@ async function cmdTalk(name: string, args: string[]) {
     positional.push(a);
   }
   const message = positional.join(" ");
+  // --session main/fork are aliases for the existing target routing; any other
+  // name is a durable named session on the peer's interactive talk pool.
+  if (session === "main") { useMain = true; session = ""; }
+  else if (session === "fork") { session = ""; }
   // One-shot uses the new fork-based agent-comms path: SSH into the cell and
   // run the on-cell CLI, which POSTs the envelope and long-polls for the
   // reply. Default target is "fork" (receiver answers from main context but
   // main stays untouched); --main escalates to writing the exchange into the
-  // receiver's main thread (Slack/email equivalent).
-  await macTalkOneShotFork(name, message, { timeoutS, useMain });
+  // receiver's main thread (Slack/email equivalent); --session=<name> drives a
+  // named durable session in the peer's pool.
+  await macTalkOneShotFork(name, message, { timeoutS, useMain, session });
 }
 
 async function macTalkOneShotFork(
   cellName: string,
   message: string,
-  opts: { timeoutS: number; useMain: boolean },
+  opts: { timeoutS: number; useMain: boolean; session?: string },
 ): Promise<void> {
   const result = await runTalkOnCell(cellName, message, opts);
   if (!result.ok) {
@@ -1310,7 +1318,7 @@ async function macTalkOneShotFork(
 async function runTalkOnCell(
   cellName: string,
   message: string,
-  opts: { timeoutS: number; useMain: boolean },
+  opts: { timeoutS: number; useMain: boolean; session?: string },
 ): Promise<{ ok: true; text: string } | { ok: false; exitCode: number; error: string; text: string }> {
   const wellName = await wellNameForCell(cellName);
   if (!wellName) {
@@ -1318,7 +1326,12 @@ async function runTalkOnCell(
   }
   const escaped = message.replace(/'/g, "'\\''");
   const flag = opts.useMain ? "--main" : "";
-  const remote = `/root/bin/cells talk '${cellName}' --await --timeout=${opts.timeoutS}s ${flag} '${escaped}'`;
+  // session is user input — single-quote-escape like the message before it
+  // rides the SSH'd shell command.
+  const sessFlag = opts.session
+    ? `--session='${opts.session.replace(/'/g, "'\\''")}'`
+    : "";
+  const remote = `/root/bin/cells talk '${cellName}' --await --timeout=${opts.timeoutS}s ${flag} ${sessFlag} '${escaped}'`;
   const proc = Bun.spawn(
     [
       "well", "exec", "-s", wellName, "--",

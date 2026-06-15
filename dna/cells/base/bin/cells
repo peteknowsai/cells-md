@@ -125,6 +125,7 @@ type TalkOpts = {
   message: string;
   wantsAwait: boolean;
   target: AgentTarget;
+  session: string;       // named durable session, or "" for plain target routing
   thread: string;
   timeoutS: number;
 };
@@ -140,6 +141,7 @@ function parseTalkArgs(rest: string[]): TalkOpts {
   let peer = "";
   let wantsAwait = false;
   let target: AgentTarget = "fork";
+  let session = "";
   let thread = "";
   // 180s: must exceed the peer's forkAndAsk ceiling (pi: 150s) plus the
   // inbox→DO→WS→reply routing round-trips, or the CLI gives up before a
@@ -151,6 +153,8 @@ function parseTalkArgs(rest: string[]): TalkOpts {
     const a = rest[i] ?? "";
     if (a === "--await") { wantsAwait = true; i++; continue; }
     if (a === "--main") { target = "main"; i++; continue; }
+    if (a.startsWith("--session=")) { session = a.slice("--session=".length); i++; continue; }
+    if (a === "--session") { session = rest[++i] ?? ""; i++; continue; }
     if (a.startsWith("--thread=")) { thread = a.slice("--thread=".length); i++; continue; }
     if (a === "--thread") { thread = rest[++i] ?? ""; i++; continue; }
     if (a.startsWith("--timeout=")) { timeoutS = parseTimeout(a.slice("--timeout=".length)); i++; continue; }
@@ -160,7 +164,11 @@ function parseTalkArgs(rest: string[]): TalkOpts {
   }
   peer = positional[0] ?? "";
   const message = positional.slice(1).join(" ");
-  return { peer, message, wantsAwait, target, thread, timeoutS };
+  // --session main/fork are aliases for the existing target routing; any other
+  // name is a durable named session handled by the peer's interactive pool.
+  if (session === "main") { target = "main"; session = ""; }
+  else if (session === "fork") { target = "fork"; session = ""; }
+  return { peer, message, wantsAwait, target, session, thread, timeoutS };
 }
 
 function getProxySecret(): string {
@@ -293,9 +301,9 @@ async function cmdTalk(rest: string[]) {
   if (rest[0] === "--list" || rest.includes("--list")) {
     return cmdTalkList();
   }
-  const { peer, message, wantsAwait, target, thread, timeoutS } = parseTalkArgs(rest);
+  const { peer, message, wantsAwait, target, session, thread, timeoutS } = parseTalkArgs(rest);
   if (!peer || !message) {
-    die("usage: cells talk <peer> [--await] [--main] [--thread=<id>] [--timeout=<Ns>] <message>\n  or: cells talk --list");
+    die("usage: cells talk <peer> [--await] [--main] [--session=<name>] [--thread=<id>] [--timeout=<Ns>] <message>\n  or: cells talk --list");
   }
   const self = selfName();
   const secret = getProxySecret();
@@ -305,6 +313,7 @@ async function cmdTalk(rest: string[]) {
     to: peer,
     text: message,
     target,
+    session: session || undefined,
     thread_id: thread || undefined,
     reply_to: replyTo,
     timeout_seconds: wantsAwait ? timeoutS : undefined,

@@ -511,6 +511,7 @@ export class CellAgent {
       corr_id: env.corr_id,
       thread_id: env.thread_id,
       target: env.target,
+      ...(env.session ? { session: env.session } : {}),
       hops: env.hops,
       text: env.text,
       ...(Number.isFinite(ttlMs) && ttlMs > 0 ? { timeout_seconds: Math.round(ttlMs / 1000) } : {}),
