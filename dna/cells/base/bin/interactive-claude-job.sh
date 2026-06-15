@@ -106,21 +106,40 @@ esac
 # interactive jobs after a refresh. Writes are idempotent + additive; an
 # existing settings.json is augmented, never created/replaced (a missing one is
 # a deeper provisioning problem we must not mask).
+# MAX_ACTIVE_JOBS lets several interactive jobs run at once, all seeding these
+# shared files — and claude itself rewrites them. So: take an exclusive flock
+# (serializes our seeds), only write when a value actually needs changing (most
+# jobs no-op once a cell is seeded), and write via temp+os.replace (atomic — a
+# concurrent reader never sees a truncated file).
 python3 - <<'PY' 2>/dev/null || true
-import json
-cj = "/root/.claude.json"
-try: d = json.load(open(cj))
-except Exception: d = {}
-d["hasCompletedOnboarding"] = True
-d.setdefault("projects", {}).setdefault("/root", {})["hasTrustDialogAccepted"] = True
-json.dump(d, open(cj, "w"))
-
-sf = "/root/.claude/settings.json"
-try: s = json.load(open(sf))
-except Exception: s = None
-if isinstance(s, dict) and s.get("skipDangerousModePermissionPrompt") is not True:
-    s["skipDangerousModePermissionPrompt"] = True
-    json.dump(s, open(sf, "w"), indent=2)
+import json, os, fcntl, tempfile
+def atomic_write(path, obj):
+    fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path), prefix=".seed-")
+    try:
+        with os.fdopen(fd, "w") as f: json.dump(obj, f, indent=2)
+        os.replace(tmp, path)
+    except Exception:
+        try: os.unlink(tmp)
+        except Exception: pass
+lk = open("/root/.claude/.seedlock", "w")
+try:
+    fcntl.flock(lk, fcntl.LOCK_EX)
+    cj = "/root/.claude.json"
+    try: d = json.load(open(cj))
+    except Exception: d = {}
+    proj = d.setdefault("projects", {}).setdefault("/root", {})
+    if d.get("hasCompletedOnboarding") is not True or proj.get("hasTrustDialogAccepted") is not True:
+        d["hasCompletedOnboarding"] = True
+        proj["hasTrustDialogAccepted"] = True
+        atomic_write(cj, d)
+    sf = "/root/.claude/settings.json"   # augment only — never create/replace
+    try: s = json.load(open(sf))
+    except Exception: s = None
+    if isinstance(s, dict) and s.get("skipDangerousModePermissionPrompt") is not True:
+        s["skipDangerousModePermissionPrompt"] = True
+        atomic_write(sf, s)
+finally:
+    fcntl.flock(lk, fcntl.LOCK_UN); lk.close()
 PY
 
 # --- inline hooks settings ------------------------------------------------

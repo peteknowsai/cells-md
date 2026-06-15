@@ -676,6 +676,10 @@ export class CellAgent {
       // Presence of this key is the `cells run` capability probe — an older
       // worker would misroute kind:"job" into the conversation path.
       jobs: [...this.jobs.values()].map(jobSummary),
+      // Capability probe for `cells run --session <target>`: this worker's
+      // validateJobSubmit/jobFrame persist + forward session_target. An older
+      // worker exposes `jobs` but drops session_target, silently running fresh.
+      job_session_targets: true,
       site: siteMeta
         ? { files: siteMeta.paths.length, paths: siteMeta.paths, publishedAt: siteMeta.publishedAt }
         : null,
