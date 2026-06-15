@@ -1469,9 +1469,9 @@ async function cmdRun(cellName: string, rest: string[]): Promise<void> {
   // can't update an old supervisor, so refuse rather than let it silently run a
   // fresh job with the wrong context.
   if (sessionTarget && debug.supervisor_session_targets !== true) {
-    console.error(`! ${cellName}'s supervisor doesn't honor --session ${sessionTarget} yet — it would silently run a fresh job.`);
-    console.error(`  Fix: \`cells refresh ${cellName}\` (updates the supervisor), then retry.`);
-    console.error(`  (If you just refreshed it, wake it once — e.g. \`cells talk ${cellName} hi\` — so its supervisor re-registers, then retry.)`);
+    console.error(`! ${cellName} won't honor --session ${sessionTarget} — it would otherwise run a fresh job with the wrong context.`);
+    console.error(`  --session fork needs a claude-code cell running the interactive jobs runner: a current supervisor (\`cells refresh ${cellName}\`) with CELLS_JOBS_INTERACTIVE=1.`);
+    console.error(`  Enable those, and if you just changed either, wake the cell once (e.g. \`cells talk ${cellName} hi\`) so it re-advertises — then retry.`);
     process.exit(1);
   }
 

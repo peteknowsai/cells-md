@@ -63,6 +63,11 @@ function readHarness(): string {
 }
 const HARNESS = readHarness();
 const ADAPTER: HarnessAdapter = getAdapter(HARNESS);
+// Whether THIS cell actually honors `cells run --session <target>`: genuine
+// interactive Claude Code runs jobs (cc_entrypoint=cli) and fork/main targets
+// are meaningful only there. The SAME value is advertised in bridge_hello (so
+// the CLI's capability gate matches reality) and used to gate startJobAttempt.
+const JOBS_INTERACTIVE = process.env.CELLS_JOBS_INTERACTIVE === "1" && HARNESS === "claude-code";
 
 // Stable per-cell session file (pi). Pin pi to this on every spawn so
 // conversations survive pi restarts. claude/codex use their own birth-time
@@ -472,10 +477,10 @@ async function startJobAttempt(rec: JobRecord): Promise<void> {
   const p = jobPaths(JOBS_DIR, rec.id);
   rec.attempts += 1;
   // Genuine interactive Claude Code (cc_entrypoint=cli → interactive billing
-  // pool, not the metered Agent-SDK credit) when enabled for this cell. Gated
-  // by env so rollout is per-cell; fork/main session targets are honored only
-  // on this path (the --print path is always fresh).
-  const interactive = process.env.CELLS_JOBS_INTERACTIVE === "1" && rec.harness === "claude-code";
+  // pool, not the metered Agent-SDK credit) when enabled for this cell. The
+  // same value the supervisor advertises in bridge_hello, so the CLI's gate and
+  // this launch path agree; fork/main are honored only here (--print is fresh).
+  const interactive = JOBS_INTERACTIVE;
   // A non-fresh session target (fork) is honored ONLY on the interactive
   // claude-code runner. If this cell can't honor it — interactive disabled (the
   // rollout default) or a non-claude-code harness — FAIL LOUDLY rather than let
@@ -1541,10 +1546,11 @@ function connectBridge() {
     console.log(`[bridge] connected to ${BRIDGE_URL}`);
     // Greet, and if the harness is already ready (warm cell, fast dial)
     // send bridge_ready immediately so the DO doesn't wait. session_targets
-    // advertises that THIS supervisor honors `cells run --session <target>` —
-    // the DO records it so the CLI can certify the cell-side supervisor (not
-    // just the Worker) before submitting a fork job.
-    try { ws.send(JSON.stringify({ type: "bridge_hello", cell: NAME, harness: HARNESS, session_targets: true })); } catch {}
+    // advertises whether THIS supervisor will actually honor `cells run
+    // --session <target>` (interactive runner on, claude-code) — NOT merely
+    // that the code is present — so the CLI's gate matches what startJobAttempt
+    // will do, and never queues a fork job that's destined to fail-loud.
+    try { ws.send(JSON.stringify({ type: "bridge_hello", cell: NAME, harness: HARNESS, session_targets: JOBS_INTERACTIVE })); } catch {}
     if (harnessReady) {
       try { ws.send(JSON.stringify({ type: "bridge_ready" })); } catch {}
     }
