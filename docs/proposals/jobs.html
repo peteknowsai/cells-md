@@ -215,7 +215,7 @@ cells jobs delta-market
     <tr><th>target</th><th>session flags</th><th>context</th></tr>
     <tr><td><code>fresh</code> (default)</td><td><code>--session-id &lt;new&gt;</code></td><td>no main context — today's behavior</td></tr>
     <tr><td><code>fork</code></td><td><code>--resume &lt;main&gt; --fork-session</code></td><td><strong>inherits main read-only, writes to a throwaway fork — main untouched</strong> (verified: a fact planted in a base session is recalled by the fork; the base transcript is byte-identical before/after)</td></tr>
-    <tr><td><code>main</code></td><td><code>--resume &lt;main&gt;</code></td><td>continues main — <em>deferred</em>: main is single-owner (the persistent talk process holds it), so a detached job must not write to it; route through the persistent channel instead</td></tr>
+    <tr><td><code>main</code></td><td>—</td><td>continues main — <strong>rejected</strong> on this path (both the CLI and the runner refuse it): main is single-owner (the persistent talk process holds it), so a detached <code>--resume main</code> job would corrupt the live conversation. Deferred to phase 2, routed through the persistent channel.</td></tr>
   </table>
 
   <p><strong>Gating &amp; rollout.</strong> Interactive jobs are opt-in per cell via

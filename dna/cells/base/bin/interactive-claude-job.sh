@@ -70,16 +70,23 @@ SESSION_ARGS=()
 case "$TARGET" in
   fresh)
     SESSION_ARGS=(--session-id "$(cat /proc/sys/kernel/random/uuid)") ;;
-  fork|main)
+  fork)
     [ -z "$MAIN_SID" ] && MAIN_SID="$(cat /root/.cell/claude-main-session 2>/dev/null)"
     if [ -z "$MAIN_SID" ] || [ ! -f "$PROJ/$MAIN_SID.jsonl" ]; then
-      echo "[interactive-job] no main session for target=$TARGET — falling back to fresh" >> "$ERR"
+      echo "[interactive-job] no main session to fork — falling back to fresh" >> "$ERR"
       SESSION_ARGS=(--session-id "$(cat /proc/sys/kernel/random/uuid)")
-    elif [ "$TARGET" = "fork" ]; then
-      SESSION_ARGS=(--resume "$MAIN_SID" --fork-session)
     else
-      SESSION_ARGS=(--resume "$MAIN_SID")
+      # --fork-session: inherit main's context, write to a NEW forked session
+      # (main untouched). claude generates the fork id; we recover it from the
+      # Stop hook payload, not from --session-id.
+      SESSION_ARGS=(--resume "$MAIN_SID" --fork-session)
     fi ;;
+  main)
+    # main is single-owner: the persistent talk process holds it open. A
+    # detached `--resume main` job would be a SECOND writer and could
+    # corrupt/wedge the cell's main conversation. Refuse — main-target work must
+    # route through the persistent channel (phase 2), not this path.
+    fail "[interactive-job] --session main is not supported on the detached jobs path (main is single-owner; a detached --resume main would corrupt the live conversation). Use fresh or fork." 2 ;;
   *) fail "[interactive-job] unknown target: $TARGET" 2 ;;
 esac
 
@@ -129,16 +136,21 @@ tmux -L "$SOCK" paste-buffer -t job -b jobp -d -p
 sleep 1
 tmux -L "$SOCK" send-keys -t job Enter
 
-# --- poll for completion; pane-change snapshots -> out for liveness -------
-# capture-pane only appended when CHANGED: a working TUI ticks its spinner/
-# elapsed counter every second (byte growth → alive); a truly wedged session
-# freezes (no growth → the existing stall watchdog fires). Non-JSON lines are
-# ignored by extractJobResult.
+# --- poll for completion; content-free liveness heartbeat -> err ----------
+# The watchdog measures byte growth of out+err. We compare the rendered pane in
+# memory but write only a CONTENT-FREE timestamp on change — never the pane
+# text. A working TUI ticks its spinner/elapsed counter every second (the pane
+# changes → a heartbeat → byte growth → alive); a truly wedged session freezes
+# (no change → no heartbeat → the existing stall watchdog fires). Crucially, the
+# pane can echo the submitted PROMPT, and on a failed job extractJobResult falls
+# back to tailing the output — so pane content must never reach out/err (the
+# "results never include the prompt" invariant). err also carries claude's real
+# stderr, so a failed job still explains itself.
 last=""
 for _ in $(seq 1 21600); do            # generous; the systemd leash is the real bound
   [ -f "$DONE" ] && break
   cur="$(tmux -L "$SOCK" capture-pane -t job -p 2>/dev/null)"
-  if [ "$cur" != "$last" ]; then printf '%s\n' "$cur" | tail -3 >> "$OUT"; last="$cur"; fi
+  if [ "$cur" != "$last" ]; then printf 'live %s\n' "$(date -u +%FT%TZ 2>/dev/null || echo tick)" >> "$ERR"; last="$cur"; fi
   sleep 3
 done
 [ -f "$DONE" ] || fail "[interactive-job] no Stop within budget" 1

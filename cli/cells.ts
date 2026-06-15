@@ -1377,7 +1377,11 @@ async function cmdRun(cellName: string, rest: string[]): Promise<void> {
       // runs the interactive job runner; otherwise the job is fresh.
       const v = a.includes("=") ? a.slice("--session=".length) : (rest[++i] ?? "");
       if (v !== "fresh" && v !== "fork" && v !== "main") {
-        console.error(`! bad --session value: '${v}' (use fresh | fork | main)`);
+        console.error(`! bad --session value: '${v}' (use fresh | fork)`);
+        process.exit(1);
+      }
+      if (v === "main") {
+        console.error(`! --session main is not yet supported — main is single-owner (the persistent talk session holds it open), so a detached job can't write to it without corrupting the live conversation. Use 'fork' (inherits main's context, leaves main untouched) or 'fresh'.`);
         process.exit(1);
       }
       sessionTarget = v;
@@ -1390,7 +1394,7 @@ async function cmdRun(cellName: string, rest: string[]): Promise<void> {
   }
   const task = positional.join(" ").trim();
   if (!task) {
-    console.error(`usage: cells run <name> "<task>" [--timeout 30m] [--session fresh|fork|main]`);
+    console.error(`usage: cells run <name> "<task>" [--timeout 30m] [--session fresh|fork]`);
     process.exit(1);
   }
   const secret = await readSecret("CELLS_PROXY_SECRET");
@@ -9970,11 +9974,11 @@ switch (sub) {
     console.log("  cells talk <name> [msg]     interactive bridge chat (no msg) or one-shot (with msg).");
     console.log("                              Reply streams in this terminal AND mirrors to Slack — same session as Slack.");
     console.log("                              'mother' is special: accepts any pi flag (-c, -r, --session=<id>, -p ...).");
-    console.log("  cells run <name> \"<task>\" [--timeout 30m] [--session fresh|fork|main]");
+    console.log("  cells run <name> \"<task>\" [--timeout 30m] [--session fresh|fork]");
     console.log("                              hand the cell a background JOB: returns a job id immediately, runs in a");
     console.log("                              detached session under a progress watchdog. Talk = chat; run = work.");
     console.log("                              --session fork: inherit main's context read-only, write to a throwaway");
-    console.log("                              fork (main untouched); fresh (default) = no context; main = continue main.");
+    console.log("                              fork (main untouched); fresh (default) = no context. (main: phase 2)");
     console.log("  cells jobs <name> [<job-id>]  job status + results (DO view if the cell is asleep — never wakes it)");
     console.log("  cells tui <name>            drop into a well-side tmux shell (debug, file poking, etc).");
     console.log("  cells list                  list known cells");
