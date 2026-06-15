@@ -46,6 +46,9 @@ export type JobRecord = {
   // completion every watchdog tick (supervisor→DO has no other
   // at-least-once machinery).
   notified_at?: string;
+  // Which session the run binds to (interactive claude-code only). Defaults
+  // to fresh; honored only when the interactive runner is enabled.
+  session_target?: SessionTarget;
 };
 
 export const JOBS_DIR = "/root/state/jobs";
@@ -92,11 +95,43 @@ export function parseMainPid(raw: string): number | null {
 // (restarts are routine), and the script records the harness exit code to
 // the .exit file: that file's existence IS completion — the run is not the
 // supervisor's child, so there's no exit event to catch.
+// Which session a job's harness run binds to. fresh = brand-new, no context
+// (the default + every harness's behavior today). fork = inherit the cell's
+// main session read-only and write to a NEW forked session (uses main's
+// context, leaves main untouched). main = continue main itself (single-owner:
+// only safe via the persistent channel, not a detached job). Only the
+// interactive claude-code path honors fork/main; --print jobs are always fresh.
+export type SessionTarget = "fresh" | "fork" | "main";
+
+export type JobScriptOpts = {
+  // Run genuine interactive Claude Code (tmux PTY + hooks, no --print) so the
+  // request bills cc_entrypoint=cli (interactive pool) instead of sdk-cli (the
+  // metered Agent-SDK credit). See bin/interactive-claude-job.sh.
+  interactive?: boolean;
+  sessionTarget?: SessionTarget;
+};
+
 export function buildJobScript(
   harness: string,
   p: ReturnType<typeof jobPaths>,
+  opts: JobScriptOpts = {},
 ): { ok: true; script: string } | { ok: false; error: string } {
   const q = (s: string) => `'${s.replace(/'/g, `'\\''`)}'`;
+  // Interactive claude-code: hand off to the baked runner, which owns the
+  // tmux PTY, hooks, prompt injection, transcript reconstruction, AND the
+  // out/err/exit files (so no `> out 2> err; echo $? > exit` tail here). The
+  // runner re-emits stream-json frames, so extractJobResult is unchanged.
+  if (harness === "claude-code" && opts.interactive) {
+    const target: SessionTarget = opts.sessionTarget ?? "fresh";
+    const script =
+      `export HOME=/root IS_SANDBOX=1; cd /root; ` +
+      `[ -r /etc/profile.d/cells-env.sh ] && . /etc/profile.d/cells-env.sh; ` +
+      `exec bash /root/bin/interactive-claude-job.sh ` +
+      `--id ${q(pathId(p))} --jobsdir ${q(JOBS_DIR)} ` +
+      `--prompt ${q(p.prompt)} --out ${q(p.out)} --err ${q(p.err)} --exit ${q(p.exit)} ` +
+      `--target ${q(target)}`;
+    return { ok: true, script };
+  }
   let pipeline: string;
   if (harness === "claude-code") {
     // Fresh session — never --resume the main id (the serialized-main wedge
@@ -311,5 +346,8 @@ export function parseJobRecord(raw: string): JobRecord | null {
     ...(typeof j.ok === "boolean" ? { ok: j.ok } : {}),
     ...(typeof j.reason === "string" ? { reason: j.reason } : {}),
     ...(typeof j.notified_at === "string" ? { notified_at: j.notified_at } : {}),
+    ...(j.session_target === "fresh" || j.session_target === "fork" || j.session_target === "main"
+      ? { session_target: j.session_target as SessionTarget }
+      : {}),
   };
 }

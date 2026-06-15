@@ -400,6 +400,12 @@ async function killJobRun(rec: JobRecord): Promise<void> {
     // pid kill for a unit-backed record: a vanished unit's saved pid may
     // already have been recycled by an unrelated root process (codex P2).
     try { spawn(["systemctl", "kill", "--signal=SIGKILL", rec.unit], { stdout: "ignore", stderr: "ignore" }); } catch {}
+    // An interactive job runs claude under a dedicated `tmux -L cell-job-<id>`
+    // socket INSIDE the unit's cgroup, so systemctl kill reaps the server — but
+    // SIGKILL skips the runner's cleanup trap, leaving the dead socket FILE
+    // behind. Sweep it (id is JOB_ID_RE-validated, so no shell metachars; a
+    // no-op for --print jobs that have no such socket).
+    try { spawn(["bash", "-lc", `rm -f /tmp/tmux-*/cell-job-${rec.id}`], { stdout: "ignore", stderr: "ignore" }); } catch {}
     // Bounded wait (~3s) for systemd to reap the cgroup. If it somehow
     // outlives this, the next attempt still uses a DIFFERENT unit name, so
     // only the shared files overlap — acceptable worst case after the wait.
@@ -440,6 +446,7 @@ async function handleJobFrame(cmd: any): Promise<void> {
   mkdirSync(JOBS_DIR, { recursive: true });
   const p = jobPaths(JOBS_DIR, id);
   writeFileSync(p.prompt, prompt);
+  const st = cmd.session_target;
   const rec: JobRecord = {
     id,
     created_at: new Date().toISOString(),
@@ -447,6 +454,7 @@ async function handleJobFrame(cmd: any): Promise<void> {
     harness: HARNESS,
     timeout_seconds: timeoutS,
     attempts: 0,
+    ...(st === "fresh" || st === "fork" || st === "main" ? { session_target: st } : {}),
   };
   saveJobRecord(rec);
   broadcastToClients(JSON.stringify({ type: "job_accepted", id }));
@@ -463,7 +471,15 @@ async function handleJobFrame(cmd: any): Promise<void> {
 async function startJobAttempt(rec: JobRecord): Promise<void> {
   const p = jobPaths(JOBS_DIR, rec.id);
   rec.attempts += 1;
-  const built = buildJobScript(rec.harness, p);
+  // Genuine interactive Claude Code (cc_entrypoint=cli → interactive billing
+  // pool, not the metered Agent-SDK credit) when enabled for this cell. Gated
+  // by env so rollout is per-cell; fork/main session targets are honored only
+  // on this path (the --print path is always fresh).
+  const interactive = process.env.CELLS_JOBS_INTERACTIVE === "1" && rec.harness === "claude-code";
+  const built = buildJobScript(rec.harness, p, {
+    interactive,
+    ...(rec.session_target ? { sessionTarget: rec.session_target } : {}),
+  });
   if (!built.ok) {
     finalizeJob(rec, { ok: false, text: built.error, reason: "unsupported", exitCode: null });
     return;

@@ -590,6 +590,7 @@ export class CellAgent {
       created_at: new Date().toISOString(),
       timeout_seconds: v.job.timeoutSeconds,
       status: "queued",
+      ...(v.job.sessionTarget ? { session_target: v.job.sessionTarget } : {}),
     };
     // The prompt gets its own storage key — packed into the snapshot, a few
     // max-size queued prompts would blow the 128 KiB per-value cap and take

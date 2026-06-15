@@ -1357,6 +1357,7 @@ async function cmdRun(cellName: string, rest: string[]): Promise<void> {
   }
   await requireCell(cellName);
   let timeoutS = 3600;
+  let sessionTarget = "";
   const positional: string[] = [];
   for (let i = 0; i < rest.length; i++) {
     const a = rest[i]!;
@@ -1369,6 +1370,17 @@ async function cmdRun(cellName: string, rest: string[]): Promise<void> {
       }
       const n = Number(m[1]);
       timeoutS = m[2] === "h" ? n * 3600 : m[2] === "m" ? n * 60 : n;
+    } else if (a === "--session" || a.startsWith("--session=")) {
+      // Which session the job binds to: fresh (default, no context), fork
+      // (inherit the cell's main context read-only, write to a throwaway fork —
+      // main untouched), or main (continue main). Honored only when the cell
+      // runs the interactive job runner; otherwise the job is fresh.
+      const v = a.includes("=") ? a.slice("--session=".length) : (rest[++i] ?? "");
+      if (v !== "fresh" && v !== "fork" && v !== "main") {
+        console.error(`! bad --session value: '${v}' (use fresh | fork | main)`);
+        process.exit(1);
+      }
+      sessionTarget = v;
     } else if (a.startsWith("--")) {
       console.error(`! unknown flag for run: ${a}`);
       process.exit(1);
@@ -1378,7 +1390,7 @@ async function cmdRun(cellName: string, rest: string[]): Promise<void> {
   }
   const task = positional.join(" ").trim();
   if (!task) {
-    console.error(`usage: cells run <name> "<task>" [--timeout 30m]`);
+    console.error(`usage: cells run <name> "<task>" [--timeout 30m] [--session fresh|fork|main]`);
     process.exit(1);
   }
   const secret = await readSecret("CELLS_PROXY_SECRET");
@@ -1445,7 +1457,13 @@ async function cmdRun(cellName: string, rest: string[]): Promise<void> {
         method: "POST",
         headers: { "content-type": "application/json", authorization: `Bearer ${secret}` },
         body: JSON.stringify({
-          event: { kind: "job", job_id: jobId, text: task, timeout_seconds: timeoutS },
+          event: {
+            kind: "job",
+            job_id: jobId,
+            text: task,
+            timeout_seconds: timeoutS,
+            ...(sessionTarget ? { session_target: sessionTarget } : {}),
+          },
         }),
         signal: AbortSignal.timeout(15_000),
       });
@@ -9952,9 +9970,11 @@ switch (sub) {
     console.log("  cells talk <name> [msg]     interactive bridge chat (no msg) or one-shot (with msg).");
     console.log("                              Reply streams in this terminal AND mirrors to Slack — same session as Slack.");
     console.log("                              'mother' is special: accepts any pi flag (-c, -r, --session=<id>, -p ...).");
-    console.log("  cells run <name> \"<task>\" [--timeout 30m]");
+    console.log("  cells run <name> \"<task>\" [--timeout 30m] [--session fresh|fork|main]");
     console.log("                              hand the cell a background JOB: returns a job id immediately, runs in a");
-    console.log("                              fresh detached session under a progress watchdog. Talk = chat; run = work.");
+    console.log("                              detached session under a progress watchdog. Talk = chat; run = work.");
+    console.log("                              --session fork: inherit main's context read-only, write to a throwaway");
+    console.log("                              fork (main untouched); fresh (default) = no context; main = continue main.");
     console.log("  cells jobs <name> [<job-id>]  job status + results (DO view if the cell is asleep — never wakes it)");
     console.log("  cells tui <name>            drop into a well-side tmux shell (debug, file poking, etc).");
     console.log("  cells list                  list known cells");
