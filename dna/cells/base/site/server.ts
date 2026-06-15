@@ -37,6 +37,8 @@ import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { getAdapter, turnLeashMs, type AdapterHost, type HarnessAdapter } from "../lib/harness-adapters";
 import { isInsideDir } from "../lib/path-guard";
+import { DEFAULT_SESSION, validateSessionName } from "../lib/session-pool";
+import { TalkPool } from "../lib/talk-pool";
 import { MIME, collectSiteFiles } from "../lib/site-files";
 import {
   buildJobScript, extractJobResult, freshWatchState, jobPaths, jobUnitName,
@@ -70,6 +72,31 @@ const ADAPTER: HarnessAdapter = getAdapter(HARNESS);
 // CELLS_JOBS_INTERACTIVE=0. The SAME value is advertised in bridge_hello (so the
 // CLI's capability gate matches reality) and used to gate startJobAttempt.
 const JOBS_INTERACTIVE = HARNESS === "claude-code" && process.env.CELLS_JOBS_INTERACTIVE !== "0";
+
+// Whether THIS cell runs TALK through warm interactive sessions (the pool)
+// instead of the always-on `claude --print` process — so every talk turn bills
+// cc_entrypoint=cli (the interactive subscription pool, not the metered
+// Agent-SDK credit) and the cell can hold several named durable conversations
+// at once (main, buyer↔WhatsApp, staff↔Slack). OPT-IN (=== "1") during rollout
+// so it soaks on one cell and rolls back independently of jobs; the default
+// flips once proven. claude-code only — pi/codex/hermes keep their own models.
+const TALK_INTERACTIVE = HARNESS === "claude-code" && process.env.CELLS_TALK_INTERACTIVE === "1";
+// Leash for a raw interactive prompt with no sender-supplied budget.
+const TALK_DEFAULT_LEASH_MS = 5 * 60 * 1000;
+
+// The talk pool (null unless TALK_INTERACTIVE). Deps are lazy arrows over the
+// hoisted broadcastToClients / signalLifecycle / signalIdleIfQuiet below, so
+// the pool reaches the bridge exactly as onTranslatedLine did. The pool counts
+// as "busy" so welld won't hibernate the cell mid-turn; idle is signaled only
+// when no session is busy AND no job is running (signalIdleIfQuiet).
+const talkPool = TALK_INTERACTIVE
+  ? new TalkPool({
+      broadcast: (line) => broadcastToClients(line),
+      onBusyChange: (busy) => { if (busy) void signalLifecycle("busy"); else signalIdleIfQuiet(); },
+      log: (m) => console.log(`[bridge] ${m}`),
+      err: (m) => console.error(`[bridge] ${m}`),
+    })
+  : null;
 
 // Stable per-cell session file (pi). Pin pi to this on every spawn so
 // conversations survive pi restarts. claude/codex use their own birth-time
@@ -350,7 +377,7 @@ const JOB_ID_RE = /^[0-9A-Za-z][0-9A-Za-z_-]{7,39}$/;
 // signal, and a detached job process is invisible to it — without this
 // gate the VM gets checkpointed mid-job.
 function signalIdleIfQuiet() {
-  if (runningJobs.size === 0) void signalLifecycle("idle");
+  if (runningJobs.size === 0 && !talkPool?.anyBusy()) void signalLifecycle("idle");
 }
 
 function loadJobRecord(id: string): JobRecord | null {
@@ -762,6 +789,16 @@ let activeMainTurn: MainTurn | null = null;
 let mainSessionBusy = false; // any turn in flight — ours or interactive
 
 function enqueueMainTurn(t: { corrId: string; from: string; text: string; leashMs: number }) {
+  if (talkPool) {
+    // Interactive talk: a durable-conversation turn drives the main session in
+    // the pool. The from-prefix (applied in pumpMainQueue on the --print path)
+    // is baked into the text here so the cell knows who's speaking.
+    talkPool.enqueue(DEFAULT_SESSION, {
+      corrId: t.corrId, from: t.from, leashMs: t.leashMs, acc: "",
+      text: `[message from ${t.from} — your reply goes back to them] ${t.text}`,
+    });
+    return;
+  }
   mainQueue.push({ ...t, acc: "" });
   pumpMainQueue();
 }
@@ -961,6 +998,16 @@ function persistentSpawnArgs(): { cmd: string[]; env: Record<string, string> } |
 
 function spawnHarness() {
   if (harnessProc) return;
+  if (talkPool) {
+    // Interactive talk: there is no persistent --print process. The pool spawns
+    // a warm interactive claude per session on demand. Mark ready (it accepts
+    // enqueues immediately) and pre-warm main so the common path skips the
+    // cold-start. Jobs (which still run via systemd-run) are unaffected.
+    harnessReady = true;
+    broadcastToClients(JSON.stringify({ type: "bridge_ready" }));
+    talkPool.prewarm(DEFAULT_SESSION);
+    return;
+  }
   if (ADAPTER.mode === "per-turn") {
     // No persistent process to spawn. Mark ready so prompts flow into runTurn().
     harnessReady = true;
@@ -1446,6 +1493,28 @@ function handleBridgeFrame(line: string) {
     return;
   }
 
+  // Interactive talk pool: a prompt drives a named warm session (default main),
+  // bypassing the --print persistent process and its main-turn machinery
+  // entirely. The optional `session` field (stamped by the DO from a channel
+  // binding, or by `cells talk --session=<name>`) selects the session; absent →
+  // main, which is every existing inbound. The pool emits agent_start/busy
+  // itself when it dispatches the turn.
+  if (cmd?.type === "prompt" && talkPool) {
+    const raw = typeof cmd.message === "string" ? cmd.message : "";
+    const reqName =
+      cmd.session === undefined || cmd.session === null ? DEFAULT_SESSION : validateSessionName(cmd.session);
+    if (!reqName) {
+      broadcastToClients(JSON.stringify({
+        type: "response", id: cmd.id, command: "prompt",
+        success: false, error: `invalid session name: ${String(cmd.session).slice(0, 40)}`,
+      }));
+      return;
+    }
+    talkPool.enqueue(reqName, { corrId: null, from: null, leashMs: TALK_DEFAULT_LEASH_MS, acc: "", text: raw });
+    broadcastToClients(JSON.stringify({ type: "response", id: cmd.id, command: "prompt", success: true }));
+    return;
+  }
+
   // Signal busy at prompt-receive time — uniform across harnesses. pi also
   // emits agent_start through passthrough (no-op duplicate); claude and
   // codex don't have an analogue, so this is their only busy signal. Also
@@ -1552,7 +1621,10 @@ function connectBridge() {
     // --session <target>` (interactive runner on, claude-code) — NOT merely
     // that the code is present — so the CLI's gate matches what startJobAttempt
     // will do, and never queues a fork job that's destined to fail-loud.
-    try { ws.send(JSON.stringify({ type: "bridge_hello", cell: NAME, harness: HARNESS, session_targets: JOBS_INTERACTIVE })); } catch {}
+    // session_targets gates `cells run --session <target>` (jobs); talk_sessions
+    // gates `cells talk --session <name>` + channel→session binding (the DO
+    // reads it before stamping a non-main session on inbound).
+    try { ws.send(JSON.stringify({ type: "bridge_hello", cell: NAME, harness: HARNESS, session_targets: JOBS_INTERACTIVE, talk_sessions: TALK_INTERACTIVE })); } catch {}
     if (harnessReady) {
       try { ws.send(JSON.stringify({ type: "bridge_ready" })); } catch {}
     }
@@ -1628,6 +1700,10 @@ function bridgeHeartbeat() {
 }
 
 console.log(`${NAME} site listening on :${server.port} (harness=${HARNESS})`);
+// Boot/thaw: a prior well-site may have left warm talk tmux servers behind with
+// stale cursors/timers (and a frozen-busy one would pin the cell awake). Kill
+// them all — the durable per-name id cold-starts and --resumes intact.
+talkPool?.sweepStale();
 connectBridge();
 setInterval(bridgeHeartbeat, BRIDGE_PING_MS);
 spawnHarness();
