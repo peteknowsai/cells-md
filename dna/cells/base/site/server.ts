@@ -63,11 +63,13 @@ function readHarness(): string {
 }
 const HARNESS = readHarness();
 const ADAPTER: HarnessAdapter = getAdapter(HARNESS);
-// Whether THIS cell actually honors `cells run --session <target>`: genuine
-// interactive Claude Code runs jobs (cc_entrypoint=cli) and fork/main targets
-// are meaningful only there. The SAME value is advertised in bridge_hello (so
-// the CLI's capability gate matches reality) and used to gate startJobAttempt.
-const JOBS_INTERACTIVE = process.env.CELLS_JOBS_INTERACTIVE === "1" && HARNESS === "claude-code";
+// Whether THIS cell runs jobs through genuine interactive Claude Code
+// (cc_entrypoint=cli → interactive billing pool, not the metered Agent-SDK
+// credit), which also makes the --session fork/main targets meaningful.
+// DEFAULT-ON for claude-code as of the fleet rollout (2026-06-15); opt OUT with
+// CELLS_JOBS_INTERACTIVE=0. The SAME value is advertised in bridge_hello (so the
+// CLI's capability gate matches reality) and used to gate startJobAttempt.
+const JOBS_INTERACTIVE = HARNESS === "claude-code" && process.env.CELLS_JOBS_INTERACTIVE !== "0";
 
 // Stable per-cell session file (pi). Pin pi to this on every spawn so
 // conversations survive pi restarts. claude/codex use their own birth-time
