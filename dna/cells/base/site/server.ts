@@ -1540,8 +1540,11 @@ function connectBridge() {
     bridgeMissedPings = 0;
     console.log(`[bridge] connected to ${BRIDGE_URL}`);
     // Greet, and if the harness is already ready (warm cell, fast dial)
-    // send bridge_ready immediately so the DO doesn't wait.
-    try { ws.send(JSON.stringify({ type: "bridge_hello", cell: NAME, harness: HARNESS })); } catch {}
+    // send bridge_ready immediately so the DO doesn't wait. session_targets
+    // advertises that THIS supervisor honors `cells run --session <target>` —
+    // the DO records it so the CLI can certify the cell-side supervisor (not
+    // just the Worker) before submitting a fork job.
+    try { ws.send(JSON.stringify({ type: "bridge_hello", cell: NAME, harness: HARNESS, session_targets: true })); } catch {}
     if (harnessReady) {
       try { ws.send(JSON.stringify({ type: "bridge_ready" })); } catch {}
     }

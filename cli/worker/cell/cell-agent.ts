@@ -668,6 +668,7 @@ export class CellAgent {
   private async handleDebug(): Promise<Response> {
     await this.ensureLoaded();
     const siteMeta = await this.state.storage.get<SiteMeta>("site:__meta__");
+    const supSessionTargets = (await this.state.storage.get<boolean>("supervisor:session_targets")) === true;
     const ws = this.bridgeWs();
     return Response.json({
       cell: this.env.CELL_NAME,
@@ -676,10 +677,12 @@ export class CellAgent {
       // Presence of this key is the `cells run` capability probe — an older
       // worker would misroute kind:"job" into the conversation path.
       jobs: [...this.jobs.values()].map(jobSummary),
-      // Capability probe for `cells run --session <target>`: this worker's
-      // validateJobSubmit/jobFrame persist + forward session_target. An older
-      // worker exposes `jobs` but drops session_target, silently running fresh.
+      // `cells run --session <target>` needs BOTH sides current: this Worker
+      // persists/forwards session_target (job_session_targets), AND the
+      // cell-side supervisor honors it (supervisor_session_targets, recorded
+      // from its bridge_hello). They deploy separately, so the CLI checks both.
       job_session_targets: true,
+      supervisor_session_targets: supSessionTargets,
       site: siteMeta
         ? { files: siteMeta.paths.length, paths: siteMeta.paths, publishedAt: siteMeta.publishedAt }
         : null,
@@ -963,7 +966,15 @@ export class CellAgent {
     try { ev = JSON.parse(line); } catch { return; }
     const type = ev?.type;
 
-    if (type === "bridge_hello" || type === "pong" || type === "response") return;
+    if (type === "bridge_hello") {
+      // Record whether the connected supervisor honors session targets, so the
+      // CLI can certify the CELL-SIDE supervisor (not just the Worker) before
+      // submitting a `--session fork` job. Persisted so it survives DO eviction
+      // / hibernation — reflects the last supervisor that dialed in.
+      void this.state.storage.put("supervisor:session_targets", ev?.session_targets === true);
+      return;
+    }
+    if (type === "pong" || type === "response") return;
 
     // frame_ack — the supervisor confirms receipt of a reliable frame.
     if (type === "frame_ack") {

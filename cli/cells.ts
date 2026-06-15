@@ -1460,6 +1460,18 @@ async function cmdRun(cellName: string, rest: string[]): Promise<void> {
     console.error(`  ✓ worker redeployed; ${sessionTarget ? "--session support" : "jobs lane"} present`);
   }
 
+  // The Worker now persists session_target, but the cell-side SUPERVISOR is
+  // what actually honors it — and they deploy separately (Worker via
+  // deploy-cell-worker.sh, supervisor via `cells refresh`). A Worker redeploy
+  // can't update an old supervisor, so refuse rather than let it silently run a
+  // fresh job with the wrong context.
+  if (sessionTarget && debug.supervisor_session_targets !== true) {
+    console.error(`! ${cellName}'s supervisor doesn't honor --session ${sessionTarget} yet — it would silently run a fresh job.`);
+    console.error(`  Fix: \`cells refresh ${cellName}\` (updates the supervisor), then retry.`);
+    console.error(`  (If you just refreshed it, wake it once — e.g. \`cells talk ${cellName} hi\` — so its supervisor re-registers, then retry.)`);
+    process.exit(1);
+  }
+
   const jobId = ulid();
   let lastErr = "";
   for (let attempt = 1; attempt <= 3; attempt++) {

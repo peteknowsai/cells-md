@@ -75,14 +75,15 @@ case "$TARGET" in
   fork)
     [ -z "$MAIN_SID" ] && MAIN_SID="$(cat /root/.cell/claude-main-session 2>/dev/null)"
     if [ -z "$MAIN_SID" ] || [ ! -f "$PROJ/$MAIN_SID.jsonl" ]; then
-      echo "[interactive-job] no main session to fork — falling back to fresh" >> "$ERR"
-      SESSION_ARGS=(--session-id "$(cat /proc/sys/kernel/random/uuid)")
-    else
-      # --fork-session: inherit main's context, write to a NEW forked session
-      # (main untouched). claude generates the fork id; we recover it from the
-      # Stop hook payload, not from --session-id.
-      SESSION_ARGS=(--resume "$MAIN_SID" --fork-session)
-    fi ;;
+      # The caller explicitly asked for main's context. Falling back to fresh
+      # would complete "successfully" with NO context (and the warning only
+      # lands on stderr, which success summaries don't surface) — fail instead.
+      fail "[interactive-job] --session fork requested but this cell has no main session to fork from (missing /root/.cell/claude-main-session or its transcript). Re-run with --session fresh." 2
+    fi
+    # --fork-session: inherit main's context, write to a NEW forked session
+    # (main untouched). claude generates the fork id; we recover it from the
+    # Stop hook payload, not from --session-id.
+    SESSION_ARGS=(--resume "$MAIN_SID" --fork-session) ;;
   main)
     # main is single-owner: the persistent talk process holds it open. A
     # detached `--resume main` job would be a SECOND writer and could
@@ -173,12 +174,7 @@ for _ in $(seq 1 60); do [ -f "$READY" ] && break; sleep 1; done
 [ -f "$READY" ] || fail "[interactive-job] claude did not reach SessionStart within 60s" 1
 
 # --- inject the prompt (bracketed paste = robust for any content) ---------
-# Stamp the moment of submission: for a FORKED session the transcript is
-# pre-seeded with main's history (including main's last assistant turn), so
-# "last assistant row" is NOT necessarily this job's answer. We only accept
-# assistant rows whose timestamp is at/after injection — this turn's rows.
 rm -f "$DONE"
-INJECT_EPOCH="$(date +%s)"
 # A job prompt is literal task text, but claude's TUI treats a leading `/`
 # (slash command) or `!` (bash mode) on the submitted line as a command — which
 # runs the wrong thing and produces no Stop (the job would hang). The --print
@@ -224,24 +220,19 @@ done
 TP="$(python3 -c "import json;print(json.load(open('$STOP')).get('transcript_path',''))" 2>/dev/null)"
 [ -z "$TP" ] && TP="$(python3 -c "import json;print(json.load(open('$SS')).get('transcript_path',''))" 2>/dev/null)"
 
-# One pass that (a) polls up to ~12s for THIS turn's final assistant entry to
-# flush (Stop can fire a beat before the write lands), filtering to rows
-# at/after INJECT_EPOCH so inherited fork history is never mistaken for the
-# answer, then (b) re-emits it + a synthesized result frame as the same
-# stream-json extractJobResult() already parses (no consumer-side changes).
-python3 - "$TP" "$INJECT_EPOCH" >> "$OUT" <<'PY'
+# Re-emit THIS turn's final answer as the stream-json frames extractJobResult()
+# already parses. THIS turn is identified by POSITION, not timestamps (which are
+# coarse + clock-skew-prone): the transcript ends with [ …inherited…, my user
+# prompt, (tool_use asst, tool_result user)*, final assistant ]. The answer is
+# the last assistant row that appears AFTER the LAST user row — inherited
+# history (older rows) precedes my prompt, and tool_results are themselves user
+# rows, so this lands on the terminal answer of a multi-tool turn too. Poll up
+# to ~15s for it to be a non-tool_use row with text (Stop can fire just before
+# the final row flushes; tool_use rows are intermediate).
+python3 - "$TP" >> "$OUT" <<'PY'
 import json, sys, os, time
-from datetime import datetime
 tp = sys.argv[1]
-inj = float(sys.argv[2])
-def ep(ts):
-    try: return datetime.fromisoformat(str(ts).replace("Z", "+00:00")).timestamp()
-    except Exception: return 0.0
 def this_turn_final():
-    # The LAST assistant row of THIS turn (timestamp >= inject), with its text
-    # and stop_reason. A tool-using turn flushes an intermediate assistant row
-    # (stop_reason "tool_use", often with a pre-tool preamble) BEFORE the final
-    # answer, so we must key on the last row, not the first text we find.
     rows = []
     if tp and os.path.exists(tp):
         for l in open(tp):
@@ -249,15 +240,19 @@ def this_turn_final():
             if l:
                 try: rows.append(json.loads(l))
                 except Exception: pass
-    this = [e for e in rows if e.get("type") == "assistant" and ep(e.get("timestamp")) >= inj]
-    if not this:
+    last_user = -1
+    for i, e in enumerate(rows):
+        if e.get("type") == "user":
+            last_user = i
+    ans = None
+    for e in rows[last_user + 1:]:
+        if e.get("type") == "assistant":
+            ans = e
+    if ans is None:
         return "", ""
-    m = this[-1].get("message", {})
+    m = ans.get("message", {})
     t = "".join(b.get("text", "") for b in m.get("content", []) if isinstance(b, dict) and b.get("type") == "text").strip()
     return t, (m.get("stop_reason") or "")
-# We're past the Stop hook (the whole turn, tools included, has ended), so the
-# terminal end_turn row is imminent — poll until the last this-turn row is a
-# non-tool_use row with text (the real answer), not the pre-tool preamble.
 text, sr = "", ""
 for _ in range(15):
     text, sr = this_turn_final()
