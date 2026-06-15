@@ -57,7 +57,7 @@ rm -f "$READY" "$DONE" "$SS" "$STOP"
 # file (kill-server leaves it), and remove the internal markers.
 cleanup(){
   tmux -L "$SOCK" kill-server 2>/dev/null
-  rm -f "${TMUX_TMPDIR:-/tmp}/tmux-$(id -u)/$SOCK" "$READY" "$DONE" "$SS" "$STOP" "$LAUNCH"
+  rm -f "${TMUX_TMPDIR:-/tmp}/tmux-$(id -u)/$SOCK" "$READY" "$DONE" "$SS" "$STOP" "$LAUNCH" "$JOBSDIR/$ID.inject"
 }
 trap cleanup EXIT
 
@@ -160,8 +160,17 @@ for _ in $(seq 1 60); do [ -f "$READY" ] && break; sleep 1; done
 # assistant rows whose timestamp is at/after injection — this turn's rows.
 rm -f "$DONE"
 INJECT_EPOCH="$(date +%s)"
+# A job prompt is literal task text, but claude's TUI treats a leading `/`
+# (slash command) or `!` (bash mode) on the submitted line as a command — which
+# runs the wrong thing and produces no Stop (the job would hang). The --print
+# path took the same text literally. Neutralize by prepending a single space
+# when the prompt starts with / or ! (claude ignores it semantically).
+INJECT="$PROMPT"
+case "$(head -c1 "$PROMPT" 2>/dev/null)" in
+  "/"|"!") INJECT="$JOBSDIR/$ID.inject"; { printf ' '; cat "$PROMPT"; } > "$INJECT" ;;
+esac
 sleep 1
-tmux -L "$SOCK" load-buffer -b jobp "$PROMPT"
+tmux -L "$SOCK" load-buffer -b jobp "$INJECT"
 tmux -L "$SOCK" paste-buffer -t job -b jobp -d -p
 sleep 1
 tmux -L "$SOCK" send-keys -t job Enter
@@ -209,7 +218,11 @@ inj = float(sys.argv[2])
 def ep(ts):
     try: return datetime.fromisoformat(str(ts).replace("Z", "+00:00")).timestamp()
     except Exception: return 0.0
-def this_turn_answer():
+def this_turn_final():
+    # The LAST assistant row of THIS turn (timestamp >= inject), with its text
+    # and stop_reason. A tool-using turn flushes an intermediate assistant row
+    # (stop_reason "tool_use", often with a pre-tool preamble) BEFORE the final
+    # answer, so we must key on the last row, not the first text we find.
     rows = []
     if tp and os.path.exists(tp):
         for l in open(tp):
@@ -217,21 +230,21 @@ def this_turn_answer():
             if l:
                 try: rows.append(json.loads(l))
                 except Exception: pass
-    # Walk newest→oldest; accept only assistant rows from THIS turn (>= inject).
-    for e in reversed(rows):
-        if e.get("type") != "assistant" or ep(e.get("timestamp")) < inj:
-            continue
-        m = e.get("message", {})
-        t = "".join(b.get("text", "") for b in m.get("content", []) if isinstance(b, dict) and b.get("type") == "text").strip()
-        if t:
-            return t, (m.get("stop_reason") or "")
-    return "", ""
+    this = [e for e in rows if e.get("type") == "assistant" and ep(e.get("timestamp")) >= inj]
+    if not this:
+        return "", ""
+    m = this[-1].get("message", {})
+    t = "".join(b.get("text", "") for b in m.get("content", []) if isinstance(b, dict) and b.get("type") == "text").strip()
+    return t, (m.get("stop_reason") or "")
+# We're past the Stop hook (the whole turn, tools included, has ended), so the
+# terminal end_turn row is imminent — poll until the last this-turn row is a
+# non-tool_use row with text (the real answer), not the pre-tool preamble.
 text, sr = "", ""
-for _ in range(12):
-    text, sr = this_turn_answer()
-    if text: break
+for _ in range(15):
+    text, sr = this_turn_final()
+    if text and sr != "tool_use": break
     time.sleep(1)
-ok = bool(text) and sr in ("", "end_turn", "stop_sequence", "tool_use")
+ok = bool(text) and sr in ("end_turn", "stop_sequence")
 print(json.dumps({"type": "assistant", "message": {"content": [{"type": "text", "text": text}]}}))
 print(json.dumps({"type": "result", "subtype": "success" if ok else "error", "is_error": not ok, "result": text}))
 PY
