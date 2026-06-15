@@ -27,7 +27,7 @@
 set -u
 
 ID=""; JOBSDIR="/root/state/jobs"; PROMPT=""; OUT=""; ERR=""; EXIT=""
-TARGET="fresh"; MAIN_SID=""
+TARGET="fresh"; MAIN_SID=""; TIMEOUT_SECONDS=3600
 while [ $# -gt 0 ]; do
   case "$1" in
     --id) ID="$2"; shift 2;;
@@ -38,9 +38,11 @@ while [ $# -gt 0 ]; do
     --exit) EXIT="$2"; shift 2;;
     --target) TARGET="$2"; shift 2;;
     --main-sid) MAIN_SID="$2"; shift 2;;
+    --timeout-seconds) TIMEOUT_SECONDS="$2"; shift 2;;
     *) shift;;
   esac
 done
+case "$TIMEOUT_SECONDS" in (*[!0-9]*|"") TIMEOUT_SECONDS=3600 ;; esac
 
 cd /root
 PROJ=/root/.claude/projects/-root
@@ -90,17 +92,40 @@ case "$TARGET" in
   *) fail "[interactive-job] unknown target: $TARGET" 2 ;;
 esac
 
-# --- pre-seed folder trust (idempotent belt; bake also seeds it) ----------
+# --- pre-seed the boot gates (idempotent; bake seeds these for newborns) ---
+# A cell that has only ever run `claude --print` is NOT onboarded for an
+# interactive session, which blocks on dialogs before SessionStart fires:
+#   - first-run onboarding → ~/.claude.json hasCompletedOnboarding (the theme
+#       picker etc.; verified on abstractor 2026-06-15 — without it claude opens
+#       the onboarding flow and never reaches SessionStart)
+#   - folder trust         → ~/.claude.json projects[/root].hasTrustDialogAccepted
+#   - bypass-perms accept  → ~/.claude/settings.json skipDangerousModePermissionPrompt
+# All must be in the PERSISTED files: the bypass flag is ignored when passed via
+# inline --settings, and settings.json is a `cells refresh` protected path, so
+# seeding HERE (not only at bake) is what lets an already-running cell adopt
+# interactive jobs after a refresh. Writes are idempotent + additive; an
+# existing settings.json is augmented, never created/replaced (a missing one is
+# a deeper provisioning problem we must not mask).
 python3 - <<'PY' 2>/dev/null || true
 import json
-f="/root/.claude.json"
-try: d=json.load(open(f))
-except Exception: d={}
-d.setdefault("projects",{}).setdefault("/root",{})["hasTrustDialogAccepted"]=True
-json.dump(d,open(f,"w"))
+cj = "/root/.claude.json"
+try: d = json.load(open(cj))
+except Exception: d = {}
+d["hasCompletedOnboarding"] = True
+d.setdefault("projects", {}).setdefault("/root", {})["hasTrustDialogAccepted"] = True
+json.dump(d, open(cj, "w"))
+
+sf = "/root/.claude/settings.json"
+try: s = json.load(open(sf))
+except Exception: s = None
+if isinstance(s, dict) and s.get("skipDangerousModePermissionPrompt") is not True:
+    s["skipDangerousModePermissionPrompt"] = True
+    json.dump(s, open(sf, "w"), indent=2)
 PY
 
 # --- inline hooks settings ------------------------------------------------
+# Just the SessionStart/Stop hooks that drive this job (the bypass-skip flag
+# must be persisted, seeded above — it is ignored when passed inline).
 SETTINGS="$(python3 - "$READY" "$SS" "$STOP" "$DONE" <<'PY'
 import json,sys
 ready,ss,stop,done=sys.argv[1:5]
@@ -151,8 +176,13 @@ tmux -L "$SOCK" send-keys -t job Enter
 # back to tailing the output — so pane content must never reach out/err (the
 # "results never include the prompt" invariant). err also carries claude's real
 # stderr, so a failed job still explains itself.
+# The supervisor's tick-counted leash (derived from timeout_seconds) is the
+# authoritative timeout — it kills the unit and this loop dies with the cgroup.
+# This inner bound is only a backstop for a dead/absent watchdog, sized just
+# PAST the configured timeout so it never pre-empts a valid long job.
+MAX_ITERS=$(( TIMEOUT_SECONDS / 3 + 200 ))
 last=""
-for _ in $(seq 1 21600); do            # generous; the systemd leash is the real bound
+for _ in $(seq 1 "$MAX_ITERS"); do
   [ -f "$DONE" ] && break
   cur="$(tmux -L "$SOCK" capture-pane -t job -p 2>/dev/null)"
   if [ "$cur" != "$last" ]; then printf 'live %s\n' "$(date -u +%FT%TZ 2>/dev/null || echo tick)" >> "$ERR"; last="$cur"; fi

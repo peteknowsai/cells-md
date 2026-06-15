@@ -109,6 +109,10 @@ export type JobScriptOpts = {
   // metered Agent-SDK credit). See bin/interactive-claude-job.sh.
   interactive?: boolean;
   sessionTarget?: SessionTarget;
+  // The job's timeout — passed to the interactive runner so its inner backstop
+  // loop is sized past the supervisor's leash (the authoritative timeout),
+  // never pre-empting a valid long job.
+  timeoutSeconds?: number;
 };
 
 export function buildJobScript(
@@ -123,13 +127,14 @@ export function buildJobScript(
   // runner re-emits stream-json frames, so extractJobResult is unchanged.
   if (harness === "claude-code" && opts.interactive) {
     const target: SessionTarget = opts.sessionTarget ?? "fresh";
+    const timeoutSeconds = Number.isFinite(opts.timeoutSeconds) ? Math.round(opts.timeoutSeconds!) : 3600;
     const script =
       `export HOME=/root IS_SANDBOX=1; cd /root; ` +
       `[ -r /etc/profile.d/cells-env.sh ] && . /etc/profile.d/cells-env.sh; ` +
       `exec bash /root/bin/interactive-claude-job.sh ` +
       `--id ${q(pathId(p))} --jobsdir ${q(JOBS_DIR)} ` +
       `--prompt ${q(p.prompt)} --out ${q(p.out)} --err ${q(p.err)} --exit ${q(p.exit)} ` +
-      `--target ${q(target)}`;
+      `--target ${q(target)} --timeout-seconds ${q(String(timeoutSeconds))}`;
     return { ok: true, script };
   }
   let pipeline: string;

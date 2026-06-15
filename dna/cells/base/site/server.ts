@@ -478,6 +478,7 @@ async function startJobAttempt(rec: JobRecord): Promise<void> {
   const interactive = process.env.CELLS_JOBS_INTERACTIVE === "1" && rec.harness === "claude-code";
   const built = buildJobScript(rec.harness, p, {
     interactive,
+    timeoutSeconds: rec.timeout_seconds,
     ...(rec.session_target ? { sessionTarget: rec.session_target } : {}),
   });
   if (!built.ok) {

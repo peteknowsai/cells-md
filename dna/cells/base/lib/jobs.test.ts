@@ -58,6 +58,13 @@ describe("buildJobScript", () => {
     expect(r.ok && r.script.includes("--target 'fork'")).toBe(true);
   });
 
+  test("claude-code interactive: passes the timeout so the runner backstop is sized past the leash", () => {
+    const dflt = buildJobScript("claude-code", P, { interactive: true });
+    expect(dflt.ok && dflt.script.includes("--timeout-seconds '3600'")).toBe(true);
+    const custom = buildJobScript("claude-code", P, { interactive: true, timeoutSeconds: 7200 });
+    expect(custom.ok && custom.script.includes("--timeout-seconds '7200'")).toBe(true);
+  });
+
   test("interactive flag is ignored for non-claude-code harnesses", () => {
     // pi/codex have no interactive runner — they stay on their --print pipeline.
     const r = buildJobScript("pi", P, { interactive: true });
