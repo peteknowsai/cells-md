@@ -129,7 +129,12 @@ for _ in $(seq 1 60); do [ -f "$READY" ] && break; sleep 1; done
 [ -f "$READY" ] || fail "[interactive-job] claude did not reach SessionStart within 60s" 1
 
 # --- inject the prompt (bracketed paste = robust for any content) ---------
+# Stamp the moment of submission: for a FORKED session the transcript is
+# pre-seeded with main's history (including main's last assistant turn), so
+# "last assistant row" is NOT necessarily this job's answer. We only accept
+# assistant rows whose timestamp is at/after injection — this turn's rows.
 rm -f "$DONE"
+INJECT_EPOCH="$(date +%s)"
 sleep 1
 tmux -L "$SOCK" load-buffer -b jobp "$PROMPT"
 tmux -L "$SOCK" paste-buffer -t job -b jobp -d -p
@@ -155,41 +160,50 @@ for _ in $(seq 1 21600); do            # generous; the systemd leash is the real
 done
 [ -f "$DONE" ] || fail "[interactive-job] no Stop within budget" 1
 
-# --- recover the answer from the transcript (settle for the final flush) --
+# --- recover THIS turn's answer from the transcript -----------------------
+# Transcript path from the Stop payload (authoritative; for a fork the id is
+# generated post-launch, so SessionStart's path is the pre-fork one).
 TP="$(python3 -c "import json;print(json.load(open('$STOP')).get('transcript_path',''))" 2>/dev/null)"
 [ -z "$TP" ] && TP="$(python3 -c "import json;print(json.load(open('$SS')).get('transcript_path',''))" 2>/dev/null)"
-# Stop can fire a beat before claude flushes the final assistant entry —
-# poll briefly for it to appear rather than racing.
-for _ in $(seq 1 10); do
-  if python3 -c "
-import json,sys
-a=[json.loads(l) for l in open('$TP') if l.strip() and json.loads(l).get('type')=='assistant']
-sys.exit(0 if a and ''.join(b.get('text','') for b in a[-1].get('message',{}).get('content',[]) if isinstance(b,dict) and b.get('type')=='text').strip() else 1)
-" 2>/dev/null; then break; fi
-  sleep 1
-done
 
-# Re-emit the final assistant + a synthesized result frame as stream-json,
-# exactly what `claude -p --output-format stream-json` would tail — so
-# extractJobResult() parses it with no special-casing.
-python3 - "$TP" >> "$OUT" <<'PY'
-import json,sys,os
-tp=sys.argv[1]; rows=[]
-if tp and os.path.exists(tp):
-    for l in open(tp):
-        l=l.strip()
-        if l:
-            try: rows.append(json.loads(l))
-            except Exception: pass
-asst=[e for e in rows if e.get("type")=="assistant"]
-text=""; stop_reason=""
-if asst:
-    m=asst[-1].get("message",{})
-    stop_reason=m.get("stop_reason") or ""
-    text="".join(b.get("text","") for b in m.get("content",[]) if isinstance(b,dict) and b.get("type")=="text").strip()
-ok = bool(text) and stop_reason in ("", "end_turn", "stop_sequence", "tool_use")
-print(json.dumps({"type":"assistant","message":{"content":[{"type":"text","text":text}]}}))
-print(json.dumps({"type":"result","subtype":"success" if ok else "error","is_error": not ok,"result":text}))
+# One pass that (a) polls up to ~12s for THIS turn's final assistant entry to
+# flush (Stop can fire a beat before the write lands), filtering to rows
+# at/after INJECT_EPOCH so inherited fork history is never mistaken for the
+# answer, then (b) re-emits it + a synthesized result frame as the same
+# stream-json extractJobResult() already parses (no consumer-side changes).
+python3 - "$TP" "$INJECT_EPOCH" >> "$OUT" <<'PY'
+import json, sys, os, time
+from datetime import datetime
+tp = sys.argv[1]
+inj = float(sys.argv[2])
+def ep(ts):
+    try: return datetime.fromisoformat(str(ts).replace("Z", "+00:00")).timestamp()
+    except Exception: return 0.0
+def this_turn_answer():
+    rows = []
+    if tp and os.path.exists(tp):
+        for l in open(tp):
+            l = l.strip()
+            if l:
+                try: rows.append(json.loads(l))
+                except Exception: pass
+    # Walk newest→oldest; accept only assistant rows from THIS turn (>= inject).
+    for e in reversed(rows):
+        if e.get("type") != "assistant" or ep(e.get("timestamp")) < inj:
+            continue
+        m = e.get("message", {})
+        t = "".join(b.get("text", "") for b in m.get("content", []) if isinstance(b, dict) and b.get("type") == "text").strip()
+        if t:
+            return t, (m.get("stop_reason") or "")
+    return "", ""
+text, sr = "", ""
+for _ in range(12):
+    text, sr = this_turn_answer()
+    if text: break
+    time.sleep(1)
+ok = bool(text) and sr in ("", "end_turn", "stop_sequence", "tool_use")
+print(json.dumps({"type": "assistant", "message": {"content": [{"type": "text", "text": text}]}}))
+print(json.dumps({"type": "result", "subtype": "success" if ok else "error", "is_error": not ok, "result": text}))
 PY
 
 echo 0 > "$EXIT"
