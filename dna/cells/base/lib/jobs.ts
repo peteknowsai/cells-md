@@ -115,6 +115,17 @@ export type JobScriptOpts = {
   timeoutSeconds?: number;
 };
 
+// A non-fresh session target (fork/main) is honored ONLY on the interactive
+// claude-code runner. When it isn't (interactive disabled, or a non-claude-code
+// harness), the job must fail loudly — letting it fall through to the --print
+// path would silently run FRESH and report success with the wrong context.
+export function sessionTargetHonorable(
+  target: SessionTarget | undefined,
+  interactive: boolean,
+): boolean {
+  return !target || target === "fresh" || interactive;
+}
+
 export function buildJobScript(
   harness: string,
   p: ReturnType<typeof jobPaths>,

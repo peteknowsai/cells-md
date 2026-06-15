@@ -14,6 +14,7 @@ import {
   leashLimitTicks,
   parseJobRecord,
   parseMainPid,
+  sessionTargetHonorable,
   stallLimitTicks,
   watchdogTick,
   WATCH_TICK_MS,
@@ -78,6 +79,15 @@ describe("buildJobScript", () => {
     const r = buildJobScript("claude-code", P);
     expect(r.ok && r.script.includes("claude --print")).toBe(true);
     expect(r.ok && r.script.includes("interactive-claude-job.sh")).toBe(false);
+  });
+
+  test("sessionTargetHonorable: fork/main need interactive; fresh/undefined always ok", () => {
+    // The guard against silently running a --print job FRESH when a fork was asked.
+    expect(sessionTargetHonorable("fork", true)).toBe(true);
+    expect(sessionTargetHonorable("fork", false)).toBe(false);   // would-be silent-fresh → must fail
+    expect(sessionTargetHonorable("main", false)).toBe(false);
+    expect(sessionTargetHonorable("fresh", false)).toBe(true);
+    expect(sessionTargetHonorable(undefined, false)).toBe(true);
   });
 
   test("codex: fresh thread (no resume), --json", () => {

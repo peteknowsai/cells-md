@@ -40,7 +40,7 @@ import { isInsideDir } from "../lib/path-guard";
 import { MIME, collectSiteFiles } from "../lib/site-files";
 import {
   buildJobScript, extractJobResult, freshWatchState, jobPaths, jobUnitName,
-  JOBS_DIR, parseJobRecord, parseMainPid, summarize, watchdogTick,
+  JOBS_DIR, parseJobRecord, parseMainPid, sessionTargetHonorable, summarize, watchdogTick,
   WATCH_TICK_MS, type JobRecord, type WatchState,
 } from "../lib/jobs";
 
@@ -476,6 +476,20 @@ async function startJobAttempt(rec: JobRecord): Promise<void> {
   // by env so rollout is per-cell; fork/main session targets are honored only
   // on this path (the --print path is always fresh).
   const interactive = process.env.CELLS_JOBS_INTERACTIVE === "1" && rec.harness === "claude-code";
+  // A non-fresh session target (fork) is honored ONLY on the interactive
+  // claude-code runner. If this cell can't honor it — interactive disabled (the
+  // rollout default) or a non-claude-code harness — FAIL LOUDLY rather than let
+  // buildJobScript fall through to the --print path, which is always fresh: a
+  // silently-fresh job that reported success is the wrong-context trap.
+  if (!sessionTargetHonorable(rec.session_target, interactive)) {
+    finalizeJob(rec, {
+      ok: false,
+      text: `--session ${rec.session_target} needs the interactive runner (a claude-code cell with CELLS_JOBS_INTERACTIVE=1), which is not enabled here. Re-run with --session fresh, or enable interactive jobs on this cell.`,
+      reason: "unsupported",
+      exitCode: null,
+    });
+    return;
+  }
   const built = buildJobScript(rec.harness, p, {
     interactive,
     timeoutSeconds: rec.timeout_seconds,
