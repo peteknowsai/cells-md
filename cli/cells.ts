@@ -1357,6 +1357,7 @@ async function cmdRun(cellName: string, rest: string[]): Promise<void> {
   }
   await requireCell(cellName);
   let timeoutS = 3600;
+  let sessionTarget = "";
   const positional: string[] = [];
   for (let i = 0; i < rest.length; i++) {
     const a = rest[i]!;
@@ -1369,6 +1370,24 @@ async function cmdRun(cellName: string, rest: string[]): Promise<void> {
       }
       const n = Number(m[1]);
       timeoutS = m[2] === "h" ? n * 3600 : m[2] === "m" ? n * 60 : n;
+    } else if (a === "--session" || a.startsWith("--session=")) {
+      // Which session the job binds to: fresh (default, no context), fork
+      // (inherit the cell's main context read-only, write to a throwaway fork —
+      // main untouched), or main (continue main). Honored only when the cell
+      // runs the interactive job runner; otherwise the job is fresh.
+      const v = a.includes("=") ? a.slice("--session=".length) : (rest[++i] ?? "");
+      if (v !== "fresh" && v !== "fork" && v !== "main") {
+        console.error(`! bad --session value: '${v}' (use fresh | fork)`);
+        process.exit(1);
+      }
+      if (v === "main") {
+        console.error(`! --session main is not yet supported — main is single-owner (the persistent talk session holds it open), so a detached job can't write to it without corrupting the live conversation. Use 'fork' (inherits main's context, leaves main untouched) or 'fresh'.`);
+        process.exit(1);
+      }
+      // fresh is the default + the old behavior — leave sessionTarget unset so
+      // the worker/supervisor capability gates (which only matter for fork)
+      // don't reject an explicit `--session fresh` on an un-refreshed cell.
+      sessionTarget = v === "fresh" ? "" : v;
     } else if (a.startsWith("--")) {
       console.error(`! unknown flag for run: ${a}`);
       process.exit(1);
@@ -1378,7 +1397,7 @@ async function cmdRun(cellName: string, rest: string[]): Promise<void> {
   }
   const task = positional.join(" ").trim();
   if (!task) {
-    console.error(`usage: cells run <name> "<task>" [--timeout 30m]`);
+    console.error(`usage: cells run <name> "<task>" [--timeout 30m] [--session fresh|fork]`);
     process.exit(1);
   }
   const secret = await readSecret("CELLS_PROXY_SECRET");
@@ -1400,13 +1419,20 @@ async function cmdRun(cellName: string, rest: string[]): Promise<void> {
     });
     if (res.ok) debug = await res.json();
   } catch {}
-  if (!debug || !Array.isArray(debug.jobs)) {
-    // The cell's worker predates the jobs lane — an old cell, or a fresh birth
-    // whose worker deploy hasn't propagated yet. Self-heal: redeploy the current
-    // worker once and re-probe, instead of dead-ending the operator with a
-    // manual command (which is all this used to do — and exactly the friction
-    // homezero hit firing Phase B on a just-born advisor).
-    console.error(`! ${cellName}'s worker predates the jobs lane — redeploying it…`);
+  // Capable = exposes the jobs lane AND, when a session target is requested,
+  // persists/forwards session_target. An older worker exposes `jobs` but drops
+  // session_target, so `--session fork` would silently run a fresh job — probe
+  // for the capability and self-heal rather than do the wrong thing quietly.
+  const capable = (d: any) =>
+    d && Array.isArray(d.jobs) && (!sessionTarget || d.job_session_targets === true);
+  const lacks = () => (!debug || !Array.isArray(debug.jobs))
+    ? "predates the jobs lane"
+    : `predates --session targets (needed for --session ${sessionTarget})`;
+  if (!capable(debug)) {
+    // Old cell, or a fresh birth whose worker deploy hasn't propagated. Self-heal:
+    // redeploy the current worker once and re-probe rather than dead-ending the
+    // operator (the friction homezero hit firing Phase B on a just-born advisor).
+    console.error(`! ${cellName}'s worker ${lacks()} — redeploying it…`);
     const wn = await wellNameForCell(cellName);
     const redeploy = Bun.spawn(
       ["bash", join(REPO_ROOT, "scripts/deploy-cell-worker.sh"), cellName, wn],
@@ -1420,7 +1446,7 @@ async function cmdRun(cellName: string, rest: string[]): Promise<void> {
     // re-probing once immediately would race the propagation and false-fail the
     // exact just-born case this self-heal targets. Poll with backoff (~15s).
     debug = null;
-    for (let attempt = 0; attempt < 6 && (!debug || !Array.isArray(debug.jobs)); attempt++) {
+    for (let attempt = 0; attempt < 6 && !capable(debug); attempt++) {
       await new Promise((r) => setTimeout(r, 2500));
       try {
         const res2 = await fetch(`${base}/debug`, {
@@ -1430,11 +1456,23 @@ async function cmdRun(cellName: string, rest: string[]): Promise<void> {
         if (res2.ok) debug = await res2.json();
       } catch {}
     }
-    if (!debug || !Array.isArray(debug.jobs)) {
-      console.error(`! ${cellName}'s worker still lacks the jobs lane ~15s after redeploy — investigate the worker deploy.`);
+    if (!capable(debug)) {
+      console.error(`! ${cellName}'s worker still ${lacks()} ~15s after redeploy — investigate the worker deploy.`);
       process.exit(1);
     }
-    console.error(`  ✓ worker redeployed; jobs lane present`);
+    console.error(`  ✓ worker redeployed; ${sessionTarget ? "--session support" : "jobs lane"} present`);
+  }
+
+  // The Worker now persists session_target, but the cell-side SUPERVISOR is
+  // what actually honors it — and they deploy separately (Worker via
+  // deploy-cell-worker.sh, supervisor via `cells refresh`). A Worker redeploy
+  // can't update an old supervisor, so refuse rather than let it silently run a
+  // fresh job with the wrong context.
+  if (sessionTarget && debug.supervisor_session_targets !== true) {
+    console.error(`! ${cellName} won't honor --session ${sessionTarget} — it would otherwise run a fresh job with the wrong context.`);
+    console.error(`  --session fork needs a claude-code cell running the interactive jobs runner: a current supervisor (\`cells refresh ${cellName}\`) with CELLS_JOBS_INTERACTIVE=1.`);
+    console.error(`  Enable those, and if you just changed either, wake the cell once (e.g. \`cells talk ${cellName} hi\`) so it re-advertises — then retry.`);
+    process.exit(1);
   }
 
   const jobId = ulid();
@@ -1445,7 +1483,13 @@ async function cmdRun(cellName: string, rest: string[]): Promise<void> {
         method: "POST",
         headers: { "content-type": "application/json", authorization: `Bearer ${secret}` },
         body: JSON.stringify({
-          event: { kind: "job", job_id: jobId, text: task, timeout_seconds: timeoutS },
+          event: {
+            kind: "job",
+            job_id: jobId,
+            text: task,
+            timeout_seconds: timeoutS,
+            ...(sessionTarget ? { session_target: sessionTarget } : {}),
+          },
         }),
         signal: AbortSignal.timeout(15_000),
       });
@@ -9952,9 +9996,11 @@ switch (sub) {
     console.log("  cells talk <name> [msg]     interactive bridge chat (no msg) or one-shot (with msg).");
     console.log("                              Reply streams in this terminal AND mirrors to Slack — same session as Slack.");
     console.log("                              'mother' is special: accepts any pi flag (-c, -r, --session=<id>, -p ...).");
-    console.log("  cells run <name> \"<task>\" [--timeout 30m]");
+    console.log("  cells run <name> \"<task>\" [--timeout 30m] [--session fresh|fork]");
     console.log("                              hand the cell a background JOB: returns a job id immediately, runs in a");
-    console.log("                              fresh detached session under a progress watchdog. Talk = chat; run = work.");
+    console.log("                              detached session under a progress watchdog. Talk = chat; run = work.");
+    console.log("                              --session fork: inherit main's context read-only, write to a throwaway");
+    console.log("                              fork (main untouched); fresh (default) = no context. (main: phase 2)");
     console.log("  cells jobs <name> [<job-id>]  job status + results (DO view if the cell is asleep — never wakes it)");
     console.log("  cells tui <name>            drop into a well-side tmux shell (debug, file poking, etc).");
     console.log("  cells list                  list known cells");

@@ -15,6 +15,11 @@
 
 export type DoJobStatus = "queued" | "running" | "done" | "failed";
 
+// Which session the run binds to (interactive claude-code only). Mirrors
+// SessionTarget in dna/cells/base/lib/jobs.ts; redefined here to keep this
+// module dependency-free (it bundles into the per-cell Worker).
+export type JobSessionTarget = "fresh" | "fork" | "main";
+
 export type DoJobRecord = {
   id: string;
   // Never persisted in the snapshot: the DO stores each queued prompt under
@@ -31,6 +36,9 @@ export type DoJobRecord = {
   // cell under /root/state/jobs/.
   summary?: string;
   finished_at?: string;
+  // Passed through to the on-cell runner in the job frame (interactive
+  // claude-code only). Omitted = fresh.
+  session_target?: JobSessionTarget;
 };
 
 export const JOB_PROMPT_CAP = 32 * 1024;
@@ -48,7 +56,7 @@ export const MAX_JOB_TIMEOUT_S = 86_400;
 // the character set is the real constraint.
 const JOB_ID_RE = /^[0-9A-Za-z][0-9A-Za-z_-]{7,39}$/;
 
-export type JobSubmit = { id: string; prompt: string; timeoutSeconds: number };
+export type JobSubmit = { id: string; prompt: string; timeoutSeconds: number; sessionTarget?: JobSessionTarget };
 
 export function validateJobSubmit(event: unknown):
   | { ok: true; job: JobSubmit }
@@ -72,7 +80,10 @@ export function validateJobSubmit(event: unknown):
       Math.min(MAX_JOB_TIMEOUT_S, Math.max(MIN_JOB_TIMEOUT_S, rawTimeout)),
     );
   }
-  return { ok: true, job: { id, prompt, timeoutSeconds } };
+  const st = e.session_target;
+  const sessionTarget: JobSessionTarget | undefined =
+    st === "fresh" || st === "fork" || st === "main" ? st : undefined;
+  return { ok: true, job: { id, prompt, timeoutSeconds, ...(sessionTarget ? { sessionTarget } : {}) } };
 }
 
 export function isTerminal(status: DoJobStatus): boolean {
@@ -107,6 +118,7 @@ export function jobFrame(rec: DoJobRecord, prompt: string): string {
     id: rec.id,
     prompt,
     timeout_seconds: rec.timeout_seconds,
+    ...(rec.session_target ? { session_target: rec.session_target } : {}),
   });
 }
 

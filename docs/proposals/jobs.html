@@ -175,6 +175,66 @@ cells jobs delta-market
 </section>
 
 <section>
+  <h2>Interactive mode + session targets (2026-06-15)</h2>
+  <p><strong>Why.</strong> On 2026-06-15 Anthropic split subscription metering: interactive
+  Claude Code stays on the normal subscription limits, while <code>claude -p</code> (and the
+  Agent SDK) draw from a separate, capped monthly <em>Agent-SDK credit</em>. The boundary is an
+  explicit attribution header the CLI stamps on every request — verified on the wire:
+  <code>claude -p</code> sends <code>cc_entrypoint=sdk-cli</code>; a genuine interactive session
+  sends <code>cc_entrypoint=cli</code>. The proxy forwards it untouched, so running jobs through a
+  <em>real interactive</em> Claude Code session (not <code>--print</code>) bills the interactive
+  pool instead of the metered credit. We run the genuine <code>claude</code> binary either way,
+  which is the ToS-permitted side of the line (the bans were about third-party token reuse, not
+  automation) — this is purely about which pool the work counts against.</p>
+
+  <p><strong>How (<code>bin/interactive-claude-job.sh</code>).</strong> <code>--print</code> is
+  documented as non-interactive, and the CLI also treats any non-TTY stdout as non-interactive —
+  so genuine interactivity needs a real PTY. The runner:</p>
+  <ul>
+    <li>launches <code>claude</code> (no <code>--print</code>) inside a dedicated
+        <code>tmux -L cell-job-&lt;id&gt;</code> socket — tmux answers the DA1/DA2/DSR capability
+        queries the Ink TUI issues at startup (a raw pipe hangs), and the dedicated socket keeps
+        the tmux server <em>inside the job's systemd-unit cgroup</em>, so
+        <code>systemctl kill &lt;unit&gt;</code> reaps it (verified — no orphans);</li>
+    <li>registers two hooks via inline <code>--settings</code>: <code>SessionStart</code> → a
+        ready marker (boots past the trust + bypass-permissions dialogs, which are pre-seeded:
+        <code>hasTrustDialogAccepted</code> and <code>skipDangerousModePermissionPrompt</code>),
+        <code>Stop</code> → a done marker plus the payload (deterministic completion — no spinner
+        scraping);</li>
+    <li>injects the prompt via tmux bracketed-paste (robust for multi-line / special-char
+        prompts), then recovers the answer from the session <em>transcript JSONL</em> (path from
+        the Stop payload — works for forked sessions whose id is generated post-launch) and
+        re-emits it as the same <code>{assistant, result}</code> stream-json frames
+        <code>claude -p</code> would have produced, so <code>extractJobResult</code> is
+        unchanged.</li>
+  </ul>
+
+  <p><strong>Session targets</strong> (<code>cells run &lt;name&gt; "&lt;task&gt;" --session
+  &lt;target&gt;</code>):</p>
+  <table>
+    <tr><th>target</th><th>session flags</th><th>context</th></tr>
+    <tr><td><code>fresh</code> (default)</td><td><code>--session-id &lt;new&gt;</code></td><td>no main context — today's behavior</td></tr>
+    <tr><td><code>fork</code></td><td><code>--resume &lt;main&gt; --fork-session</code></td><td><strong>inherits main read-only, writes to a throwaway fork — main untouched</strong> (verified: a fact planted in a base session is recalled by the fork; the base transcript is byte-identical before/after)</td></tr>
+    <tr><td><code>main</code></td><td>—</td><td>continues main — <strong>rejected</strong> on this path (both the CLI and the runner refuse it): main is single-owner (the persistent talk process holds it), so a detached <code>--resume main</code> job would corrupt the live conversation. Deferred to phase 2, routed through the persistent channel.</td></tr>
+  </table>
+
+  <p><strong>Gating &amp; rollout.</strong> Interactive jobs are opt-in per cell via
+  <code>CELLS_JOBS_INTERACTIVE=1</code> in the well-site env (default off → the <code>--print</code>
+  path is unchanged, and session targets are honored only on the interactive path). Flip it on a
+  cell, validate, then default-on once the fleet has soaked.</p>
+
+  <p><strong>Trade-offs.</strong> Interactive mode forfeits <code>--include-partial-messages</code>
+  (per-<em>token</em> streaming is <code>--print</code>-only); the transcript gives per-<em>message</em>
+  granularity. Watchdog liveness therefore comes from pane-change snapshots appended to
+  <code>.err</code> (a working TUI ticks its spinner/elapsed counter → byte growth; a truly wedged
+  session freezes → the existing stall watchdog still fires). The <code>Stop</code> hook can fire a
+  beat before the final assistant entry flushes, so the runner polls briefly for it (settle) before
+  reconstructing. <strong>The <code>talk</code> path stays on <code>--print</code> for now</strong> —
+  converting the live persistent talk renderer (which depends on the stream-json → pi-event
+  translation) is a separate, higher-risk pass; see NEEDS_PETE.</p>
+</section>
+
+<section>
   <h2>Bounds and caps</h2>
   <ul>
     <li>Prompt ≤ 32KB at submit (413 otherwise) — the DO snapshot lives under a 128KiB-per-value
@@ -235,7 +295,7 @@ cells jobs delta-market
 </section>
 
 <footer>
-  <p>cells · docs/proposals/jobs.html · 2026-06-12</p>
+  <p>cells · docs/proposals/jobs.html · 2026-06-12 · interactive mode + session targets added 2026-06-15</p>
 </footer>
 </body>
 </html>

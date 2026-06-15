@@ -40,7 +40,7 @@ import { isInsideDir } from "../lib/path-guard";
 import { MIME, collectSiteFiles } from "../lib/site-files";
 import {
   buildJobScript, extractJobResult, freshWatchState, jobPaths, jobUnitName,
-  JOBS_DIR, parseJobRecord, parseMainPid, summarize, watchdogTick,
+  JOBS_DIR, parseJobRecord, parseMainPid, sessionTargetHonorable, summarize, watchdogTick,
   WATCH_TICK_MS, type JobRecord, type WatchState,
 } from "../lib/jobs";
 
@@ -63,6 +63,11 @@ function readHarness(): string {
 }
 const HARNESS = readHarness();
 const ADAPTER: HarnessAdapter = getAdapter(HARNESS);
+// Whether THIS cell actually honors `cells run --session <target>`: genuine
+// interactive Claude Code runs jobs (cc_entrypoint=cli) and fork/main targets
+// are meaningful only there. The SAME value is advertised in bridge_hello (so
+// the CLI's capability gate matches reality) and used to gate startJobAttempt.
+const JOBS_INTERACTIVE = process.env.CELLS_JOBS_INTERACTIVE === "1" && HARNESS === "claude-code";
 
 // Stable per-cell session file (pi). Pin pi to this on every spawn so
 // conversations survive pi restarts. claude/codex use their own birth-time
@@ -400,6 +405,12 @@ async function killJobRun(rec: JobRecord): Promise<void> {
     // pid kill for a unit-backed record: a vanished unit's saved pid may
     // already have been recycled by an unrelated root process (codex P2).
     try { spawn(["systemctl", "kill", "--signal=SIGKILL", rec.unit], { stdout: "ignore", stderr: "ignore" }); } catch {}
+    // An interactive job runs claude under a dedicated `tmux -L cell-job-<id>`
+    // socket INSIDE the unit's cgroup, so systemctl kill reaps the server — but
+    // SIGKILL skips the runner's cleanup trap, leaving the dead socket FILE
+    // behind. Sweep it (id is JOB_ID_RE-validated, so no shell metachars; a
+    // no-op for --print jobs that have no such socket).
+    try { spawn(["bash", "-lc", `rm -f /tmp/tmux-*/cell-job-${rec.id}`], { stdout: "ignore", stderr: "ignore" }); } catch {}
     // Bounded wait (~3s) for systemd to reap the cgroup. If it somehow
     // outlives this, the next attempt still uses a DIFFERENT unit name, so
     // only the shared files overlap — acceptable worst case after the wait.
@@ -440,6 +451,7 @@ async function handleJobFrame(cmd: any): Promise<void> {
   mkdirSync(JOBS_DIR, { recursive: true });
   const p = jobPaths(JOBS_DIR, id);
   writeFileSync(p.prompt, prompt);
+  const st = cmd.session_target;
   const rec: JobRecord = {
     id,
     created_at: new Date().toISOString(),
@@ -447,6 +459,7 @@ async function handleJobFrame(cmd: any): Promise<void> {
     harness: HARNESS,
     timeout_seconds: timeoutS,
     attempts: 0,
+    ...(st === "fresh" || st === "fork" || st === "main" ? { session_target: st } : {}),
   };
   saveJobRecord(rec);
   broadcastToClients(JSON.stringify({ type: "job_accepted", id }));
@@ -463,7 +476,30 @@ async function handleJobFrame(cmd: any): Promise<void> {
 async function startJobAttempt(rec: JobRecord): Promise<void> {
   const p = jobPaths(JOBS_DIR, rec.id);
   rec.attempts += 1;
-  const built = buildJobScript(rec.harness, p);
+  // Genuine interactive Claude Code (cc_entrypoint=cli → interactive billing
+  // pool, not the metered Agent-SDK credit) when enabled for this cell. The
+  // same value the supervisor advertises in bridge_hello, so the CLI's gate and
+  // this launch path agree; fork/main are honored only here (--print is fresh).
+  const interactive = JOBS_INTERACTIVE;
+  // A non-fresh session target (fork) is honored ONLY on the interactive
+  // claude-code runner. If this cell can't honor it — interactive disabled (the
+  // rollout default) or a non-claude-code harness — FAIL LOUDLY rather than let
+  // buildJobScript fall through to the --print path, which is always fresh: a
+  // silently-fresh job that reported success is the wrong-context trap.
+  if (!sessionTargetHonorable(rec.session_target, interactive)) {
+    finalizeJob(rec, {
+      ok: false,
+      text: `--session ${rec.session_target} needs the interactive runner (a claude-code cell with CELLS_JOBS_INTERACTIVE=1), which is not enabled here. Re-run with --session fresh, or enable interactive jobs on this cell.`,
+      reason: "unsupported",
+      exitCode: null,
+    });
+    return;
+  }
+  const built = buildJobScript(rec.harness, p, {
+    interactive,
+    timeoutSeconds: rec.timeout_seconds,
+    ...(rec.session_target ? { sessionTarget: rec.session_target } : {}),
+  });
   if (!built.ok) {
     finalizeJob(rec, { ok: false, text: built.error, reason: "unsupported", exitCode: null });
     return;
@@ -1509,8 +1545,12 @@ function connectBridge() {
     bridgeMissedPings = 0;
     console.log(`[bridge] connected to ${BRIDGE_URL}`);
     // Greet, and if the harness is already ready (warm cell, fast dial)
-    // send bridge_ready immediately so the DO doesn't wait.
-    try { ws.send(JSON.stringify({ type: "bridge_hello", cell: NAME, harness: HARNESS })); } catch {}
+    // send bridge_ready immediately so the DO doesn't wait. session_targets
+    // advertises whether THIS supervisor will actually honor `cells run
+    // --session <target>` (interactive runner on, claude-code) — NOT merely
+    // that the code is present — so the CLI's gate matches what startJobAttempt
+    // will do, and never queues a fork job that's destined to fail-loud.
+    try { ws.send(JSON.stringify({ type: "bridge_hello", cell: NAME, harness: HARNESS, session_targets: JOBS_INTERACTIVE })); } catch {}
     if (harnessReady) {
       try { ws.send(JSON.stringify({ type: "bridge_ready" })); } catch {}
     }

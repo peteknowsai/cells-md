@@ -68,6 +68,18 @@ describe("validateJobSubmit", () => {
     expect(big.ok).toBe(false);
     if (!big.ok) expect(big.status).toBe(413);
   });
+
+  test("session_target: passes through valid values, omits invalid/absent", () => {
+    for (const t of ["fresh", "fork", "main"] as const) {
+      const v = validateJobSubmit({ job_id: "01JXM2K8ABCDEF", text: "x", session_target: t });
+      expect(v.ok && v.job.sessionTarget).toBe(t);
+    }
+    // Absent or garbage → undefined (the cell defaults to fresh).
+    const none = validateJobSubmit({ job_id: "01JXM2K8ABCDEF", text: "x" });
+    expect(none.ok && none.job.sessionTarget).toBeUndefined();
+    const junk = validateJobSubmit({ job_id: "01JXM2K8ABCDEF", text: "x", session_target: "wat" });
+    expect(junk.ok && junk.job.sessionTarget).toBeUndefined();
+  });
 });
 
 describe("admitJob", () => {
@@ -147,5 +159,10 @@ describe("frames and summaries", () => {
     const r = rec();
     expect(JSON.parse(jobFrame(r, "secret task body")).prompt).toBe("secret task body");
     expect(JSON.stringify(jobSummary(r))).not.toContain("secret task body");
+  });
+
+  test("jobFrame forwards session_target when set, omits it otherwise", () => {
+    expect(JSON.parse(jobFrame(rec({ session_target: "fork" }), "p")).session_target).toBe("fork");
+    expect("session_target" in JSON.parse(jobFrame(rec(), "p"))).toBe(false);
   });
 });

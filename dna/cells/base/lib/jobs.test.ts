@@ -14,6 +14,7 @@ import {
   leashLimitTicks,
   parseJobRecord,
   parseMainPid,
+  sessionTargetHonorable,
   stallLimitTicks,
   watchdogTick,
   WATCH_TICK_MS,
@@ -33,6 +34,60 @@ describe("buildJobScript", () => {
     expect(r.script).not.toContain("--resume");
     expect(r.script).toContain(`< '${P.prompt}'`);
     expect(r.script).toContain(`echo $? > '${P.exit}'`);
+  });
+
+  test("claude-code interactive: hands off to the runner, no --print, fresh by default", () => {
+    const r = buildJobScript("claude-code", P, { interactive: true });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.script).toContain("bin/interactive-claude-job.sh");
+    expect(r.script).toContain("--target 'fresh'");
+    expect(r.script).toContain(`--prompt '${P.prompt}'`);
+    expect(r.script).toContain(`--out '${P.out}'`);
+    expect(r.script).toContain(`--exit '${P.exit}'`);
+    // No --print (the whole point: cc_entrypoint=cli), and the runner owns the
+    // out/err/exit files — so NO `> out 2> err; echo $? > exit` tail here.
+    expect(r.script).not.toContain("--print");
+    expect(r.script).not.toContain(`echo $? > '${P.exit}'`);
+    // Still sources cells-env (proxy bearer) and sets the root-sandbox guard.
+    expect(r.script).toContain(". /etc/profile.d/cells-env.sh");
+    expect(r.script).toContain("IS_SANDBOX=1");
+  });
+
+  test("claude-code interactive: honors the session target", () => {
+    const r = buildJobScript("claude-code", P, { interactive: true, sessionTarget: "fork" });
+    expect(r.ok && r.script.includes("--target 'fork'")).toBe(true);
+  });
+
+  test("claude-code interactive: passes the timeout so the runner backstop is sized past the leash", () => {
+    const dflt = buildJobScript("claude-code", P, { interactive: true });
+    expect(dflt.ok && dflt.script.includes("--timeout-seconds '3600'")).toBe(true);
+    const custom = buildJobScript("claude-code", P, { interactive: true, timeoutSeconds: 7200 });
+    expect(custom.ok && custom.script.includes("--timeout-seconds '7200'")).toBe(true);
+  });
+
+  test("interactive flag is ignored for non-claude-code harnesses", () => {
+    // pi/codex have no interactive runner — they stay on their --print pipeline.
+    const r = buildJobScript("pi", P, { interactive: true });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.script).not.toContain("interactive-claude-job.sh");
+    expect(r.script).toContain("pi --print");
+  });
+
+  test("claude-code without opts stays on the --print path (interactive is opt-in)", () => {
+    const r = buildJobScript("claude-code", P);
+    expect(r.ok && r.script.includes("claude --print")).toBe(true);
+    expect(r.ok && r.script.includes("interactive-claude-job.sh")).toBe(false);
+  });
+
+  test("sessionTargetHonorable: fork/main need interactive; fresh/undefined always ok", () => {
+    // The guard against silently running a --print job FRESH when a fork was asked.
+    expect(sessionTargetHonorable("fork", true)).toBe(true);
+    expect(sessionTargetHonorable("fork", false)).toBe(false);   // would-be silent-fresh → must fail
+    expect(sessionTargetHonorable("main", false)).toBe(false);
+    expect(sessionTargetHonorable("fresh", false)).toBe(true);
+    expect(sessionTargetHonorable(undefined, false)).toBe(true);
   });
 
   test("codex: fresh thread (no resume), --json", () => {
@@ -225,5 +280,12 @@ describe("parseJobRecord", () => {
     expect(parseJobRecord("not json")).toBeNull();
     expect(parseJobRecord(JSON.stringify({ status: "running" }))).toBeNull();
     expect(parseJobRecord(JSON.stringify({ id: "x", status: "exploded" }))).toBeNull();
+  });
+
+  test("round-trips a valid session_target and drops an invalid one", () => {
+    const fork = parseJobRecord(JSON.stringify({ id: "01JX", status: "running", harness: "claude-code", session_target: "fork" }));
+    expect(fork!.session_target).toBe("fork");
+    const junk = parseJobRecord(JSON.stringify({ id: "01JX", status: "running", harness: "claude-code", session_target: "sideways" }));
+    expect(junk!.session_target).toBeUndefined();
   });
 });

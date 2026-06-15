@@ -209,6 +209,8 @@ export class CellAgent {
   private pendingAgentForks: Map<string, { reply_to: string; from: string; thread_id: string }> = new Map();
   private pendingFrames: Map<string, { frame: string; at: number }> = new Map();
   private jobs: Map<string, DoJobRecord> = new Map();
+  // Staged by a bridge_hello frame, flushed (awaited) in webSocketMessage.
+  private pendingSupervisorCap: boolean | undefined;
 
   constructor(state: DurableObjectState, env: Env) {
     this.state = state;
@@ -585,11 +587,26 @@ export class CellAgent {
     if (decision.kind === "full") {
       return new Response(`job queue full (${MAX_ACTIVE_JOBS} active)`, { status: 429 });
     }
+    // Defense in depth: a non-fresh session target may only be queued when the
+    // cell-side supervisor has advertised it honors them. The CLI gates this up
+    // front, but a hand-rolled /inbox/append submitter could bypass it — and an
+    // old supervisor would silently run the job FRESH (wrong context). Reject
+    // here so the wrong-context job is never queued, regardless of submitter.
+    if (v.job.sessionTarget && v.job.sessionTarget !== "fresh") {
+      const supOk = (await this.state.storage.get<boolean>("supervisor:session_targets")) === true;
+      if (!supOk) {
+        return new Response(
+          `--session ${v.job.sessionTarget} not supported on this cell — its supervisor hasn't advertised session-target support (refresh the cell and enable interactive jobs: CELLS_JOBS_INTERACTIVE=1)`,
+          { status: 409 },
+        );
+      }
+    }
     const rec: DoJobRecord = {
       id: v.job.id,
       created_at: new Date().toISOString(),
       timeout_seconds: v.job.timeoutSeconds,
       status: "queued",
+      ...(v.job.sessionTarget ? { session_target: v.job.sessionTarget } : {}),
     };
     // The prompt gets its own storage key — packed into the snapshot, a few
     // max-size queued prompts would blow the 128 KiB per-value cap and take
@@ -667,6 +684,7 @@ export class CellAgent {
   private async handleDebug(): Promise<Response> {
     await this.ensureLoaded();
     const siteMeta = await this.state.storage.get<SiteMeta>("site:__meta__");
+    const supSessionTargets = (await this.state.storage.get<boolean>("supervisor:session_targets")) === true;
     const ws = this.bridgeWs();
     return Response.json({
       cell: this.env.CELL_NAME,
@@ -675,6 +693,12 @@ export class CellAgent {
       // Presence of this key is the `cells run` capability probe — an older
       // worker would misroute kind:"job" into the conversation path.
       jobs: [...this.jobs.values()].map(jobSummary),
+      // `cells run --session <target>` needs BOTH sides current: this Worker
+      // persists/forwards session_target (job_session_targets), AND the
+      // cell-side supervisor honors it (supervisor_session_targets, recorded
+      // from its bridge_hello). They deploy separately, so the CLI checks both.
+      job_session_targets: true,
+      supervisor_session_targets: supSessionTargets,
       site: siteMeta
         ? { files: siteMeta.paths.length, paths: siteMeta.paths, publishedAt: siteMeta.publishedAt }
         : null,
@@ -849,6 +873,12 @@ export class CellAgent {
         if (line) this.onPiEvent(line);
       }
     }
+    // Persist a supervisor capability staged by a bridge_hello in the AWAITED
+    // path, so it can't be lost on hibernation or read stale right after a wake.
+    if (this.pendingSupervisorCap !== undefined) {
+      await this.state.storage.put("supervisor:session_targets", this.pendingSupervisorCap);
+      this.pendingSupervisorCap = undefined;
+    }
     await this.persist();
   }
 
@@ -958,7 +988,16 @@ export class CellAgent {
     try { ev = JSON.parse(line); } catch { return; }
     const type = ev?.type;
 
-    if (type === "bridge_hello" || type === "pong" || type === "response") return;
+    if (type === "bridge_hello") {
+      // Record whether the connected supervisor honors session targets, so the
+      // CLI can certify the CELL-SIDE supervisor (not just the Worker) before
+      // submitting a `--session fork` job. Stage it for webSocketMessage to
+      // persist in its AWAITED flow — a fire-and-forget put could be lost on DO
+      // hibernation or read stale by an immediate post-wake /debug probe.
+      this.pendingSupervisorCap = ev?.session_targets === true;
+      return;
+    }
+    if (type === "pong" || type === "response") return;
 
     // frame_ack — the supervisor confirms receipt of a reliable frame.
     if (type === "frame_ack") {
