@@ -218,10 +218,13 @@ cells jobs delta-market
     <tr><td><code>main</code></td><td>—</td><td>continues main — <strong>rejected</strong> on this path (both the CLI and the runner refuse it): main is single-owner (the persistent talk process holds it), so a detached <code>--resume main</code> job would corrupt the live conversation. Deferred to phase 2, routed through the persistent channel.</td></tr>
   </table>
 
-  <p><strong>Gating &amp; rollout.</strong> Interactive jobs are opt-in per cell via
-  <code>CELLS_JOBS_INTERACTIVE=1</code> in the well-site env (default off → the <code>--print</code>
-  path is unchanged, and session targets are honored only on the interactive path). Flip it on a
-  cell, validate, then default-on once the fleet has soaked.</p>
+  <p><strong>Gating &amp; rollout.</strong> Interactive jobs are <strong>on by default for
+  claude-code cells</strong> as of the 2026-06-15 fleet rollout — opt OUT per cell with
+  <code>CELLS_JOBS_INTERACTIVE=0</code> in the well-site env. pi/codex cells and the
+  <code>--print</code> path are unaffected (session targets are honored only on the interactive
+  claude-code path). The runner ships via <code>cells refresh</code>; the supervisor advertises
+  its capability to the per-cell Worker, which the CLI checks before queuing a <code>--session
+  fork</code> job.</p>
 
   <p><strong>Trade-offs.</strong> Interactive mode forfeits <code>--include-partial-messages</code>
   (per-<em>token</em> streaming is <code>--print</code>-only); the transcript gives per-<em>message</em>
