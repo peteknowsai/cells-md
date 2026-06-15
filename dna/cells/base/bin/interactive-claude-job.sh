@@ -205,14 +205,22 @@ tmux -L "$SOCK" send-keys -t job Enter
 # This inner bound is only a backstop for a dead/absent watchdog, sized just
 # PAST the configured timeout so it never pre-empts a valid long job.
 MAX_ITERS=$(( TIMEOUT_SECONDS / 3 + 200 ))
-last=""
+last=""; gone=0
 for _ in $(seq 1 "$MAX_ITERS"); do
   [ -f "$DONE" ] && break
+  # If claude exited without firing Stop — a fatal API/auth error, a crash, an
+  # interrupt — the tmux session is gone. Finish immediately (claude's stderr
+  # is already in $ERR) instead of polling to the watchdog leash.
+  tmux -L "$SOCK" has-session -t job 2>/dev/null || { gone=1; break; }
   cur="$(tmux -L "$SOCK" capture-pane -t job -p 2>/dev/null)"
   if [ "$cur" != "$last" ]; then printf 'live %s\n' "$(date -u +%FT%TZ 2>/dev/null || echo tick)" >> "$ERR"; last="$cur"; fi
   sleep 3
 done
-[ -f "$DONE" ] || fail "[interactive-job] no Stop within budget" 1
+if [ ! -f "$DONE" ]; then
+  # gone but DONE present (Stop fired as the session ended) is handled above.
+  [ "$gone" = 1 ] && fail "[interactive-job] claude exited before completing the turn — see stderr (likely an API/auth/rate-limit error)" 1
+  fail "[interactive-job] no Stop within budget" 1
+fi
 
 # --- recover THIS turn's answer from the transcript -----------------------
 # Transcript path from the Stop payload (authoritative; for a fork the id is

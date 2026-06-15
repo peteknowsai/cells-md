@@ -1384,7 +1384,10 @@ async function cmdRun(cellName: string, rest: string[]): Promise<void> {
         console.error(`! --session main is not yet supported — main is single-owner (the persistent talk session holds it open), so a detached job can't write to it without corrupting the live conversation. Use 'fork' (inherits main's context, leaves main untouched) or 'fresh'.`);
         process.exit(1);
       }
-      sessionTarget = v;
+      // fresh is the default + the old behavior — leave sessionTarget unset so
+      // the worker/supervisor capability gates (which only matter for fork)
+      // don't reject an explicit `--session fresh` on an un-refreshed cell.
+      sessionTarget = v === "fresh" ? "" : v;
     } else if (a.startsWith("--")) {
       console.error(`! unknown flag for run: ${a}`);
       process.exit(1);
