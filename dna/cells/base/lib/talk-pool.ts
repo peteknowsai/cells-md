@@ -202,7 +202,7 @@ export class TalkPool {
     );
     if (evict && evict !== s.name) {
       const victim = this.sessions.get(evict);
-      if (victim) this.evict(victim);
+      if (victim) this.evict(victim, "LRU (warm cap)");
     }
 
     // Resolve the durable claude session id: resume an existing one, or mint a
@@ -428,11 +428,13 @@ export class TalkPool {
   private armIdle(s: LiveSession): void {
     if (s.idleTimer) clearTimeout(s.idleTimer);
     s.idleTimer = setTimeout(() => {
-      if (s.state === "idle" && idleEvictDue(nowMs(), s.lastTurnAt, IDLE_TTL_MS)) this.evict(s);
+      if (s.state === "idle" && idleEvictDue(nowMs(), s.lastTurnAt, IDLE_TTL_MS)) {
+        this.evict(s, `idle ${Math.round(IDLE_TTL_MS / 60000)}m`);
+      }
     }, IDLE_TTL_MS);
   }
 
-  private evict(s: LiveSession): void {
+  private evict(s: LiveSession, reason: string): void {
     if (s.idleTimer) { clearTimeout(s.idleTimer); s.idleTimer = null; }
     if (s.state !== "idle") return;
     s.state = "evicting";
@@ -440,6 +442,6 @@ export class TalkPool {
     s.state = "cold";
     s.claudeSessionId = null;
     s.transcriptPath = null;
-    this.deps.log(`talk-pool: ${s.name} evicted (idle ${Math.round(IDLE_TTL_MS / 60000)}m)`);
+    this.deps.log(`talk-pool: ${s.name} evicted (${reason})`);
   }
 }
