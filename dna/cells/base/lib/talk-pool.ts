@@ -245,6 +245,11 @@ export class TalkPool {
     }
 
     if (code !== 0) {
+      // First-use: the id was persisted BEFORE launch so the bootstrap could
+      // assert it via --session-id. The bootstrap failed → that id may name no
+      // real session; roll it back so the next attempt mints a fresh one rather
+      // than --resume'ing a ghost id (which would fail forever).
+      if (created) { try { rmSync(idFile, { force: true }); } catch {} }
       s.state = "cold";
       this.drainQueueWithError(s, "the cell could not start an interactive session (see supervisor log)");
       this.notifyBusy();
@@ -255,6 +260,10 @@ export class TalkPool {
     this.deps.log(`talk-pool: ${s.name} warm`);
     void this.pump(s);
     if (s.state === "idle") this.armIdle(s);
+    // Recompute lifecycle: spawn signaled busy while spawning. If pump started a
+    // queued turn we're still busy; if this was a prewarm (empty queue) we're
+    // now idle and welld must hear it, or the cell never hibernates.
+    this.notifyBusy();
   }
 
   // Idle → busy. Pin the cursor at the current transcript size (everything
@@ -268,9 +277,12 @@ export class TalkPool {
     if (s.idleTimer) { clearTimeout(s.idleTimer); s.idleTimer = null; }
     this.notifyBusy();
     // agent_start opens a turn at the DO (it gates message_update accumulation
-    // on a current turn) — the same contract the --print path met via the
-    // synthesized agent_start.
-    this.deps.broadcast(JSON.stringify({ type: "agent_start" }));
+    // on a current turn) — but ONLY for a raw prompt turn (Slack/email/readline
+    // channel render). A corrId turn (agent_message: peer, --main, --session) is
+    // delivered via agent_response→reply_to; emitting the pi-shaped turn frames
+    // would make the DO post the reply to a stale/empty Slack/email destination
+    // (it sets pendingChannel only for inbound channel events, not envelopes).
+    if (!turn.corrId) this.deps.broadcast(JSON.stringify({ type: "agent_start" }));
     // Clear THIS turn's done marker; the Stop hook re-creates it at turn end.
     try { rmSync(`${TALK_STATE_DIR}/${s.name}.done`, { force: true }); } catch {}
     s.cursor = fileSize(s.transcriptPath!);
@@ -327,8 +339,10 @@ export class TalkPool {
     s.cursor += lastNl + 1;
     const deltas = parseTranscriptDelta(parseJsonl(text));
     for (const d of deltas) {
-      this.deps.broadcast(JSON.stringify({ type: "message_update", assistantMessageEvent: { type: "text_delta", delta: d } }));
+      // corrId turn: accumulate for agent_response, don't stream to the DO (it
+      // has no channel for it). Raw prompt turn: stream live to the channel.
       if (s.active?.corrId) s.active.acc += d;
+      else this.deps.broadcast(JSON.stringify({ type: "message_update", assistantMessageEvent: { type: "text_delta", delta: d } }));
     }
   }
 
@@ -349,10 +363,17 @@ export class TalkPool {
     }
 
     const turn = s.active;
-    this.deps.broadcast(JSON.stringify({ type: "agent_end" }));
     if (turn?.corrId) {
-      const text = turn.acc.trim() || fallback.trim() || "(empty reply)";
+      // Prefer the authoritative terminal answer (full transcript) over acc —
+      // acc can be a truncated prefix if Stop beat the final block's flush or the
+      // transcript compacted mid-turn. A corrId turn rides agent_response only:
+      // no agent_start/message_update/agent_end (see startTurn), so the DO never
+      // mistakes a peer/--session reply for a Slack/email turn it has no channel
+      // for; the reply reaches the sender via reply_to / the await matcher.
+      const text = fallback.trim() || turn.acc.trim() || "(empty reply)";
       this.deps.broadcast(JSON.stringify({ type: "agent_response", in_reply_to: turn.corrId, text }));
+    } else {
+      this.deps.broadcast(JSON.stringify({ type: "agent_end" }));
     }
     s.active = null;
     s.state = "idle";
@@ -401,16 +422,18 @@ export class TalkPool {
   }
 
   // Emit a turn-ending error to the right consumer (agent_response for a corrId
-  // turn so the sender's long-poll fails loudly; a response error for a raw
-  // interactive prompt; always agent_end so the DO closes the turn).
+  // turn so the sender's long-poll fails loudly; a response error + agent_end
+  // for a raw interactive/channel turn so the DO closes its turn). A corrId turn
+  // never opened a DO turn (no agent_start — see startTurn), so it gets no
+  // agent_end, mirroring drainQueueWithError.
   private errorActive(s: LiveSession, msg: string): void {
     const turn = s.active;
     if (turn?.corrId) {
       this.deps.broadcast(JSON.stringify({ type: "agent_response", in_reply_to: turn.corrId, text: msg }));
     } else {
       this.deps.broadcast(JSON.stringify({ type: "response", success: false, error: msg }));
+      this.deps.broadcast(JSON.stringify({ type: "agent_end" }));
     }
-    this.deps.broadcast(JSON.stringify({ type: "agent_end" }));
   }
 
   private drainQueueWithError(s: LiveSession, msg: string): void {
