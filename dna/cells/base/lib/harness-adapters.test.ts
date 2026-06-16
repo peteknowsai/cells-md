@@ -14,6 +14,9 @@ import {
   buildPiNamedCmd,
   buildCodexNamedCmd,
   buildClaudeNamedCmd,
+  parseModelSpec,
+  claudeModelArg,
+  codexModelFlag,
   getAdapter,
   type AdapterHost,
 } from "./harness-adapters";
@@ -448,6 +451,62 @@ test("buildClaudeNamedCmd: created mints --session-id, resume uses --resume", ()
   const resumeScript = buildClaudeNamedCmd("uuid-1", false)[2];
   expect(resumeScript).toContain("--resume 'uuid-1'");
   expect(resumeScript).not.toContain("--session-id");
+});
+
+// ---- per-session model + role (uniform multi-harness cell) -----------------
+
+test("parseModelSpec: strips harness prefix + trailing effort, takes model after /", () => {
+  expect(parseModelSpec("anthropic/opus-4-8:medium")).toEqual({ model: "opus-4-8", effort: "medium" });
+  expect(parseModelSpec("gpt-5.5:low")).toEqual({ model: "gpt-5.5", effort: "low" });
+  expect(parseModelSpec("claude-code:anthropic/opus-4-8:xhigh")).toEqual({ model: "opus-4-8", effort: "xhigh" });
+  expect(parseModelSpec("gpt-5.5")).toEqual({ model: "gpt-5.5", effort: "" });
+  // a trailing :token that ISN'T a known effort stays part of the model
+  expect(parseModelSpec("anthropic/opus-4-8:weird")).toEqual({ model: "opus-4-8:weird", effort: "" });
+});
+
+test("claudeModelArg: prefixes bare opus/sonnet/haiku ids, passes qualified ids through", () => {
+  expect(claudeModelArg("anthropic/opus-4-8:medium")).toBe("claude-opus-4-8");
+  expect(claudeModelArg("sonnet-4-6")).toBe("claude-sonnet-4-6");
+  expect(claudeModelArg("claude-opus-4-8")).toBe("claude-opus-4-8");
+  expect(claudeModelArg("")).toBe("");
+});
+
+test("codexModelFlag: -m <model> plus reasoning effort when given", () => {
+  expect(codexModelFlag("gpt-5.5:high")).toBe('-m gpt-5.5 -c model_reasoning_effort="high"');
+  expect(codexModelFlag("gpt-5.5")).toBe("-m gpt-5.5");
+  expect(codexModelFlag("gpt-5.5:off")).toBe("-m gpt-5.5"); // off/none → no effort override
+  expect(codexModelFlag("")).toBe("");
+});
+
+test("buildClaudeNamedCmd: model → --model, role → --append-system-prompt at $1", () => {
+  const cmd = buildClaudeNamedCmd("uuid-9", true, { model: "anthropic/opus-4-8:medium", rolePreamble: "You are staff." });
+  expect(cmd[2]).toContain("--model claude-opus-4-8");
+  expect(cmd[2]).toContain('--append-system-prompt "$1"');
+  expect(cmd[cmd.length - 1]).toBe("You are staff."); // preamble rides as a positional, never interpolated
+  // no model/role → today's argv exactly (no extra flags)
+  const plain = buildClaudeNamedCmd("uuid-9", true)[2];
+  expect(plain).not.toContain("--model");
+  expect(plain).not.toContain("--append-system-prompt");
+});
+
+test("buildPiNamedCmd: effort → --thinking level; default off (role is prompt-prefixed in askInSession)", () => {
+  expect(buildPiNamedCmd("staff", "p", "", "high")[2]).toContain("--thinking high");
+  // default: thinking off (today's behavior); no role flag (pi role is established
+  // via first-turn prompt prefix in askInSession, not a CLI flag)
+  const plain = buildPiNamedCmd("buyer", "p", "")[2];
+  expect(plain).toContain("--thinking off");
+  expect(plain).not.toContain("CELL_SESSION_ROLE");
+});
+
+test("buildCodexNamedCmd: model → -m flag; role prepended only on the fresh first turn", () => {
+  const fresh = buildCodexNamedCmd("", "do it", "--json", { model: "gpt-5.5:high", rolePreamble: "ROLE" });
+  expect(fresh[2]).toContain("-m gpt-5.5");
+  expect(fresh[2]).toContain('model_reasoning_effort="high"');
+  expect(fresh[fresh.length - 1]).toBe("ROLE\n\n---\n\ndo it"); // role established once at $1
+  // resume turn: role is NOT re-prepended (thread already carries it); prompt at $2
+  const resume = buildCodexNamedCmd("th_x", "next", "--json", { model: "gpt-5.5:high", rolePreamble: "ROLE" });
+  expect(resume[resume.length - 1]).toBe("next");
+  expect(resume[2]).toContain("-m gpt-5.5");
 });
 
 test("codex thread id survives a full turn cycle (capture → resume)", () => {

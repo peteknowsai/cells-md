@@ -111,12 +111,70 @@ export interface AskInSessionOpts {
   session: string;
   cellName: string;
   timeoutMs?: number;
+  // Per-session model spec (cells format, e.g. "anthropic/opus-4-8:medium" or
+  // "gpt-5.5:low"), already validated (session-config.validateModelSpec) so it
+  // carries no shell metacharacters. Absent → the harness's configured default.
+  // Lets one cell run a pi/gpt-5.5 buyer session and a claude/opus staff session.
+  model?: string;
+  // Resolved role/"hat" preamble TEXT — the supervisor reads the role file
+  // (/root/.cell/roles/<role>.md) and passes the contents here, so adapters do
+  // no role→path IO. Injected as a system prompt where the harness supports one
+  // (claude --append-system-prompt; pi via use-max env), else prepended to the
+  // first turn (codex). Absent → the session inherits only the cell's SOUL.
+  rolePreamble?: string;
 }
 
 // Belt-and-suspenders: the supervisor validates the session name before it
 // reaches an adapter, but askInSession turns the name into a filesystem path
 // (pi session dir, codex thread file), so re-check here too.
 const SESSION_NAME_RE = /^[a-z][a-z0-9_-]{0,31}$/;
+
+// ---- per-session model-spec translation (pure, exported for tests) ---------
+//
+// A cells model spec is "[<harness>:]<provider>/<model>[:<effort>]" or a bare
+// "<model>[:<effort>]". Each harness wants a different shape; these turn the
+// spec into the right CLI fragment. The spec is validateModelSpec-clean before
+// it gets here, so the result is shell-safe to interpolate.
+
+const MODEL_EFFORTS = new Set(["low", "medium", "high", "xhigh", "max", "off", "none"]);
+
+// → { model, effort }. Strips an optional leading harness prefix and a trailing
+// :effort, then takes the model after the last "/". effort "" if none.
+export function parseModelSpec(spec: string): { model: string; effort: string } {
+  let s = spec;
+  for (const p of ["claude-code:", "pi:", "codex:", "hermes:"]) {
+    if (s.startsWith(p)) { s = s.slice(p.length); break; }
+  }
+  let effort = "";
+  const lastColon = s.lastIndexOf(":");
+  if (lastColon >= 0 && MODEL_EFFORTS.has(s.slice(lastColon + 1))) {
+    effort = s.slice(lastColon + 1);
+    s = s.slice(0, lastColon);
+  }
+  const model = s.includes("/") ? s.slice(s.lastIndexOf("/") + 1) : s;
+  return { model, effort };
+}
+
+// claude --model value. The proxy normalizes any opus id to the newest, so we
+// just need a value claude's CLI accepts: bare opus/sonnet/haiku ids get the
+// "claude-" prefix; an already-qualified "claude-…" passes through. "" if empty.
+export function claudeModelArg(spec: string): string {
+  const { model } = parseModelSpec(spec);
+  if (!model) return "";
+  if (model.startsWith("claude-")) return model;
+  if (/^(opus|sonnet|haiku)/.test(model)) return `claude-${model}`;
+  return model;
+}
+
+// codex flags: `-m <model>` plus, if an effort was given, the reasoning-effort
+// config override. "" if the spec has no usable model.
+export function codexModelFlag(spec: string): string {
+  const { model, effort } = parseModelSpec(spec);
+  if (!model) return "";
+  let f = `-m ${model}`;
+  if (effort && effort !== "off" && effort !== "none") f += ` -c model_reasoning_effort="${effort}"`;
+  return f;
+}
 
 // ---- named-session command builders (pure seams for askInSession) ----------
 //
@@ -128,14 +186,25 @@ const SESSION_NAME_RE = /^[a-z][a-z0-9_-]{0,31}$/;
 
 // pi: a stable per-name --session-id makes a fresh `pi --print` resume exactly
 // this conversation. extPath="" omits the proxy extension flag. Prompt → "$1".
-export function buildPiNamedCmd(session: string, prompt: string, extPath: string): string[] {
+// thinking maps the session's effort to pi's --thinking level (default "off"
+// keeps buyer chat fast). The role "hat" is NOT a flag here — pi has no reliable
+// per-invocation system-prompt seam (and whether `-e` adds-to or replaces the
+// configured extensions is version-dependent), so the role is established by
+// prepending it to the FIRST turn's prompt in askInSession (same as codex). pi
+// MODEL stays the cell's pi model — vary the cell model to change it.
+export function buildPiNamedCmd(
+  session: string,
+  prompt: string,
+  extPath: string,
+  thinking = "off",
+): string[] {
   const sessDir = `/root/.pi/agent/sessions/named-${session}`;
   const sessId = `named-${session}`;
   const eFlag = extPath ? `-e ${extPath}` : "";
   return [
     "bash", "-lc",
     `export HOME=/root; cd /root && mkdir -p ${sessDir} && ` +
-    `exec pi --print ${eFlag} --session-dir ${sessDir} --session-id ${sessId} --thinking off "$1"`,
+    `exec pi --print ${eFlag} --session-dir ${sessDir} --session-id ${sessId} --thinking ${thinking} "$1"`,
     "pi-named",
     prompt,
   ];
@@ -143,22 +212,41 @@ export function buildPiNamedCmd(session: string, prompt: string, extPath: string
 
 // codex: resume a captured per-name thread, or start fresh on the first turn.
 // threadId="" → fresh (no `resume`, prompt at $1); else `resume "$1"` with the
-// thread id as $1 and the prompt at $2.
-export function buildCodexNamedCmd(threadId: string, prompt: string, flags: string): string[] {
+// thread id as $1 and the prompt at $2. opts.model adds `-m <model>` (+ reasoning
+// effort); opts.rolePreamble (codex has no system-prompt seam) is established
+// ONCE by prepending it to the first turn's prompt — later turns resume the
+// thread, which already carries the hat. model/effort are validateModelSpec-safe.
+export function buildCodexNamedCmd(
+  threadId: string,
+  prompt: string,
+  flags: string,
+  opts: { model?: string; rolePreamble?: string } = {},
+): string[] {
+  const mFlag = opts.model ? codexModelFlag(opts.model) : "";
+  const allFlags = mFlag ? `${flags} ${mFlag}` : flags;
+  const p = (!threadId && opts.rolePreamble) ? `${opts.rolePreamble}\n\n---\n\n${prompt}` : prompt;
   return threadId
-    ? ["bash", "-lc", `export HOME=/root; cd /root && exec codex exec resume "$1" ${flags} "$2" </dev/null`, "codex-named", threadId, prompt]
-    : ["bash", "-lc", `export HOME=/root; cd /root && exec codex exec ${flags} "$1" </dev/null`, "codex-named", prompt];
+    ? ["bash", "-lc", `export HOME=/root; cd /root && exec codex exec resume "$1" ${allFlags} "$2" </dev/null`, "codex-named", threadId, p]
+    : ["bash", "-lc", `export HOME=/root; cd /root && exec codex exec ${allFlags} "$1" </dev/null`, "codex-named", p];
 }
 
-// claude (flag-off --print fallback): mint+assert a uuid on first use
-// (created), else resume it. The prompt rides on stdin (not argv), so it isn't
-// part of this command.
-export function buildClaudeNamedCmd(id: string, created: boolean): string[] {
+// claude (flag-off --print fallback AND the per-turn path for a claude session
+// on a non-claude cell when the pool is off): mint+assert a uuid on first use
+// (created), else resume it. The prompt rides on stdin (not argv). opts.model →
+// `--model <claude id>` (the proxy normalizes opus ids, so forcing opus on a pi
+// cell's staff session just works); opts.rolePreamble → `--append-system-prompt`
+// carried as $1 so free-text role files can't break shell quoting.
+export function buildClaudeNamedCmd(
+  id: string,
+  created: boolean,
+  opts: { model?: string; rolePreamble?: string } = {},
+): string[] {
   const sessFlag = created ? `--session-id '${id}'` : `--resume '${id}'`;
-  return [
-    "bash", "-lc",
-    `export HOME=/root IS_SANDBOX=1; cd /root && exec claude --print ${sessFlag} --permission-mode bypassPermissions`,
-  ];
+  const mArg = opts.model ? claudeModelArg(opts.model) : "";
+  const modelFlag = mArg ? ` --model ${mArg}` : "";
+  const roleFlag = opts.rolePreamble ? ` --append-system-prompt "$1"` : "";
+  const cmd = `export HOME=/root IS_SANDBOX=1; cd /root && exec claude --print ${sessFlag}${modelFlag}${roleFlag} --permission-mode bypassPermissions`;
+  return opts.rolePreamble ? ["bash", "-lc", cmd, "claude-named", opts.rolePreamble] : ["bash", "-lc", cmd];
 }
 
 export interface ForkAndAskOpts {
@@ -354,15 +442,22 @@ export const piAdapter: HarnessAdapter = {
   // billing concern: pi runs gpt-5.5 on the ChatGPT sub at flat cost.
   // session is [a-z0-9_-] only, so sessDir/sessId/ext carry no shell
   // metacharacters and are safe to interpolate; the prompt rides as "$1".
-  async askInSession({ prompt, session, cellName, timeoutMs = 150_000 }) {
+  async askInSession({ prompt, session, cellName, timeoutMs = 150_000, model, rolePreamble }) {
     if (!SESSION_NAME_RE.test(session)) {
       return { ok: false, error: `invalid session name: ${session.slice(0, 40)}` };
     }
     void cellName;
     const ext = "/root/.pi/extensions/codex-proxy/index.ts";
+    // pi MODEL stays the cell's pi model; only the effort maps to --thinking.
+    const thinking = model ? (parseModelSpec(model).effort || "off") : "off";
+    // Establish the role "hat" once, on the first turn (the session dir doesn't
+    // exist yet — buildPiNamedCmd's mkdir creates it). Later turns resume and
+    // already carry it. Mirrors the codex first-turn-prepend.
+    const sessDir = `/root/.pi/agent/sessions/named-${session}`;
+    const p = (rolePreamble && !existsSync(sessDir)) ? `${rolePreamble}\n\n---\n\n${prompt}` : prompt;
     try {
       const r = await runProcess({
-        cmd: buildPiNamedCmd(session, prompt, existsSync(ext) ? ext : ""),
+        cmd: buildPiNamedCmd(session, p, existsSync(ext) ? ext : "", thinking),
         timeoutMs,
       });
       if (r.exitCode !== 0) {
@@ -528,7 +623,7 @@ export const claudeCodeAdapter: HarnessAdapter = {
   // toggling the flag keeps the same durable conversation. The uuid is
   // persisted only AFTER a successful create — never leave a registry id
   // whose session was never born (mirrors the pool's roll-back-on-failure).
-  async askInSession({ prompt, session, cellName, timeoutMs = 300_000 }) {
+  async askInSession({ prompt, session, cellName, timeoutMs = 300_000, model, rolePreamble }) {
     if (!SESSION_NAME_RE.test(session)) {
       return { ok: false, error: `invalid session name: ${session.slice(0, 40)}` };
     }
@@ -541,7 +636,7 @@ export const claudeCodeAdapter: HarnessAdapter = {
     try {
       if (created) await mkdir("/root/.cell/sessions", { recursive: true });
       const r = await runProcess({
-        cmd: buildClaudeNamedCmd(id, created),
+        cmd: buildClaudeNamedCmd(id, created, { model, rolePreamble }),
         stdin: prompt,
         timeoutMs,
       });
@@ -698,7 +793,7 @@ export const codexAdapter: HarnessAdapter = {
   // window is NOT atomic, so the SUPERVISOR serializes same-name turns
   // (enqueueNamedTurn) — without that, two concurrent first turns would mint
   // two threads and orphan one. No billing split (codex on the ChatGPT sub).
-  async askInSession({ prompt, session, cellName, timeoutMs = 90_000 }) {
+  async askInSession({ prompt, session, cellName, timeoutMs = 90_000, model, rolePreamble }) {
     if (!SESSION_NAME_RE.test(session)) {
       return { ok: false, error: `invalid session name: ${session.slice(0, 40)}` };
     }
@@ -708,7 +803,7 @@ export const codexAdapter: HarnessAdapter = {
     let threadId = "";
     try { threadId = (await readFile(threadFile, "utf8")).trim(); } catch { /* first use */ }
     try {
-      const r = await runProcess({ cmd: buildCodexNamedCmd(threadId, prompt, flags), timeoutMs });
+      const r = await runProcess({ cmd: buildCodexNamedCmd(threadId, prompt, flags, { model, rolePreamble }), timeoutMs });
       if (r.exitCode !== 0) {
         return { ok: false, error: `codex exit ${r.exitCode}: ${r.stderr.slice(0, 200)}` };
       }

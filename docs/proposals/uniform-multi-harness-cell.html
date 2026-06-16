@@ -1,0 +1,133 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Uniform Multi-Harness Cell — harness is a per-session attribute</title>
+<link rel="stylesheet" href="../_assets/doc.css">
+</head>
+<body>
+<div class="page">
+
+  <div class="doc-header">
+    <div class="crumb">cells <span class="sep">/</span> proposals <span class="sep">/</span> uniform multi-harness cell</div>
+    <div>design + plan</div>
+  </div>
+
+  <h1>Uniform Multi-Harness Cell</h1>
+  <p class="subtitle">Stop treating a cell as "a pi cell" or "a claude cell." A cell is one Linux box that already ships every harness binary. <strong>Which harness runs is a per-session choice, not the cell's brand.</strong> One advisor can hold a <code>buyer</code>&nbsp;↔&nbsp;WhatsApp conversation on pi/gpt-5.5 and a <code>staff</code>&nbsp;↔&nbsp;Slack conversation on claude/opus at the same time — same VM, same files, same memory, different hats.</p>
+
+  <div class="callout">
+    <p><strong>Plain-English summary.</strong> Today the supervisor reads one <code>HARNESS</code> at boot and drives the whole cell through it. But every egg <em>already</em> ships the pi, claude, and codex binaries and all their config trees — so "harness" is really just the default the supervisor picks. This plan makes harness a property of each named <a href="named-sessions.html">session</a> instead: <code>buyer</code> runs pi (fast, cheap, flat ChatGPT-sub cost), <code>staff</code> runs claude/opus on the warm interactive pool (the smart model, billed to the Max subscription, for real tuning). Durable memory stays physically shared because it's one filesystem; each session keeps its own conversation history and its own role.</p>
+  </div>
+
+  <div class="callout">
+    <p><strong>Status — built on <code>feature/uniform-multi-harness-cell</code> (broad scope, 2026-06-16).</strong> The full per-session primitive ships, not a pi+claude special-case: any of pi/claude/codex as any session, on any cell. Per-session config sidecar; supervisor per-session dispatch + pool decoupling; per-session model + role through both the pool and <code>askInSession</code>; memory convergence; <code>cells&nbsp;model&nbsp;--session</code> + the auto chain-entry; all-three binary currency. 482 unit tests; a 6-dimension adversarial review (14 verify agents) found 2 real bugs, both fixed (pi-update failure masking; warm-session model-drift respawn). <strong>Q1/Q2 (Slack→<code>staff</code> routing, <code>--channels=slack:staff</code> at birth) is a SEPARATE branch — <a href="https://github.com/">PR #22</a></strong> — and composes at runtime: a Slack-bound <code>staff</code> session configured here to claude/opus. <strong>Decided:</strong> staff-opus on the subscription pool (not metered); memory fully shared; binary currency = birth-all-three + steward sweep.</p>
+  </div>
+
+  <div class="callout">
+    <p><strong>The simplification that makes this tractable.</strong> Named sessions <em>do not</em> need a second long-running harness process. <code>main</code> uses the cell's persistent process; named sessions already dispatch <strong>per-turn</strong> — pi via <code>pi&nbsp;--print&nbsp;--session-id</code>, claude via the warm tmux pool, codex via <code>codex&nbsp;exec&nbsp;resume</code>. So "two harnesses on one cell" is never "two daemons fighting" — it's <code>main</code> on the default harness plus named sessions that each pick their harness at dispatch. This sidesteps every hard ("large"-rated) part of the problem: no dual-process boot, no multi-harness main loop.</p>
+  </div>
+
+  <h2>Why</h2>
+
+  <p>Zero's HomeZero advisors are <strong>pi cells</strong> (gpt-5.5). They need two durable conversations on one cell: <code>buyer</code>&nbsp;↔&nbsp;WhatsApp (the user — fast, conversational) and <code>staff</code>&nbsp;↔&nbsp;Slack (operators tuning the advisor's skills/memory/behavior — where Pete wants the smart model). <a href="named-sessions.html">Named durable sessions</a> already give two isolated conversations on one cell, on any harness. What's missing is letting those two sessions run <em>different harnesses/models</em> — specifically a genuine claude-code/opus <code>staff</code> session on a cell whose <code>buyer</code> half is pi.</p>
+
+  <p>The blocker was framed as "billing": the warm interactive pool that bills <code>cc_entrypoint=cli</code> (the Max subscription pool, not the metered Agent-SDK credit) only stands up when the cell's baked harness is claude-code (<code>server.ts:86</code>). A pi cell's only route to opus was the one-shot <code>claude&nbsp;--print</code> fallback → <code>sdk-cli</code> → metered. This reframe dissolves that: decouple the pool from the baked harness, and a claude-typed session on <em>any</em> cell rides the subscription pool. The billing problem isn't worked around — it's gone.</p>
+
+  <h2>It's mostly already there</h2>
+
+  <ul>
+    <li><strong>Binaries.</strong> <code>scripts/bake-egg.sh:220</code> — "pre-merge eggs ship pi/claude/codex." All three binaries + their config trees (<code>.pi/ .claude/ .codex/</code>) are on every cell already.</li>
+    <li><strong>Auth.</strong> <code>cli/lib/cells-env.ts:43-46</code> exports the single proxy secret as <code>ANTHROPIC_OAUTH_TOKEN</code>, <code>ANTHROPIC_AUTH_TOKEN</code>, and <code>OPENAI_CODEX_API_KEY</code> on <em>every</em> cell; <code>.claude/settings.json</code> (base URL + <code>x-cell-name</code> header) ships in base DNA. So claude on a pi cell is already wired to the proxy.</li>
+    <li><strong>Memory storage.</strong> <code>/root/state/memory</code>, <code>mentality.md</code>, <code>wiki/</code> are one filesystem, session-agnostic. A claude <code>staff</code> session and a pi <code>buyer</code> session physically share them.</li>
+    <li><strong>Adapters.</strong> <code>harness-adapters.ts</code> already defines all four adapters and <code>getAdapter(name)</code>; <code>askInSession</code> exists for pi/claude/codex. The supervisor just picks one at boot.</li>
+  </ul>
+
+  <p>So this is not a new bake or an install expansion. It's a dispatch change plus four targeted gaps.</p>
+
+  <h2>Architecture</h2>
+
+  <pre>                       one VM · one /root · shared memory (state/memory, MEMORY.md, wiki/)
+                       ┌────────────────────────────────────────────────────────────┐
+WhatsApp ─► buyer ────►│  per-session config  /root/.cell/session-config/buyer.json  │
+                       │     { harness: pi,         model: gpt-5.5:low,  role: buyer }│──► pi --print --session-id named-buyer   (flat cost)
+Slack ────► staff ────►│  per-session config  /root/.cell/session-config/staff.json  │
+                       │     { harness: claude-code, model: opus-4.8:med, role: staff}│──► warm tmux claude pool (cc_entrypoint=cli, Max sub)
+CLI/peer ─► main  ────►│  cell default harness (persistent process)                   │──► pi main loop
+                       └────────────────────────────────────────────────────────────┘
+                          supervisor: getAdapter(session.harness) PER named turn,
+                          not one ADAPTER at boot. Role injected per harness from
+                          /root/.cell/roles/&lt;session&gt;.md. Memory shared by construction.</pre>
+
+  <h2>Two hard requirements (Pete)</h2>
+
+  <h3>1. Shared filesystem = shared memory</h3>
+  <p>All harnesses run in one VM at <code>/root</code>, so durable memory is physically shared — <em>but only pi auto-ingests it</em> (the pi <code>memory</code> extension). claude and codex won't read <code>/root/state/memory</code> + <code>MEMORY.md</code> unless told to. So "shared memory" is a <strong>convergence + ingestion</strong> fix, not storage:</p>
+  <ul>
+    <li>Converge every harness on <code>/root/state/memory</code> as the canonical store (no claude-default or codex-default memory dir).</li>
+    <li>The shared instruction files (<code>CLAUDE.md</code> for claude, <code>AGENTS.md</code> for codex) carry a directive to load the canonical memory at session start, the way pi's extension does automatically.</li>
+    <li>Dream/consolidation (the pi extension) keeps writing there — so when <code>staff</code> (claude) tunes the advisor's memory, <code>buyer</code> (pi) reads it next turn, and vice-versa. That cross-pollination is the entire point of "same cell."</li>
+  </ul>
+
+  <h3>2. Per-session role / hat</h3>
+  <p>The shared cell identity + memory pointer stay in the static instruction files. The per-session <em>hat</em> ("you are talking to a buyer over WhatsApp" vs "you are HomeZero staff over Slack who tune this cell") is a short markdown at <code>/root/.cell/roles/&lt;session&gt;.md</code>, injected per harness via that harness's system-prompt mechanism:</p>
+  <ul>
+    <li><strong>claude</strong> — <code>--append-system-prompt</code> on the <code>--print</code> path; a <code>SessionStart</code> hook (or session-scoped settings) for the warm pool.</li>
+    <li><strong>pi</strong> — a <code>use-max</code> per-session delta: <code>use-max</code> already composes the system prompt from <code>SOUL.md</code> + friends at <code>before_agent_start</code>; it gains a per-session role-file append.</li>
+    <li><strong>codex</strong> — prompt-prefix (codex has no native system-prompt seam).</li>
+  </ul>
+  <p>In Zero's case the harness split happens to <em>be</em> the role split (pi=buyer, claude=staff), so the static files nearly suffice — but per-session role injection is the robust primitive and handles two same-harness sessions with different hats. (Exact flag names — <code>--append-system-prompt</code>, a pi <code>--system</code> equivalent — verified against each binary during build.)</p>
+
+  <h2>Components &amp; changes</h2>
+
+  <table>
+    <thead><tr><th>Piece</th><th>Change</th><th>Where</th><th>Effort</th></tr></thead>
+    <tbody>
+      <tr><td>Per-session config</td><td>New sidecar <code>/root/.cell/session-config/&lt;name&gt;.json</code> = <code>{harness, model, role}</code>. Single source of truth; the harness-specific session-id files stay where each adapter expects them.</td><td><code>session-pool.ts</code> (new <code>readSessionConfig</code>)</td><td>small</td></tr>
+      <tr><td>Per-dispatch adapter selection</td><td>Named-turn dispatch reads the session config and calls <code>getAdapter(session.harness)</code> instead of the boot-time <code>ADAPTER</code>. <code>main</code> still uses the cell default.</td><td><code>server.ts</code> named-turn paths (~1514, 1601, 1623); <code>enqueueNamedTurn</code></td><td>medium</td></tr>
+      <tr><td>Pool decoupling</td><td>Instantiate the warm pool regardless of cell harness; only sessions whose configured harness is claude use a pool slot. Per-session busy/idle so a pi <code>buyer</code> turn and a claude <code>staff</code> turn account independently.</td><td><code>server.ts:86,95-112,400</code>; <code>talk-pool.ts</code></td><td>medium</td></tr>
+      <tr><td>Role injection</td><td><code>/root/.cell/roles/&lt;name&gt;.md</code> + per-harness inject (claude <code>--append-system-prompt</code>/hook, pi use-max delta, codex prefix).</td><td><code>harness-adapters.ts</code> (<code>askInSession</code> gains <code>role?</code>); <code>interactive-claude-talk.sh</code>; <code>.pi/extensions/use-max</code></td><td>medium</td></tr>
+      <tr><td>Memory convergence</td><td>Point claude/codex at <code>/root/state/memory</code> + load <code>MEMORY.md</code> at session start (instruction-file directive).</td><td><code>CLAUDE.md</code>, <code>AGENTS.md</code> in base DNA</td><td>small</td></tr>
+      <tr><td>Proxy gate (claude on a pi cell)</td><td>Add a <code>claude-code:anthropic/opus</code> chain entry to any advisor running a claude session — the sanctioned mother pattern. Auth tokens + base URL already present.</td><td><code>cli/cells.ts</code> (chain), <code>registry.ts</code>; gate already honors it (<code>proxy-oauth.ts:88</code>)</td><td>small</td></tr>
+      <tr><td>Binary currency ⚠️</td><td>Keep pi+claude+codex current on every cell — not just the active one at birth. Steward periodic sweep (<code>update-cell-harness.sh</code> per installed harness) + ensure-current on first activation of a dormant harness.</td><td><code>scripts/update-cell-harness.sh</code>, the steward loop, <code>refresh</code></td><td>medium</td></tr>
+      <tr><td><strong>Q1</strong> Slack→staff routing</td><td><code>ChannelBinding</code> gains <code>session</code>; the DO stamps it on inbound frames and routes replies <em>per-session</em> (today's single <code>pendingChannel</code> can't serve buyer↔WhatsApp + staff↔Slack at once).</td><td><code>cli/lib/channels.ts</code>, <code>cli/worker/cell/cell-agent.ts</code></td><td>medium</td></tr>
+      <tr><td><strong>Q2</strong> Wire at birth</td><td>Parse <code>--channels=slack:staff</code>; auto-created Slack channel binds to the <code>staff</code> session, not <code>main</code>.</td><td><code>cli/cells.ts</code> <code>parseCreateArgs</code> (~3057), bind-channel</td><td>small</td></tr>
+      <tr><td><strong>Q3</strong> Per-session model CLI</td><td><code>cells model &lt;cell&gt; --session=staff claude-opus-4-8:medium</code> writes the per-session config + chain entry.</td><td><code>cli/cells.ts</code> <code>cmdModel</code> (~9824)</td><td>small</td></tr>
+    </tbody>
+  </table>
+
+  <p>No <strong>large</strong>-rated item remains: the dual-process / multi-harness-main-loop work the survey flagged is avoided by keeping <code>main</code> single-harness and named sessions per-dispatch.</p>
+
+  <h2>Build phases (staged for incremental verify)</h2>
+  <ol>
+    <li><strong>Per-session config + dispatch.</strong> <code>readSessionConfig</code> + pure tests; named-turn dispatch selects the adapter per session. Default (no config) = cell harness, so zero behavior change until a config exists. Verify on a pi cell: a <code>staff</code> session with <code>{harness: claude-code}</code> routes to claude while <code>buyer</code> stays pi.</li>
+    <li><strong>Pool decoupling + chain entry.</strong> Stand the warm pool up on a pi cell for claude-typed sessions; add the chain entry; confirm <code>staff</code> opus bills <code>cc_entrypoint=cli</code> (the proxy attribution check), buyer untouched, RAM within cap.</li>
+    <li><strong>Role + memory convergence.</strong> <code>/root/.cell/roles/&lt;name&gt;.md</code> per-harness injection; claude/codex read canonical memory. Verify staff edits memory → buyer sees it; each session holds its own hat.</li>
+    <li><strong>Binary currency.</strong> Steward sweep keeps all three harnesses current; ensure-current on first activation. Verify a dormant claude binary updates before a staff session's first turn.</li>
+    <li><strong>Q1/Q2/Q3.</strong> Channel→session binding + per-session DO reply routing; <code>--channels=slack:staff</code> at birth; <code>cells model --session</code>. Verify Slack→staff↔Slack, WhatsApp→buyer↔WhatsApp, concurrent, replies to the right channel.</li>
+    <li><strong>Docs + rollout.</strong> Update this doc + <a href="named-sessions.html">named-sessions</a>; refresh fleet; memory update.</li>
+  </ol>
+
+  <h2>Rollout</h2>
+  <p>Mirrors the named-sessions rollout, and is <strong>safe by construction</strong>: with no per-session sidecar present, every code path falls back to the cell's default harness — so a refreshed cell behaves exactly as before until someone runs <code>cells model --session</code>. Order:</p>
+  <ol>
+    <li><strong>Merge order.</strong> Land this branch and <a href="#">PR #22</a> (channel→session). They touch mostly different files; the only shared file is <code>cli/cells.ts</code> (this branch's <code>cmdModel</code> vs #22's <code>parseCreateArgs</code> — non-overlapping functions).</li>
+    <li><strong>Fleet refresh.</strong> <code>cells refresh --all</code> ships the new supervisor + adapters + libs + bootstrap; the steward does the same within 30&nbsp;min. The pool decoupling means even pi/codex cells now instantiate a (lazy) pool — inert until a claude session enqueues.</li>
+    <li><strong>Worker redeploy</strong> only if PR #22 changes the DO/worker capability surface (this branch does not touch the DO).</li>
+    <li><strong>Per-advisor wiring (Zero).</strong> On a clean-born advisor: <code>cells model &lt;cell&gt; --session=staff claude-code:anthropic/opus-4-8:medium</code> (auto-adds the chain entry) and <code>--session=buyer openai-codex/gpt-5.5:low</code>; drop a <code>roles/staff.md</code> + <code>roles/buyer.md</code> hat; bind Slack→<code>staff</code> via #22's <code>--channels=slack:staff</code>. Verify: a staff turn bills <code>cc_entrypoint=cli</code> (proxy attribution), buyer stays gpt-5.5, both isolated, memory shared.</li>
+    <li><strong>Binary currency</strong> rides birth automatically (all three current on a fresh cell); the steward keeps long-lived cells current.</li>
+  </ol>
+
+  <h2>Risks</h2>
+  <ul>
+    <li><strong>RAM</strong> — a warm claude pool on pi cells; mitigated by pay-as-you-go warming + the existing cap/TTL.</li>
+    <li><strong>Role-injection flags</strong> — exact per-harness system-prompt seam (<code>--append-system-prompt</code>, pi equivalent) verified against each binary in phase 3; codex falls back to prompt-prefix.</li>
+    <li><strong>Per-session DO reply routing</strong> — the piece deferred from named-sessions; today's single <code>pendingChannel</code> can't route two channels at once. In scope here (Q1).</li>
+    <li><strong>Binary drift</strong> — the gap that motivated this section; closed by the sweep + lazy check.</li>
+  </ul>
+
+</div>
+<script src="../_assets/doc.js" defer></script>
+</body>
+</html>

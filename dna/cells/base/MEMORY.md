@@ -17,3 +17,15 @@ consolidations land in `state/.dream/`. Durable reference notes go in
 - [state/memory/](state/memory/) — full memory directory
 - [state/wiki/](state/wiki/) — durable reference notes
 - [state/mentality.md](state/mentality.md) — core mental models
+
+## Shared across all your sessions
+
+You may hold several named conversations at once (e.g. `buyer`↔WhatsApp and
+`staff`↔Slack), possibly running on different harnesses — but they all share
+ONE `state/memory/` on this VM. Conversation history is per-session and private;
+**memory is the cell's, not the session's.** So what an operator teaches you in
+the `staff` session — a skill, a correction, a fact — you write to `state/memory/`
+and it's there for every other session, including the buyer-facing one. Read
+`state/memory/MEMORY.md` at the start of a session if it wasn't auto-inlined, and
+write durable learnings there (never only into one session's transcript), so the
+whole cell — every hat — stays in sync.

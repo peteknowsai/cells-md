@@ -26,6 +26,7 @@
 set -u
 
 NAME=""; SOCK=""; STATEDIR="/root/state/talk"; MODE="resume"; SID=""; TIMEOUT_MS=25000
+MODEL=""; ROLE_FILE=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --name) NAME="$2"; shift 2;;
@@ -34,6 +35,8 @@ while [ $# -gt 0 ]; do
     --mode) MODE="$2"; shift 2;;           # resume | create
     --sid) SID="$2"; shift 2;;             # claude session id to resume or assert
     --timeout-ms) TIMEOUT_MS="$2"; shift 2;;
+    --model) MODEL="$2"; shift 2;;         # per-session claude model id (uniform-cell)
+    --role-file) ROLE_FILE="$2"; shift 2;; # per-session role preamble → --append-system-prompt
     *) shift;;
   esac
 done
@@ -128,6 +131,13 @@ PY
   printf '[ -r /etc/profile.d/cells-env.sh ] && . /etc/profile.d/cells-env.sh\n'
   printf 'exec env IS_SANDBOX=1 claude'
   for a in "${SESSION_ARGS[@]}"; do printf " %q" "$a"; done
+  # Per-session model + role "hat" (uniform-cell). MODEL is a claude id (the
+  # pool already translated the cells spec); the role text rides in a file so
+  # free-text preambles can't break quoting — %q makes both shell-safe.
+  [ -n "$MODEL" ] && printf ' --model %q' "$MODEL"
+  if [ -n "$ROLE_FILE" ] && [ -r "$ROLE_FILE" ]; then
+    printf ' --append-system-prompt %q' "$(cat "$ROLE_FILE")"
+  fi
   printf " --settings %q --permission-mode bypassPermissions\n" "$SETTINGS"
 } > "$LAUNCH"
 
