@@ -11,6 +11,9 @@ import {
   piAdapter,
   extractCodexJsonText,
   extractCodexThreadId,
+  buildPiNamedCmd,
+  buildCodexNamedCmd,
+  buildClaudeNamedCmd,
   getAdapter,
   type AdapterHost,
 } from "./harness-adapters";
@@ -371,16 +374,80 @@ test("askInSession capability: present on pi/codex/claude, absent on hermes", ()
 
 // Defense in depth: the supervisor validates the session name, but each
 // adapter turns it into a filesystem path, so a bad name must be rejected
-// before any spawn (no traversal, no empty path segment).
+// before any spawn (no traversal, no empty path segment). Assert on the
+// discriminating error string — NOT just ok===false — because on a dev/CI box
+// a VALID name also returns ok===false (the spawn hits a missing /root). Only
+// the pre-spawn regex gate produces "invalid session name", so this fails if
+// the gate is removed.
 test("askInSession rejects an invalid session name before spawning", async () => {
-  for (const bad of ["../escape", "Buyer", "", "has space", "a".repeat(40)]) {
-    const rPi = await piAdapter.askInSession!({ prompt: "x", session: bad, cellName: "c" });
-    expect(rPi.ok).toBe(false);
-    const rCodex = await codexAdapter.askInSession!({ prompt: "x", session: bad, cellName: "c" });
-    expect(rCodex.ok).toBe(false);
-    const rClaude = await claudeCodeAdapter.askInSession!({ prompt: "x", session: bad, cellName: "c" });
-    expect(rClaude.ok).toBe(false);
+  for (const bad of ["../escape", "Buyer", "", "has space", "a".repeat(40), "a/b", "a;b"]) {
+    for (const adapter of [piAdapter, codexAdapter, claudeCodeAdapter]) {
+      const r = await adapter.askInSession!({ prompt: "x", session: bad, cellName: "c" });
+      expect(r.ok).toBe(false);
+      if (!r.ok) expect(r.error).toContain("invalid session name");
+    }
   }
+});
+
+// extractCodexThreadId returns the FIRST thread.started (first-turn semantics).
+// Two competing ids pin first-vs-last, which the single-id cases can't.
+test("extractCodexThreadId: returns the FIRST thread.started when several appear", () => {
+  const stdout = [
+    JSON.stringify({ type: "thread.started", thread_id: "th_first" }),
+    JSON.stringify({ type: "item.completed", item: { type: "agent_message", text: "hi" } }),
+    JSON.stringify({ type: "thread.started", thread_id: "th_second" }),
+  ].join("\n");
+  expect(extractCodexThreadId(stdout)).toBe("th_first");
+});
+
+// ---- named-session command builders (the askInSession argv shapes) ---------
+// pi was live-verified; the codex resume + claude resume branches were NOT, so
+// pin their argv here so a transposition (e.g. resume/flags order) can't ship.
+test("buildPiNamedCmd: stable per-name --session-id + --session-dir, prompt as $1", () => {
+  const cmd = buildPiNamedCmd("buyer", "hello there", "/root/.pi/extensions/codex-proxy/index.ts");
+  expect(cmd[0]).toBe("bash");
+  expect(cmd[1]).toBe("-lc");
+  const script = cmd[2];
+  expect(script).toContain("--session-id named-buyer");
+  expect(script).toContain("--session-dir /root/.pi/agent/sessions/named-buyer");
+  expect(script).toContain("-e /root/.pi/extensions/codex-proxy/index.ts");
+  expect(script).toContain('"$1"'); // prompt rides as a positional, never interpolated
+  expect(script).not.toContain("hello there");
+  expect(cmd[cmd.length - 1]).toBe("hello there");
+});
+
+test("buildPiNamedCmd: omits the -e flag when no extension path", () => {
+  const script = buildPiNamedCmd("staff", "p", "")[2];
+  expect(script).not.toContain(" -e ");
+  expect(script).toContain("--session-id named-staff");
+});
+
+test("buildCodexNamedCmd: fresh first turn omits resume, prompt at $1", () => {
+  const cmd = buildCodexNamedCmd("", "first prompt", "--json --flag");
+  const script = cmd[2];
+  expect(script).toContain("codex exec --json --flag");
+  expect(script).not.toContain("resume");
+  expect(cmd).toEqual(["bash", "-lc", script, "codex-named", "first prompt"]);
+});
+
+test("buildCodexNamedCmd: resume turn passes thread id at $1 and prompt at $2", () => {
+  const cmd = buildCodexNamedCmd("th_abc", "next prompt", "--json --flag");
+  const script = cmd[2];
+  expect(script).toContain('codex exec resume "$1"');
+  expect(script).toContain('"$2"');
+  // thread id then prompt — never interpolated into the script
+  expect(cmd).toEqual(["bash", "-lc", script, "codex-named", "th_abc", "next prompt"]);
+  expect(script).not.toContain("th_abc");
+  expect(script).not.toContain("next prompt");
+});
+
+test("buildClaudeNamedCmd: created mints --session-id, resume uses --resume", () => {
+  const createdScript = buildClaudeNamedCmd("uuid-1", true)[2];
+  expect(createdScript).toContain("--session-id 'uuid-1'");
+  expect(createdScript).not.toContain("--resume");
+  const resumeScript = buildClaudeNamedCmd("uuid-1", false)[2];
+  expect(resumeScript).toContain("--resume 'uuid-1'");
+  expect(resumeScript).not.toContain("--session-id");
 });
 
 test("codex thread id survives a full turn cycle (capture → resume)", () => {

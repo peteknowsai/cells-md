@@ -118,6 +118,49 @@ export interface AskInSessionOpts {
 // (pi session dir, codex thread file), so re-check here too.
 const SESSION_NAME_RE = /^[a-z][a-z0-9_-]{0,31}$/;
 
+// ---- named-session command builders (pure seams for askInSession) ----------
+//
+// Each returns the exact argv runProcess spawns, factored out so the argv
+// shape — which the live-verify only exercised for pi, and not at all for the
+// codex resume / claude resume branches — is unit-testable without a VM. The
+// callers (the per-harness askInSession) validate the session name first; these
+// assume `session` is already SESSION_NAME_RE-safe (no shell metacharacters).
+
+// pi: a stable per-name --session-id makes a fresh `pi --print` resume exactly
+// this conversation. extPath="" omits the proxy extension flag. Prompt → "$1".
+export function buildPiNamedCmd(session: string, prompt: string, extPath: string): string[] {
+  const sessDir = `/root/.pi/agent/sessions/named-${session}`;
+  const sessId = `named-${session}`;
+  const eFlag = extPath ? `-e ${extPath}` : "";
+  return [
+    "bash", "-lc",
+    `export HOME=/root; cd /root && mkdir -p ${sessDir} && ` +
+    `exec pi --print ${eFlag} --session-dir ${sessDir} --session-id ${sessId} --thinking off "$1"`,
+    "pi-named",
+    prompt,
+  ];
+}
+
+// codex: resume a captured per-name thread, or start fresh on the first turn.
+// threadId="" → fresh (no `resume`, prompt at $1); else `resume "$1"` with the
+// thread id as $1 and the prompt at $2.
+export function buildCodexNamedCmd(threadId: string, prompt: string, flags: string): string[] {
+  return threadId
+    ? ["bash", "-lc", `export HOME=/root; cd /root && exec codex exec resume "$1" ${flags} "$2" </dev/null`, "codex-named", threadId, prompt]
+    : ["bash", "-lc", `export HOME=/root; cd /root && exec codex exec ${flags} "$1" </dev/null`, "codex-named", prompt];
+}
+
+// claude (flag-off --print fallback): mint+assert a uuid on first use
+// (created), else resume it. The prompt rides on stdin (not argv), so it isn't
+// part of this command.
+export function buildClaudeNamedCmd(id: string, created: boolean): string[] {
+  const sessFlag = created ? `--session-id '${id}'` : `--resume '${id}'`;
+  return [
+    "bash", "-lc",
+    `export HOME=/root IS_SANDBOX=1; cd /root && exec claude --print ${sessFlag} --permission-mode bypassPermissions`,
+  ];
+}
+
 export interface ForkAndAskOpts {
   prompt: string;
   // Reference to main session, harness-specific format. See HarnessAdapter
@@ -316,19 +359,10 @@ export const piAdapter: HarnessAdapter = {
       return { ok: false, error: `invalid session name: ${session.slice(0, 40)}` };
     }
     void cellName;
-    const sessDir = `/root/.pi/agent/sessions/named-${session}`;
-    const sessId = `named-${session}`;
     const ext = "/root/.pi/extensions/codex-proxy/index.ts";
-    const eFlag = existsSync(ext) ? `-e ${ext}` : "";
     try {
       const r = await runProcess({
-        cmd: [
-          "bash", "-lc",
-          `export HOME=/root; cd /root && mkdir -p ${sessDir} && ` +
-          `exec pi --print ${eFlag} --session-dir ${sessDir} --session-id ${sessId} --thinking off "$1"`,
-          "pi-named",
-          prompt,
-        ],
+        cmd: buildPiNamedCmd(session, prompt, existsSync(ext) ? ext : ""),
         timeoutMs,
       });
       if (r.exitCode !== 0) {
@@ -504,14 +538,10 @@ export const claudeCodeAdapter: HarnessAdapter = {
     try { id = (await readFile(idFile, "utf8")).trim(); } catch { /* first use */ }
     const created = !id;
     if (created) id = crypto.randomUUID();
-    const sessFlag = created ? `--session-id '${id}'` : `--resume '${id}'`;
     try {
       if (created) await mkdir("/root/.cell/sessions", { recursive: true });
       const r = await runProcess({
-        cmd: [
-          "bash", "-lc",
-          `export HOME=/root IS_SANDBOX=1; cd /root && exec claude --print ${sessFlag} --permission-mode bypassPermissions`,
-        ],
+        cmd: buildClaudeNamedCmd(id, created),
         stdin: prompt,
         timeoutMs,
       });
@@ -664,8 +694,10 @@ export const codexAdapter: HarnessAdapter = {
   // Durable NAMED session: a per-name codex THREAD. First turn starts a fresh
   // thread and persists its id to /root/.cell/codex-session-<name>-thread;
   // later turns `codex exec resume <id>` continue it. Each name → its own
-  // thread file → buyer/staff never cross, and concurrent turns are separate
-  // `codex exec` processes. No billing split (codex on the ChatGPT sub).
+  // thread file → buyer/staff never cross. The first-turn read→spawn→write-id
+  // window is NOT atomic, so the SUPERVISOR serializes same-name turns
+  // (enqueueNamedTurn) — without that, two concurrent first turns would mint
+  // two threads and orphan one. No billing split (codex on the ChatGPT sub).
   async askInSession({ prompt, session, cellName, timeoutMs = 90_000 }) {
     if (!SESSION_NAME_RE.test(session)) {
       return { ok: false, error: `invalid session name: ${session.slice(0, 40)}` };
@@ -676,10 +708,7 @@ export const codexAdapter: HarnessAdapter = {
     let threadId = "";
     try { threadId = (await readFile(threadFile, "utf8")).trim(); } catch { /* first use */ }
     try {
-      const cmd = threadId
-        ? ["bash", "-lc", `export HOME=/root; cd /root && exec codex exec resume "$1" ${flags} "$2" </dev/null`, "codex-named", threadId, prompt]
-        : ["bash", "-lc", `export HOME=/root; cd /root && exec codex exec ${flags} "$1" </dev/null`, "codex-named", prompt];
-      const r = await runProcess({ cmd, timeoutMs });
+      const r = await runProcess({ cmd: buildCodexNamedCmd(threadId, prompt, flags), timeoutMs });
       if (r.exitCode !== 0) {
         return { ok: false, error: `codex exit ${r.exitCode}: ${r.stderr.slice(0, 200)}` };
       }

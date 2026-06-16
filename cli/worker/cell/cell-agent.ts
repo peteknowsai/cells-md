@@ -488,7 +488,14 @@ export class CellAgent {
     // supervisor would ignore `session` and answer from a throwaway fork (wrong
     // context). Reject loudly instead — mirrors the jobs session-target gate.
     if (env.session && env.session !== "main") {
-      const namedOk = (await this.state.storage.get<boolean>("supervisor:named_sessions")) === true;
+      // Read the post-rename key, falling back to the pre-rename
+      // supervisor:talk_sessions persisted by a claude-code cell that was
+      // named-capable before this rename — so redeploying this Worker ahead of
+      // the supervisor's refresh doesn't 409 an already-working channel→session
+      // route during the rollout window. Removable once the fleet has rolled.
+      const namedOk =
+        (await this.state.storage.get<boolean>("supervisor:named_sessions")) === true ||
+        (await this.state.storage.get<boolean>("supervisor:talk_sessions")) === true;
       if (!namedOk) {
         return new Response(
           `cell does not support named sessions yet (refresh the cell so its supervisor advertises named_sessions: claude-code via the talk pool, pi/codex via per-turn -p sessions)`,

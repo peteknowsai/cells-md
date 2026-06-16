@@ -386,11 +386,20 @@ const unnotifiedDones = new Set<string>();
 // Mirror of the DO-side id rule — ids become filenames here.
 const JOB_ID_RE = /^[0-9A-Za-z][0-9A-Za-z_-]{7,39}$/;
 
-// Jobs hold the cell awake. welld's watchdog only sees the busy/idle
-// signal, and a detached job process is invisible to it — without this
-// gate the VM gets checkpointed mid-job.
+// In-flight adapter-driven named-session turns (pi/codex/flag-off-claude;
+// claude's warm pool tracks its own busy state). An askInSession subprocess is
+// invisible to welld's watchdog the same way a detached job is, so it must
+// hold the cell awake — and a turn finishing must not flip the cell idle while
+// another named turn is still running. Maintained by enqueueNamedTurn.
+let namedTurnsInFlight = 0;
+
+// Jobs (and named-session turns) hold the cell awake. welld's watchdog only
+// sees the busy/idle signal, and a detached job/askInSession process is
+// invisible to it — without this gate the VM gets checkpointed mid-work.
 function signalIdleIfQuiet() {
-  if (runningJobs.size === 0 && !talkPool?.anyBusy()) void signalLifecycle("idle");
+  if (runningJobs.size === 0 && !talkPool?.anyBusy() && namedTurnsInFlight === 0) {
+    void signalLifecycle("idle");
+  }
 }
 
 function loadJobRecord(id: string): JobRecord | null {
@@ -800,6 +809,38 @@ type MainTurn = {
 const mainQueue: MainTurn[] = [];
 let activeMainTurn: MainTurn | null = null;
 let mainSessionBusy = false; // any turn in flight — ours or interactive
+
+// Serialize adapter-driven named-session turns PER NAME. The claude pool has
+// its own per-session queue; pi/codex (and flag-off claude) have no warm
+// process, so two messages to ONE session would otherwise spawn concurrent
+// writer processes — interleaving pi's session JSONL, or on a codex/claude
+// FIRST turn minting two threads/uuids and orphaning one (the registry is
+// read-then-write-after-success). Chaining per name closes that; different
+// names stay parallel. This helper also owns the busy/idle lifecycle for these
+// turns so welld can't checkpoint the cell mid-turn: busy when the first turn
+// goes in flight, idle when the last finishes — but never idle while a main
+// turn is still running (signalIdleIfQuiet already guards jobs/pool/other
+// named turns; mainSessionBusy is guarded here because the harness-death path
+// must still be able to force idle through signalIdleIfQuiet directly).
+const namedTurnChains = new Map<string, Promise<unknown>>();
+
+function enqueueNamedTurn(name: string, run: () => Promise<void>): void {
+  namedTurnsInFlight++;
+  if (namedTurnsInFlight === 1) void signalLifecycle("busy");
+  const prev = namedTurnChains.get(name) ?? Promise.resolve();
+  // Run after prev settles (success OR failure); run owns its own errors.
+  const next = prev
+    .then(run, run)
+    .catch((e) => { console.error(`[bridge] named turn (${name}) crashed: ${String(e).slice(0, 200)}`); })
+    .finally(() => {
+      namedTurnsInFlight--;
+      // Drop the chain entry only if no newer turn replaced it (else a queued
+      // successor's tail would be lost).
+      if (namedTurnChains.get(name) === next) namedTurnChains.delete(name);
+      if (!mainSessionBusy) signalIdleIfQuiet();
+    });
+  namedTurnChains.set(name, next);
+}
 
 function enqueueMainTurn(t: { corrId: string; from: string; text: string; leashMs: number }) {
   if (talkPool) {
@@ -1487,9 +1528,11 @@ function handleBridgeFrame(line: string) {
       }
       if (ADAPTER.askInSession) {
         // pi/codex (and flag-off claude): per-turn DURABLE named session via
-        // the adapter (`pi --print --session-dir` / `codex exec resume`).
+        // the adapter (`pi --print --session-id` / `codex exec resume`).
         // One-shot — no live streaming — so reply only by agent_response.
-        void (async () => {
+        // enqueueNamedTurn serializes same-name turns (no concurrent writers)
+        // and holds the cell awake for the duration.
+        enqueueNamedTurn(name, async () => {
           const t0 = Date.now();
           const result = await ADAPTER.askInSession!({ prompt: prefixed, session: name, cellName: NAME, timeoutMs: leashMs });
           const dt = Date.now() - t0;
@@ -1500,7 +1543,7 @@ function handleBridgeFrame(line: string) {
             console.error(`[bridge] askInSession failed session=${name} corr=${corrId.slice(0, 10)} dt=${dt}ms: ${result.error}`);
             broadcastToClients(JSON.stringify({ type: "agent_response", in_reply_to: corrId, text: `[error] ${result.error}` }));
           }
-        })();
+        });
         return;
       }
       // No named-session primitive on this harness (hermes). Fail loudly — a
@@ -1592,15 +1635,15 @@ function handleBridgeFrame(line: string) {
     }
     const raw = typeof cmd.message === "string" ? cmd.message : "";
     broadcastToClients(JSON.stringify({ type: "response", id: cmd.id, command: "prompt", success: true }));
-    void (async () => {
-      void signalLifecycle("busy");
+    // enqueueNamedTurn serializes same-name turns and owns busy/idle (so the
+    // cell stays awake for the turn and isn't flipped idle mid-stream).
+    enqueueNamedTurn(reqName, async () => {
       broadcastToClients(JSON.stringify({ type: "agent_start" }));
       const result = await ADAPTER.askInSession!({ prompt: raw, session: reqName, cellName: NAME, timeoutMs: TALK_DEFAULT_LEASH_MS });
       const delta = result.ok ? result.text : `[error] ${result.error}`;
       broadcastToClients(JSON.stringify({ type: "message_update", assistantMessageEvent: { type: "text_delta", delta } }));
       broadcastToClients(JSON.stringify({ type: "agent_end" }));
-      signalIdleIfQuiet();
-    })();
+    });
     return;
   }
 
