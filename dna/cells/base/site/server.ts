@@ -38,6 +38,10 @@ import { fileURLToPath } from "node:url";
 import { getAdapter, turnLeashMs, type AdapterHost, type HarnessAdapter } from "../lib/harness-adapters";
 import { isInsideDir } from "../lib/path-guard";
 import { DEFAULT_SESSION, validateSessionName } from "../lib/session-pool";
+import {
+  sessionConfigPath, rolePath, parseSessionConfig, effectiveHarness, effectiveRole,
+  type SessionConfig,
+} from "../lib/session-config";
 import { TalkPool } from "../lib/talk-pool";
 import { MIME, collectSiteFiles } from "../lib/site-files";
 import {
@@ -83,16 +87,23 @@ const JOBS_INTERACTIVE = HARNESS === "claude-code" && process.env.CELLS_JOBS_INT
 // fork is a follow-up (it has a latency tradeoff on verify fan-out). DEFAULT-ON
 // for claude-code (opt OUT with CELLS_TALK_INTERACTIVE=0), like jobs; pi/codex/
 // hermes keep their own models.
-const TALK_INTERACTIVE = HARNESS === "claude-code" && process.env.CELLS_TALK_INTERACTIVE !== "0";
+// The warm interactive claude pool is DECOUPLED from the cell's baked harness
+// (uniform-cell, docs/proposals/uniform-multi-harness-cell.html). It exists on
+// ANY cell unless opted out (CELLS_TALK_INTERACTIVE=0), so a claude-TYPED named
+// session — e.g. a `staff`↔Slack/opus session on a pi advisor — rides the warm
+// pool (cc_entrypoint=cli, the Max subscription) instead of the metered
+// `claude --print` credit. The pool is lazy (no warm process until something
+// enqueues), so instantiating it on a pi cell that never runs a claude session
+// is free.
+const POOL_ENABLED = process.env.CELLS_TALK_INTERACTIVE !== "0";
 // Leash for a raw interactive prompt with no sender-supplied budget.
 const TALK_DEFAULT_LEASH_MS = 5 * 60 * 1000;
 
-// The talk pool (null unless TALK_INTERACTIVE). Deps are lazy arrows over the
-// hoisted broadcastToClients / signalLifecycle / signalIdleIfQuiet below, so
-// the pool reaches the bridge exactly as onTranslatedLine did. The pool counts
-// as "busy" so welld won't hibernate the cell mid-turn; idle is signaled only
-// when no session is busy AND no job is running (signalIdleIfQuiet).
-const talkPool = TALK_INTERACTIVE
+// Deps are lazy arrows over the hoisted broadcastToClients / signalLifecycle /
+// signalIdleIfQuiet below, so the pool reaches the bridge exactly as
+// onTranslatedLine did. The pool counts as "busy" so welld won't hibernate the
+// cell mid-turn; idle is signaled only when no session is busy AND no job runs.
+const talkPool = POOL_ENABLED
   ? new TalkPool({
       broadcast: (line) => broadcastToClients(line),
       onBusyChange: (busy) => { if (busy) void signalLifecycle("busy"); else signalIdleIfQuiet(); },
@@ -100,6 +111,12 @@ const talkPool = TALK_INTERACTIVE
       err: (m) => console.error(`[bridge] ${m}`),
     })
   : null;
+
+// Whether the cell's MAIN session (Slack/email/CLI/--main) rides the pool —
+// only when the cell's BAKED harness is claude-code. A pi/codex cell runs main
+// through its own persistent/per-turn process; only its claude-TYPED named
+// sessions use the pool. (Named routing is per-session via adapterForSession.)
+const MAIN_USES_POOL = HARNESS === "claude-code" && !!talkPool;
 
 // Whether THIS cell can hold named durable sessions (buyer↔WhatsApp,
 // staff↔Slack) at all — harness-agnostic. claude-code does it through the
@@ -139,6 +156,46 @@ function getMainRef(): string {
   if (HARNESS === "claude-code") return claudeMainId();
   if (HARNESS === "codex") return codexMainThread();
   return "";
+}
+
+// ---- per-session harness/model/role resolution (uniform-cell) --------------
+//
+// HARNESS is the cell DEFAULT (drives `main`). A named session may override it
+// via a sidecar /root/.cell/session-config/<name>.json — so `buyer` runs pi and
+// `staff` runs claude/opus on the same VM, sharing /root and memory. These read
+// the sidecar + role file at dispatch (cheap; cached by the OS) — the IO the
+// pure session-config seams deliberately leave to the supervisor.
+
+function readSessionConfig(name: string): SessionConfig | null {
+  const p = sessionConfigPath(name);
+  if (!p) return null;
+  try { return parseSessionConfig(JSON.parse(readFileSync(p, "utf8"))); } catch { return null; }
+}
+
+// The role "hat" text for a session: read /root/.cell/roles/<role>.md (role name
+// defaults to the session name). "" if there's no role file — the common case.
+function readRolePreamble(cfg: SessionConfig | null, name: string): string {
+  const rp = rolePath(effectiveRole(cfg, name));
+  if (!rp) return "";
+  try { return readFileSync(rp, "utf8").trim(); } catch { return ""; }
+}
+
+// Resolve everything a named turn needs: the effective harness, its adapter, and
+// the per-session model + role overrides to thread into the pool / askInSession.
+function resolveSession(name: string): {
+  harness: string;
+  adapter: HarnessAdapter;
+  model?: string;
+  rolePreamble: string;
+} {
+  const cfg = readSessionConfig(name);
+  const harness = effectiveHarness(cfg, HARNESS);
+  return {
+    harness,
+    adapter: getAdapter(harness),
+    model: cfg?.model,
+    rolePreamble: readRolePreamble(cfg, name),
+  };
 }
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -843,7 +900,7 @@ function enqueueNamedTurn(name: string, run: () => Promise<void>): void {
 }
 
 function enqueueMainTurn(t: { corrId: string; from: string; text: string; leashMs: number }) {
-  if (talkPool) {
+  if (MAIN_USES_POOL && talkPool) {
     // Interactive talk: a durable-conversation turn drives the main session in
     // the pool. The from-prefix (applied in pumpMainQueue on the --print path)
     // is baked into the text here so the cell knows who's speaking.
@@ -1052,11 +1109,13 @@ function persistentSpawnArgs(): { cmd: string[]; env: Record<string, string> } |
 
 function spawnHarness() {
   if (harnessProc) return;
-  if (talkPool) {
-    // Interactive talk: there is no persistent --print process. The pool spawns
-    // a warm interactive claude per session on demand. Mark ready (it accepts
-    // enqueues immediately) and pre-warm main so the common path skips the
-    // cold-start. Jobs (which still run via systemd-run) are unaffected.
+  if (MAIN_USES_POOL && talkPool) {
+    // claude cell: main rides the pool, so there is no persistent --print
+    // process. The pool spawns a warm interactive claude per session on demand.
+    // Mark ready (it accepts enqueues immediately) and pre-warm main so the
+    // common path skips the cold-start. Jobs (systemd-run) are unaffected. On a
+    // pi/codex cell the pool still exists (for claude-typed named sessions) but
+    // main spawns its own harness process below.
     harnessReady = true;
     broadcastToClients(JSON.stringify({ type: "bridge_ready" }));
     talkPool.prewarm(DEFAULT_SESSION);
@@ -1520,13 +1579,18 @@ function handleBridgeFrame(line: string) {
       }
       const prefixed = `[message from ${from} — your reply goes back to them] ${text}`;
       const leashMs = turnLeashMs((timeoutS || 180) * 1000);
-      if (talkPool) {
-        // claude-code: drive the named session in the warm interactive pool
-        // (cc_entrypoint=cli). The pool correlates the reply by corrId.
-        talkPool.enqueue(name, { corrId, from, leashMs, acc: "", text: prefixed });
+      // Resolve THIS session's harness (it may differ from the cell default):
+      // a claude-typed session rides the pool (cc_entrypoint=cli), pi/codex go
+      // per-turn through askInSession, all with the session's model + role.
+      const { harness: sh, adapter: sa, model, rolePreamble } = resolveSession(name);
+      if (sh === "claude-code" && talkPool) {
+        // claude (the cell default's pool, or a claude-typed session on a
+        // pi/codex cell): drive the named session in the warm interactive pool.
+        // The pool correlates the reply by corrId and applies model + role.
+        talkPool.enqueue(name, { corrId, from, leashMs, acc: "", text: prefixed, model, rolePreamble });
         return;
       }
-      if (ADAPTER.askInSession) {
+      if (sa.askInSession) {
         // pi/codex (and flag-off claude): per-turn DURABLE named session via
         // the adapter (`pi --print --session-id` / `codex exec resume`).
         // One-shot — no live streaming — so reply only by agent_response.
@@ -1534,22 +1598,22 @@ function handleBridgeFrame(line: string) {
         // and holds the cell awake for the duration.
         enqueueNamedTurn(name, async () => {
           const t0 = Date.now();
-          const result = await ADAPTER.askInSession!({ prompt: prefixed, session: name, cellName: NAME, timeoutMs: leashMs });
+          const result = await sa.askInSession!({ prompt: prefixed, session: name, cellName: NAME, timeoutMs: leashMs, model, rolePreamble });
           const dt = Date.now() - t0;
           if (result.ok) {
-            console.log(`[bridge] agent_response session=${name} corr=${corrId.slice(0, 10)} dt=${dt}ms text=${result.text.slice(0, 100).replace(/\n/g, " ")}`);
+            console.log(`[bridge] agent_response session=${name} harness=${sh} corr=${corrId.slice(0, 10)} dt=${dt}ms text=${result.text.slice(0, 100).replace(/\n/g, " ")}`);
             broadcastToClients(JSON.stringify({ type: "agent_response", in_reply_to: corrId, text: result.text }));
           } else {
-            console.error(`[bridge] askInSession failed session=${name} corr=${corrId.slice(0, 10)} dt=${dt}ms: ${result.error}`);
+            console.error(`[bridge] askInSession failed session=${name} harness=${sh} corr=${corrId.slice(0, 10)} dt=${dt}ms: ${result.error}`);
             broadcastToClients(JSON.stringify({ type: "agent_response", in_reply_to: corrId, text: `[error] ${result.error}` }));
           }
         });
         return;
       }
-      // No named-session primitive on this harness (hermes). Fail loudly — a
-      // silent fall-through to main would land a buyer's message in the wrong
-      // conversation.
-      broadcastToClients(JSON.stringify({ type: "agent_response", in_reply_to: corrId, text: `[error] this cell's harness (${HARNESS}) does not support named --session conversations` }));
+      // The session's harness has no named-session primitive (hermes, and no
+      // pool). Fail loudly — a silent fall-through to main would land a buyer's
+      // message in the wrong conversation.
+      broadcastToClients(JSON.stringify({ type: "agent_response", in_reply_to: corrId, text: `[error] session '${name}' harness (${sh}) does not support named --session conversations` }));
       return;
     }
     if (target === "main" || reqSession === "main") {
@@ -1592,58 +1656,51 @@ function handleBridgeFrame(line: string) {
     return;
   }
 
-  // Interactive talk pool: a prompt drives a named warm session (default main),
-  // bypassing the --print persistent process and its main-turn machinery
-  // entirely. The optional `session` field (stamped by the DO from a channel
-  // binding, or by `cells talk --session=<name>`) selects the session; absent →
-  // main, which is every existing inbound. The pool emits agent_start/busy
-  // itself when it dispatches the turn.
-  if (cmd?.type === "prompt" && talkPool) {
-    const raw = typeof cmd.message === "string" ? cmd.message : "";
-    const reqName =
-      cmd.session === undefined || cmd.session === null ? DEFAULT_SESSION : validateSessionName(cmd.session);
-    if (!reqName) {
-      broadcastToClients(JSON.stringify({
-        type: "response", id: cmd.id, command: "prompt",
-        success: false, error: `invalid session name: ${String(cmd.session).slice(0, 40)}`,
-      }));
-      return;
-    }
-    talkPool.enqueue(reqName, { corrId: null, from: null, leashMs: TALK_DEFAULT_LEASH_MS, acc: "", text: raw });
-    broadcastToClients(JSON.stringify({ type: "response", id: cmd.id, command: "prompt", success: true }));
-    return;
-  }
-
-  // Non-pool harness (pi/codex), raw interactive prompt targeting a NAMED
-  // session: it must never fall through to the persistent MAIN process below
-  // (that would land the message in main). Route it through the per-turn
-  // durable adapter and surface the one-shot answer as a normal streamed turn
-  // (agent_start → text_delta → agent_end) so the CLI/TUI renders it. main
-  // (default session) still uses the persistent path unchanged.
-  if (
-    cmd?.type === "prompt" && !talkPool &&
-    typeof cmd.session === "string" && cmd.session && cmd.session !== "main"
-  ) {
+  // Raw interactive prompt targeting a NAMED session (uniform-cell: per-session
+  // harness). The optional `session` field (stamped by the DO from a channel
+  // binding, or by `cells talk --session=<name>`) selects the session. It must
+  // never fall through to the persistent MAIN process below (that would land
+  // the message in main). Route by the SESSION's resolved harness: claude →
+  // the warm pool (cc_entrypoint=cli); pi/codex → per-turn askInSession,
+  // surfaced as a normal streamed turn (agent_start → text_delta → agent_end)
+  // so the CLI/TUI renders it. Works on ANY cell, regardless of its default.
+  if (cmd?.type === "prompt" && typeof cmd.session === "string" && cmd.session && cmd.session !== "main") {
     const reqName = validateSessionName(cmd.session);
     if (!reqName) {
       broadcastToClients(JSON.stringify({ type: "response", id: cmd.id, command: "prompt", success: false, error: `invalid session name: ${String(cmd.session).slice(0, 40)}` }));
       return;
     }
-    if (!ADAPTER.askInSession) {
-      broadcastToClients(JSON.stringify({ type: "response", id: cmd.id, command: "prompt", success: false, error: `this cell's harness (${HARNESS}) does not support named --session conversations` }));
+    const raw = typeof cmd.message === "string" ? cmd.message : "";
+    const { harness: sh, adapter: sa, model, rolePreamble } = resolveSession(reqName);
+    if (sh === "claude-code" && talkPool) {
+      talkPool.enqueue(reqName, { corrId: null, from: null, leashMs: TALK_DEFAULT_LEASH_MS, acc: "", text: raw, model, rolePreamble });
+      broadcastToClients(JSON.stringify({ type: "response", id: cmd.id, command: "prompt", success: true }));
       return;
     }
-    const raw = typeof cmd.message === "string" ? cmd.message : "";
+    if (!sa.askInSession) {
+      broadcastToClients(JSON.stringify({ type: "response", id: cmd.id, command: "prompt", success: false, error: `session '${reqName}' harness (${sh}) does not support named --session conversations` }));
+      return;
+    }
     broadcastToClients(JSON.stringify({ type: "response", id: cmd.id, command: "prompt", success: true }));
     // enqueueNamedTurn serializes same-name turns and owns busy/idle (so the
     // cell stays awake for the turn and isn't flipped idle mid-stream).
     enqueueNamedTurn(reqName, async () => {
       broadcastToClients(JSON.stringify({ type: "agent_start" }));
-      const result = await ADAPTER.askInSession!({ prompt: raw, session: reqName, cellName: NAME, timeoutMs: TALK_DEFAULT_LEASH_MS });
+      const result = await sa.askInSession!({ prompt: raw, session: reqName, cellName: NAME, timeoutMs: TALK_DEFAULT_LEASH_MS, model, rolePreamble });
       const delta = result.ok ? result.text : `[error] ${result.error}`;
       broadcastToClients(JSON.stringify({ type: "message_update", assistantMessageEvent: { type: "text_delta", delta } }));
       broadcastToClients(JSON.stringify({ type: "agent_end" }));
     });
+    return;
+  }
+
+  // Main / default-session raw prompt on a claude cell: drive main in the pool,
+  // bypassing the --print persistent process and its main-turn machinery. (A
+  // pi/codex cell's main falls through to its persistent/per-turn process.)
+  if (cmd?.type === "prompt" && MAIN_USES_POOL && talkPool) {
+    const raw = typeof cmd.message === "string" ? cmd.message : "";
+    talkPool.enqueue(DEFAULT_SESSION, { corrId: null, from: null, leashMs: TALK_DEFAULT_LEASH_MS, acc: "", text: raw });
+    broadcastToClients(JSON.stringify({ type: "response", id: cmd.id, command: "prompt", success: true }));
     return;
   }
 

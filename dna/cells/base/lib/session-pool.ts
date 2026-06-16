@@ -198,4 +198,10 @@ export type PendingTurn = {
   from: string | null;
   leashMs: number;
   acc: string; // accumulated assistant text (read at agent_end for corrId turns)
+  // Per-session overrides (uniform-cell): the model spec to launch this session's
+  // warm claude with (e.g. "anthropic/opus-4-8:medium") and the resolved role
+  // preamble (system prompt / "hat"). Absent → the cell's claude defaults. Applied
+  // at (re)launch by the pool, sticky for the warm session's lifetime.
+  model?: string;
+  rolePreamble?: string;
 };
