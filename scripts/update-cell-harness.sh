@@ -61,15 +61,27 @@ update_one() {
       # set -o pipefail in the REMOTE shell so a failed npm install isn't masked
       # by the `| tail` exit status (the outer pipefail doesn't reach inside
       # `bash -lc`). A masked failure would let postwork report OK with pi stale.
+      # Each well-exec failure MUST propagate via `|| return 1` — with `set -e`
+      # dropped (so the best-effort dormant loop can continue past a flake), the
+      # function's exit status would otherwise be whatever its LAST command
+      # returned. The `rm -f /usr/bin/pi` here makes a masked npm failure
+      # actively dangerous (binary removed, not replaced), so guard it explicitly.
       echo "updating pi on $EGG_WELL (→ @earendil-works, keeping @mariozechner libs) ..."
-      well exec -s "$EGG_WELL" -- bash -lc "set -o pipefail; sudo bash -c 'rm -f /usr/bin/pi; npm --prefix /usr install -g @earendil-works/pi-coding-agent' 2>&1 | tail -10"
+      well exec -s "$EGG_WELL" -- bash -lc "set -o pipefail; sudo bash -c 'rm -f /usr/bin/pi; npm --prefix /usr install -g @earendil-works/pi-coding-agent' 2>&1 | tail -10" \
+        || { echo "PI-INSTALL-FAIL: @earendil install failed on $EGG_WELL — /usr/bin/pi may be missing" >&2; return 1; }
+      # Confirm the install actually produced a runnable pi (the rm+install could
+      # report ok yet leave no usable binary) — the @mariozechner check below is
+      # NOT a proxy for this (it tests the RETAINED lib, present regardless).
+      well exec -s "$EGG_WELL" -- bash -lc "command -v pi >/dev/null && pi --version >/dev/null 2>&1 && echo PI-BIN-OK" \
+        || { echo "PI-BIN-FAIL: /usr/bin/pi not runnable after install on $EGG_WELL" >&2; return 1; }
       # The reinstall lands a PRISTINE pi-ai — the proxy baseUrl, fallback-chain,
       # codex, and adaptive-thinking patches are gone. Reapply them or an
       # Anthropic-on-Max cell silently reverts to direct api.anthropic.com (and,
       # with the paid key now stripped, breaks). apply-pi-patches.sh searches
       # both npm scopes, so it patches @earendil and the retained @mariozechner.
       echo "re-applying pi patches on $EGG_WELL ..."
-      well exec -s "$EGG_WELL" -- bash -lc "set -o pipefail; sudo bash /root/scripts/apply-pi-patches.sh 2>&1 | tail -5"
+      well exec -s "$EGG_WELL" -- bash -lc "set -o pipefail; sudo bash /root/scripts/apply-pi-patches.sh 2>&1 | tail -5" \
+        || { echo "PI-PATCH-FAIL: apply-pi-patches.sh failed on $EGG_WELL — pi may revert to direct api.anthropic.com" >&2; return 1; }
       # Verify the exact failure mode is closed: the file that ENOENT'd
       # (@mariozechner/pi-coding-agent's file-processor.js) still resolves from
       # pi's own /usr/lib location after the swap. Deterministic — no model call,

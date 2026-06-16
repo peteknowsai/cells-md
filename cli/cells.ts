@@ -9895,7 +9895,7 @@ sudo chown -R root:root /root/.cell/session-config`;
     );
     chainNote = `\n  + added '${chainEntry}' to the registry chain so the proxy allows opus on this ${cellHarness} cell`;
   }
-  console.log(`${name} session=${session} → ${entry}${chainNote}\n  (applies on the session's next (re)spawn — no supervisor restart needed)`);
+  console.log(`${name} session=${session} → ${entry}${chainNote}\n  (applies on the session's next turn — a warm pool session respawns to pick up the change; no supervisor restart needed)`);
 }
 
 async function cmdModel(args: string[]): Promise<void> {

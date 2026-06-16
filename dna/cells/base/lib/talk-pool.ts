@@ -62,11 +62,17 @@ type LiveSession = {
   name: SessionName;
   state: LiveSessionState;
   sock: string;
-  // Per-session model spec + role preamble (uniform-cell). Set from each
-  // enqueued turn so a config change is picked up on the NEXT (re)spawn; sticky
-  // for a warm session's lifetime. Empty/undefined → the cell's claude defaults.
+  // Per-session model spec + role preamble (uniform-cell). `model`/`rolePreamble`
+  // are the DESIRED values (refreshed from each enqueued turn's sidecar);
+  // `launchedModel`/`launchedRole` are what the warm process was actually spawned
+  // with. When they drift (operator ran `cells model --session`), pump() evicts
+  // and respawns BEFORE the next turn — claude can't switch model in-pane, so a
+  // respawn is the only way to honor the new config, and doing it on the next
+  // turn (not just on idle-eviction) makes the change take effect promptly.
   model?: string;
   rolePreamble?: string;
+  launchedModel?: string;
+  launchedRole?: string;
   claudeSessionId: string | null;
   transcriptPath: string | null;
   queue: PendingTurn[];
@@ -198,7 +204,18 @@ export class TalkPool {
       // spawn() pumps again on success; on failure it drains the queue with errors.
       return;
     }
-    if (s.state === "idle") this.startTurn(s);
+    if (s.state === "idle") {
+      // Config drifted (cells model --session) since this warm process launched?
+      // Evict + respawn so the next turn runs the new model/role — claude has no
+      // in-pane model switch, so the warm process must be replaced.
+      if ((s.model ?? "") !== (s.launchedModel ?? "") || (s.rolePreamble ?? "") !== (s.launchedRole ?? "")) {
+        this.deps.log(`talk-pool: ${s.name} model/role changed — respawning`);
+        this.evict(s, "model/role changed");
+        void this.pump(s); // now cold → spawn() with the new flags
+        return;
+      }
+      this.startTurn(s);
+    }
   }
 
   // Cold → spawning → idle. Resolves the durable id (create-on-first-use),
@@ -283,6 +300,11 @@ export class TalkPool {
     }
     s.state = "idle";
     s.lastTurnAt = nowMs();
+    // Record what this warm process was launched with, so pump() can detect a
+    // later cells-model-session config change and respawn (claude can't switch
+    // model in-pane).
+    s.launchedModel = s.model;
+    s.launchedRole = s.rolePreamble;
     this.deps.log(`talk-pool: ${s.name} warm`);
     void this.pump(s);
     if (s.state === "idle") this.armIdle(s);
