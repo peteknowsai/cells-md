@@ -10,6 +10,7 @@ import {
   claudeCodeAdapter,
   piAdapter,
   extractCodexJsonText,
+  extractCodexThreadId,
   getAdapter,
   type AdapterHost,
 } from "./harness-adapters";
@@ -327,6 +328,59 @@ test("extractCodexJsonText: skips non-JSON / non-object lines without throwing",
     "trailing garbage {not json",
   ].join("\n");
   expect(extractCodexJsonText(stdout)).toBe("answer");
+});
+
+// extractCodexThreadId — a named codex session persists this id from the
+// FIRST turn (thread.started) so later turns `codex exec resume <id>`.
+test("extractCodexThreadId: pulls thread_id from the thread.started event", () => {
+  const stdout = [
+    JSON.stringify({ type: "thread.started", thread_id: "th_abc123" }),
+    JSON.stringify({ type: "item.completed", item: { type: "agent_message", text: "hi" } }),
+    JSON.stringify({ type: "turn.completed" }),
+  ].join("\n");
+  expect(extractCodexThreadId(stdout)).toBe("th_abc123");
+});
+
+test("extractCodexThreadId: returns null when no thread.started is present", () => {
+  const stdout = [
+    JSON.stringify({ type: "turn.started" }),
+    JSON.stringify({ type: "item.completed", item: { type: "agent_message", text: "hi" } }),
+  ].join("\n");
+  expect(extractCodexThreadId(stdout)).toBeNull();
+});
+
+test("extractCodexThreadId: ignores a thread.started without a string thread_id, and survives garbage", () => {
+  const stdout = [
+    "starting codex…",
+    JSON.stringify({ type: "thread.started" }), // no thread_id
+    "{ not json",
+    JSON.stringify({ type: "thread.started", thread_id: "th_real" }),
+  ].join("\n");
+  expect(extractCodexThreadId(stdout)).toBe("th_real");
+});
+
+// askInSession presence is the per-adapter "supports named sessions"
+// capability the supervisor folds into NAMED_SESSIONS. pi/codex/claude have
+// it (durable per-turn or pool); hermes has no named-session primitive.
+test("askInSession capability: present on pi/codex/claude, absent on hermes", () => {
+  expect(typeof piAdapter.askInSession).toBe("function");
+  expect(typeof codexAdapter.askInSession).toBe("function");
+  expect(typeof claudeCodeAdapter.askInSession).toBe("function");
+  expect(hermesAdapter.askInSession).toBeUndefined();
+});
+
+// Defense in depth: the supervisor validates the session name, but each
+// adapter turns it into a filesystem path, so a bad name must be rejected
+// before any spawn (no traversal, no empty path segment).
+test("askInSession rejects an invalid session name before spawning", async () => {
+  for (const bad of ["../escape", "Buyer", "", "has space", "a".repeat(40)]) {
+    const rPi = await piAdapter.askInSession!({ prompt: "x", session: bad, cellName: "c" });
+    expect(rPi.ok).toBe(false);
+    const rCodex = await codexAdapter.askInSession!({ prompt: "x", session: bad, cellName: "c" });
+    expect(rCodex.ok).toBe(false);
+    const rClaude = await claudeCodeAdapter.askInSession!({ prompt: "x", session: bad, cellName: "c" });
+    expect(rClaude.ok).toBe(false);
+  }
 });
 
 test("codex thread id survives a full turn cycle (capture → resume)", () => {

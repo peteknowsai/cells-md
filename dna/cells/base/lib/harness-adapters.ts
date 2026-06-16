@@ -23,7 +23,7 @@
  */
 
 import { spawn } from "bun";
-import { copyFile, mkdir, rm, readdir } from "node:fs/promises";
+import { copyFile, mkdir, rm, readdir, readFile, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 
@@ -85,7 +85,38 @@ export interface HarnessAdapter {
   //   claude-code — main session UUID (the on-cell cache file content)
   //   codex       — main thread UUID
   forkAndAsk(opts: ForkAndAskOpts): Promise<ForkAndAskResult>;
+
+  // Ask one prompt in a DURABLE NAMED session, the harness-agnostic half of
+  // named sessions. forkAndAsk's sibling, but the session PERSISTS across
+  // turns instead of being discarded: a cell holds N independent durable
+  // conversations (main, buyer↔WhatsApp, staff↔Slack), each keyed by name.
+  //
+  // claude-code routes named sessions through the warm interactive POOL
+  // instead (cc_entrypoint=cli billing) — its askInSession is only the
+  // --print fallback used when CELLS_TALK_INTERACTIVE is off. pi/codex have
+  // no such billing split (gpt-5.5 on the ChatGPT sub, flat cost), so they
+  // use the simple per-turn `-p`/`exec` shape here — durable because the
+  // session DIR (pi) / THREAD id (codex) is stable per name, concurrent
+  // because each turn is its own process. hermes has no named-session
+  // primitive → askInSession is undefined (the supervisor rejects loudly).
+  // Optional: presence is the cell's "I support named sessions" capability.
+  askInSession?(opts: AskInSessionOpts): Promise<ForkAndAskResult>;
 }
+
+export interface AskInSessionOpts {
+  prompt: string;
+  // Validated session name ([a-z][a-z0-9_-]{0,31}); the supervisor validates
+  // before dispatch, and each adapter re-checks (defense in depth) before
+  // building a filesystem path from it.
+  session: string;
+  cellName: string;
+  timeoutMs?: number;
+}
+
+// Belt-and-suspenders: the supervisor validates the session name before it
+// reaches an adapter, but askInSession turns the name into a filesystem path
+// (pi session dir, codex thread file), so re-check here too.
+const SESSION_NAME_RE = /^[a-z][a-z0-9_-]{0,31}$/;
 
 export interface ForkAndAskOpts {
   prompt: string;
@@ -259,6 +290,48 @@ export const piAdapter: HarnessAdapter = {
       try { await rm(forkDir, { recursive: true, force: true }); } catch {}
     }
   },
+  // Durable NAMED session: a fresh `pi --print --session-dir <named-dir>`
+  // RESUMES the dir's prior conversation (verified live — turn 2 in a fresh
+  // process recalled a codeword planted in turn 1), so the conversation
+  // persists across turns and process restarts with no warm pool. Each name
+  // is its own dir → buyer/staff are independent and run concurrently.
+  //
+  // `-e codex-proxy`: a one-shot `pi --print` does NOT inherit the persistent
+  // RPC process's in-process provider-chain cursor, so without the proxy
+  // extension it dies "No API key found for openai-codex" (the pi-fork auth
+  // gap). The extension resolves the proxy bearer. No --thinking/billing
+  // concern: pi runs gpt-5.5 on the ChatGPT sub at flat cost.
+  async askInSession({ prompt, session, cellName, timeoutMs = 150_000 }) {
+    if (!SESSION_NAME_RE.test(session)) {
+      return { ok: false, error: `invalid session name: ${session.slice(0, 40)}` };
+    }
+    void cellName;
+    const sessDir = `/root/.pi/agent/sessions/named-${session}`;
+    const ext = "/root/.pi/extensions/codex-proxy/index.ts";
+    try {
+      await mkdir(sessDir, { recursive: true });
+      const r = await runProcess({
+        cmd: [
+          "pi",
+          "--print",
+          ...(existsSync(ext) ? ["-e", ext] : []),
+          "--session-dir", sessDir,
+          "--thinking", "off",
+          prompt,
+        ],
+        // pi resolves provider config + auth from the cwd's .pi/ — /root has
+        // the cell's, /root/site (the supervisor's cwd) does not.
+        cwd: "/root",
+        timeoutMs,
+      });
+      if (r.exitCode !== 0) {
+        return { ok: false, error: `pi exit ${r.exitCode}: ${r.stderr.slice(0, 200)}` };
+      }
+      return { ok: true, text: r.stdout.trim() };
+    } catch (e) {
+      return { ok: false, error: String(e).slice(0, 200) };
+    }
+  },
 };
 
 export const claudeCodeAdapter: HarnessAdapter = {
@@ -406,6 +479,48 @@ export const claudeCodeAdapter: HarnessAdapter = {
       try { await rm(dstPath, { force: true }); } catch {}
     }
   },
+  // Durable NAMED session for claude-code WITHOUT the warm pool — the
+  // --print fallback used only when CELLS_TALK_INTERACTIVE is off (the pool
+  // is the cc_entrypoint=cli path; this bills sdk-cli, same as main does
+  // when the flag is off). Shares the pool's registry (/root/.cell/sessions/
+  // <name>): first turn mints + asserts a uuid, later turns --resume it, so
+  // toggling the flag keeps the same durable conversation. The uuid is
+  // persisted only AFTER a successful create — never leave a registry id
+  // whose session was never born (mirrors the pool's roll-back-on-failure).
+  async askInSession({ prompt, session, cellName, timeoutMs = 300_000 }) {
+    if (!SESSION_NAME_RE.test(session)) {
+      return { ok: false, error: `invalid session name: ${session.slice(0, 40)}` };
+    }
+    void cellName;
+    const idFile = `/root/.cell/sessions/${session}`;
+    let id = "";
+    try { id = (await readFile(idFile, "utf8")).trim(); } catch { /* first use */ }
+    const created = !id;
+    if (created) id = crypto.randomUUID();
+    const sessFlag = created ? `--session-id '${id}'` : `--resume '${id}'`;
+    try {
+      if (created) await mkdir("/root/.cell/sessions", { recursive: true });
+      const r = await runProcess({
+        cmd: [
+          "bash", "-lc",
+          `export HOME=/root IS_SANDBOX=1; cd /root && exec claude --print ${sessFlag} --permission-mode bypassPermissions`,
+        ],
+        stdin: prompt,
+        timeoutMs,
+      });
+      if (r.exitCode !== 0) {
+        return { ok: false, error: `claude exit ${r.exitCode}: ${r.stderr.slice(0, 200)}` };
+      }
+      const text = r.stdout.trim();
+      if (text.includes("Not logged in")) {
+        return { ok: false, error: `claude not authenticated (bash -lc env miss?): ${text.slice(0, 200)}` };
+      }
+      if (created) { try { await writeFile(idFile, id); } catch { /* best effort */ } }
+      return { ok: true, text };
+    } catch (e) {
+      return { ok: false, error: String(e).slice(0, 200) };
+    }
+  },
 };
 
 export const codexAdapter: HarnessAdapter = {
@@ -539,7 +654,64 @@ export const codexAdapter: HarnessAdapter = {
       try { await rm(dstPath, { force: true }); } catch {}
     }
   },
+  // Durable NAMED session: a per-name codex THREAD. First turn starts a fresh
+  // thread and persists its id to /root/.cell/codex-session-<name>-thread;
+  // later turns `codex exec resume <id>` continue it. Each name → its own
+  // thread file → buyer/staff never cross, and concurrent turns are separate
+  // `codex exec` processes. No billing split (codex on the ChatGPT sub).
+  async askInSession({ prompt, session, cellName, timeoutMs = 90_000 }) {
+    if (!SESSION_NAME_RE.test(session)) {
+      return { ok: false, error: `invalid session name: ${session.slice(0, 40)}` };
+    }
+    void cellName;
+    const flags = "--json --skip-git-repo-check --dangerously-bypass-approvals-and-sandbox";
+    const threadFile = `/root/.cell/codex-session-${session}-thread`;
+    let threadId = "";
+    try { threadId = (await readFile(threadFile, "utf8")).trim(); } catch { /* first use */ }
+    try {
+      const cmd = threadId
+        ? ["bash", "-lc", `export HOME=/root; cd /root && exec codex exec resume "$1" ${flags} "$2" </dev/null`, "codex-named", threadId, prompt]
+        : ["bash", "-lc", `export HOME=/root; cd /root && exec codex exec ${flags} "$1" </dev/null`, "codex-named", prompt];
+      const r = await runProcess({ cmd, timeoutMs });
+      if (r.exitCode !== 0) {
+        return { ok: false, error: `codex exit ${r.exitCode}: ${r.stderr.slice(0, 200)}` };
+      }
+      const text = extractCodexJsonText(r.stdout);
+      if (text === null) {
+        return { ok: false, error: `codex emitted no agent_message; stderr: ${r.stderr.slice(0, 200)}` };
+      }
+      // First turn only: capture + persist the new thread id so the next turn
+      // resumes this exact conversation. Persist after a successful answer.
+      if (!threadId) {
+        const newId = extractCodexThreadId(r.stdout);
+        if (newId) {
+          try { await mkdir("/root/.cell", { recursive: true }); await writeFile(threadFile, newId); } catch { /* best effort */ }
+        }
+      }
+      return { ok: true, text };
+    } catch (e) {
+      return { ok: false, error: String(e).slice(0, 200) };
+    }
+  },
 };
+
+// `codex exec --json` emits a `thread.started` event carrying the new
+// thread's id. Pull it out of the JSONL stdout so a named session can persist
+// the id and resume the same thread next turn. Returns null if absent.
+// Exported for the harness-adapters tests.
+export function extractCodexThreadId(stdout: string): string | null {
+  for (const raw of stdout.split(/\r?\n/)) {
+    const line = raw.trim();
+    if (!line || line[0] !== "{") continue;
+    try {
+      const evt = JSON.parse(line);
+      if (evt?.type === "thread.started" && typeof evt?.thread_id === "string") {
+        return evt.thread_id;
+      }
+    } catch { /* not JSON — skip */ }
+  }
+  return null;
+}
 
 // Locate the codex rollout file whose filename ends in <threadUuid>.jsonl.
 // Scans /root/.codex/sessions/YYYY/MM/DD/ for the latest match.
