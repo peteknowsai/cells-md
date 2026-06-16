@@ -9809,11 +9809,113 @@ async function cmdChain(args: string[]): Promise<void> {
 // cells chat on openai-codex/gpt-5.5:low; depth comes from the deep_research
 // tool, not the chat path. The Max policy still applies — anthropic
 // conversation models are claude-code-harness-only.
+// Per-session model/harness (uniform-cell): write the sidecar config the cell's
+// supervisor reads at dispatch (/root/.cell/session-config/<session>.json =
+// {harness?, model, role?}), so one cell runs a pi/gpt-5.5 buyer session and a
+// claude/opus staff session. When a session is set to claude on a non-claude
+// cell, also add a `claude-code:anthropic/*` entry to the cell's registry chain
+// so the proxy's Max-policy gate allows the Anthropic route (the mother pattern).
+const SESSION_NAME_RE = /^[a-z][a-z0-9_-]{0,31}$/;
+async function setSessionModel(
+  name: string,
+  cellHarness: string,
+  session: string,
+  entry: string | undefined,
+  role: string,
+): Promise<void> {
+  if (!SESSION_NAME_RE.test(session)) {
+    console.error(`bad --session name '${session}' — want [a-z][a-z0-9_-]{0,31}`);
+    process.exit(1);
+  }
+  if (role && !SESSION_NAME_RE.test(role)) {
+    console.error(`bad --role '${role}' — want [a-z][a-z0-9_-]{0,31}`);
+    process.exit(1);
+  }
+  const wellName = await wellNameForCell(name);
+
+  if (!entry) {
+    const r = await wellExecCapture(wellName, `cat /root/.cell/session-config/${session}.json 2>/dev/null || echo '(no per-session config — uses the cell default harness/model)'`);
+    console.log(`${name} session=${session}:`);
+    console.log("  " + (r.ok ? r.stdout.trim() : "(live config unreadable — well may be asleep)"));
+    return;
+  }
+
+  // Parse [<harness>:]<provider>/<model>:<effort>  (provider optional).
+  let sessionHarness = "";
+  let spec = entry;
+  const hm = entry.match(/^(pi|claude-code|codex):(.+)$/);
+  if (hm) { sessionHarness = hm[1]!; spec = hm[2]!; }
+  const sm = spec.match(/^(?:([a-z0-9-]+)\/)?[A-Za-z0-9.:_-]+?:(minimal|low|medium|high|xhigh|max|off|none)$/);
+  if (!sm) {
+    console.error(`bad model spec '${spec}' — want [<harness>:]<provider>/<model>:<effort>, e.g. claude-code:anthropic/opus-4-8:medium`);
+    process.exit(1);
+  }
+  const effHarness = sessionHarness || cellHarness;
+  if (effHarness !== "pi" && effHarness !== "claude-code" && effHarness !== "codex") {
+    console.error(`session harness '${effHarness}' not supported (pi | claude-code | codex)`);
+    process.exit(1);
+  }
+  const provider = sm[1] ?? "";
+  if (provider === "anthropic" && effHarness !== "claude-code") {
+    console.error(`anthropic models run on a claude-code session — use: cells model ${name} --session=${session} claude-code:${spec}`);
+    process.exit(1);
+  }
+  if (provider && provider !== "anthropic" && effHarness === "claude-code") {
+    console.error(`a claude-code session only runs anthropic models — '${spec}' would be unrunnable`);
+    process.exit(1);
+  }
+
+  const cfg: Record<string, string> = { model: spec };
+  if (sessionHarness) cfg.harness = sessionHarness;
+  if (role) cfg.role = role;
+  const cfgJson = JSON.stringify(cfg); // values are validated → no shell metachars
+
+  const writeScript = `set -euo pipefail
+sudo mkdir -p /root/.cell/session-config
+printf '%s' '${cfgJson}' | sudo tee /root/.cell/session-config/${session}.json >/dev/null
+sudo chown -R root:root /root/.cell/session-config`;
+  const r = await wellExecCapture(wellName, writeScript);
+  if (!r.ok) {
+    console.error(`writing session config failed: ${(r.stderr || r.stdout).slice(0, 300)}`);
+    process.exit(1);
+  }
+
+  // Proxy-gate opener: a claude session on a non-claude cell needs a
+  // claude-code:anthropic/* chain entry or anthropicRouteVerdict 403s it.
+  let chainNote = "";
+  if (effHarness === "claude-code" && cellHarness !== "claude-code") {
+    const chainEntry = `claude-code:${spec}`;
+    await mutateRegistry((cells) =>
+      cells.map((c) => {
+        if (c.name !== name) return c;
+        const chain: string[] = Array.isArray(c.modelChain) ? [...c.modelChain] : [];
+        if (!chain.some((e) => e.startsWith("claude-code:anthropic/"))) chain.push(chainEntry);
+        return { ...c, modelChain: chain };
+      }),
+    );
+    chainNote = `\n  + added '${chainEntry}' to the registry chain so the proxy allows opus on this ${cellHarness} cell`;
+  }
+  console.log(`${name} session=${session} → ${entry}${chainNote}\n  (applies on the session's next (re)spawn — no supervisor restart needed)`);
+}
+
 async function cmdModel(args: string[]): Promise<void> {
-  const name = args[0];
+  // Pull optional flags out first so positionals stay [cell, entry].
+  // --session=<name> sets a PER-SESSION model/harness (uniform-cell), --role=<name>
+  // overrides the role file the session reads (defaults to the session name).
+  let sessionFlag = "";
+  let roleFlag = "";
+  const pos: string[] = [];
+  for (const a of args) {
+    if (a.startsWith("--session=")) sessionFlag = a.slice("--session=".length);
+    else if (a.startsWith("--role=")) roleFlag = a.slice("--role=".length);
+    else pos.push(a);
+  }
+  const name = pos[0];
   if (!name) {
     console.error("usage: cells model <cell> [<provider>/<model>:<thinking>]");
     console.error("  e.g. cells model advisor-pete openai-codex/gpt-5.5:low");
+    console.error("  per-session: cells model <cell> --session=staff [<harness>:]<provider>/<model>:<effort>");
+    console.error("  e.g. cells model advisor-pete --session=staff claude-code:anthropic/opus-4-8:medium");
     process.exit(1);
   }
   const cell = findCellIn((await loadRegistry()).cells, name);
@@ -9822,7 +9924,10 @@ async function cmdModel(args: string[]): Promise<void> {
     process.exit(1);
   }
   const harness = cell.harness ?? "pi";
-  const entry = args[1];
+
+  if (sessionFlag) { await setSessionModel(name, harness, sessionFlag, pos[1], roleFlag); return; }
+
+  const entry = pos[1];
 
   if (!entry) {
     console.log(`${name} (harness=${harness})`);
