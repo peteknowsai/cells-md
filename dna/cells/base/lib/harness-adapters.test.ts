@@ -489,12 +489,17 @@ test("buildClaudeNamedCmd: model → --model, role → --append-system-prompt at
   expect(plain).not.toContain("--append-system-prompt");
 });
 
-test("buildPiNamedCmd: effort → --thinking level; default off (role is prompt-prefixed in askInSession)", () => {
-  expect(buildPiNamedCmd("staff", "p", "", "high")[2]).toContain("--thinking high");
-  // default: thinking off (today's behavior); no role flag (pi role is established
-  // via first-turn prompt prefix in askInSession, not a CLI flag)
+test("buildPiNamedCmd: per-session model → --model (pins provider/id + effort); no model → --thinking off", () => {
+  // model spec carries provider/id:thinking — pins the session's model even on a
+  // non-pi cell (the uniform-cell case that else inherits the wrong cell default)
+  const m = buildPiNamedCmd("buyer", "p", "", "openai-codex/gpt-5.5:low")[2];
+  expect(m).toContain("--model openai-codex/gpt-5.5:low");
+  expect(m).not.toContain("--thinking");
+  // no model: cell's pi model + --thinking off (buyer-fast default); role is
+  // first-turn-prefixed in askInSession, never a flag here
   const plain = buildPiNamedCmd("buyer", "p", "")[2];
   expect(plain).toContain("--thinking off");
+  expect(plain).not.toContain("--model");
   expect(plain).not.toContain("CELL_SESSION_ROLE");
 });
 

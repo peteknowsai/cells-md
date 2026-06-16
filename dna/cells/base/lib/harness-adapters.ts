@@ -186,25 +186,30 @@ export function codexModelFlag(spec: string): string {
 
 // pi: a stable per-name --session-id makes a fresh `pi --print` resume exactly
 // this conversation. extPath="" omits the proxy extension flag. Prompt → "$1".
-// thinking maps the session's effort to pi's --thinking level (default "off"
-// keeps buyer chat fast). The role "hat" is NOT a flag here — pi has no reliable
-// per-invocation system-prompt seam (and whether `-e` adds-to or replaces the
-// configured extensions is version-dependent), so the role is established by
-// prepending it to the FIRST turn's prompt in askInSession (same as codex). pi
-// MODEL stays the cell's pi model — vary the cell model to change it.
+// model is the validated cells spec ("openai-codex/gpt-5.5:low") — pi's
+// `--model` takes exactly "provider/id:thinking", so it pins the session's model
+// AND carries the effort; without it (no per-session model) the cell's pi model
+// is used with --thinking. This is load-bearing for the uniform cell: a pi
+// session on a NON-pi cell would otherwise inherit that cell's pi default (e.g.
+// anthropic on a claude cell → proxy 403). The role "hat" is NOT a flag — pi has
+// no reliable per-invocation system-prompt seam — so it's prepended to the FIRST
+// turn's prompt in askInSession (same as codex). model is validateModelSpec-clean
+// (no shell metacharacters), safe to interpolate.
 export function buildPiNamedCmd(
   session: string,
   prompt: string,
   extPath: string,
+  model = "",
   thinking = "off",
 ): string[] {
   const sessDir = `/root/.pi/agent/sessions/named-${session}`;
   const sessId = `named-${session}`;
   const eFlag = extPath ? `-e ${extPath}` : "";
+  const modelFlag = model ? `--model ${model}` : `--thinking ${thinking}`;
   return [
     "bash", "-lc",
     `export HOME=/root; cd /root && mkdir -p ${sessDir} && ` +
-    `exec pi --print ${eFlag} --session-dir ${sessDir} --session-id ${sessId} --thinking ${thinking} "$1"`,
+    `exec pi --print ${eFlag} --session-dir ${sessDir} --session-id ${sessId} ${modelFlag} "$1"`,
     "pi-named",
     prompt,
   ];
@@ -448,8 +453,6 @@ export const piAdapter: HarnessAdapter = {
     }
     void cellName;
     const ext = "/root/.pi/extensions/codex-proxy/index.ts";
-    // pi MODEL stays the cell's pi model; only the effort maps to --thinking.
-    const thinking = model ? (parseModelSpec(model).effort || "off") : "off";
     // Establish the role "hat" once, on the first turn (the session dir doesn't
     // exist yet — buildPiNamedCmd's mkdir creates it). Later turns resume and
     // already carry it. Mirrors the codex first-turn-prepend.
@@ -457,7 +460,9 @@ export const piAdapter: HarnessAdapter = {
     const p = (rolePreamble && !existsSync(sessDir)) ? `${rolePreamble}\n\n---\n\n${prompt}` : prompt;
     try {
       const r = await runProcess({
-        cmd: buildPiNamedCmd(session, p, existsSync(ext) ? ext : "", thinking),
+        // model (cells spec) → pi --model, which pins provider/id and carries
+        // effort; absent → cell pi model + --thinking off.
+        cmd: buildPiNamedCmd(session, p, existsSync(ext) ? ext : "", model ?? ""),
         timeoutMs,
       });
       if (r.exitCode !== 0) {
