@@ -489,15 +489,13 @@ test("buildClaudeNamedCmd: model → --model, role → --append-system-prompt at
   expect(plain).not.toContain("--append-system-prompt");
 });
 
-test("buildPiNamedCmd: role → base64 env for use-max, effort → --thinking", () => {
-  const cmd = buildPiNamedCmd("staff", "p", "", "You are staff.", "high");
-  expect(cmd[2]).toContain("CELL_SESSION_ROLE_B64=");
-  expect(cmd[2]).toContain(Buffer.from("You are staff.", "utf8").toString("base64"));
-  expect(cmd[2]).toContain("--thinking high");
-  // default: no role export, thinking off (today's behavior)
+test("buildPiNamedCmd: effort → --thinking level; default off (role is prompt-prefixed in askInSession)", () => {
+  expect(buildPiNamedCmd("staff", "p", "", "high")[2]).toContain("--thinking high");
+  // default: thinking off (today's behavior); no role flag (pi role is established
+  // via first-turn prompt prefix in askInSession, not a CLI flag)
   const plain = buildPiNamedCmd("buyer", "p", "")[2];
-  expect(plain).not.toContain("CELL_SESSION_ROLE_B64");
   expect(plain).toContain("--thinking off");
+  expect(plain).not.toContain("CELL_SESSION_ROLE");
 });
 
 test("buildCodexNamedCmd: model → -m flag; role prepended only on the fresh first turn", () => {

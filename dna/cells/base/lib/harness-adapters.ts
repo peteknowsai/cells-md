@@ -186,28 +186,24 @@ export function codexModelFlag(spec: string): string {
 
 // pi: a stable per-name --session-id makes a fresh `pi --print` resume exactly
 // this conversation. extPath="" omits the proxy extension flag. Prompt → "$1".
-// rolePreamble (the session's "hat") rides as a base64 env var that use-max
-// decodes and appends to its composed system prompt (pi has no --system flag;
-// use-max is the system-prompt composer, so the role lands cleanly, not in the
-// turn text). thinking maps the session's effort to pi's --thinking level
-// (default "off" keeps buyer chat fast). pi MODEL stays the cell's pi model —
-// pi --print has no model flag here; vary the cell model to change it.
+// thinking maps the session's effort to pi's --thinking level (default "off"
+// keeps buyer chat fast). The role "hat" is NOT a flag here — pi has no reliable
+// per-invocation system-prompt seam (and whether `-e` adds-to or replaces the
+// configured extensions is version-dependent), so the role is established by
+// prepending it to the FIRST turn's prompt in askInSession (same as codex). pi
+// MODEL stays the cell's pi model — vary the cell model to change it.
 export function buildPiNamedCmd(
   session: string,
   prompt: string,
   extPath: string,
-  rolePreamble = "",
   thinking = "off",
 ): string[] {
   const sessDir = `/root/.pi/agent/sessions/named-${session}`;
   const sessId = `named-${session}`;
   const eFlag = extPath ? `-e ${extPath}` : "";
-  const roleExport = rolePreamble
-    ? `export CELL_SESSION_ROLE_B64=${Buffer.from(rolePreamble, "utf8").toString("base64")}; `
-    : "";
   return [
     "bash", "-lc",
-    `export HOME=/root; ${roleExport}cd /root && mkdir -p ${sessDir} && ` +
+    `export HOME=/root; cd /root && mkdir -p ${sessDir} && ` +
     `exec pi --print ${eFlag} --session-dir ${sessDir} --session-id ${sessId} --thinking ${thinking} "$1"`,
     "pi-named",
     prompt,
@@ -454,9 +450,14 @@ export const piAdapter: HarnessAdapter = {
     const ext = "/root/.pi/extensions/codex-proxy/index.ts";
     // pi MODEL stays the cell's pi model; only the effort maps to --thinking.
     const thinking = model ? (parseModelSpec(model).effort || "off") : "off";
+    // Establish the role "hat" once, on the first turn (the session dir doesn't
+    // exist yet — buildPiNamedCmd's mkdir creates it). Later turns resume and
+    // already carry it. Mirrors the codex first-turn-prepend.
+    const sessDir = `/root/.pi/agent/sessions/named-${session}`;
+    const p = (rolePreamble && !existsSync(sessDir)) ? `${rolePreamble}\n\n---\n\n${prompt}` : prompt;
     try {
       const r = await runProcess({
-        cmd: buildPiNamedCmd(session, prompt, existsSync(ext) ? ext : "", rolePreamble ?? "", thinking),
+        cmd: buildPiNamedCmd(session, p, existsSync(ext) ? ext : "", thinking),
         timeoutMs,
       });
       if (r.exitCode !== 0) {
