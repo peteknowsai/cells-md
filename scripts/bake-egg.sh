@@ -138,6 +138,20 @@ tar czf - -C "$REPO_ROOT/dna/cells/base" . \
   # checked out (git mode bits don't always survive every clone/zip path).
   echo "sudo chmod +x /root/bin/* 2>/dev/null || true"
 
+  echo "# ===node-gyp self-heal (stale eggs predating the 5d bake) ==="
+  # Freshly-baked eggs ship node-gyp (provisionCellInWell step 5d), but eggs
+  # baked before that change don't. Stoolap-backed market cells need it to
+  # compile the @stoolap/node NAPI bridge at store-mint. Best-effort + NON-fatal
+  # (unlike the hermes self-heal, which exits 1): a non-market cell never
+  # touches node-gyp, and a market cell's own self-config can still recover —
+  # don't tank a birth over it. Pinned to 12.x to match the bake (node-gyp 13
+  # needs Node >=22.22.2; the egg ships 22.11.0). No-op + no network once the
+  # pool has cycled to node-gyp-bearing eggs.
+  echo "if ! command -v node-gyp >/dev/null 2>&1; then"
+  echo "  echo '  node-gyp missing on this egg — installing…'"
+  echo "  sudo npm install -g node-gyp@12 >/dev/null 2>&1 || echo '  node-gyp install failed (non-fatal)'"
+  echo "fi"
+
   # ===dna rev stamp ===
   # Record the runtime-DNA rev the overlay above landed at. The doctor
   # compares this against the repo's current rev; the steward refreshes a

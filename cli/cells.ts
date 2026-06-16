@@ -4196,6 +4196,24 @@ echo "hermes: $(sudo bash -lc 'export HOME=/root; hermes --version' 2>&1 | head 
   if (!hermesInstall.ok) {
     throw new Error(`hermes install failed: ${(hermesInstall.stderr + hermesInstall.stdout).slice(-600)}`);
   }
+  // 5d. node-gyp bake — Stoolap-backed market cells (zero-<market>) mint their
+  //     on-cell store via the @stoolap/node NAPI module, whose npm/bun install
+  //     runs `node-gyp rebuild` to compile a small bridge before dlopen'ing
+  //     libstoolap.so. The egg ships cc/make/python3/node/bun but NOT node-gyp,
+  //     so the store mint dies at birth without it. Bake it globally so the
+  //     bridge compiles with no extra build+network step on the birth hot path.
+  //     Pinned to 12.x: node-gyp 13 declares engines ^22.22.2, but the egg
+  //     ships Node 22.11.0 (bakeInstallSystemTools); 12.x needs >=22.9.0 —
+  //     compatible. Bump this alongside the egg's NODE_VERSION.
+  const nodeGypInstall = await wellExecCapture(
+    wellName,
+    `set -euo pipefail
+sudo npm install -g node-gyp@12
+echo "node-gyp: $(sudo bash -lc 'export HOME=/root; node-gyp --version' 2>&1 | head -1 || echo MISSING)"`,
+  );
+  if (!nodeGypInstall.ok) {
+    throw new Error(`node-gyp install failed: ${(nodeGypInstall.stderr + nodeGypInstall.stdout).slice(-600)}`);
+  }
   // 6. Apply pi patches with sudo (writes into /usr/lib/node_modules).
   const patch = await wellExecCapture(wellName, `sudo bash /root/scripts/apply-pi-patches.sh`);
   if (!patch.ok) {
