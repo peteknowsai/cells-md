@@ -22,6 +22,10 @@
   </div>
 
   <div class="callout">
+    <p><strong>Status — built on <code>feature/uniform-multi-harness-cell</code> (broad scope, 2026-06-16).</strong> The full per-session primitive ships, not a pi+claude special-case: any of pi/claude/codex as any session, on any cell. Per-session config sidecar; supervisor per-session dispatch + pool decoupling; per-session model + role through both the pool and <code>askInSession</code>; memory convergence; <code>cells&nbsp;model&nbsp;--session</code> + the auto chain-entry; all-three binary currency. 482 unit tests; a 6-dimension adversarial review (14 verify agents) found 2 real bugs, both fixed (pi-update failure masking; warm-session model-drift respawn). <strong>Q1/Q2 (Slack→<code>staff</code> routing, <code>--channels=slack:staff</code> at birth) is a SEPARATE branch — <a href="https://github.com/">PR #22</a></strong> — and composes at runtime: a Slack-bound <code>staff</code> session configured here to claude/opus. <strong>Decided:</strong> staff-opus on the subscription pool (not metered); memory fully shared; binary currency = birth-all-three + steward sweep.</p>
+  </div>
+
+  <div class="callout">
     <p><strong>The simplification that makes this tractable.</strong> Named sessions <em>do not</em> need a second long-running harness process. <code>main</code> uses the cell's persistent process; named sessions already dispatch <strong>per-turn</strong> — pi via <code>pi&nbsp;--print&nbsp;--session-id</code>, claude via the warm tmux pool, codex via <code>codex&nbsp;exec&nbsp;resume</code>. So "two harnesses on one cell" is never "two daemons fighting" — it's <code>main</code> on the default harness plus named sessions that each pick their harness at dispatch. This sidesteps every hard ("large"-rated) part of the problem: no dual-process boot, no multi-harness main loop.</p>
   </div>
 
@@ -105,13 +109,15 @@ CLI/peer ─► main  ────►│  cell default harness (persistent proce
     <li><strong>Docs + rollout.</strong> Update this doc + <a href="named-sessions.html">named-sessions</a>; refresh fleet; memory update.</li>
   </ol>
 
-  <h2>Open decisions for Pete</h2>
-  <ul>
-    <li><strong>Billing for staff-opus — resolved by the reframe.</strong> Pool (subscription, <code>cli</code>), not metered <code>--print</code>. The only cost is RAM (~1.9 GB per warm claude, pay-as-you-go — a buyer-only advisor never warms claude; <code>WARM_CAP=3</code> + 15-min idle-TTL still load-bearing).</li>
-    <li><strong>Scope now.</strong> Recommend tight: prove <code>pi-main/buyer + pooled claude/opus staff</code> on one cell end-to-end before making all three harnesses bulletproof in every path.</li>
-    <li><strong>Binary-currency mechanism.</strong> Steward periodic sweep (predictable) vs ensure-current-on-activate (lazy, faster) — recommend both: sweep for steady-state, lazy check as the safety net before a dormant harness's first turn.</li>
-    <li><strong>Per-session memory.</strong> Fully shared (recommended — it's the point) vs namespaced per session. Shared.</li>
-  </ul>
+  <h2>Rollout</h2>
+  <p>Mirrors the named-sessions rollout, and is <strong>safe by construction</strong>: with no per-session sidecar present, every code path falls back to the cell's default harness — so a refreshed cell behaves exactly as before until someone runs <code>cells model --session</code>. Order:</p>
+  <ol>
+    <li><strong>Merge order.</strong> Land this branch and <a href="#">PR #22</a> (channel→session). They touch mostly different files; the only shared file is <code>cli/cells.ts</code> (this branch's <code>cmdModel</code> vs #22's <code>parseCreateArgs</code> — non-overlapping functions).</li>
+    <li><strong>Fleet refresh.</strong> <code>cells refresh --all</code> ships the new supervisor + adapters + libs + bootstrap; the steward does the same within 30&nbsp;min. The pool decoupling means even pi/codex cells now instantiate a (lazy) pool — inert until a claude session enqueues.</li>
+    <li><strong>Worker redeploy</strong> only if PR #22 changes the DO/worker capability surface (this branch does not touch the DO).</li>
+    <li><strong>Per-advisor wiring (Zero).</strong> On a clean-born advisor: <code>cells model &lt;cell&gt; --session=staff claude-code:anthropic/opus-4-8:medium</code> (auto-adds the chain entry) and <code>--session=buyer openai-codex/gpt-5.5:low</code>; drop a <code>roles/staff.md</code> + <code>roles/buyer.md</code> hat; bind Slack→<code>staff</code> via #22's <code>--channels=slack:staff</code>. Verify: a staff turn bills <code>cc_entrypoint=cli</code> (proxy attribution), buyer stays gpt-5.5, both isolated, memory shared.</li>
+    <li><strong>Binary currency</strong> rides birth automatically (all three current on a fresh cell); the steward keeps long-lived cells current.</li>
+  </ol>
 
   <h2>Risks</h2>
   <ul>
