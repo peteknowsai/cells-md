@@ -73,14 +73,17 @@ const ADAPTER: HarnessAdapter = getAdapter(HARNESS);
 // CLI's capability gate matches reality) and used to gate startJobAttempt.
 const JOBS_INTERACTIVE = HARNESS === "claude-code" && process.env.CELLS_JOBS_INTERACTIVE !== "0";
 
-// Whether THIS cell runs TALK through warm interactive sessions (the pool)
-// instead of the always-on `claude --print` process — so every talk turn bills
-// cc_entrypoint=cli (the interactive subscription pool, not the metered
-// Agent-SDK credit) and the cell can hold several named durable conversations
-// at once (main, buyer↔WhatsApp, staff↔Slack). OPT-IN (=== "1") during rollout
-// so it soaks on one cell and rolls back independently of jobs; the default
-// flips once proven. claude-code only — pi/codex/hermes keep their own models.
-const TALK_INTERACTIVE = HARNESS === "claude-code" && process.env.CELLS_TALK_INTERACTIVE === "1";
+// Whether THIS cell runs the DURABLE talk paths through warm interactive
+// sessions (the pool) instead of the always-on `claude --print` process — so
+// main (Slack/email/CLI/--main) and named sessions (buyer↔WhatsApp, staff↔Slack)
+// bill cc_entrypoint=cli (the interactive subscription pool, not the metered
+// Agent-SDK credit) and the cell can hold several durable conversations at once.
+// NOTE: the throwaway FORK path (default one-shot `cells talk`, peer RPC, verify)
+// still runs `claude --print` via forkAndAsk — converting it to an interactive
+// fork is a follow-up (it has a latency tradeoff on verify fan-out). DEFAULT-ON
+// for claude-code (opt OUT with CELLS_TALK_INTERACTIVE=0), like jobs; pi/codex/
+// hermes keep their own models.
+const TALK_INTERACTIVE = HARNESS === "claude-code" && process.env.CELLS_TALK_INTERACTIVE !== "0";
 // Leash for a raw interactive prompt with no sender-supplied budget.
 const TALK_DEFAULT_LEASH_MS = 5 * 60 * 1000;
 

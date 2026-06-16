@@ -431,7 +431,10 @@ export class TalkPool {
     if (turn?.corrId) {
       this.deps.broadcast(JSON.stringify({ type: "agent_response", in_reply_to: turn.corrId, text: msg }));
     } else {
-      this.deps.broadcast(JSON.stringify({ type: "response", success: false, error: msg }));
+      // Raw channel turn: the DO renders message_update text, not `response`
+      // frames — so a crash/leash error has to ride a text_delta or the user
+      // just sees *(no response)*. agent_start was already emitted in startTurn.
+      this.deps.broadcast(JSON.stringify({ type: "message_update", assistantMessageEvent: { type: "text_delta", delta: msg } }));
       this.deps.broadcast(JSON.stringify({ type: "agent_end" }));
     }
   }
@@ -442,7 +445,11 @@ export class TalkPool {
       if (t.corrId) {
         this.deps.broadcast(JSON.stringify({ type: "agent_response", in_reply_to: t.corrId, text: `[error] ${msg}` }));
       } else {
-        this.deps.broadcast(JSON.stringify({ type: "response", success: false, error: `[error] ${msg}` }));
+        // These turns never started (spawn failed), so no agent_start fired.
+        // Emit a whole rendered turn (start → error text → end) so a channel
+        // user sees the failure instead of silence.
+        this.deps.broadcast(JSON.stringify({ type: "agent_start" }));
+        this.deps.broadcast(JSON.stringify({ type: "message_update", assistantMessageEvent: { type: "text_delta", delta: `[error] ${msg}` } }));
         this.deps.broadcast(JSON.stringify({ type: "agent_end" }));
       }
     }

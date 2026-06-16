@@ -15,10 +15,10 @@
   </div>
 
   <h1>Named Durable Sessions + Interactive Talk</h1>
-  <p class="subtitle">Replace the cell's single <code>claude&nbsp;--print</code> talk process with a pool of warm, genuinely interactive sessions — so all talk bills the interactive subscription pool, and one cell can hold several independent durable conversations at once.</p>
+  <p class="subtitle">Replace the cell's single <code>claude&nbsp;--print</code> talk process with a pool of warm, genuinely interactive sessions — so the <em>durable</em> talk paths (main + named sessions) bill the interactive subscription pool, and one cell can hold several independent durable conversations at once.</p>
 
   <div class="callout">
-    <p><strong>Status — shipped behind a flag, soaking on delta-market (2026-06-15).</strong> Interactive talk + named durable sessions work end-to-end: <code>cells talk &lt;cell&gt; --session=buyer</code> drives a durable conversation isolated from <code>main</code> and <code>staff</code>; the warm cap (3) LRU-evicts; <code>cc_entrypoint=cli</code> by construction (no <code>--print</code>). Gated <code>CELLS_TALK_INTERACTIVE=1</code> — opt-in until the soak earns a fleet-wide default-on. The plain <code>--print</code> path is byte-for-byte unchanged when the flag is off, and pi/codex/hermes are untouched.</p>
+    <p><strong>Status — shipped, default-on for claude-code (2026-06-15), soaked on delta-market.</strong> Interactive talk + named durable sessions work end-to-end: <code>cells talk &lt;cell&gt; --session=buyer</code> drives a durable conversation isolated from <code>main</code> and <code>staff</code>; the warm cap (3) LRU-evicts; <code>cc_entrypoint=cli</code> by construction (no <code>--print</code>). Default-on like jobs — opt OUT with <code>CELLS_TALK_INTERACTIVE=0</code>; the <code>--print</code> path is byte-for-byte unchanged when off, and pi/codex/hermes are untouched. <strong>Scope:</strong> main (Slack/email/CLI/<code>--main</code>) and named sessions move to <code>cli</code>; the throwaway <strong>fork</strong> path (default one-shot <code>cells talk</code>, peer RPC, <code>verify</code>) still uses <code>claude --print</code> — see <em>Deferred</em>.</p>
   </div>
 
   <h2>Why</h2>
@@ -49,7 +49,7 @@ email ────┘     per-cell DO ─ws─► server.ts ── TalkPool
     <thead><tr><th>Piece</th><th>Before</th><th>After (flag on)</th></tr></thead>
     <tbody>
       <tr><td>Talk process</td><td>one <code>claude --print --resume &lt;main&gt;</code></td><td>a pool of warm interactive sessions</td></tr>
-      <tr><td>Billing</td><td><code>cc_entrypoint=sdk-cli</code> (metered)</td><td><code>cc_entrypoint=cli</code> (subscription)</td></tr>
+      <tr><td>Billing</td><td><code>cc_entrypoint=sdk-cli</code> (metered)</td><td>main + named: <code>cc_entrypoint=cli</code> (subscription); fork still <code>sdk-cli</code></td></tr>
       <tr><td>Live output</td><td>per-token <code>text_delta</code></td><td>per-completed-block (transcript tail)</td></tr>
       <tr><td>Sessions per cell</td><td>one (main, single-owner)</td><td>N named durable (main, buyer, staff, …)</td></tr>
       <tr><td>Session id registry</td><td><code>/root/.cell/claude-main-session</code></td><td>+ <code>/root/.cell/sessions/&lt;name&gt;</code>, create-on-first-use</td></tr>
@@ -109,6 +109,7 @@ POST https://&lt;cell&gt;.cells.md/inbox/append
 
   <h2>Deferred</h2>
   <ul>
+    <li><strong>Fork path → interactive.</strong> The throwaway fork (default one-shot <code>cells talk &lt;cell&gt; "…"</code>, peer agent-comms, <code>verify</code>) still runs <code>claude --print</code> via <code>forkAndAsk</code>, so that traffic stays on the metered rail. Converting it (a transient interactive fork session, like the job runner's <code>--target fork</code>) is a clean follow-up — deferred because per-fork cold-start adds latency to <code>verify</code> fan-out, a tradeoff worth weighing on its own.</li>
     <li><strong>Cells-native channel auto-binding</strong> — binding a cell's own Slack/email worker channel to a named session (so inbound Slack auto-routes to <code>staff</code>) needs per-session reply routing in the DO (today's single pending-channel can't serve concurrent sessions). Not on Zero's path — they route via the envelope <code>session</code> field above — so deferred.</li>
     <li>Per-token streaming recovery (no mechanism without <code>--print</code>); keep-alive heuristics for hot named sessions; compaction-aware <em>live</em> streaming (the fallback is correct, just not live).</li>
   </ul>
