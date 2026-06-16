@@ -108,6 +108,26 @@ export default {
   },
 };
 
+// The CHANNELS KV value is either a bare cell name (session-less — the
+// historical shape, and still what every main-bound channel stores) or a JSON
+// {cell, session} object when inbound should land on a named session. Kept in
+// lockstep with encodeChannelValue in cli/lib/channels.ts. A cell name matches
+// [a-z0-9-]+, so a leading '{' is an unambiguous JSON marker.
+function parseBinding(value: string): { cell: string; session?: string } | null {
+  const v = value.trim();
+  if (!v) return null;
+  if (v[0] === "{") {
+    try {
+      const j = JSON.parse(v);
+      if (j && typeof j.cell === "string" && j.cell) {
+        return { cell: j.cell, session: typeof j.session === "string" && j.session ? j.session : undefined };
+      }
+    } catch { /* malformed — treat as no binding rather than a literal name */ }
+    return null;
+  }
+  return { cell: v };
+}
+
 // ───────────────────── inbound: Slack → cell ─────────────────────
 
 async function handleEvents(req: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
@@ -168,12 +188,14 @@ async function handleEvents(req: Request, env: Env, ctx: ExecutionContext): Prom
   // CHANNELS namespace is small and changes only on `cells channel
   // link/unlink`. Default cacheTtl was bigger and caused stale
   // "missing" reads after a fresh binding.
-  const cell = await env.CHANNELS.get(channelId, { cacheTtl: 60 });
-  if (!cell) {
+  const rawBinding = await env.CHANNELS.get(channelId, { cacheTtl: 60 });
+  const binding = rawBinding ? parseBinding(rawBinding) : null;
+  if (!binding) {
     console.log(`drop unbound: channel=${channelId}`);
     return new Response("ok", { status: 200 });
   }
-  console.log(`route ${channelId} -> ${cell} (user=${event.user} text=${(event.text??"").slice(0,50)} files=${(event.files??[]).length})`);
+  const cell = binding.cell;
+  console.log(`route ${channelId} -> ${cell}${binding.session ? `/${binding.session}` : ""} (user=${event.user} text=${(event.text??"").slice(0,50)} files=${(event.files??[]).length})`);
 
   // For messages with attachments, slap an :eyes: reaction on
   // immediately so the user sees the cell "noticed" the file before
@@ -202,6 +224,9 @@ async function handleEvents(req: Request, env: Env, ctx: ExecutionContext): Prom
         images: enriched.images,
         team_id: body.team_id,
         event_id: body.event_id,
+        // Pins this inbound to a named durable session on the cell (e.g.
+        // "staff"); absent → main. The cell DO stamps it onto the prompt.
+        ...(binding.session ? { session: binding.session } : {}),
       }),
     }).catch((e) => { console.error(`fan-out to ${cell} threw: ${String(e).slice(0, 300)}`); return null; });
     if (!r) return;
@@ -570,7 +595,9 @@ async function reverseLookup(kv: KVNamespace, cell: string): Promise<string | nu
     const page = await kv.list({ cursor, limit: 1000 });
     for (const k of page.keys) {
       const v = await kv.get(k.name);
-      if (v === cell) return k.name;
+      // Values may be a bare cell name or JSON {cell, session} — match on the
+      // resolved cell either way so session-bound channels still reverse-look-up.
+      if (v && parseBinding(v)?.cell === cell) return k.name;
     }
     cursor = page.list_complete ? undefined : page.cursor;
   } while (cursor);

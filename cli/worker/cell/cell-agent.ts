@@ -379,6 +379,31 @@ export class CellAgent {
     const channel = String(event.channel ?? "");
     const user = String(event.user ?? "");
     const threadTs = String(event.thread_ts ?? "");
+    // A channel binding may pin inbound to a named durable session (Slack→
+    // "staff" while main stays the cell's own thread). The front-door worker
+    // forwards it on the append body; absent/"main" → main, unchanged. The
+    // supervisor's prompt path honors `session` (talk pool for claude-code,
+    // askInSession for pi/codex) and still streams the reply back through the
+    // normal turn events, so the Slack/email mirror below is untouched.
+    const sessionRaw = String(body?.session ?? "").trim();
+    const session = sessionRaw && sessionRaw !== "main" ? sessionRaw : "";
+    if (session) {
+      // A non-main session needs a named-session-capable supervisor. If this
+      // Worker was deployed ahead of the cell's supervisor refresh, the old
+      // supervisor would ignore `session` and land the message in MAIN — the
+      // exact wrong-context corruption the agent path guards against (and worse
+      // here, since main is the cell's reserved autonomous thread). Fail loud
+      // (drop with a log) rather than silently misroute. Mirrors handleAgentEnvelope.
+      const namedOk =
+        (await this.state.storage.get<boolean>("supervisor:named_sessions")) === true ||
+        (await this.state.storage.get<boolean>("supervisor:talk_sessions")) === true;
+      if (!namedOk) {
+        console.error(
+          `[${this.env.CELL_NAME}] dropping ${event.kind === "email" ? "email" : "slack"} inbound for session='${session}': supervisor doesn't advertise named sessions (refresh the cell). Not landing it in main.`,
+        );
+        return new Response("named sessions unsupported on this cell", { status: 409 });
+      }
+    }
     // event.kind discriminates the front-door (slack default for back-compat;
     // "email" enables the email outbound path). New event fields:
     //   subject     — email subject line (empty for slack)
@@ -413,6 +438,7 @@ export class CellAgent {
       type: "prompt",
       message,
       ...(images && images.length ? { images } : {}),
+      ...(session ? { session } : {}),
       streamingBehavior: "steer",
     }));
 
