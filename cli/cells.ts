@@ -72,6 +72,8 @@ import {
   type ChannelKind,
   type ChannelsFile,
   CHANNEL_ID_PATTERNS,
+  SESSION_NAME_RE,
+  parseChannelValue,
   loadChannels,
   saveChannels,
   kvUpsert,
@@ -350,7 +352,13 @@ const EXTENSION_OPTIONS: SelectOption[] = OPTIONAL_EXTENSIONS.map((p) => ({
 // implies its own infra setup at birth (Slack: auto-create channel,
 // bind, deploy CF worker). Keep the list short and additive.
 const CHANNEL_VALUES = ["slack", "email"] as const;
-type ChannelValue = (typeof CHANNEL_VALUES)[number];
+type ChannelKindValue = (typeof CHANNEL_VALUES)[number];
+// A channel value is a kind, optionally suffixed with `:session` to pin
+// inbound from that channel to a named durable session on the cell
+// (`slack:staff`). The bare form (`slack`) lands on main, unchanged. The
+// `kind:session` string survives the JSON blob round-trip to
+// bind-cell-channels.sh, so the session travels with its channel at birth.
+type ChannelValue = ChannelKindValue | `${ChannelKindValue}:${string}`;
 const CHANNEL_OPTIONS: SelectOption[] = [
   { value: "slack", label: "slack" },
   { value: "email", label: "email", hint: "<cell>@cells.md" },
@@ -3056,8 +3064,13 @@ function parseCreateArgs(args: string[]): { name: string | undefined; opts: Crea
       const v = a.slice("--channels=".length);
       const parts = v ? v.split(",").map((s) => s.trim()).filter(Boolean) : [];
       for (const p of parts) {
-        if (!(CHANNEL_VALUES as readonly string[]).includes(p)) {
-          console.error(`unknown channel: ${p}. choose from: ${CHANNEL_VALUES.join(", ")}`);
+        const { kind, session } = parseChannelValue(p);
+        if (!(CHANNEL_VALUES as readonly string[]).includes(kind)) {
+          console.error(`unknown channel: ${kind}. choose from: ${CHANNEL_VALUES.join(", ")} (optionally suffixed :<session>, e.g. slack:staff)`);
+          process.exit(1);
+        }
+        if (p.includes(":") && session && !SESSION_NAME_RE.test(session)) {
+          console.error(`bad session name in channel '${p}': must match ${SESSION_NAME_RE}`);
           process.exit(1);
         }
       }
@@ -6298,7 +6311,8 @@ async function cmdChannel(args: string[]) {
     case "sync":   await cmdChannelSync(); break;
     default:
       console.error("usage:");
-      console.error("  cells channel link <cell> <channel-id-or-address> [--kind=slack|email]");
+      console.error("  cells channel link <cell> <channel-id-or-address> [--kind=slack|email] [--session=<name>]");
+      console.error("                                    # --session pins inbound to a named session (e.g. staff); omit → main");
       console.error("  cells channel unlink <cell> [<channel-id>]");
       console.error("  cells channel list");
       console.error("  cells channel sync                # re-mirror channels.json → KV");
@@ -6308,6 +6322,7 @@ async function cmdChannel(args: string[]) {
 
 async function cmdChannelLink(args: string[]) {
   let kind: ChannelKind = "slack";
+  let session = "";
   const positional: string[] = [];
   for (const a of args) {
     if (a.startsWith("--kind=")) {
@@ -6317,6 +6332,8 @@ async function cmdChannelLink(args: string[]) {
         process.exit(1);
       }
       kind = v;
+    } else if (a.startsWith("--session=")) {
+      session = a.slice("--session=".length);
     } else if (a.startsWith("-")) {
       console.error(`unknown flag: ${a}`);
       process.exit(1);
@@ -6324,7 +6341,14 @@ async function cmdChannelLink(args: string[]) {
   }
   let [cell, channelId] = positional;
   if (!cell || !channelId) {
-    console.error("usage: cells channel link <cell> <channel-id-or-address> [--kind=slack|email]");
+    console.error("usage: cells channel link <cell> <channel-id-or-address> [--kind=slack|email] [--session=<name>]");
+    process.exit(1);
+  }
+  // "main" / empty is the default session — store it as a session-less binding
+  // (a bare cell name in KV) rather than a redundant {cell, session:"main"}.
+  if (session === "main") session = "";
+  if (session && !SESSION_NAME_RE.test(session)) {
+    console.error(`bad --session '${session}': must match ${SESSION_NAME_RE} (e.g. staff, buyer)`);
     process.exit(1);
   }
   // For email, the "channel ID" is the address itself. Lowercase it so
@@ -6342,21 +6366,23 @@ async function cmdChannelLink(args: string[]) {
     cell,
     kind,
     createdAt: prev?.createdAt ?? new Date().toISOString(),
+    ...(session ? { session } : {}),
   };
   await saveChannels(file);
-  await kvUpsert(kind, channelId, cell);
+  await kvUpsert(kind, channelId, cell, session || undefined);
   await updateCellStatusChannels(cell);
   if (prev && prev.cell !== cell && prev.cell) {
     // Also refresh the previously-bound cell's status so its bar drops the
     // channel that just moved away.
     await updateCellStatusChannels(prev.cell);
   }
+  const sess = session ? ` session=${session}` : "";
   if (prev && prev.cell !== cell) {
-    console.log(`linked ${channelId} → ${cell} (${kind}) — was ${prev.cell}`);
+    console.log(`linked ${channelId} → ${cell} (${kind})${sess} — was ${prev.cell}`);
   } else if (prev) {
-    console.log(`already linked ${channelId} → ${cell} (${kind})`);
+    console.log(`already linked ${channelId} → ${cell} (${kind})${sess}`);
   } else {
-    console.log(`linked ${channelId} → ${cell} (${kind})`);
+    console.log(`linked ${channelId} → ${cell} (${kind})${sess}`);
   }
 }
 
@@ -6409,10 +6435,10 @@ async function cmdChannelList() {
     console.log("(no channel bindings)");
     return;
   }
-  console.log(`${"channel".padEnd(14)} ${"cell".padEnd(14)} ${"kind".padEnd(8)} created`);
-  console.log(`${"".padEnd(14, "-")} ${"".padEnd(14, "-")} ${"".padEnd(8, "-")} -------`);
+  console.log(`${"channel".padEnd(14)} ${"cell".padEnd(14)} ${"kind".padEnd(8)} ${"session".padEnd(10)} created`);
+  console.log(`${"".padEnd(14, "-")} ${"".padEnd(14, "-")} ${"".padEnd(8, "-")} ${"".padEnd(10, "-")} -------`);
   for (const [id, b] of entries.sort((a, b) => a[1].cell.localeCompare(b[1].cell))) {
-    console.log(`${id.padEnd(14)} ${b.cell.padEnd(14)} ${b.kind.padEnd(8)} ${b.createdAt}`);
+    console.log(`${id.padEnd(14)} ${b.cell.padEnd(14)} ${b.kind.padEnd(8)} ${(b.session ?? "main").padEnd(10)} ${b.createdAt}`);
   }
 }
 
@@ -6424,8 +6450,8 @@ async function cmdChannelSync() {
     return;
   }
   for (const [id, b] of entries) {
-    await kvUpsert(b.kind, id, b.cell);
-    console.log(`synced ${id} → ${b.cell} (${b.kind})`);
+    await kvUpsert(b.kind, id, b.cell, b.session);
+    console.log(`synced ${id} → ${b.cell} (${b.kind})${b.session ? ` session=${b.session}` : ""}`);
   }
   console.log(`✓ synced ${entries.length} binding${entries.length === 1 ? "" : "s"} to KV`);
 }
@@ -10006,6 +10032,7 @@ switch (sub) {
     console.log("                                     --extensions=memory,mentality,wiki,dream,deep-research");
     console.log("                                     --packages=pi-web-access");
     console.log("                                     --channels=slack         (auto-creates #cells-<name>, binds, deploys worker)");
+    console.log("                                     --channels=slack:staff   (bind the Slack channel to the cell's 'staff' session, not main)");
     console.log("                                     --slack-channel=C0123456789  (legacy: bind to existing channel by ID)");
     console.log("                                     --seed=<text>            (first message auto-sent post-birth; default greeting on, --seed=off disables)");
     console.log("                                     --no-pool                (skip open-egg lookup, force slow birth — testing/perf-baseline)");
@@ -10048,7 +10075,7 @@ switch (sub) {
     console.log("                              --restart kicks pi on the cell so new extensions load (otherwise dormant until next pi start)");
     console.log("                              --remove deletes the extension dir + drops it from settings.json (inverse of push)");
     console.log("  cells heartbeat [name|--tail]  show pulse digest, one cell's schedule, or tail cron-fires.log");
-    console.log("  cells channel link <cell> <channel-id> [--kind=slack]");
+    console.log("  cells channel link <cell> <channel-id> [--kind=slack] [--session=<name>]");
     console.log("                              bind a Slack channel to a cell (mirrors to Cloudflare KV for the Slack Worker)");
     console.log("  cells channel unlink <cell> [<channel-id>]  remove one or all bindings for a cell");
     console.log("  cells channel list           list all channel↔cell bindings");

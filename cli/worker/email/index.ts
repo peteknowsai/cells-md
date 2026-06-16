@@ -110,17 +110,20 @@ export default {
       return;
     }
 
-    // KV key shape: "email:<local-part>". Value is the cell name. Falls
-    // back to a bare "<local-part>" lookup so a manually-linked binding
-    // (cells channel link bob bob@cells.md) without the prefix still
-    // routes — defensive, not load-bearing.
-    const cell = (await env.CHANNELS.get(`email:${local}`, { cacheTtl: 60 }))
+    // KV key shape: "email:<local-part>". Value is a bare cell name, or a JSON
+    // {cell, session} object when inbound should land on a named session.
+    // Falls back to a bare "<local-part>" lookup so a manually-linked binding
+    // (cells channel link bob bob@cells.md) without the prefix still routes —
+    // defensive, not load-bearing.
+    const rawBinding = (await env.CHANNELS.get(`email:${local}`, { cacheTtl: 60 }))
       ?? (await env.CHANNELS.get(local, { cacheTtl: 60 }));
-    if (!cell) {
+    const binding = rawBinding ? parseBinding(rawBinding) : null;
+    if (!binding) {
       console.log(`reject unbound: to=${full} local=${local}`);
       message.setReject(`No such cell: ${local}`);
       return;
     }
+    const cell = binding.cell;
 
     // Read the raw RFC 5322 message into a buffer so PostalMime can
     // parse and we can hand attachment buffers to the enrichment helpers.
@@ -167,6 +170,8 @@ export default {
           images: enriched.images,
           team_id: "email",
           event_id: messageId,
+          // Pins this inbound to a named durable session (e.g. "staff"); absent → main.
+          ...(binding.session ? { session: binding.session } : {}),
         }),
       }).catch((e) => { console.error(`fan-out to ${cell} threw: ${String(e).slice(0, 300)}`); return null; });
       if (!r) return;
@@ -175,6 +180,28 @@ export default {
     })());
   },
 };
+
+// ───────────────────── binding parsing ─────────────────────
+
+// The CHANNELS KV value is either a bare cell name (session-less — the
+// historical shape) or JSON {cell, session} when inbound should land on a
+// named session. Kept in lockstep with encodeChannelValue in
+// cli/lib/channels.ts. A cell name matches [a-z0-9-]+, so a leading '{' is an
+// unambiguous JSON marker.
+function parseBinding(value: string): { cell: string; session?: string } | null {
+  const v = value.trim();
+  if (!v) return null;
+  if (v[0] === "{") {
+    try {
+      const j = JSON.parse(v);
+      if (j && typeof j.cell === "string" && j.cell) {
+        return { cell: j.cell, session: typeof j.session === "string" && j.session ? j.session : undefined };
+      }
+    } catch { /* malformed — treat as no binding rather than a literal name */ }
+    return null;
+  }
+  return { cell: v };
+}
 
 // ───────────────────── recipient parsing ─────────────────────
 

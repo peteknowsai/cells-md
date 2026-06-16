@@ -20,8 +20,38 @@ import { readSecret, readSecretsKey } from "./secrets";
 export const CHANNELS_PATH = join(homedir(), ".cells", "channels.json");
 
 export type ChannelKind = "slack" | "email"; // future: "imessage" | "telegram"
-export type ChannelBinding = { cell: string; kind: ChannelKind; createdAt: string };
+// `session` pins inbound from this channel to a named durable session on the
+// cell (e.g. Slack→"staff" while WhatsApp rides "buyer" and main stays the
+// cell's own autonomous thread). Absent → main, which is every pre-session
+// binding. The name is SESSION_NAME_RE-validated at the CLI/birth edge.
+export type ChannelBinding = { cell: string; kind: ChannelKind; createdAt: string; session?: string };
 export type ChannelsFile = { version: 1; bindings: Record<string, ChannelBinding> };
+
+// The value stored in the CHANNELS KV namespace (and read by the front-door
+// workers). A bare cell name when session-less — back-compat with every
+// pre-session binding and the only shape the workers used to see. JSON
+// {cell, session} when a session is pinned; a cell name can never start with
+// '{' (CELL_NAME_RE is [a-z0-9-]+), so the workers disambiguate on the first
+// byte. Keep this in lockstep with parseChannelValue in the slack/email workers.
+export function encodeChannelValue(cell: string, session?: string): string {
+  return session ? JSON.stringify({ cell, session }) : cell;
+}
+
+// Mirrors SESSION_NAME_RE in dna/cells/base/lib/session-pool.ts. The supervisor
+// re-validates, but callers reject bad names at the binding edge so a malformed
+// session never reaches KV.
+export const SESSION_NAME_RE = /^[a-z][a-z0-9_-]{0,31}$/;
+
+// Split a channel value (`slack` or `slack:staff`) into its kind + optional
+// session. `session` is normalized: "main"/empty → undefined (the default
+// session, stored as a session-less binding). The kind is returned raw — the
+// caller validates it against its own allowed-kinds list.
+export function parseChannelValue(v: string): { kind: string; session?: string } {
+  const ci = v.indexOf(":");
+  if (ci < 0) return { kind: v };
+  const session = v.slice(ci + 1);
+  return { kind: v.slice(0, ci), session: session && session !== "main" ? session : undefined };
+}
 
 export const CHANNEL_ID_PATTERNS: Record<ChannelKind, RegExp> = {
   slack: /^[CDG][A-Z0-9]{8,}$/, // C=public, D=DM, G=private/group/mpdm
@@ -140,7 +170,7 @@ async function cfCreds(): Promise<{ accountId: string; token: string } | null> {
   return null;
 }
 
-export async function kvUpsert(kind: ChannelKind, channelId: string, cell: string): Promise<void> {
+export async function kvUpsert(kind: ChannelKind, channelId: string, cell: string, session?: string): Promise<void> {
   const id = await kvChannelsNamespaceId();
   const creds = await cfCreds();
   if (!id || !creds) {
@@ -148,12 +178,13 @@ export async function kvUpsert(kind: ChannelKind, channelId: string, cell: strin
     return;
   }
   const key = kvKeyFor(kind, channelId);
+  const value = encodeChannelValue(cell, session);
   const r = await fetch(
     `https://api.cloudflare.com/client/v4/accounts/${creds.accountId}/storage/kv/namespaces/${id}/values/${encodeURIComponent(key)}`,
-    { method: "PUT", headers: { Authorization: `Bearer ${creds.token}` }, body: cell },
+    { method: "PUT", headers: { Authorization: `Bearer ${creds.token}` }, body: value },
   );
   if (!r.ok) {
-    console.warn(`[kv] put ${key}=${cell} failed (${r.status}): ${(await r.text()).slice(0, 200)}`);
+    console.warn(`[kv] put ${key}=${value} failed (${r.status}): ${(await r.text()).slice(0, 200)}`);
   }
 }
 
@@ -373,7 +404,7 @@ jq --argjson ch '${channelsJson.replace(/'/g, "'\\''")}' '.channels = $ch' "$F" 
 // slack: create the channel, invite the owner, write the binding.
 // email: derive <cell>@cells.md, write the binding. Idempotent. Returns
 // the bound channel id / address.
-export async function bindChannel(cell: string, kind: ChannelKind): Promise<string> {
+export async function bindChannel(cell: string, kind: ChannelKind, session?: string): Promise<string> {
   if (kind === "slack") {
     const channelId = await ensureSlackChannel(cell);
     try {
@@ -383,17 +414,17 @@ export async function bindChannel(cell: string, kind: ChannelKind): Promise<stri
       console.warn(`! could not auto-invite owner to the slack channel for ${cell}: ${e}`);
     }
     const file = await loadChannels();
-    file.bindings[channelId] = { cell, kind: "slack", createdAt: new Date().toISOString() };
+    file.bindings[channelId] = { cell, kind: "slack", createdAt: new Date().toISOString(), ...(session ? { session } : {}) };
     await saveChannels(file);
-    await kvUpsert("slack", channelId, cell);
+    await kvUpsert("slack", channelId, cell, session);
     await updateCellStatusChannels(cell);
     return channelId;
   }
   const address = `${cell}@cells.md`;
   const file = await loadChannels();
-  file.bindings[address] = { cell, kind: "email", createdAt: new Date().toISOString() };
+  file.bindings[address] = { cell, kind: "email", createdAt: new Date().toISOString(), ...(session ? { session } : {}) };
   await saveChannels(file);
-  await kvUpsert("email", address, cell);
+  await kvUpsert("email", address, cell, session);
   await updateCellStatusChannels(cell);
   return address;
 }
