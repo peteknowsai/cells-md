@@ -1,0 +1,119 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Named Durable Sessions + Interactive Talk</title>
+<link rel="stylesheet" href="../_assets/doc.css">
+</head>
+<body>
+<div class="page">
+
+  <div class="doc-header">
+    <div class="crumb">cells <span class="sep">/</span> proposals <span class="sep">/</span> named sessions</div>
+    <div>design + rollout</div>
+  </div>
+
+  <h1>Named Durable Sessions + Interactive Talk</h1>
+  <p class="subtitle">Replace the cell's single <code>claude&nbsp;--print</code> talk process with a pool of warm, genuinely interactive sessions — so all talk bills the interactive subscription pool, and one cell can hold several independent durable conversations at once.</p>
+
+  <div class="callout">
+    <p><strong>Status — shipped behind a flag, soaking on delta-market (2026-06-15).</strong> Interactive talk + named durable sessions work end-to-end: <code>cells talk &lt;cell&gt; --session=buyer</code> drives a durable conversation isolated from <code>main</code> and <code>staff</code>; the warm cap (3) LRU-evicts; <code>cc_entrypoint=cli</code> by construction (no <code>--print</code>). Gated <code>CELLS_TALK_INTERACTIVE=1</code> — opt-in until the soak earns a fleet-wide default-on. The plain <code>--print</code> path is byte-for-byte unchanged when the flag is off, and pi/codex/hermes are untouched.</p>
+  </div>
+
+  <h2>Why</h2>
+
+  <p>Two needs land in the same place.</p>
+
+  <p><strong>Billing.</strong> Anthropic's 2026-06-15 metering split bills <code>claude&nbsp;-p</code> / Agent-SDK on a capped monthly credit, and genuine <em>interactive</em> Claude Code on the normal subscription pool. We already moved <a href="jobs.html">jobs</a> onto a genuine interactive runner. But <strong>all talk was still <code>--print</code></strong>: the always-on supervisor process and the agent-comms fork path both ran <code>claude&nbsp;--print</code> → stamped <code>cc_entrypoint=sdk-cli</code> → the metered pool. Talk is the bigger leak, because Slack, email, the CLI, and peer <code>target=main</code> turns all funnel through one main session.</p>
+
+  <p><strong>Named durable sessions.</strong> A HomeZero advisor needs <em>two</em> (eventually N) independent durable conversations on one cell — <code>buyer</code>&nbsp;↔&nbsp;WhatsApp (the user) and <code>staff</code>&nbsp;↔&nbsp;Slack (operators tuning the cell), never crossing. A cell used to pin exactly one session (<code>/root/.cell/claude-main-session</code>), which is the only reason "main is single-owner."</p>
+
+  <p>Both live in the same persistent-process layer, so they're one rewrite. There is no way to keep a persistent stdio stream-json process (which requires <code>--print</code>) <em>and</em> bill <code>cli</code> — so warm interactive sessions, tailing the transcript for output, is the only shape that wins billing. Decided tradeoff: that tail is per-completed-block, not per-token, so live output is message-chunk, not the <code>--print</code> typewriter. Slack/email and agent-comms (which read the text at turn end) are unaffected; the CLI <code>cells talk</code> reveal gets chunkier.</p>
+
+  <h2>Architecture</h2>
+
+  <pre>WhatsApp ─┐                              ┌── /root/.cell/sessions/buyer   (durable id)
+          │  POST /inbox/append (envelope │   /root/.cell/sessions/staff
+Slack ────┼─►  or cells talk --session)   │
+email ────┘     per-cell DO ─ws─► server.ts ── TalkPool
+                (session selector,            ├─ LiveSession "main"  (pre-warmed, tmux cell-talk-main)
+                 default "main")              ├─ LiveSession "buyer" (tmux cell-talk-buyer)
+                                              └─ LiveSession "staff" (tmux cell-talk-staff)
+                                            each = warm interactive claude (no --print),
+                                            resuming its own durable id, transcript-tail → pi-shaped deltas</pre>
+
+  <p>Each <code>LiveSession</code> is one interactive <code>claude</code> in a dedicated <code>tmux&nbsp;-L&nbsp;cell-talk-&lt;name&gt;</code> socket, resuming its durable per-name id, with a per-session queue (same name serializes; different names run concurrently), a transcript-tail loop that emits the same pi-shaped <code>message_update</code>/<code>agent_end</code> lines the old <code>onTranslatedLine</code> did (so Slack/email/CLI/agent-comms are unchanged), Stop-hook turn boundaries, idle eviction, and an LRU warm cap.</p>
+
+  <table>
+    <thead><tr><th>Piece</th><th>Before</th><th>After (flag on)</th></tr></thead>
+    <tbody>
+      <tr><td>Talk process</td><td>one <code>claude --print --resume &lt;main&gt;</code></td><td>a pool of warm interactive sessions</td></tr>
+      <tr><td>Billing</td><td><code>cc_entrypoint=sdk-cli</code> (metered)</td><td><code>cc_entrypoint=cli</code> (subscription)</td></tr>
+      <tr><td>Live output</td><td>per-token <code>text_delta</code></td><td>per-completed-block (transcript tail)</td></tr>
+      <tr><td>Sessions per cell</td><td>one (main, single-owner)</td><td>N named durable (main, buyer, staff, …)</td></tr>
+      <tr><td>Session id registry</td><td><code>/root/.cell/claude-main-session</code></td><td>+ <code>/root/.cell/sessions/&lt;name&gt;</code>, create-on-first-use</td></tr>
+      <tr><td>Locking</td><td>global single-owner</td><td>per-session queue</td></tr>
+    </tbody>
+  </table>
+
+  <h2>Components</h2>
+  <dl class="kv">
+    <dt><code>lib/session-pool.ts</code></dt>
+    <dd>Pure seams (unit-tested, no VM): name validation + path safety, <code>main</code>-aliases-the-legacy-pin, resume-vs-create flags, the transcript-row→delta extractor, the finishTurn fallback harvester, idle/LRU policy.</dd>
+    <dt><code>lib/talk-pool.ts</code></dt>
+    <dd>The IO half: tmux launch, the byte-cursor transcript-tail loop, per-session queue + busy reduction, Stop-hook turn close with a poll fallback, crash/leash handling, idle + LRU eviction. Lives in <code>lib/</code> (not <code>site/</code>) so <code>cells refresh</code> ships it.</dd>
+    <dt><code>bin/interactive-claude-talk.sh</code></dt>
+    <dd>The bootstrapper — sibling of the job runner, but long-lived: seeds the boot gates, registers per-session SessionStart/Stop hooks, launches the tmux, waits for ready, then exits leaving the server alive. The supervisor drives each turn.</dd>
+    <dt><code>site/server.ts</code></dt>
+    <dd>Gated wiring: pre-warm main instead of spawning <code>--print</code>; route the <code>prompt</code> dispatch and <code>enqueueMainTurn</code> + named <code>agent_message.session</code> to the pool; busy-as-reduction drives welld's busy/idle; <code>bridge_hello</code> advertises <code>talk_sessions</code>; boot sweeps stale talk tmux.</dd>
+    <dt><code>agent-envelope</code> (both copies) + <code>cells talk</code> + the DO</dt>
+    <dd>An optional <code>session</code> field threads through the envelope, both CLIs, and the DO's <code>agent_message</code> forward, so a turn can target a named session. <code>--session=main</code>/<code>fork</code> are aliases for the existing target routing.</dd>
+  </dl>
+
+  <h2>Reaching a named session</h2>
+  <p>Two equivalent paths, both concurrent-safe (the reply is correlated by <code>corr_id</code>):</p>
+  <pre># operator / CLI / peer (SSH → on-cell talk → DO → pool):
+cells talk &lt;cell&gt; --session=buyer "…"
+
+# pure DO, no SSH (hibernation-robust; what an external bridge uses):
+POST https://&lt;cell&gt;.cells.md/inbox/append
+  { "kind":"agent", "from":"wa-bridge", "to":"&lt;cell&gt;",
+    "corr_id":"…", "text":"…", "session":"buyer",
+    "reply_to":"https://wa-bridge.example/hook" }</pre>
+  <p>The HomeZero wa-bridge flips from today's <code>cells talk &lt;advisor&gt; --main</code> to either form with <code>session=buyer</code> — a strict robustness upgrade (the DO survives hibernation and delivers at-least-once).</p>
+
+  <h2>Tradeoffs &amp; guards</h2>
+  <ul>
+    <li><strong>Chunk streaming, not token.</strong> Intrinsic to dropping <code>--print</code>; accepted. Slack/email/agent-comms unaffected.</li>
+    <li><strong>RAM ceiling.</strong> Warm cap = 3 sessions/cell (LRU-evict the least-recently-used idle one); idle-TTL 15 min. An evicted session is durable — the next turn cold-starts and resumes its id. (~1.9&nbsp;GB per warm claude on the 48&nbsp;GB Mini.)</li>
+    <li><strong>Jobs stay fresh/fork.</strong> Named durable sessions are single-owner, held warm by the pool; a detached job co-writing one would corrupt the live conversation (the same reason <code>main</code> is rejected for jobs). <code>cells run --session</code> remains <code>fresh|fork</code>.</li>
+    <li><strong>Hibernation.</strong> On boot/thaw all sessions are treated cold and busy bookkeeping reset; an in-flight turn at hibernation is lost via its leash (same surface as a harness death today). The durable id recovers the conversation.</li>
+  </ul>
+
+  <h2>Verification (delta-market, flag on)</h2>
+  <ul>
+    <li>Interactive talk end-to-end; the pool's claude runs <code>--resume … --permission-mode bypassPermissions</code> with <strong>no <code>--print</code></strong> → <code>cli</code> billing by construction (same mechanism the job runner verified live).</li>
+    <li>Warm reuse: a 2nd main turn returned in ~3s and remembered the 1st turn (durable multi-turn context).</li>
+    <li>Named sessions: <code>buyer</code> recalled a planted secret; <code>staff</code> returned <code>NO-RECORD</code> (isolated); registry files written per name.</li>
+    <li>Warm cap: a 4th session LRU-evicted main, leaving exactly 3 live tmux servers; the evicted session resumed cleanly on its next turn.</li>
+    <li>OFF-path regression: with the flag unset, talk answers via the unchanged <code>--print</code> path.</li>
+  </ul>
+
+  <h2>Rollout</h2>
+  <ol>
+    <li>Soak on delta-market (current). Watch billing attribution + talk health.</li>
+    <li>Flip the code default to on (like <code>CELLS_JOBS_INTERACTIVE</code>), then <code>cells refresh --all</code> + redeploy per-cell Workers + bounce welld + verify <code>talk_sessions</code> advert fleet-wide.</li>
+    <li>Tell Zero: the wa-bridge can flip to <code>session=buyer</code> (either reach-path above).</li>
+  </ol>
+
+  <h2>Deferred</h2>
+  <ul>
+    <li><strong>Cells-native channel auto-binding</strong> — binding a cell's own Slack/email worker channel to a named session (so inbound Slack auto-routes to <code>staff</code>) needs per-session reply routing in the DO (today's single pending-channel can't serve concurrent sessions). Not on Zero's path — they route via the envelope <code>session</code> field above — so deferred.</li>
+    <li>Per-token streaming recovery (no mechanism without <code>--print</code>); keep-alive heuristics for hot named sessions; compaction-aware <em>live</em> streaming (the fallback is correct, just not live).</li>
+  </ul>
+
+</div>
+<script src="../_assets/doc.js" defer></script>
+</body>
+</html>

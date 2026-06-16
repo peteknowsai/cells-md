@@ -1390,7 +1390,11 @@ async function cmdRun(cellName: string, rest: string[]): Promise<void> {
       // runs the interactive job runner; otherwise the job is fresh.
       const v = a.includes("=") ? a.slice("--session=".length) : (rest[++i] ?? "");
       if (v !== "fresh" && v !== "fork" && v !== "main") {
-        console.error(`! bad --session value: '${v}' (use fresh | fork)`);
+        // Named durable sessions (buyer, staff, …) are a TALK concept — they're
+        // single-owner, held warm by the cell's interactive pool. A detached job
+        // co-writing one would corrupt the live conversation (the same reason
+        // main is rejected). Use `cells talk <cell> --session=<name>` for those.
+        console.error(`! bad --session value: '${v}' for run (use fresh | fork). Named durable sessions live on 'cells talk --session=<name>', not detached jobs.`);
         process.exit(1);
       }
       if (v === "main") {
