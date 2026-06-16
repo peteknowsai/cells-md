@@ -161,6 +161,34 @@ else
   done
 fi
 
+# ── harness binary currency (uniform-cell) ──────────────────────────
+# A uniform cell can run ANY harness per-session, so ALL three binaries
+# (pi/claude/codex) must stay current — not just the baked primary. Fresh
+# births already install all three (update-cell-harness.sh); this keeps
+# LONG-LIVED cells from drifting. Conservative: only running+ok cells, at most
+# once/day/cell (a marker file), capped 2/sweep so we never npm-storm the fleet.
+# STRICT=0 → all best-effort (a binary swap is non-disruptive: it only affects
+# the NEXT spawn, never an in-flight process). Detached so the slow npm runs
+# don't stall the sweep.
+CUR_DIR="$HOME/.cells/harness-currency"
+mkdir -p "$CUR_DIR" "$HOME/.cells/logs"
+hn=0
+while IFS=$'\t' read -r name well; do
+  [ -z "$name" ] && continue
+  [ "$hn" -ge 2 ] && break
+  marker="$CUR_DIR/$name"
+  # once/day/cell: skip if the marker was touched in the last 24h
+  if [ -f "$marker" ] && [ "$(find "$marker" -mtime -1 2>/dev/null)" ]; then continue; fi
+  touch "$marker"
+  # STRICT=0 makes the "primary" non-strict, so all three are swept best-effort
+  # regardless of which harness we name — pass a fixed blob (the real primary is
+  # irrelevant here; only birth cares which one is strict).
+  nohup env HARNESS_UPDATE_STRICT=0 bash scripts/update-cell-harness.sh "$well" '{"harness":"pi"}' \
+    >> "$HOME/.cells/logs/harness-currency.log" 2>&1 &
+  FIXED+=("$name: harness-currency sweep started (pi/claude/codex → current, best-effort)")
+  hn=$((hn+1))
+done < <(echo "$J1" | jq -r '.cells[] | select(.status == "ok") | [.name, .well] | @tsv')
+
 # ── re-check what we touched ────────────────────────────────────────
 sleep 5
 J2=$(snapshot)
