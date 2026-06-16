@@ -300,11 +300,17 @@ export const piAdapter: HarnessAdapter = {
   // Durable across turns + restarts, no warm pool. Different ids → concurrent,
   // isolated. The dedicated dir keeps named sessions out of the main store.
   //
-  // `-e codex-proxy`: a one-shot `pi --print` does NOT inherit the persistent
-  // RPC process's in-process provider-chain cursor, so without the proxy
-  // extension it dies "No API key found for openai-codex" (the pi-fork auth
-  // gap). The extension resolves the proxy bearer. No --thinking/billing
-  // concern: pi runs gpt-5.5 on the ChatGPT sub at flat cost.
+  // Run through `bash -lc`, NOT a bare `pi` spawn (the shape forkAndAsk uses,
+  // and the source of the pi-fork auth gap). Two things only the login shell
+  // provides: it sources /etc/profile.d/cells-env.sh → OPENAI_CODEX_API_KEY
+  // (the proxy bearer the `-e codex-proxy` extension reads — the supervisor's
+  // own env only has CELLS_PROXY_SECRET, so a direct spawn registers no
+  // provider and dies on the opus fallback), and the shell's exec of
+  // /usr/bin/pi resolves + parses identically to an interactive run (a direct
+  // Bun spawn of the same argv was observed to reject --session-id). No
+  // billing concern: pi runs gpt-5.5 on the ChatGPT sub at flat cost.
+  // session is [a-z0-9_-] only, so sessDir/sessId/ext carry no shell
+  // metacharacters and are safe to interpolate; the prompt rides as "$1".
   async askInSession({ prompt, session, cellName, timeoutMs = 150_000 }) {
     if (!SESSION_NAME_RE.test(session)) {
       return { ok: false, error: `invalid session name: ${session.slice(0, 40)}` };
@@ -313,21 +319,16 @@ export const piAdapter: HarnessAdapter = {
     const sessDir = `/root/.pi/agent/sessions/named-${session}`;
     const sessId = `named-${session}`;
     const ext = "/root/.pi/extensions/codex-proxy/index.ts";
+    const eFlag = existsSync(ext) ? `-e ${ext}` : "";
     try {
-      await mkdir(sessDir, { recursive: true });
       const r = await runProcess({
         cmd: [
-          "pi",
-          "--print",
-          ...(existsSync(ext) ? ["-e", ext] : []),
-          "--session-dir", sessDir,
-          "--session-id", sessId,
-          "--thinking", "off",
+          "bash", "-lc",
+          `export HOME=/root; cd /root && mkdir -p ${sessDir} && ` +
+          `exec pi --print ${eFlag} --session-dir ${sessDir} --session-id ${sessId} --thinking off "$1"`,
+          "pi-named",
           prompt,
         ],
-        // pi resolves provider config + auth from the cwd's .pi/ — /root has
-        // the cell's, /root/site (the supervisor's cwd) does not.
-        cwd: "/root",
         timeoutMs,
       });
       if (r.exitCode !== 0) {
