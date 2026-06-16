@@ -211,10 +211,11 @@ export class CellAgent {
   private jobs: Map<string, DoJobRecord> = new Map();
   // Staged by a bridge_hello frame, flushed (awaited) in webSocketMessage.
   private pendingSupervisorCap: boolean | undefined;
-  // Whether the connected supervisor honors named talk sessions (the
-  // interactive talk pool). Gates forwarding a non-main `session` envelope so a
-  // worker deployed ahead of its supervisor's refresh doesn't silently fork.
-  private pendingSupervisorTalk: boolean | undefined;
+  // Whether the connected supervisor can hold named durable sessions
+  // (claude-code's interactive pool OR pi/codex's per-turn askInSession).
+  // Gates forwarding a non-main `session` envelope so a worker deployed ahead
+  // of its supervisor's refresh doesn't silently fork into main.
+  private pendingSupervisorNamed: boolean | undefined;
 
   constructor(state: DurableObjectState, env: Env) {
     this.state = state;
@@ -482,15 +483,22 @@ export class CellAgent {
       return new Response(null, { status: 202 });
     }
 
-    // A non-main named session needs an interactive-talk-capable supervisor. If
+    // A non-main named session needs a named-session-capable supervisor. If
     // this worker was deployed ahead of the cell's supervisor refresh, the old
     // supervisor would ignore `session` and answer from a throwaway fork (wrong
     // context). Reject loudly instead — mirrors the jobs session-target gate.
     if (env.session && env.session !== "main") {
-      const talkOk = (await this.state.storage.get<boolean>("supervisor:talk_sessions")) === true;
-      if (!talkOk) {
+      // Read the post-rename key, falling back to the pre-rename
+      // supervisor:talk_sessions persisted by a claude-code cell that was
+      // named-capable before this rename — so redeploying this Worker ahead of
+      // the supervisor's refresh doesn't 409 an already-working channel→session
+      // route during the rollout window. Removable once the fleet has rolled.
+      const namedOk =
+        (await this.state.storage.get<boolean>("supervisor:named_sessions")) === true ||
+        (await this.state.storage.get<boolean>("supervisor:talk_sessions")) === true;
+      if (!namedOk) {
         return new Response(
-          `cell does not support named talk sessions yet (needs CELLS_TALK_INTERACTIVE + a current supervisor that has advertised talk_sessions)`,
+          `cell does not support named sessions yet (refresh the cell so its supervisor advertises named_sessions: claude-code via the talk pool, pi/codex via per-turn -p sessions)`,
           { status: 409 },
         );
       }
@@ -704,7 +712,7 @@ export class CellAgent {
     await this.ensureLoaded();
     const siteMeta = await this.state.storage.get<SiteMeta>("site:__meta__");
     const supSessionTargets = (await this.state.storage.get<boolean>("supervisor:session_targets")) === true;
-    const supTalkSessions = (await this.state.storage.get<boolean>("supervisor:talk_sessions")) === true;
+    const supNamedSessions = (await this.state.storage.get<boolean>("supervisor:named_sessions")) === true;
     const ws = this.bridgeWs();
     return Response.json({
       cell: this.env.CELL_NAME,
@@ -719,10 +727,10 @@ export class CellAgent {
       // from its bridge_hello). They deploy separately, so the CLI checks both.
       job_session_targets: true,
       supervisor_session_targets: supSessionTargets,
-      // Named talk sessions (`cells talk --session=<name>`) — the cell-side
-      // supervisor advertises talk_sessions in bridge_hello; the DO gates a
+      // Named sessions (`cells talk --session=<name>`) — the cell-side
+      // supervisor advertises named_sessions in bridge_hello; the DO gates a
       // non-main session envelope on it so a fresh worker never silent-forks.
-      supervisor_talk_sessions: supTalkSessions,
+      supervisor_named_sessions: supNamedSessions,
       site: siteMeta
         ? { files: siteMeta.paths.length, paths: siteMeta.paths, publishedAt: siteMeta.publishedAt }
         : null,
@@ -903,9 +911,9 @@ export class CellAgent {
       await this.state.storage.put("supervisor:session_targets", this.pendingSupervisorCap);
       this.pendingSupervisorCap = undefined;
     }
-    if (this.pendingSupervisorTalk !== undefined) {
-      await this.state.storage.put("supervisor:talk_sessions", this.pendingSupervisorTalk);
-      this.pendingSupervisorTalk = undefined;
+    if (this.pendingSupervisorNamed !== undefined) {
+      await this.state.storage.put("supervisor:named_sessions", this.pendingSupervisorNamed);
+      this.pendingSupervisorNamed = undefined;
     }
     await this.persist();
   }
@@ -1023,7 +1031,7 @@ export class CellAgent {
       // persist in its AWAITED flow — a fire-and-forget put could be lost on DO
       // hibernation or read stale by an immediate post-wake /debug probe.
       this.pendingSupervisorCap = ev?.session_targets === true;
-      this.pendingSupervisorTalk = ev?.talk_sessions === true;
+      this.pendingSupervisorNamed = ev?.named_sessions === true;
       return;
     }
     if (type === "pong" || type === "response") return;

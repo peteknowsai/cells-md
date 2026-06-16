@@ -15,10 +15,14 @@
   </div>
 
   <h1>Named Durable Sessions + Interactive Talk</h1>
-  <p class="subtitle">Replace the cell's single <code>claude&nbsp;--print</code> talk process with a pool of warm, genuinely interactive sessions — so the <em>durable</em> talk paths (main + named sessions) bill the interactive subscription pool, and one cell can hold several independent durable conversations at once.</p>
+  <p class="subtitle">One cell holds several independent durable conversations at once (<code>main</code>, <code>buyer</code>&nbsp;↔&nbsp;WhatsApp, <code>staff</code>&nbsp;↔&nbsp;Slack), each addressable by name. The mechanism is <strong>harness-agnostic</strong> — every harness uses its own durable-session primitive; the claude-code warm interactive pool is just claude's special case (it exists to win <code>cc_entrypoint=cli</code> billing, which only claude needs).</p>
 
   <div class="callout">
-    <p><strong>Status — shipped, default-on for claude-code (2026-06-15), soaked on delta-market.</strong> Interactive talk + named durable sessions work end-to-end: <code>cells talk &lt;cell&gt; --session=buyer</code> drives a durable conversation isolated from <code>main</code> and <code>staff</code>; the warm cap (3) LRU-evicts; <code>cc_entrypoint=cli</code> by construction (no <code>--print</code>). Default-on like jobs — opt OUT with <code>CELLS_TALK_INTERACTIVE=0</code>; the <code>--print</code> path is byte-for-byte unchanged when off, and pi/codex/hermes are untouched. <strong>Scope:</strong> main (Slack/email/CLI/<code>--main</code>) and named sessions move to <code>cli</code>; the throwaway <strong>fork</strong> path (default one-shot <code>cells talk</code>, peer RPC, <code>verify</code>) still uses <code>claude --print</code> — see <em>Deferred</em>.</p>
+    <p><strong>Status — shipped for claude-code (2026-06-15), generalized to pi + codex (2026-06-16).</strong> <code>cells talk &lt;cell&gt; --session=buyer</code> drives a durable conversation isolated from <code>main</code> and <code>staff</code> on <em>any</em> harness. Verified live on a pi cell: durable recall across turns, buyer/staff isolation, <code>main</code> untouched. Per harness: <strong>claude-code</strong> → the warm interactive pool (<code>cc_entrypoint=cli</code>, opt OUT with <code>CELLS_TALK_INTERACTIVE=0</code>); <strong>pi</strong> → per-turn <code>pi&nbsp;--print&nbsp;--session-id&nbsp;named-&lt;name&gt;</code>; <strong>codex</strong> → per-turn <code>codex&nbsp;exec&nbsp;resume&nbsp;&lt;per-name&nbsp;thread&gt;</code>; <strong>hermes</strong> → unsupported (rejected loudly). pi/codex have no <code>cc_entrypoint</code> billing split (gpt-5.5 on the ChatGPT sub, flat cost), so they need no warm pool — a stable <code>--session-id</code> / thread id makes a plain <code>-p</code> call durable and isolated. <strong>Scope:</strong> the throwaway <strong>fork</strong> path (default one-shot <code>cells talk</code>, peer RPC, <code>verify</code>) is unchanged — see <em>Deferred</em>.</p>
+  </div>
+
+  <div class="callout">
+    <p><strong>Harness-agnostic dispatch (the generalization).</strong> The supervisor routes a named-session turn to the pool if it's running (claude-code), else to the adapter's <code>askInSession</code> (pi/codex), else rejects (hermes) — it never silently forks a buyer's message into <code>main</code>. The capability <code>named_sessions</code> (renamed from <code>talk_sessions</code>) is advertised in <code>bridge_hello</code> and is true for the pool <em>or</em> any adapter with <code>askInSession</code>; the per-cell DO gates a non-main <code>session</code> envelope on it (409 if the supervisor isn't named-capable). This unblocks Zero's <strong>pi</strong> advisors holding buyer/staff sessions — the original motivation, which the pool-only version did not serve.</p>
   </div>
 
   <h2>Why</h2>
@@ -57,8 +61,22 @@ email ────┘     per-cell DO ─ws─► server.ts ── TalkPool
     </tbody>
   </table>
 
+  <h2>Per-harness mechanism</h2>
+  <table>
+    <thead><tr><th>Harness</th><th>Named-session primitive</th><th>Durable because</th><th>Billing</th></tr></thead>
+    <tbody>
+      <tr><td>claude-code</td><td>warm interactive pool (<code>tmux</code> + <code>--resume</code> per-name id)</td><td>the pool holds the session id + warm process</td><td><code>cc_entrypoint=cli</code> (pool) / <code>sdk-cli</code> (flag off)</td></tr>
+      <tr><td>pi</td><td><code>pi --print -e codex-proxy --session-dir named-&lt;name&gt; --session-id named-&lt;name&gt;</code> via <code>bash -lc</code></td><td>the stable per-name <code>--session-id</code> resumes exactly that conversation</td><td>flat (gpt-5.5, ChatGPT sub)</td></tr>
+      <tr><td>codex</td><td><code>codex exec [resume &lt;id&gt;]</code>, thread id persisted to <code>/root/.cell/codex-session-&lt;name&gt;-thread</code></td><td>the per-name thread id is resumed explicitly</td><td>flat (ChatGPT sub)</td></tr>
+      <tr><td>hermes</td><td>none — <code>askInSession</code> undefined</td><td>—</td><td>rejected loudly</td></tr>
+    </tbody>
+  </table>
+  <p><strong>Two pi gotchas the live test surfaced</strong> (both load-bearing): (1) <code>--session-dir</code> alone only sets storage — pi resumes the project-global latest session, so two names <em>crossed</em> (buyer recalled staff's codeword) until a stable per-name <code>--session-id</code> pinned each one. (2) A bare <code>pi</code> spawn from the supervisor lacks <code>OPENAI_CODEX_API_KEY</code> (only <code>cells-env.sh</code> exports it) so the proxy extension registers no provider, and Bun's spawn even rejected the same <code>--session-id</code> argv a shell exec accepts — so <code>askInSession</code> runs pi through <code>bash -lc</code> (the same shape codex/claude use, and the real fix for the long-standing pi-fork auth gap on this path).</p>
+
   <h2>Components</h2>
   <dl class="kv">
+    <dt><code>lib/harness-adapters.ts</code> — <code>askInSession</code></dt>
+    <dd>The harness-agnostic half: a new adapter method, sibling of <code>forkAndAsk</code> but the session <em>persists</em>. pi/codex/claude implement it; hermes leaves it undefined (its presence is the cell's named-session capability). The supervisor dispatches to the pool when present, else <code>askInSession</code>, else rejects.</dd>
     <dt><code>lib/session-pool.ts</code></dt>
     <dd>Pure seams (unit-tested, no VM): name validation + path safety, <code>main</code>-aliases-the-legacy-pin, resume-vs-create flags, the transcript-row→delta extractor, the finishTurn fallback harvester, idle/LRU policy.</dd>
     <dt><code>lib/talk-pool.ts</code></dt>
@@ -66,7 +84,7 @@ email ────┘     per-cell DO ─ws─► server.ts ── TalkPool
     <dt><code>bin/interactive-claude-talk.sh</code></dt>
     <dd>The bootstrapper — sibling of the job runner, but long-lived: seeds the boot gates, registers per-session SessionStart/Stop hooks, launches the tmux, waits for ready, then exits leaving the server alive. The supervisor drives each turn.</dd>
     <dt><code>site/server.ts</code></dt>
-    <dd>Gated wiring: pre-warm main instead of spawning <code>--print</code>; route the <code>prompt</code> dispatch and <code>enqueueMainTurn</code> + named <code>agent_message.session</code> to the pool; busy-as-reduction drives welld's busy/idle; <code>bridge_hello</code> advertises <code>talk_sessions</code>; boot sweeps stale talk tmux.</dd>
+    <dd>Gated wiring: pre-warm main instead of spawning <code>--print</code>; dispatch named <code>agent_message.session</code> + the raw <code>prompt</code> path to the pool (claude) or <code>askInSession</code> (pi/codex); busy-as-reduction drives welld's busy/idle; <code>bridge_hello</code> advertises <code>named_sessions</code> (<code>= !!talkPool || !!ADAPTER.askInSession</code>); boot sweeps stale talk tmux.</dd>
     <dt><code>agent-envelope</code> (both copies) + <code>cells talk</code> + the DO</dt>
     <dd>An optional <code>session</code> field threads through the envelope, both CLIs, and the DO's <code>agent_message</code> forward, so a turn can target a named session. <code>--session=main</code>/<code>fork</code> are aliases for the existing target routing.</dd>
   </dl>
@@ -103,7 +121,7 @@ POST https://&lt;cell&gt;.cells.md/inbox/append
   <h2>Rollout</h2>
   <ol>
     <li>Soak on delta-market (current). Watch billing attribution + talk health.</li>
-    <li>Flip the code default to on (like <code>CELLS_JOBS_INTERACTIVE</code>), then <code>cells refresh --all</code> + redeploy per-cell Workers + bounce welld + verify <code>talk_sessions</code> advert fleet-wide.</li>
+    <li><code>cells refresh --all</code> (new supervisor + adapter) + redeploy every per-cell Worker (the <code>named_sessions</code> rename — the DO gate reads it) + verify the <code>supervisor_named_sessions</code> advert fleet-wide. The Worker redeploy is required: an old Worker reads <code>talk_sessions</code> (now absent) and would 409 a pi cell's named session. <code>main</code> talk is unaffected in every deploy interleaving.</li>
     <li>Tell Zero: the wa-bridge can flip to <code>session=buyer</code> (either reach-path above).</li>
   </ol>
 
