@@ -25,6 +25,9 @@ export interface AgentEnvelope {
   corr_id: string;       // ULID — matches reply to send
   thread_id: string;     // conversation id; default = sorted pair joined by ":"
   target: AgentTarget;   // "fork" (default, read main, no write-back) | "main" (writes)
+  session?: string;      // named durable session (e.g. "buyer", "staff"); overrides
+                         // target routing → the cell's interactive talk pool. "main"
+                         // is equivalent to target:"main". Absent = target routing.
   reply_to: string;      // URL to POST the response to; "" for fire-and-forget
   hops: number;          // incremented at each relay; drop if > MAX_HOPS
   sent_at: string;       // ISO 8601
@@ -86,6 +89,7 @@ export function validateEnvelope(e: any): { ok: true; env: AgentEnvelope } | { o
       corr_id: e.corr_id,
       thread_id: typeof e.thread_id === "string" ? e.thread_id : sortedThreadId(e.from, e.to),
       target,
+      ...(typeof e.session === "string" && e.session ? { session: e.session } : {}),
       reply_to: typeof e.reply_to === "string" ? e.reply_to : "",
       hops,
       sent_at: typeof e.sent_at === "string" ? e.sent_at : new Date().toISOString(),
@@ -107,6 +111,7 @@ export interface SendArgs {
   to: string;
   text: string;
   target?: AgentTarget;
+  session?: string;      // named durable session; overrides target → talk pool
   thread_id?: string;
   reply_to?: string;     // sender's inbox URL; "" for fire-and-forget
   timeout_seconds?: number;
@@ -125,6 +130,7 @@ export function makeOutgoing(args: SendArgs): AgentEnvelope {
     corr_id: ulid(now),
     thread_id: args.thread_id ?? sortedThreadId(args.from, args.to),
     target: args.target ?? "fork",
+    ...(args.session ? { session: args.session } : {}),
     reply_to: args.reply_to ?? "",
     hops: 0,
     sent_at,

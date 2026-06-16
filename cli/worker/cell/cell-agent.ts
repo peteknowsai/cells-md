@@ -211,6 +211,10 @@ export class CellAgent {
   private jobs: Map<string, DoJobRecord> = new Map();
   // Staged by a bridge_hello frame, flushed (awaited) in webSocketMessage.
   private pendingSupervisorCap: boolean | undefined;
+  // Whether the connected supervisor honors named talk sessions (the
+  // interactive talk pool). Gates forwarding a non-main `session` envelope so a
+  // worker deployed ahead of its supervisor's refresh doesn't silently fork.
+  private pendingSupervisorTalk: boolean | undefined;
 
   constructor(state: DurableObjectState, env: Env) {
     this.state = state;
@@ -478,6 +482,20 @@ export class CellAgent {
       return new Response(null, { status: 202 });
     }
 
+    // A non-main named session needs an interactive-talk-capable supervisor. If
+    // this worker was deployed ahead of the cell's supervisor refresh, the old
+    // supervisor would ignore `session` and answer from a throwaway fork (wrong
+    // context). Reject loudly instead — mirrors the jobs session-target gate.
+    if (env.session && env.session !== "main") {
+      const talkOk = (await this.state.storage.get<boolean>("supervisor:talk_sessions")) === true;
+      if (!talkOk) {
+        return new Response(
+          `cell does not support named talk sessions yet (needs CELLS_TALK_INTERACTIVE + a current supervisor that has advertised talk_sessions)`,
+          { status: 409 },
+        );
+      }
+    }
+
     // (2) Inbound new agent message — forward to the supervisor.
     // The supervisor's response will arrive over the WS as agent_response;
     // onPiEvent looks up pendingAgentForks[corr_id] and POSTs to reply_to.
@@ -511,6 +529,7 @@ export class CellAgent {
       corr_id: env.corr_id,
       thread_id: env.thread_id,
       target: env.target,
+      ...(env.session ? { session: env.session } : {}),
       hops: env.hops,
       text: env.text,
       ...(Number.isFinite(ttlMs) && ttlMs > 0 ? { timeout_seconds: Math.round(ttlMs / 1000) } : {}),
@@ -685,6 +704,7 @@ export class CellAgent {
     await this.ensureLoaded();
     const siteMeta = await this.state.storage.get<SiteMeta>("site:__meta__");
     const supSessionTargets = (await this.state.storage.get<boolean>("supervisor:session_targets")) === true;
+    const supTalkSessions = (await this.state.storage.get<boolean>("supervisor:talk_sessions")) === true;
     const ws = this.bridgeWs();
     return Response.json({
       cell: this.env.CELL_NAME,
@@ -699,6 +719,10 @@ export class CellAgent {
       // from its bridge_hello). They deploy separately, so the CLI checks both.
       job_session_targets: true,
       supervisor_session_targets: supSessionTargets,
+      // Named talk sessions (`cells talk --session=<name>`) — the cell-side
+      // supervisor advertises talk_sessions in bridge_hello; the DO gates a
+      // non-main session envelope on it so a fresh worker never silent-forks.
+      supervisor_talk_sessions: supTalkSessions,
       site: siteMeta
         ? { files: siteMeta.paths.length, paths: siteMeta.paths, publishedAt: siteMeta.publishedAt }
         : null,
@@ -879,6 +903,10 @@ export class CellAgent {
       await this.state.storage.put("supervisor:session_targets", this.pendingSupervisorCap);
       this.pendingSupervisorCap = undefined;
     }
+    if (this.pendingSupervisorTalk !== undefined) {
+      await this.state.storage.put("supervisor:talk_sessions", this.pendingSupervisorTalk);
+      this.pendingSupervisorTalk = undefined;
+    }
     await this.persist();
   }
 
@@ -995,6 +1023,7 @@ export class CellAgent {
       // persist in its AWAITED flow — a fire-and-forget put could be lost on DO
       // hibernation or read stale by an immediate post-wake /debug probe.
       this.pendingSupervisorCap = ev?.session_targets === true;
+      this.pendingSupervisorTalk = ev?.talk_sessions === true;
       return;
     }
     if (type === "pong" || type === "response") return;
