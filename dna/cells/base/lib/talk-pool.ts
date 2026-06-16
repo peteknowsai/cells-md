@@ -34,6 +34,7 @@ import {
   parseTranscriptDelta, sessionFlags, sessionIdPath, transcriptPathForId,
   type LiveSessionState, type PendingTurn, type SessionName,
 } from "./session-pool";
+import { claudeModelArg } from "./harness-adapters";
 
 const TALK_STATE_DIR = "/root/state/talk";
 const BOOTSTRAP = "/root/bin/interactive-claude-talk.sh";
@@ -61,6 +62,11 @@ type LiveSession = {
   name: SessionName;
   state: LiveSessionState;
   sock: string;
+  // Per-session model spec + role preamble (uniform-cell). Set from each
+  // enqueued turn so a config change is picked up on the NEXT (re)spawn; sticky
+  // for a warm session's lifetime. Empty/undefined → the cell's claude defaults.
+  model?: string;
+  rolePreamble?: string;
   claudeSessionId: string | null;
   transcriptPath: string | null;
   queue: PendingTurn[];
@@ -132,6 +138,11 @@ export class TalkPool {
   // session is created cold on first reference.
   enqueue(name: SessionName, turn: PendingTurn): void {
     const s = this.ensure(name);
+    // Capture the session's model/role from the turn so spawn() launches the
+    // warm claude with them. Picked up on the next (re)spawn — a warm session
+    // keeps the model/role it booted with until it's evicted and cold-starts.
+    if (turn.model !== undefined) s.model = turn.model;
+    if (turn.rolePreamble !== undefined) s.rolePreamble = turn.rolePreamble;
     s.queue.push(turn);
     void this.pump(s);
   }
@@ -226,7 +237,21 @@ export class TalkPool {
     s.claudeSessionId = sid;
     s.transcriptPath = transcriptPathForId(sid);
     this.notifyBusy(); // spawning counts as busy (holds the cell awake during boot)
-    this.deps.log(`talk-pool: ${s.name} ${mode} ${sid.slice(0, 8)} (${args.join(" ")})`);
+
+    // Per-session model + role (uniform-cell): translate the cells spec to a
+    // claude --model id, and stage the role preamble in a file the bootstrap
+    // reads into --append-system-prompt (free text → file avoids any argv
+    // quoting hazard). Both are launch flags, sticky for this warm session.
+    const extra: string[] = [];
+    if (s.model) { const m = claudeModelArg(s.model); if (m) extra.push("--model", m); }
+    const roleFile = `${TALK_STATE_DIR}/${s.name}.role`;
+    if (s.rolePreamble && s.rolePreamble.trim()) {
+      try { writeFileSync(roleFile, s.rolePreamble); extra.push("--role-file", roleFile); }
+      catch (e) { this.deps.err(`talk-pool: ${s.name} could not stage role file: ${String(e).slice(0, 120)}`); }
+    } else {
+      try { rmSync(roleFile, { force: true }); } catch {}
+    }
+    this.deps.log(`talk-pool: ${s.name} ${mode} ${sid.slice(0, 8)} (${args.join(" ")}${extra.length ? " " + extra.join(" ") : ""})`);
 
     let code = 1;
     try {
@@ -234,6 +259,7 @@ export class TalkPool {
         "bash", BOOTSTRAP,
         "--name", s.name, "--sock", s.sock, "--statedir", TALK_STATE_DIR,
         "--mode", mode, "--sid", sid, "--timeout-ms", String(SESSIONSTART_TIMEOUT_MS),
+        ...extra,
       ], { cwd: "/root", stdin: "ignore", stdout: "ignore", stderr: "pipe", env: { ...process.env, HOME: "/root" } });
       code = await p.exited;
       if (code !== 0) {
