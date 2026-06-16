@@ -290,11 +290,15 @@ export const piAdapter: HarnessAdapter = {
       try { await rm(forkDir, { recursive: true, force: true }); } catch {}
     }
   },
-  // Durable NAMED session: a fresh `pi --print --session-dir <named-dir>`
-  // RESUMES the dir's prior conversation (verified live — turn 2 in a fresh
-  // process recalled a codeword planted in turn 1), so the conversation
-  // persists across turns and process restarts with no warm pool. Each name
-  // is its own dir → buyer/staff are independent and run concurrently.
+  // Durable NAMED session: a stable per-name `--session-id` (pi: "use exact
+  // project session ID, creating it if missing") makes a fresh `pi --print`
+  // RESUME exactly this name's conversation and nothing else. The id is
+  // load-bearing for ISOLATION: `--session-dir` alone only sets storage, so
+  // pi resumes the project-global latest session and buyer/staff cross —
+  // verified live (buyer recalled staff's codeword) until `--session-id`
+  // pinned each name to its own session (then buyer↔RED, staff↔BLUE held).
+  // Durable across turns + restarts, no warm pool. Different ids → concurrent,
+  // isolated. The dedicated dir keeps named sessions out of the main store.
   //
   // `-e codex-proxy`: a one-shot `pi --print` does NOT inherit the persistent
   // RPC process's in-process provider-chain cursor, so without the proxy
@@ -307,6 +311,7 @@ export const piAdapter: HarnessAdapter = {
     }
     void cellName;
     const sessDir = `/root/.pi/agent/sessions/named-${session}`;
+    const sessId = `named-${session}`;
     const ext = "/root/.pi/extensions/codex-proxy/index.ts";
     try {
       await mkdir(sessDir, { recursive: true });
@@ -316,6 +321,7 @@ export const piAdapter: HarnessAdapter = {
           "--print",
           ...(existsSync(ext) ? ["-e", ext] : []),
           "--session-dir", sessDir,
+          "--session-id", sessId,
           "--thinking", "off",
           prompt,
         ],
