@@ -1245,7 +1245,7 @@ async function handleBridgeProxy(req: Request): Promise<Response> {
 //
 // Bearer-gated (same CELLS_PROXY_SECRET as every other proxy route); body
 // {cell}. Resolves the well name and runs `well start -s` — the exact path
-// `cells wake` / `ensureWellRunningForTalk` use, which handles both
+// `cells wake` / `ensureWellRunning` use, which handles both
 // hibernated (resume from saved RAM) and cold-stopped wells and blocks
 // until SSH-accept is ready.
 async function handleWake(req: Request): Promise<Response> {

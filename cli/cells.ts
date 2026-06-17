@@ -1176,7 +1176,7 @@ async function cmdTalk(name: string, args: string[]) {
   // VM must be running and accepting SSH first. No-op if already serving.
   try {
     const wellName = await wellNameForCell(name);
-    if (wellName) await ensureWellRunningForTalk(wellName);
+    if (wellName) await ensureWellRunning(wellName);
   } catch (e) {
     console.error(`! wake failed: ${e instanceof Error ? e.message : String(e)}`);
     process.exit(1);
@@ -1295,10 +1295,22 @@ async function runTalkOnCell(
 
 // ── jobs lane — `cells run` / `cells jobs` (docs/proposals/jobs.html) ──
 //
-// Talk is conversation; run is work. A job submit POSTs a kind:"job" event
-// to the cell's DO and prints the job id immediately — no wake, no SSH, no
-// held socket. The on-cell runner executes it in a fresh detached session
+// Talk is conversation; run is work. A job submit wakes the target well
+// (the on-cell runner + its watchdog live INSIDE the cell, so a hibernated
+// well never picks the job up on its own), then POSTs a kind:"job" event to
+// the cell's DO and prints the job id immediately — fire-and-forget, NO held
+// socket (we wake then return; we do not hold the socket open for the job's
+// duration). The on-cell runner executes it in a fresh detached session
 // under a frame-progress watchdog (kill, retry once, durably mark failed).
+//
+// The wake is client-side and synchronous on purpose. The DO already rings a
+// best-effort doorbell on enqueue (handleJobSubmit → proxy.cells.md/wake),
+// but that's an un-awaited fire-and-forget on the edge — version-skew on the
+// deployed Worker, isolate eviction after the 202, or a post-hibernation
+// zombie WS can all swallow it, which is exactly how doorbell `cells run`
+// jobs sat queued for up to a day (only the daily talk-based pulse drained
+// them). The Mac-side `well start -s` is deterministic and proven (same path
+// `cells talk` uses); it's belt-and-suspenders with the DO doorbell.
 
 async function cmdRun(cellName: string, rest: string[]): Promise<void> {
   // Jobs on a mother were once refused outright. They're now allowed for a
@@ -1432,6 +1444,22 @@ async function cmdRun(cellName: string, rest: string[]): Promise<void> {
     console.error(`  --session fork needs a claude-code cell running the interactive jobs runner: a current supervisor (\`cells refresh ${cellName}\`) with CELLS_JOBS_INTERACTIVE=1.`);
     console.error(`  Enable those, and if you just changed either, wake the cell once (e.g. \`cells talk ${cellName} hi\`) so it re-advertises — then retry.`);
     process.exit(1);
+  }
+
+  // Wake the well, THEN enqueue. The runner lives inside the cell, so a job
+  // queued at a hibernated cell sits until something boots it — the bug Zero
+  // hit (doorbell `cells run` jobs wedged for ~a day; only the talk-based
+  // pulse drained them). Same auto-wake path as `cells talk`: a near-no-op
+  // (~100ms) when the cell is already serving, ~2s `well start -s` when it's
+  // hibernated/stopped, gated on SSH-accept. Best-effort: a wake failure must
+  // NOT reject the submit — the job is durable in the DO inbox and the next
+  // wake/pulse still flushes it, so we keep today's durability and only add
+  // liveness on top. Wake-then-return preserves the no-held-socket contract.
+  try {
+    const wn = await wellNameForCell(cellName);
+    if (wn) await ensureWellRunning(wn);
+  } catch (e) {
+    console.error(`! could not wake ${cellName} (${e instanceof Error ? e.message : String(e)}); queuing the job anyway — it'll run on the cell's next wake.`);
   }
 
   const jobId = ulid();
@@ -4850,12 +4878,14 @@ async function startPulseLoop(wellName: string): Promise<void> {
 // If welld reports status=running but ip=null (most often a side-effect
 // of a flush-all that wiped legit leases), force a /stop + /start so the
 // VM re-DHCPs on its next boot. Polls for the IP afterwards for up to 30s.
-// V1.5/V1.6: ensure a well is running + SSH-ready before talk.
+// V1.5/V1.6: ensure a well is running + SSH-ready before we drive it.
+// Used by talk, the host-bridge dial-in, and `cells run` (jobs) — anything
+// whose work executes INSIDE the cell needs the VM awake first.
 // Different from ensureWellHasIp (which only checks IP, used at birth):
-// this is talk-side, so we treat an idle-hibernated/stopped well as
-// expected and transparently wake it. /wake first (preserves saved RAM
-// state for Tier 2 hibernated members), /start as fallback (Tier 4 stopped).
-async function ensureWellRunningForTalk(wellName: string): Promise<void> {
+// this treats an idle-hibernated/stopped well as expected and transparently
+// wakes it. /wake first (preserves saved RAM state for Tier 2 hibernated
+// members), /start as fallback (Tier 4 stopped).
+async function ensureWellRunning(wellName: string): Promise<void> {
   const base = process.env.WELL_API_URL ?? "http://127.0.0.1:7878";
   const token = await wellsToken();
   const info = await fetch(`${base}/v1/wells/${encodeURIComponent(wellName)}`, {
@@ -4875,7 +4905,7 @@ async function ensureWellRunningForTalk(wellName: string): Promise<void> {
     await $`well start -s ${wellName}`.quiet();
   } catch (e) {
     throw new Error(
-      `ensureWellRunningForTalk: 'well start -s ${wellName}' failed: ${e instanceof Error ? e.message : String(e)}`,
+      `ensureWellRunning: 'well start -s ${wellName}' failed: ${e instanceof Error ? e.message : String(e)}`,
     );
   }
   // Defensive verify: confirm SSH-accept on the well's IP. `well start`
@@ -4892,7 +4922,7 @@ async function ensureWellRunningForTalk(wellName: string): Promise<void> {
     await new Promise(r => setTimeout(r, 200));
   }
   throw new Error(
-    `ensureWellRunningForTalk: '${wellName}' not SSH-ready 5s post-start (last: status=${last?.status} ip=${last?.ip})`,
+    `ensureWellRunning: '${wellName}' not SSH-ready 5s post-start (last: status=${last?.status} ip=${last?.ip})`,
   );
 }
 
@@ -6651,7 +6681,7 @@ async function refreshOneCell(
   const specialDir = cell.special ? join(SPECIALS_DIR, cellName) : null;
   const sources = overlay(listDnaFiles(DNA_DIR), specialDir ? listDnaFiles(specialDir) : null);
 
-  await ensureWellRunningForTalk(wellName);
+  await ensureWellRunning(wellName);
 
   // Discover which if-present units the cell carries — its enabled set is
   // config, not ours to change. One round-trip.
