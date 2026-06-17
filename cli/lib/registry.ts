@@ -25,8 +25,16 @@ export type Cell = {
   // name, and the birth-start stale-warming cull (cullStaleWarming) reaps any
   // that outlive a plausible birth.
   status?: "warming" | "alive";
-  // The egg id this cell hatched from (the hex suffix of egg-<id>).
+  // Legacy marker — only on pre-2026-06-17 cells, where it's the hex suffix of
+  // their old `egg-<id>` well. Cells born since don't set it; `well` is
+  // authoritative now. Kept optional for back-compat reads.
   hatched_from?: string;
+  // The cell's well name — the source of truth for cell→well resolution. New
+  // cells set `cells-<name>` at birth (the namespace convention; the name is
+  // already project-prefixed, e.g. `cells-zero-advisor-pete`). Legacy cells were
+  // backfilled with their real well name, so resolve.ts is pure data — no
+  // derivation, no egg scheme.
+  well?: string;
   // Which agent runtime the cell runs — host-bridge reads this to pick the
   // spawn path. Absent on older entries; default to "pi" at read time.
   harness?: "pi" | "claude-code" | "codex" | "hermes";

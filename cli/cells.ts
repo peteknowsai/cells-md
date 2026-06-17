@@ -1846,8 +1846,8 @@ async function cmdShell(name: string) {
     }
   }
   await requireCell(name);
-  // Pool-hatched cells live in a well whose name is `egg-<id>`, not the
-  // cell name. Every other command uses wellNameForCell() to map; shell
+  // A cell's well name (`cells-<name>`) differs from its cell name, so
+  // resolve via wellNameForCell(). Every other command does; shell
   // forgot to, so `cells shell <cell>` on hatched cells errored with
   // "well not found in registry". Resolve here too.
   const wellName = await wellNameForCell(name);
@@ -2824,8 +2824,11 @@ async function cmdDoctor() {
         const reg = (await loadRegistry()).cells;
         known = [];
         for (const c of reg) {
+          // wellNameForCell returns the stored `well` (legacy cells were
+          // backfilled with their real well name), so this covers both the
+          // `cells-<name>` cells and any legacy well without naming it here.
           known.push(await wellNameForCell(c.name), `cells-${c.name}`, c.name);
-          if (c.hatched_from) known.push(`egg-${c.hatched_from}`);
+          if (c.well) known.push(c.well);
         }
         poolWells = [];  // no pool anymore — every owned well is a registered cell
       } catch (e) {
@@ -3056,8 +3059,9 @@ function generateCellName(): string {
   return `cell-${randomBytes(4).toString("hex").slice(0, 6)}`;
 }
 
-// Birth a cell: resolve config, claim a generic egg from the pool, hand
-// [name, egg-well, config-blob] to mother — who follows the birthing ritual
+// Birth a cell: resolve config, fork a fresh well (`cells-<name>`) from the
+// cell-base image, hand [name, well, config-blob] to mother — who follows the
+// birthing ritual
 // (docs/birthing-ritual.html). One linear path, no fast/slow split. Birth
 // isn't a race; it's done when mother's end-test proves the cell works.
 async function cmdCreate(name: string | undefined, opts: CreateOpts): Promise<void> {
@@ -3342,17 +3346,18 @@ async function cmdCreate(name: string | undefined, opts: CreateOpts): Promise<vo
   // instead of claiming a pre-baked hibernated egg. The heavy provisioning
   // (DNA + four harnesses + node-gyp + pi patches) was paid ONCE at
   // `cells bake` time and is baked into the image — birth only forks +
-  // imprints. The well name stays `egg-<hex>`; the cell's `hatched_from` is
-  // that hex and `egg-<hatched_from>` is the cell→well binding (resolve.ts),
-  // so nothing downstream changes shape. `claimAndReady` keeps its name +
-  // return shape ({wellName, id}) because the retry loop below reuses it.
+  // imprints. The well is named after the cell — `cells-<name>` — matching
+  // specials and the namespace convention (docs/namespacing.md); it's stored on
+  // the registry record (`well`) so resolve.ts is pure data, no derivation.
+  // `claimAndReady` keeps its name because the retry loop below reuses it.
   if (!(await readSecret("CELLS_PROXY_SECRET"))) {
     console.error("CELLS_PROXY_SECRET missing from ~/.cells/secrets.json");
     process.exit(1);
   }
   const claimAndReady = async () => {
-    const wellName = generatePoolWellName();
-    const id = wellName.slice("egg-".length);
+    // `name` is already project-prefixed (projectCellName), so e.g. a zero cell
+    // becomes well `cells-zero-advisor-pete`. No egg, no hex, no pool.
+    const wellName = `cells-${name}`;
     try {
       // Fork the provisioned cell-base. setWellAuthPublic + waitForCloudInit
       // are required for a *freshly forked* well (the old pool path got these
@@ -3375,7 +3380,7 @@ async function cmdCreate(name: string | undefined, opts: CreateOpts): Promise<vo
       // fresh create, which falls back to the global 60s default — the API just
       // reports the absent field as null. The cell idle-hibernates at 60s on its
       // own once ensureHibernateReady seals it below. Confirmed w/ wells 2026-06-17.)
-      return { wellName, id };
+      return { wellName };
     } catch (e) {
       console.error(
         `! fresh cell ${wellName} couldn't be readied: ${e instanceof Error ? e.message : String(e)}`,
@@ -3394,8 +3399,8 @@ async function cmdCreate(name: string | undefined, opts: CreateOpts): Promise<vo
     );
     process.exit(1);
   }
-  let eggWell = claim.wellName;
-  const sweepEgg = async (well: string) => {
+  let cellWell = claim.wellName;
+  const sweepWell = async (well: string) => {
     await directWellDestroy(well).catch(() => {});
   };
 
@@ -3409,7 +3414,7 @@ async function cmdCreate(name: string | undefined, opts: CreateOpts): Promise<vo
   const warmingEntry = {
     name,
     created_at: new Date().toISOString(),
-    hatched_from: claim.id,
+    well: claim.wellName,
     modelChain: chain,
     harness,
     ...(opts.project ? { project: opts.project } : {}),
@@ -3423,8 +3428,8 @@ async function cmdCreate(name: string | undefined, opts: CreateOpts): Promise<vo
   try {
     await mutateRegistry((cells) => upsertBirthingCell(cullStaleWarming(cells, Date.now()), warmingEntry));
   } catch (e) {
-    console.error(`birth failed: could not register ${name} (${e instanceof Error ? e.message : String(e)}) — sweeping egg ${eggWell}`);
-    await sweepEgg(eggWell).catch(() => {});
+    console.error(`birth failed: could not register ${name} (${e instanceof Error ? e.message : String(e)}) — sweeping well ${cellWell}`);
+    await sweepWell(cellWell).catch(() => {});
     process.exit(1);
   }
   const rollbackRegistration = async () => {
@@ -3436,13 +3441,13 @@ async function cmdCreate(name: string | undefined, opts: CreateOpts): Promise<vo
   // outcome guards via the never-returning exit). Order matters: roll the
   // warming entry back FIRST (critical — a leaked "warming" entry causes
   // phantom cells / a 403 on the next birth of the same name), THEN reclaim
-  // the egg as best-effort, so a pool-lock/disk error inside sweepEgg can
-  // never strand the warming entry. Reads eggWell at call-time (a retry may
+  // the egg as best-effort, so a pool-lock/disk error inside sweepWell can
+  // never strand the warming entry. Reads cellWell at call-time (a retry may
   // have reassigned it).
   const cleanupFailedBirth = async () => {
     await rollbackRegistration();
-    await sweepEgg(eggWell).catch((e) =>
-      console.warn(`note: cell well sweep failed — destroy '${eggWell}' by hand if it lingers: ${e instanceof Error ? e.message : String(e)}`),
+    await sweepWell(cellWell).catch((e) =>
+      console.warn(`note: cell well sweep failed — destroy '${cellWell}' by hand if it lingers: ${e instanceof Error ? e.message : String(e)}`),
     );
   };
 
@@ -3508,7 +3513,7 @@ async function cmdCreate(name: string | undefined, opts: CreateOpts): Promise<vo
     // entry — treat it as a no-outcome attempt so the !outcome handler rolls
     // the warming entry back.
     try {
-      const r = await talkAndAwaitOutcome("cell-create", [name, eggWell, JSON.stringify(blob)], { progressName: name });
+      const r = await talkAndAwaitOutcome("cell-create", [name, cellWell, JSON.stringify(blob)], { progressName: name });
       outcome = r.outcome;
     } catch (e) {
       console.warn(`! mother-cell birth threw: ${e instanceof Error ? e.message : String(e)}`);
@@ -3522,10 +3527,10 @@ async function cmdCreate(name: string | undefined, opts: CreateOpts): Promise<vo
         console.warn(`! retrying birth with mother harness '${which}' (fresh egg)`);
         let fresh: Awaited<ReturnType<typeof claimAndReady>> = null;
         try {
-          await sweepEgg(eggWell);
+          await sweepWell(cellWell);
           fresh = await claimAndReady();
         } catch (e) {
-          // sweepEgg/claimAndReady can throw on a pool-lock/disk error — don't
+          // sweepWell/claimAndReady can throw on a pool-lock/disk error — don't
           // let that leak the warming entry; fall into the !fresh rollback.
           console.error(`birth failed: retry egg prep threw: ${e instanceof Error ? e.message : String(e)}`);
         }
@@ -3536,7 +3541,7 @@ async function cmdCreate(name: string | undefined, opts: CreateOpts): Promise<vo
           process.exit(1);
         }
         claim = fresh;
-        eggWell = fresh.wellName;
+        cellWell = fresh.wellName;
       }
       usedMotherHarness = which;
       await writeBirthLog(which);  // start record (refreshed per attempt)
@@ -3547,13 +3552,13 @@ async function cmdCreate(name: string | undefined, opts: CreateOpts): Promise<vo
         r = which === "claude-code"
           ? await runClaudeWithOutcome(
               "birth",
-              [name, eggWell, JSON.stringify(blob)],
+              [name, cellWell, JSON.stringify(blob)],
               wellsEnv(),
               { progressName: name },
             )
           : await runPiWithOutcome(
               "cell-create",
-              [name, eggWell, JSON.stringify(blob)],
+              [name, cellWell, JSON.stringify(blob)],
               wellsEnv(),
               { progressName: name },
             );
@@ -3577,12 +3582,12 @@ async function cmdCreate(name: string | undefined, opts: CreateOpts): Promise<vo
     await writeBirthLog(usedMotherHarness, outcome);
   }
   if (!outcome) {
-    console.error(`birth failed: mother did not report an outcome — sweeping egg ${eggWell}`);
+    console.error(`birth failed: mother did not report an outcome — sweeping well ${cellWell}`);
     await cleanupFailedBirth();
     process.exit(1);
   }
   if (!outcome.success) {
-    console.error(`birth failed: ${outcome.message} — sweeping egg ${eggWell}`);
+    console.error(`birth failed: ${outcome.message} — sweeping well ${cellWell}`);
     await cleanupFailedBirth();
     process.exit(1);
   }
@@ -3591,32 +3596,31 @@ async function cmdCreate(name: string | undefined, opts: CreateOpts): Promise<vo
   // cell reaches the registry that the hibernation system can't manage
   // (hibernation model, invariant 4).
   try {
-    await ensureHibernateReady(eggWell);
+    await ensureHibernateReady(cellWell);
   } catch (e) {
     console.error(
-      `birth failed: '${name}' not hibernate-ready (${e instanceof Error ? e.message : String(e)}) — sweeping egg ${eggWell}`,
+      `birth failed: '${name}' not hibernate-ready (${e instanceof Error ? e.message : String(e)}) — sweeping well ${cellWell}`,
     );
     await cleanupFailedBirth();
     process.exit(1);
   }
 
   // ── 6. Success: promote the warming entry to alive (authoritative) ──
-  // Promote BEFORE the pool bookkeeping below so a markPoolMemberLive failure
-  // can't strand a proven-alive cell as "warming". A throw here (the promote
-  // never persisted → the cell isn't authoritatively alive yet) rolls the
-  // warming entry back; once promoted, no later step ever un-registers it.
+  // A throw here (the promote never persisted → the cell isn't authoritatively
+  // alive yet) rolls the warming entry back; once promoted, no later step ever
+  // un-registers it.
   try {
     await mutateRegistry((cells) => {
-      // hatched_from + modelChain are patched in case a retry swept the original
-      // egg and re-claimed a fresh one. If the warming entry somehow vanished,
-      // re-insert so a successful birth always lands a registered, alive cell.
-      let next = promoteCell(cells, name, { hatched_from: claim.id, modelChain: chain });
+      // `well` + modelChain are patched in case a retry recreated the cell's
+      // well. If the warming entry somehow vanished, re-insert so a successful
+      // birth always lands a registered, alive cell.
+      let next = promoteCell(cells, name, { well: claim.wellName, modelChain: chain });
       if (!findCellIn(next, name)) {
         next = [...next, {
           name,
           created_at: new Date().toISOString(),
           status: "alive" as const,
-          hatched_from: claim.id,
+          well: claim.wellName,
           modelChain: chain,
           harness,
           ...(opts.project ? { project: opts.project } : {}),
@@ -3629,8 +3633,8 @@ async function cmdCreate(name: string | undefined, opts: CreateOpts): Promise<vo
     throw e;
   }
 
-  // (No pool bookkeeping anymore — the cell IS its well; the registry's
-  // `hatched_from` is the only binding, resolved as `egg-<hatched_from>`.)
+  // (No pool bookkeeping anymore — the registry's `well` field is the only
+  // cell→well binding now.)
 
   // Kick host-bridge to spawn ssh+pi now so the first talk connects warm.
   void prewarmHostBridge(name);
@@ -3894,14 +3898,6 @@ async function registerSiteService(wellName: string, cellName: string): Promise<
       `register site service for '${wellName}' failed: ${r.status} ${(await r.text()).slice(0, 300)}`,
     );
   }
-}
-
-// Generate a fresh well-name for a birth. Distinct from cell-names (cell-<hex>)
-// so `cells list` doesn't treat the well as a user-facing cell. The `egg-`
-// prefix is historical (pool era) but load-bearing: a hatched cell's well is
-// `egg-<hatched_from>`, which resolve.ts reconstructs from that prefix.
-function generatePoolWellName(): string {
-  return `egg-${randomBytes(4).toString("hex").slice(0, 6)}`;
 }
 
 // Read all LLM provider keys from ~/.cells/secrets.json so every cell/root
@@ -5091,8 +5087,8 @@ async function cmdDestroyOne(name: string): Promise<boolean> {
   // kill/birth cycles for cells reusing the same name.
   await removePostwork(name);
 
-  // (No pool.json to clean — the cell's well `egg-<hatched_from>` was
-  // destroyed above; there's no separate pool entry anymore.)
+  // (No pool.json to clean — the cell's well was destroyed above; the
+  // registry entry's `well` field goes with the removeCell below.)
 
   // Journal the teardown. Birth appends a `born` line via mother's
   // cell-create prompt; mirror that here so the activity log stays a
@@ -7106,7 +7102,7 @@ type WellInfo = {
 
 async function getWellInfo(nameOrCell: string): Promise<WellInfo> {
   // Accept either a well name or a cell name. For hatched cells, the
-  // well name is the egg's permanent name (cell name ≠ well name);
+  // a cell's well name (`cells-<name>`) differs from its cell name;
   // resolve here so the API call hits the right well. Well-only
   // callers pass a name not in the cell registry — wellNameForCell
   // returns the input unchanged in that case.

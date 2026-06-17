@@ -82,10 +82,9 @@ type CellTarget = {
 
 async function resolveCellTarget(cellName: string): Promise<CellTarget | null> {
   // Well-name resolution is centralized in lib/resolve.ts#wellNameForCell:
-  // specials → cells-<name>, hatched cells → egg-<hatched_from>, else the
-  // cell-name (legacy/cold-fork). Pre-2026-06-17 a hatched cell indirected
-  // through pool.json; with the egg pool gone the binding reconstructs from
-  // hatched_from directly.
+  // it reads the cell's stored `well` (set at birth: `cells-<name>`), defaulting
+  // to `cells-<name>` for specials / any cell missing it. Legacy cells were
+  // backfilled with their real well name, so there's no per-era derivation here.
   let wellName = cellName;
   let harness = "pi";
   try {
