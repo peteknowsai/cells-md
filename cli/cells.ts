@@ -749,7 +749,27 @@ async function runClaudeWithOutcome(
     );
     if (existsSync(outcomeFile)) await unlink(outcomeFile);
 
-    const message = `/${slashCommand} ${args.join(" ")}`.trim();
+    // For births, prepend a birthId and stage the config blob as a file passed
+    // by `@path` (not raw JSON). The recipe drives every step through
+    // cells-bridge, so it runs identically whether mother is here on the Mac or
+    // inside her own cell — and the blob's quotes never have to survive the
+    // shell. (report-outcome still writes CELL_OUTCOME_FILE in local mode, so
+    // the birthId is just carried for the in-cell path.)
+    let msgArgs = args;
+    if (slashCommand === "birth") {
+      const bid = `b${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
+      let blobArg = args[2] ?? "";
+      if (blobArg && !blobArg.startsWith("@")) {
+        try {
+          await mkdir(BIRTH_BLOBS_DIR, { recursive: true });
+          const blobFile = join(BIRTH_BLOBS_DIR, `${bid}.json`);
+          await writeFile(blobFile, blobArg);
+          blobArg = `@${blobFile}`;
+        } catch {/* keep raw JSON if staging fails */}
+      }
+      msgArgs = [bid, args[0] ?? "", args[1] ?? "", blobArg];
+    }
+    const message = `/${slashCommand} ${msgArgs.join(" ")}`.trim();
 
     const chipName = opts?.progressName;
     const useChip = !!chipName && process.stderr.isTTY;
@@ -770,6 +790,9 @@ async function runClaudeWithOutcome(
         cwd: MOTHER_ROOT,
         env: {
           ...process.env,
+          // cells-bridge lives in base bin; put it on PATH so the recipe can
+          // call it bare here, exactly as it's on /root/bin inside a cell.
+          PATH: `${join(DNA_DIR, "bin")}:${process.env.PATH ?? ""}`,
           CELL_OUTCOME_FILE: outcomeFile,
           ...(extraEnv ?? {}),
         },
@@ -893,6 +916,10 @@ async function runPiWithOutcome(
 // deletes runPiWithOutcome + this flag once the new path is verified live.
 
 const BIRTH_OUTCOMES_DIR_LOCAL = join(REGISTRY_DIR, "birth-outcomes");
+// Where the in-cell birth path stages the config blob so mother references it
+// by `@path` instead of carrying raw JSON through SSH + slash-command parsing +
+// mac_exec quoting (where it gets mangled — the "config blob parse error").
+const BIRTH_BLOBS_DIR = join(REGISTRY_DIR, "birth-blobs");
 const BIRTH_LOCK_PATH = join(REGISTRY_DIR, "birth.lock");
 // 10 min — cells-mother adds latency (per-tool bridge round trips) on top
 // of the legacy ~90-140s envelope, especially on early births when she's
@@ -935,7 +962,7 @@ const BIRTH_LOG_DIR = join(REGISTRY_DIR, "birth-log");
 async function talkAndAwaitOutcome(
   slashCommand: string,
   args: string[],
-  opts?: { progressName?: string },
+  opts?: { progressName?: string; motherCell?: string; dispatch?: "talk" | "run" },
 ): Promise<{ exit: number; outcome: Outcome | null }> {
   return withBirthLock(`${slashCommand} ${args[0] ?? ""}`.trim(), async () => {
     const birthId = `b${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
@@ -948,7 +975,7 @@ async function talkAndAwaitOutcome(
     const startedAt = Date.now();
     const startedAtIso = new Date(startedAt).toISOString();
     let meta: { name?: string; harness?: string; model?: string } = {};
-    if (slashCommand === "cell-create") {
+    if (slashCommand === "cell-create" || slashCommand === "birth") {
       const [name, , blobJson] = args;
       meta.name = name;
       try {
@@ -965,12 +992,43 @@ async function talkAndAwaitOutcome(
       }, null, 2));
     } catch {/* log surface is best-effort */}
 
-    const message = `/${slashCommand} ${birthId} ${args.join(" ")}`.trim();
-    // Fire `cells talk mother <message>` in the background. Mother runs
-    // the ritual; her final tool call (report_outcome) writes outcomeFile
-    // via /bridge/birth/outcome. We don't care about the talk exit code —
-    // outcome presence is the source of truth.
-    const proc = Bun.spawn(["bun", join(REPO_ROOT, "cli/cells.ts"), "talk", "mother", message], {
+    // For cell-create, stage the blob in a file and hand mother `@path` instead
+    // of raw JSON: the JSON would otherwise ride through `cells talk`'s SSH
+    // escaping, the in-cell slash-command arg split, and mother's own mac_exec
+    // quoting — too many shell layers for it to survive intact. The birth
+    // scripts deref `@path`. Falls back to raw JSON if staging fails.
+    let msgArgs = args;
+    if ((slashCommand === "cell-create" || slashCommand === "birth") && args[2]) {
+      try {
+        await mkdir(BIRTH_BLOBS_DIR, { recursive: true });
+        const blobFile = join(BIRTH_BLOBS_DIR, `${birthId}.json`);
+        await writeFile(blobFile, args[2]);
+        msgArgs = [args[0] ?? "", args[1] ?? "", `@${blobFile}`];
+      } catch {/* keep raw JSON if staging fails */}
+    }
+    const message = `/${slashCommand} ${birthId} ${msgArgs.join(" ")}`.trim();
+    // Fire the birth at the owning mother in the background. Her final
+    // report_outcome tool-call writes outcomeFile via /bridge/birth/outcome;
+    // we don't care about the dispatcher's exit code — outcome presence is the
+    // source of truth.
+    //
+    // Two dispatch shapes, chosen by the caller:
+    //   "talk" — `cells talk <mother> <msg>`: the agent-comms fork path. For a
+    //            claude mother this runs `claude --print` (forkAndAsk), which
+    //            bills the metered Agent-SDK credit (cc_entrypoint=sdk-cli) AND
+    //            replays her whole main session. Fine for pi (flat-cost), wrong
+    //            for claude.
+    //   "run"  — `cells run <mother> <msg>`: a durable JOB. A claude mother
+    //            runs it through the GENUINELY INTERACTIVE runner
+    //            (interactive-claude-job.sh, tmux PTY), so the birth bills the
+    //            subscription pool (cc_entrypoint=cli) — the same path
+    //            `cells run` uses for any claude job. This is how a project
+    //            mother "does the work" of her own births.
+    const dispatch = opts?.dispatch ?? "talk";
+    const cliArgs = dispatch === "run"
+      ? ["run", opts?.motherCell ?? "mother", message, "--timeout", `${Math.round(TALK_OUTCOME_TIMEOUT_MS / 1000)}s`]
+      : ["talk", opts?.motherCell ?? "mother", message];
+    const proc = Bun.spawn(["bun", join(REPO_ROOT, "cli/cells.ts"), ...cliArgs], {
       stdio: ["ignore", "ignore", "ignore"],
     });
 
@@ -3499,7 +3557,12 @@ async function cmdCreate(name: string | undefined, opts: CreateOpts): Promise<vo
   if (!process.stdout.isTTY) {
     console.log(owningMother === "mother" ? `birthing ${name}…` : `birthing ${name} (${owningMother})…`);
   }
-  const useMotherCell = process.env.CELLS_USE_MOTHER_CELL === "1";
+  // Birth is the OWNING mother cell's own work: try her first (she runs the
+  // recipe in-cell via cells-bridge / her mac_exec tools, ~30-40s). Only if she
+  // yields no successful outcome do we fall back to the Mac-side ritual — so
+  // reliability never drops below the Mac path. CELLS_MAC_BIRTH=1 forces
+  // Mac-only (debug / recovery).
+  const forceMac = process.env.CELLS_MAC_BIRTH === "1";
   const motherChain = await readMotherHarnessChain();
 
   // Birth-log surface for mother.cells.md. talkAndAwaitOutcome writes its
@@ -3535,19 +3598,59 @@ async function cmdCreate(name: string | undefined, opts: CreateOpts): Promise<vo
 
   let outcome: Outcome | null = null;
   let usedMotherHarness: string | null = null;
-  if (useMotherCell) {
-    // talkAndAwaitOutcome handles its own birth-log entry. A throw here (the
-    // legacy mother-cell path can fail mid-talk) must NOT leak the warming
-    // entry — treat it as a no-outcome attempt so the !outcome handler rolls
-    // the warming entry back.
+  // PRIMARY — the owning mother cell births in-cell, via the harness she runs
+  // (claude-code → /birth, pi → /cell-create; both drive the same bridge). She
+  // writes her own birth-log entry. A throw or non-success just falls through
+  // to the Mac-side fallback below — it never leaks the warming entry.
+  //
+  // HOW she's invoked matters for billing. A claude mother MUST run the birth
+  // as a durable JOB (`cells run`) — that path hands off to the genuinely
+  // interactive runner (tmux PTY, cc_entrypoint=cli), so the birth bills the
+  // Max subscription pool, NOT the metered Agent-SDK credit that `claude
+  // --print` (the `cells talk` fork path) would. The job route is only open to
+  // a PROJECT mother (motherJobRefusalReason === null — the global mother is
+  // refused, as a detached job there races the birth-ritual lock). pi mothers
+  // stay on the flat-cost talk/--print path: gpt-5.5 has no billing split, and
+  // that path is already proven.
+  if (!forceMac) {
     try {
-      const r = await talkAndAwaitOutcome("cell-create", [name, cellWell, JSON.stringify(blob)], { progressName: name });
-      outcome = r.outcome;
+      const ownerHarness = (await loadRegistry()).cells.find(c => c.name === owningMother)?.harness ?? "pi";
+      const slash = ownerHarness === "claude-code" ? "birth" : "cell-create";
+      const useJob = ownerHarness === "claude-code" && motherJobRefusalReason(owningMother, false) === null;
+      const dispatch = useJob ? "run" : "talk";
+      const r = await talkAndAwaitOutcome(slash, [name, cellWell, JSON.stringify(blob)], { progressName: name, motherCell: owningMother, dispatch });
+      if (r.outcome?.success) {
+        outcome = r.outcome;
+        usedMotherHarness = `${owningMother}·${useJob ? "job" : "cell"}`;
+        // Record attribution NOW — the fallback block's writeBirthLog (which
+        // stamps mother_harness for mother.cells.md) is skipped once `outcome`
+        // is set, so an in-cell success would otherwise leave the surface
+        // showing a null mother_harness.
+        await writeBirthLog(usedMotherHarness, outcome);
+      } else {
+        console.warn(`! in-cell ${owningMother} birth ${r.outcome ? `failed (${r.outcome.message})` : "produced no outcome"} — falling back to the Mac-side ritual`);
+      }
     } catch (e) {
-      console.warn(`! mother-cell birth threw: ${e instanceof Error ? e.message : String(e)}`);
-      outcome = null;
+      console.warn(`! in-cell ${owningMother} birth threw (${e instanceof Error ? e.message : String(e)}) — falling back to the Mac-side ritual`);
     }
-  } else {
+  }
+  // FALLBACK (or primary under CELLS_MAC_BIRTH): the Mac-side harness chain. If
+  // the in-cell attempt may have touched this well, reset to a clean cold-fork
+  // first so the Mac ritual starts from a pristine well.
+  if (!outcome) {
+    if (!forceMac) {
+      try {
+        await sweepWell(cellWell);
+        const fresh = await claimAndReady();
+        if (!fresh) throw new Error("no fresh well");
+        claim = fresh;
+        cellWell = fresh.wellName;
+      } catch (e) {
+        console.error(`birth failed: could not reset well for Mac-side fallback: ${e instanceof Error ? e.message : String(e)}`);
+        await cleanupFailedBirth();
+        process.exit(1);
+      }
+    }
     for (let attempt = 0; attempt < motherChain.length; attempt++) {
       const { harness: motherHarness } = parseChainEntry(motherChain[attempt]!);
       const which = motherHarness ?? "pi";
@@ -6678,7 +6781,14 @@ async function refreshOneCell(
   const wellName = await wellNameForCell(cellName);
 
   // Source = base DNA floored, special dir overlaid (same order birth uses).
-  const specialDir = cell.special ? join(SPECIALS_DIR, cellName) : null;
+  // A project mother/pulse has NO dna/specials/<cellName> of its own — it bakes
+  // from the shared template (dnaName: "mother"/"pulse"). Resolve through the
+  // same mapping birth uses, else refresh of e.g. zero-mother silently overlays
+  // a nonexistent dir and pushes only base DNA — leaving her birth skill (a
+  // mother-special unit) frozen at bake time. Falls back to cellName for global
+  // specials (mother/pulse/doctor) that ARE their own dir.
+  const specialDnaName = cell.special ? (resolveSpecialSpec(cellName)?.dnaName ?? cellName) : null;
+  const specialDir = specialDnaName ? join(SPECIALS_DIR, specialDnaName) : null;
   const sources = overlay(listDnaFiles(DNA_DIR), specialDir ? listDnaFiles(specialDir) : null);
 
   await ensureWellRunning(wellName);

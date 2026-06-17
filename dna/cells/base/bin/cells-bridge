@@ -1,0 +1,90 @@
+#!/usr/bin/env bash
+# cells-bridge — the harness-agnostic birth bridge.
+#
+# Birthing has to run things on the Mac (fork/imprint/checkpoint a well via
+# welld) and report an outcome. A mother running ON THE MAC can do that
+# directly; a mother running INSIDE a cell has to relay through the proxy
+# back-channel. This wrapper hides that difference behind three subcommands so
+# the birth recipe is identical for every harness (pi / claude-code / codex /
+# hermes) and every location — each harness just calls it through its shell.
+#
+#   cells-bridge mac-exec   '<script>'                run a bash script on the Mac (cwd = cells repo)
+#   cells-bridge well-exec  '<well>' '<script>'       run a script in <well> as root (HOME=/root)
+#   cells-bridge report-outcome '<birthId>' true|false '<message>'
+#
+# Location is detected, not configured: if a local welld answers we're on the
+# Mac and run directly; otherwise we're in a cell and relay over
+# proxy.cells.md/bridge/* (Bearer $CELLS_PROXY_SECRET). The local and bridge
+# paths mirror cli/proxy.ts handleBridgeProxy exactly, so behaviour is identical
+# either way — this is the same channel the pi mother's tools already use.
+set -uo pipefail
+
+BRIDGE="${CELLS_BRIDGE_URL:-https://proxy.cells.md/bridge}"
+WELLD="${WELL_API_URL:-http://127.0.0.1:7878}"
+
+# On the Mac iff a local welld answers. A cell can't reach the Mac's welld
+# (that's the whole point of the wells boundary), so this is a clean signal.
+on_mac() { curl -sf -m 2 "$WELLD/healthz" >/dev/null 2>&1; }
+
+secret() { printf '%s' "${CELLS_PROXY_SECRET:?CELLS_PROXY_SECRET not set in env}"; }
+
+# Mac-side repo root: this script lives at <repo>/dna/cells/base/bin/cells-bridge.
+repo_root() {
+  local d; d="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." 2>/dev/null && pwd)"
+  if [ -n "$d" ] && [ -f "$d/cli/cells.ts" ]; then printf '%s' "$d"; else printf '%s' "${CELLS_REPO:-$HOME/Projects/cells}"; fi
+}
+
+bridge_post() { # <path> <json-body> -> raw response body
+  curl -sS -X POST "$BRIDGE$1" \
+    -H "Authorization: Bearer $(secret)" \
+    -H "Content-Type: application/json" \
+    --data "$2"
+}
+
+# Print a bridge response's stdout/stderr and exit with its exit code.
+relay_result() {
+  local resp="$1"
+  printf '%s' "$resp" | jq -r '.stdout // ""'
+  printf '%s' "$resp" | jq -r '.stderr // ""' >&2
+  exit "$(printf '%s' "$resp" | jq -r '(.exit // 1) | tostring')"
+}
+
+cmd="${1:?usage: cells-bridge <mac-exec|well-exec|report-outcome> ...}"; shift || true
+
+case "$cmd" in
+  mac-exec)
+    script="${1:?usage: cells-bridge mac-exec '<script>'}"
+    if on_mac; then
+      ( cd "$(repo_root)" && bash -c "$script" )
+    else
+      relay_result "$(bridge_post /mac_exec "$(jq -nc --arg s "$script" '{script:$s, cell:"mother"}')")"
+    fi
+    ;;
+  well-exec)
+    well="${1:?usage: cells-bridge well-exec '<well>' '<script>'}"
+    script="${2:?usage: cells-bridge well-exec '<well>' '<script>'}"
+    if on_mac; then
+      # Mirror bridgeWellSsh: lift to root with HOME=/root explicitly.
+      well exec -s "$well" -- sudo bash -lc "export HOME=/root; $script"
+    else
+      relay_result "$(bridge_post /well/ssh "$(jq -nc --arg w "$well" --arg s "$script" '{wellName:$w, script:$s}')")"
+    fi
+    ;;
+  report-outcome)
+    birthId="${1:?usage: cells-bridge report-outcome '<birthId>' true|false '<message>'}"
+    success="${2:?true|false}"
+    message="${3:-}"
+    json="$(jq -nc --arg id "$birthId" --argjson ok "$success" --arg m "$message" '{birthId:$id, success:$ok, message:$m}')"
+    if [ -n "${CELL_OUTCOME_FILE:-}" ]; then
+      # Mac-side: the CLI is long-polling this file (runClaudeWithOutcome /
+      # runPiWithOutcome). Write just {success,message} — its shape.
+      printf '%s' "$json" | jq -c '{success, message}' > "$CELL_OUTCOME_FILE"
+    else
+      bridge_post /birth/outcome "$json" >/dev/null
+    fi
+    ;;
+  *)
+    echo "cells-bridge: unknown subcommand '$cmd'" >&2
+    exit 2
+    ;;
+esac

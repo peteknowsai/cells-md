@@ -24,6 +24,8 @@ set -uo pipefail
 NAME="${1:?usage: $0 <NAME> <WELL> <BLOB_JSON>}"
 CELL_WELL="${2:?usage: $0 <NAME> <WELL> <BLOB_JSON>}"
 BLOB_JSON="${3:?usage: $0 <NAME> <WELL> <BLOB_JSON>}"
+# Accept `@/path/to/blob.json` as well as raw JSON (see imprint-cell.sh).
+[[ "$BLOB_JSON" == @* ]] && BLOB_JSON="$(cat "${BLOB_JSON#@}")"
 
 REPO="${CELLS_REPO:-$HOME/Projects/cells}"
 STATUS_DIR="$HOME/.cells/postwork"

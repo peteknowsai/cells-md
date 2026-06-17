@@ -16,6 +16,11 @@ set -euo pipefail
 CELL_WELL="${1:?well required}"
 NAME="${2:?cell name required}"
 BLOB="${3:?blob JSON required}"
+# The blob may be passed as `@/path/to/blob.json` instead of raw JSON — the
+# in-cell mother path stages it in a file so the JSON never rides through the
+# SSH + slash-command + mac_exec shell layers (where its quotes get mangled).
+# Raw JSON still works (the Mac-side birth path passes it directly).
+[[ "$BLOB" == @* ]] && BLOB="$(cat "${BLOB#@}")"
 
 HARNESS=$(echo "$BLOB" | jq -r '.harness // "pi"')
 MODEL=$(echo "$BLOB" | jq -r '.model // empty')
