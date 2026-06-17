@@ -54,12 +54,6 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { verifyClerkSession, gateHtml } from "./shared/clerk-gate";
 import { wellNameForCell } from "./lib/resolve";
-import {
-  V1_POOL_VARIANT_SIGNATURE,
-  loadPool,
-  savePool,
-  withPoolLock,
-} from "./lib/pool";
 import { isValidCellName } from "./lib/cell-name";
 import { pulseOwner } from "./lib/pulse-owner";
 import { loadRegistry, loadRegistrySafe, saveRegistry, withRegistryLock, isStaleWarming, type Cell, type Registry } from "./lib/registry";
@@ -1023,8 +1017,6 @@ async function handleHeartbeatChanged(req: Request): Promise<Response> {
 // Mac via the same primitives cli/cells.ts uses.
 //
 // Endpoints:
-//   POST /bridge/pool/claim     — claim a generic egg, return {wellName, tier, id}
-//   POST /bridge/pool/sweep     — destroy a half-born egg + trigger refill
 //   POST /bridge/registry/read  — return ~/.cells/cells.json
 //   POST /bridge/registry/write — replace ~/.cells/cells.json (full doc)
 //   POST /bridge/well/ssh       — exec a script in a well via `well exec`, return {ok, stdout, stderr}
@@ -1038,37 +1030,6 @@ async function handleHeartbeatChanged(req: Request): Promise<Response> {
 // so the cells CLI can long-poll for them.
 
 const BIRTH_OUTCOMES_DIR = join(homedir(), ".cells/birth-outcomes");
-// pool storage paths, the variant constant, and the lock helper are now
-// canonical in ./lib/pool — imported above.
-
-async function bridgePoolClaim(body: { cellName: string }): Promise<Response> {
-  // Canonical cell-name contract (cli/lib/cell-name) — same rule cmdCreate
-  // enforces at birth, so a name that exists always passes here. The old
-  // inline /^[a-z0-9-]+$/ was looser (accepted leading/trailing hyphens
-  // and unbounded length) than creation — a defense-in-depth gap.
-  // wellName / birthId elsewhere in this file are a different format and
-  // keep their own checks.
-  if (!body.cellName || !isValidCellName(body.cellName)) {
-    return new Response("bad cellName", { status: 400 });
-  }
-  let chosen: { wellName: string; tier: number; id: string } | null = null;
-  await withPoolLock(async () => {
-    const file = await loadPool();
-    const open = file.members.find((e) =>
-      e.state === "open" && e.variant_signature === V1_POOL_VARIANT_SIGNATURE && (e.tier ?? 2) === 4
-    ) ?? file.members.find((e) =>
-      e.state === "open" && e.variant_signature === V1_POOL_VARIANT_SIGNATURE
-    );
-    if (!open) return;
-    open.state = "claimed";
-    open.claimed_at = new Date().toISOString();
-    open.claimed_by = body.cellName;
-    chosen = { wellName: open.well_name, tier: open.tier ?? 2, id: open.well_name.slice("egg-".length) };
-    await savePool(file);
-  });
-  if (!chosen) return Response.json({ error: "no open egg available" }, { status: 503 });
-  return Response.json(chosen);
-}
 
 async function bridgeRegistryRead(): Promise<Response> {
   // Mirror the registry to the host-bridge. loadRegistry gives the same
@@ -1130,21 +1091,6 @@ async function bridgeWellSsh(body: { wellName: string; script: string }): Promis
   ]);
   const exit = await proc.exited;
   return Response.json({ ok: exit === 0, exit, stdout, stderr });
-}
-
-async function bridgePoolSweep(body: { wellName: string }): Promise<Response> {
-  if (!body.wellName || !/^[a-z0-9-]+$/.test(body.wellName)) {
-    return new Response("bad wellName", { status: 400 });
-  }
-  // Destroy + drop from pool. Refill is a fire-and-forget; we don't wait.
-  Bun.spawn(["well", "destroy", body.wellName, "--force"], { stdio: ["ignore", "ignore", "ignore"] });
-  await withPoolLock(async () => {
-    const file = await loadPool();
-    file.members = file.members.filter((e) => e.well_name !== body.wellName);
-    await savePool(file);
-  });
-  Bun.spawn(["bun", join(REPO_ROOT, "cli/cells.ts"), "pool", "refill"], { stdio: ["ignore", "ignore", "ignore"] });
-  return new Response(null, { status: 204 });
 }
 
 async function bridgeBirthOutcome(body: { birthId: string; success: boolean; message: string }): Promise<Response> {
@@ -1269,8 +1215,6 @@ async function handleBridgeProxy(req: Request): Promise<Response> {
 
   try {
     switch (path) {
-      case "/pool/claim":     return await bridgePoolClaim(body);
-      case "/pool/sweep":     return await bridgePoolSweep(body);
       case "/registry/read":  return await bridgeRegistryRead();
       case "/registry/write": return await bridgeRegistryWrite(body);
       case "/well/ssh":       return await bridgeWellSsh(body);

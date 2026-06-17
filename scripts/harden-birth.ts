@@ -19,7 +19,7 @@ import { readFile, writeFile, mkdir, readdir, unlink, rm, stat } from "node:fs/p
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { existsSync } from "node:fs";
-import { loadPool as sharedLoadPool, countOpen } from "../cli/lib/pool";
+import { wellNameForCell } from "../cli/lib/resolve";
 import { loadRegistry } from "../cli/lib/registry";
 
 const HOME = homedir();
@@ -183,31 +183,10 @@ function nameFor(combo: Combo, ts: Date): string {
 
 type ChannelsFile = { version: 1; bindings: Record<string, { cell: string; kind: string; createdAt: string }> };
 
-// The egg pool. Every birth claims one open member; the harness runs a
-// `cells pool refill` before the birth phase, so this just sanity-counts.
-// Uses the shared loader from cli/lib/pool so the warm→open migration
-// shim + uniform-pool semantics stay consistent with cells / proxy /
-// dashboard.
-const loadPool = sharedLoadPool;
-
-// Resolve a cell to the well it actually runs on. Birth claims a generic
-// egg from the pool, so the well name is the egg's permanent well_name —
-// not the cell name. The registry's `hatched_from` points at the pool
-// member's `id`; fall back to the cell name if the entry is gone.
-async function wellForCell(name: string): Promise<string> {
-  const reg = await loadRegistry();
-  const cell = reg.cells.find((c) => c.name === name);
-  if (!cell?.hatched_from) return name;
-  const pool = await loadPool();
-  const member = pool.members.find((m) => m.id === cell.hatched_from);
-  return member?.well_name ?? name;
-}
-
-async function countOpenEggs(): Promise<number> {
-  // Reuse the canonical counter — it also filters on the V1 variant
-  // signature, so this won't over-count once a V2 variant pool coexists.
-  return countOpen((await loadPool()).members);
-}
+// Resolve a cell to the well it runs on. With the egg pool gone (cold-boot
+// substrate, 2026-06-17) a hatched cell lives in `egg-<hatched_from>` — the
+// canonical resolver reconstructs that directly (no pool.json indirection).
+const wellForCell = wellNameForCell;
 
 async function loadChannels(): Promise<ChannelsFile> {
   if (!existsSync(CHANNELS_PATH)) return { version: 1, bindings: {} };
@@ -768,20 +747,9 @@ async function main() {
     return;
   }
 
-  // Pre-flight: every birth claims an open egg from the uniform pool, so
-  // stock the pool before the birth phase. `cells pool refill` brings it to
-  // target depth; then sanity-check there's at least one egg per planned
-  // birth (refill can fall short if a bake failed).
-  console.log(`\nrefilling egg pool before births...`);
-  const refill = await runCells(["pool", "refill"]);
-  if (refill.exitCode !== 0) {
-    console.warn(`  pool refill exited ${refill.exitCode}: ${tail(refill.stderr, 300)}`);
-  }
-  const openEggs = await countOpenEggs();
-  console.log(`  pool: ${openEggs} open egg(s); plan needs ${plan.length}`);
-  if (openEggs < plan.length) {
-    console.warn(`  ⚠ pool short by ${plan.length - openEggs} — births may fail with "pool empty"`);
-  }
+  // (No pool to stock — cold-boot substrate, 2026-06-17. Each birth forks the
+  //  pre-provisioned cell-base image on demand, so there's nothing to pre-fill.
+  //  Births fail-fast if the cell-base image is missing — run `cells bake`.)
 
   // Birth sequentially. Parallel mothers contend for the same OAuth /
   // proxy and time out at ~3 minutes — a one-mother bottleneck, not a

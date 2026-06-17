@@ -8,7 +8,6 @@ import { execSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import * as readline from "node:readline/promises";
 import { createHash, randomBytes } from "node:crypto";
-import { planReconcileEvictions, selectStaleRevCull } from "./lib/reconcile";
 import { findOrphanWells } from "./lib/orphan-wells";
 import { dnaRev, summarizeDnaDrift } from "./lib/dna-rev";
 import { CELLS_ENV_SH_BODY } from "./lib/cells-env";
@@ -54,19 +53,6 @@ import {
   type Cell,
   type Registry,
 } from "./lib/registry";
-import {
-  V1_POOL_VARIANT_SIGNATURE,
-  V1_POOL_TARGET_DEPTH,
-  V1_RUNNING_POOL_TARGET,
-  loadPool,
-  savePool,
-  withPoolLock,
-  countOpenPoolMembers,
-  type PoolMember,
-  type PoolMemberState,
-  type PoolFile,
-} from "./lib/pool";
-import { tryAcquireRefillLock, releaseRefillLock, refillLockHolder } from "./lib/refill-lock";
 import {
   CHANNELS_PATH,
   type ChannelKind,
@@ -375,59 +361,7 @@ const PACKAGE_DEFAULTS: string[] = OPTIONAL_PACKAGES.filter((p) => p.defaultChec
 // Cell / Registry types + loadRegistry / saveRegistry / findCell are
 // canonical in ./lib/registry — imported above.
 
-// ───── pool.json — pre-warmed cell pool ─────
-//
-// Eggs are wells with the toolchain installed but no agent identity.
-// Hatching = claiming an egg, sed-substituting (NAME, MODEL, PROVIDER,
-// THINKING) onto it, registering its site service, and starting pi.
-// Auto-hatch in cmdCreate looks for a open egg matching the requested
-// variant signature; if none, falls back to the slow build-from-scratch
-// path. See docs/eggs-phase-1.md for the full design.
-
-// Atomically claim a open egg matching the predicate. Returns the
-// claimed egg (state transitioned to "claimed", claimed_at + claimed_by
-// populated) or null if no match.
-async function claimEgg(
-  match: (e: PoolMember) => boolean,
-  claimedBy: string,
-): Promise<PoolMember | null> {
-  return withPoolLock(async () => {
-    const file = await loadPool();
-    const egg = file.members.find((e) => e.state === "open" && match(e));
-    if (!egg) return null;
-    egg.state = "claimed";
-    egg.claimed_at = new Date().toISOString();
-    egg.claimed_by = claimedBy;
-    await savePool(file);
-    return egg;
-  });
-}
-
-// Mark an egg as live (after its hatch's site service registered and pi
-// is up). Pete can then `cells pool list` and see claimed members that have
-// graduated into cells. Phase 3 may auto-cull these once the cell is
-// killed; v1 leaves them as breadcrumbs.
-async function markEggLive(eggId: string): Promise<void> {
-  await withPoolLock(async () => {
-    const file = await loadPool();
-    const egg = file.members.find((e) => e.id === eggId);
-    if (!egg) return;
-    egg.state = "live";
-    await savePool(file);
-  });
-}
-
-// Mark an egg for culling (after a hatch failure). Pete cleans up via
-// `cells pool cull <id>`.
-async function markEggCulling(eggId: string): Promise<void> {
-  await withPoolLock(async () => {
-    const file = await loadPool();
-    const egg = file.members.find((e) => e.id === eggId);
-    if (!egg) return;
-    egg.state = "culling";
-    await savePool(file);
-  });
-}
+// ───── cell helpers ─────
 
 async function requireCell(name: string): Promise<Cell> {
   const c = await findCell(name);
@@ -2385,15 +2319,6 @@ async function cmdMenubarStatus() {
   console.log(`agent:  ${plistPresent ? (loaded ? "loaded" : "installed (not loaded)") : "missing"} (${MENUBAR_AGENT_PLIST})`);
 }
 
-// First-line diagnostic for "auth feels broken." See docs/oauth-refresh.md.
-// One refill at a time — both the steward sweep and the empty-pool birth
-// path use this guard so a drought doesn't stack bakes.
-async function isRefillInFlight(): Promise<boolean> {
-  const p = Bun.spawn(["pgrep", "-f", "cells.ts pool refill"], { stdout: "pipe", stderr: "ignore" });
-  await p.exited;
-  return (await new Response(p.stdout).text()).trim().length > 0;
-}
-
 // Shared by the human doctor (section 8) and `doctor --json` (the steward's
 // food). One probe pass per cell: welld service def, power, in-guest unit/
 // health/OOM/clock. Hibernated cells get the def check only — never woken.
@@ -2506,9 +2431,6 @@ async function cmdDoctorJson() {
   const waPort = process.env.WA_BRIDGE_PORT ?? "7891";
   const waBridge = await probe(`http://127.0.0.1:${waPort}/health`);
 
-  const pool = await loadPool().catch(() => ({ members: [] as any[] }));
-  const open = pool.members.filter((m: any) => m.state === "open").length;
-
   const reg = await loadRegistry();
   const specials: Record<string, { power: string; pinned: boolean }> = {};
   for (const c of reg.cells.filter((c) => c.special)) {
@@ -2530,16 +2452,14 @@ async function cmdDoctorJson() {
 
   const cells = await collectFleetTransport();
 
-  // DNA drift: current runtime-DNA rev vs what eggs/cells carry. Pool eggs
-  // judged from pool.json (zero wakes); live cells from the probe's dna_rev
-  // (running only). tree_clean gates the steward's auto-refresh — see
-  // dnaTreeClean(). The steward consumes .dna.stale_cells + .dna.tree_clean.
+  // DNA drift: current runtime-DNA rev vs what live cells carry (from the
+  // probe's dna_rev, running only). tree_clean gates the steward's
+  // auto-refresh — see dnaTreeClean(). The steward consumes
+  // .dna.stale_cells + .dna.tree_clean. (No pool eggs to judge anymore.)
   const dna = summarizeDnaDrift({
     currentRev: dnaRev(DNA_DIR),
     treeClean: dnaTreeClean(),
-    poolRevs: pool.members
-      .filter((m: any) => m.state === "open" && m.variant_signature === V1_POOL_VARIANT_SIGNATURE)
-      .map((m: any) => m.dna_rev),
+    poolRevs: [],
     cellRevs: cells
       .filter((c) => c.power === "running")
       .map((c) => ({ name: c.name, rev: c.dna_rev })),
@@ -2563,7 +2483,6 @@ async function cmdDoctorJson() {
           inboundAgeS: typeof waBridge?.lastInboundAgeS === "number" ? waBridge.lastInboundAgeS : null,
           outboundAgeS: typeof waBridge?.lastOutboundAgeS === "number" ? waBridge.lastOutboundAgeS : null,
         },
-        pool: { open, target: V1_POOL_TARGET_DEPTH },
         dna,
         specials,
         cells,
@@ -2819,29 +2738,19 @@ async function cmdDoctor() {
       console.log(`  ${red}${transportFails} cell(s) cannot complete a talk round-trip. Fix before trusting the fleet.${reset}`);
     }
 
-    // 8b. DNA drift — does each egg/cell carry the current runtime DNA?
-    // Reuses the transport probe's dna_rev (no extra round-trips). Pool eggs
-    // judged from pool.json (zero wakes). A stale running cell self-heals on
-    // the steward's next sweep (when the tree is clean); a stale egg is
-    // culled + rebaked by reconcile. Informational here — never a hard fail.
+    // 8b. DNA drift — does each live cell carry the current runtime DNA?
+    // Reuses the transport probe's dna_rev (no extra round-trips). A stale
+    // running cell self-heals on the steward's next sweep (when the tree is
+    // clean). Informational here — never a hard fail. (No pool eggs anymore.)
     try {
-      const pool = await loadPool();
       const drift = summarizeDnaDrift({
         currentRev: dnaRev(DNA_DIR),
         treeClean: dnaTreeClean(),
-        poolRevs: pool.members
-          .filter((m) => m.state === "open" && m.variant_signature === V1_POOL_VARIANT_SIGNATURE)
-          .map((m) => m.dna_rev),
+        poolRevs: [],
         cellRevs: rows.filter((r) => r.power === "running").map((r) => ({ name: r.name, rev: r.dna_rev })),
       });
       const treeNote = drift.tree_clean ? "" : ` ${yellow}(working tree dirty — auto-heal paused)${reset}`;
       console.log(`\nDNA rev:        ${drift.current ? `${dim}${drift.current}${reset}` : `${yellow}unknown${reset}`}${treeNote}`);
-      const poolColor = drift.pool.stale > 0 ? yellow : green;
-      console.log(
-        `  pool:         ${poolColor}${drift.pool.current}/${drift.pool.total} current${reset}` +
-          (drift.pool.stale > 0 ? `${dim}, ${drift.pool.stale} stale${reset}` : "") +
-          (drift.pool.unknown > 0 ? `${dim}, ${drift.pool.unknown} unknown (pre-rev egg)${reset}` : ""),
-      );
       const unknownCells = drift.cells.filter((c) => c.state === "unknown").map((c) => c.name);
       if (drift.stale_cells.length > 0) {
         console.log(`  live cells:   ${yellow}${drift.stale_cells.length} stale${reset} ${dim}— ${drift.stale_cells.join(", ")} ${drift.tree_clean ? "(steward refreshes next sweep)" : "(commit DNA to let the steward refresh)"}${reset}`);
@@ -2918,14 +2827,14 @@ async function cmdDoctor() {
           known.push(await wellNameForCell(c.name), `cells-${c.name}`, c.name);
           if (c.hatched_from) known.push(`egg-${c.hatched_from}`);
         }
-        poolWells = (await loadPool()).members.map((m: any) => String(m?.well_name ?? "")).filter(Boolean);
+        poolWells = [];  // no pool anymore — every owned well is a registered cell
       } catch (e) {
-        console.log(`\norphan wells:  ${yellow}skipped${reset} ${dim}(registry or pool.json unreadable — can't distinguish orphans from owned wells: ${String(e).slice(0, 80)})${reset}`);
+        console.log(`\norphan wells:  ${yellow}skipped${reset} ${dim}(registry unreadable — can't distinguish orphans from owned wells: ${String(e).slice(0, 80)})${reset}`);
       }
       if (known && poolWells) {
         const orphans = findOrphanWells({ welldWells, knownWells: known, poolWells });
         if (orphans.length === 0) {
-          console.log(`\norphan wells:  ${green}none${reset} ${dim}(every welld VM is a registered cell or a pool egg)${reset}`);
+          console.log(`\norphan wells:  ${green}none${reset} ${dim}(every welld VM is a registered cell)${reset}`);
         } else {
           console.log(`\norphan wells:  ${red}${orphans.length}${reset} ${dim}— welld VMs nothing in cells owns (half-finished birth? bake-egg.sh run outside \`cells birth\`?):${reset}`);
           for (const w of orphans) {
@@ -3374,7 +3283,7 @@ async function cmdCreate(name: string | undefined, opts: CreateOpts): Promise<vo
     thinking = "medium";
   }
   if (opts.noPool) {
-    console.warn(`note: --no-pool is deprecated and ignored — birth is pool-only now`);
+    console.warn(`note: --no-pool is deprecated and ignored — there is no egg pool (every birth cold-forks the cell-base image)`);
   }
 
   // ── 3. Build the config blob handed to mother ──
@@ -3426,79 +3335,68 @@ async function cmdCreate(name: string | undefined, opts: CreateOpts): Promise<vo
     }
   }
 
-  // ── 4. Claim a generic egg from the pool ──
+  // ── 4. Create a fresh cell by forking the cell-base image ──
+  // No pool anymore (cold-boot substrate, 2026-06-17 — see the wells repo's
+  // docs/proposals/cold-boot-substrate.html). Each birth forks a fresh well
+  // from the pre-provisioned `cell-base` image (APFS clonefile, sub-ms)
+  // instead of claiming a pre-baked hibernated egg. The heavy provisioning
+  // (DNA + four harnesses + node-gyp + pi patches) was paid ONCE at
+  // `cells bake` time and is baked into the image — birth only forks +
+  // imprints. The well name stays `egg-<hex>`; the cell's `hatched_from` is
+  // that hex and `egg-<hatched_from>` is the cell→well binding (resolve.ts),
+  // so nothing downstream changes shape. `claimAndReady` keeps its name +
+  // return shape ({wellName, id}) because the retry loop below reuses it.
   if (!(await readSecret("CELLS_PROXY_SECRET"))) {
     console.error("CELLS_PROXY_SECRET missing from ~/.cells/secrets.json");
     process.exit(1);
   }
-  // Lazy reconcile first — evict stale entries (welld bounced, pool.json
-  // still says open) before we claim. Skip refill; we refill post-success.
-  await reconcilePool({ silent: false, skipRefill: true }).catch(() => { /* don't fail birth on reconcile error */ });
   const claimAndReady = async () => {
-    const c = await claimGenericEgg(name);
-    if (!c) return null;
+    const wellName = generatePoolWellName();
+    const id = wellName.slice("egg-".length);
     try {
-      await wakePoolMember(c.wellName, c.tier);
-      await ensureWellHasIp(c.wellName);
-      // Wait for SSH-ready before any post-wake SSH work. /wake returning
-      // 200 only means "VZ restore complete," not "guest reachable" — the
-      // guest's networking stack can take 1-5s more to fully come up.
-      // Without this poll, stripAnthropicKeyFromWell below races that
-      // window on roughly 1-in-many wakes and birth fails with "no route
-      // to host" on the freshly-allocated IP. Bake-validate uses the
-      // same helper so the symmetry is intentional.
-      await waitForSshReady(c.wellName);
-      // No harness uses a direct paid Anthropic key anymore — claude-code and
-      // pi both reach Anthropic through proxy.cells.md (Max sub); codex/hermes
-      // run the ChatGPT sub. Strip the latent key off every cell.
-      await stripAnthropicKeyFromWell(c.wellName);
-      return c;
+      // Fork the provisioned cell-base. setWellAuthPublic + waitForCloudInit
+      // are required for a *freshly forked* well (the old pool path got these
+      // at bake time): public auth so the cell's /agent WS passes, and
+      // firstboot identity injection (machine-id, hostname, ssh host keys)
+      // re-runs on the clone and must complete before mother imprints.
+      await directWellCreate(wellName, { fromImage: "cell-base", env: await collectCellLlmEnv() });
+      await setWellAuthPublic(wellName);
+      await waitForCloudInit(wellName);
+      await ensureWellHasIp(wellName);
+      // SSH-ready gate before any SSH work — /v1/wells returning 200 doesn't
+      // guarantee the guest's network stack is up; without this the strip
+      // below races a "no route to host" on the freshly-allocated IP.
+      await waitForSshReady(wellName);
+      // No harness uses a direct paid Anthropic key — claude-code and pi reach
+      // Anthropic via proxy.cells.md (Max sub); codex/hermes ride the ChatGPT
+      // sub. Strip any latent key off the cell.
+      await stripAnthropicKeyFromWell(wellName);
+      // (No auto-sleep reset needed: welld leaves auto_sleep_seconds UNSET on a
+      // fresh create, which falls back to the global 60s default — the API just
+      // reports the absent field as null. The cell idle-hibernates at 60s on its
+      // own once ensureHibernateReady seals it below. Confirmed w/ wells 2026-06-17.)
+      return { wellName, id };
     } catch (e) {
       console.error(
-        `! egg ${c.wellName} couldn't be readied: ${e instanceof Error ? e.message : String(e)}`,
+        `! fresh cell ${wellName} couldn't be readied: ${e instanceof Error ? e.message : String(e)}`,
       );
-      await directWellDestroy(c.wellName).catch(() => {});
-      await withPoolLock(async () => {
-        const file = await loadPool();
-        file.members = file.members.filter((m) => m.well_name !== c.wellName);
-        await savePool(file);
-      });
+      await directWellDestroy(wellName).catch(() => {});
       return null;
     }
   };
   let claim = await claimAndReady();
   if (!claim) {
-    // Kick the refill before refusing — a drought should start fixing
-    // itself the moment it's observed, not wait for the steward's next
-    // pass. Detached so this process still exits promptly; the retry a
-    // couple of minutes later lands on a fresh egg. (Scale test
-    // 2026-06-11: 5 births drained the pool in 160s and the 6th failed
-    // with no refill in flight.)
-    if (!(await isRefillInFlight())) {
-      const log = join(homedir(), ".cells/logs/pool-refill.log");
-      await mkdir(dirname(log), { recursive: true }).catch(() => {});
-      Bun.spawn(["bun", join(REPO_ROOT, "cli/cells.ts"), "pool", "refill"], {
-        stdin: "ignore",
-        stdout: openSync(log, "a"),
-        stderr: openSync(log, "a"),
-      }).unref();
-      console.error(`  (pool refill started in the background — retry in ~2 minutes)`);
-    }
     console.error(
-      `birth failed: the egg pool is empty (or no egg could be readied).\n` +
-      `  cells pool refill          # bake more pool members\n` +
-      `  cells pool reconcile       # re-sync pool.json with welld`,
+      `birth failed: could not create a fresh cell from the 'cell-base' image.\n` +
+      `  cells bake                 # (re)build the cell-base image\n` +
+      `  well image info cell-base  # confirm the image exists\n` +
+      `  cells doctor               # check welld + proxy health`,
     );
     process.exit(1);
   }
   let eggWell = claim.wellName;
   const sweepEgg = async (well: string) => {
     await directWellDestroy(well).catch(() => {});
-    await withPoolLock(async () => {
-      const file = await loadPool();
-      file.members = file.members.filter((m) => m.well_name !== well);
-      await savePool(file);
-    });
   };
 
   // ── 4.5 Pre-register the cell as "warming" BEFORE the handoff ──
@@ -3544,7 +3442,7 @@ async function cmdCreate(name: string | undefined, opts: CreateOpts): Promise<vo
   const cleanupFailedBirth = async () => {
     await rollbackRegistration();
     await sweepEgg(eggWell).catch((e) =>
-      console.warn(`note: egg sweep failed (reconcile will reclaim): ${e instanceof Error ? e.message : String(e)}`),
+      console.warn(`note: cell well sweep failed — destroy '${eggWell}' by hand if it lingers: ${e instanceof Error ? e.message : String(e)}`),
     );
   };
 
@@ -3632,7 +3530,7 @@ async function cmdCreate(name: string | undefined, opts: CreateOpts): Promise<vo
           console.error(`birth failed: retry egg prep threw: ${e instanceof Error ? e.message : String(e)}`);
         }
         if (!fresh) {
-          console.error(`birth failed: could not claim a fresh egg for retry`);
+          console.error(`birth failed: could not create a fresh cell for retry`);
           await writeBirthLog(which, null);
           await rollbackRegistration();
           process.exit(1);
@@ -3731,12 +3629,8 @@ async function cmdCreate(name: string | undefined, opts: CreateOpts): Promise<vo
     throw e;
   }
 
-  // Pool bookkeeping is best-effort AFTER the promote — the cell is already a
-  // live, registered VM, so a pool.json error must not crash or unregister it
-  // (reconcile reconciles pool↔registry).
-  await markPoolMemberLive(eggWell).catch((e) =>
-    console.warn(`note: pool bookkeeping for ${name} failed (reconcile will fix): ${e instanceof Error ? e.message : String(e)}`),
-  );
+  // (No pool bookkeeping anymore — the cell IS its well; the registry's
+  // `hatched_from` is the only binding, resolved as `egg-<hatched_from>`.)
 
   // Kick host-bridge to spawn ssh+pi now so the first talk connects warm.
   void prewarmHostBridge(name);
@@ -3747,20 +3641,13 @@ async function cmdCreate(name: string | undefined, opts: CreateOpts): Promise<vo
     await mkdir(perfDir, { recursive: true });
     await writeFile(
       join(perfDir, "birth.jsonl"),
-      JSON.stringify({ ts: new Date().toISOString(), cell: name, path: "pool", alive_ms: Date.now() - t0 }) + "\n",
+      JSON.stringify({ ts: new Date().toISOString(), cell: name, path: "cold", alive_ms: Date.now() - t0 }) + "\n",
       { flag: "a" },
     );
   } catch { /* telemetry non-critical */ }
 
-  // Fire-and-forget: top the pool back up (this birth just claimed an
-  // egg), sync the new cell into the vault. This is the ONLY routine
-  // refill trigger — there is no background refiller. refillPoolToDepth
-  // bakes until the pool is back at V1_POOL_TARGET_DEPTH, so one birth
-  // bakes one egg; reconcile's cull pass catches any overshoot from
-  // concurrent births.
-  refillPoolToDepth().catch((e) =>
-    console.warn(`! pool top-up failed: ${e instanceof Error ? e.message : String(e)}`),
-  );
+  // Fire-and-forget: sync the new cell into the vault. (No pool top-up
+  // anymore — births create wells on demand, there's nothing to refill.)
   void cmdSync(name).catch((e) => console.error(`! initial vault sync failed: ${e}`));
 
   // ── Talk UX ──
@@ -3934,12 +3821,15 @@ async function sealWell(wellName: string): Promise<void> {
 }
 
 // Birth guarantees a hibernate-ready cell (hibernation model, invariant 4 —
-// docs/proposals/hibernation-model.html). bakePoolMember seals every egg, but
-// an egg can rot in the pool between bake and claim: a welld transition storm
-// cleared hibernate_ready on egg-0f7d66 while it waited. So re-verify at claim.
-// If welld reports the well hibernate-ready, done. Otherwise — or if welld is
-// too old to report the field at all — seal now. sealWell throws on failure;
-// the caller sweeps the egg and fails the birth rather than registering a cell
+// docs/proposals/hibernation-model.html). A cell forked from the cell-base
+// image is born hibernate_ready=FALSE: welld attaches a fresh cidata disk
+// (SSH key + firstboot netplan) on every create, and hibernate is illegal
+// while cidata is mounted. sealWell does the halt + disk-only restart that
+// drops the cidata mount and flips the flag — so birth seals once per cell
+// here (confirmed w/ wells 2026-06-17). /seal is therefore retained as the
+// per-cell warming primitive: the pool era called it once per egg, now it's
+// once per cell — a big reduction, but not to zero. sealWell throws on failure;
+// the caller sweeps the cell and fails the birth rather than registering a cell
 // the hibernation system can never manage.
 // Read welld's hibernate_ready bit for a well. Returns undefined if welld
 // is unreachable or too old to expose the field; callers pair with
@@ -4006,20 +3896,15 @@ async function registerSiteService(wellName: string, cellName: string): Promise<
   }
 }
 
-// v1 egg pool helpers. The v1 pool is uniform — every egg is the same
-// V1_POOL_VARIANT_SIGNATURE is now canonical in ./lib/pool — imported above.
-
-// Generate a fresh egg well-name. Distinct from cell-names (cell-<hex>) so
-// `cells list` doesn't pretend pool wells are user-facing cells.
+// Generate a fresh well-name for a birth. Distinct from cell-names (cell-<hex>)
+// so `cells list` doesn't treat the well as a user-facing cell. The `egg-`
+// prefix is historical (pool era) but load-bearing: a hatched cell's well is
+// `egg-<hatched_from>`, which resolve.ts reconstructs from that prefix.
 function generatePoolWellName(): string {
   return `egg-${randomBytes(4).toString("hex").slice(0, 6)}`;
 }
 
-// Bake one v1 egg: fork cell-base, set auth=public, hibernate. Inserts an
-// entry into pool.json with state=open on success. Returns the well-name
-// or throws. Caller is responsible for the egg-lock dance (use
-// withPoolLock around the bake invocation when refilling).
-// Read all LLM provider keys from ~/.cells/secrets.json so every egg/root
+// Read all LLM provider keys from ~/.cells/secrets.json so every cell/root
 // has every supported model available out of the box. Pi-ai natively reads
 // these env vars for direct-API providers; CELLS_PROXY_SECRET is used by
 // the codex-proxy extension for subscription-routed providers (codex,
@@ -4046,63 +3931,11 @@ async function collectCellLlmEnv(): Promise<Record<string, string>> {
   return env;
 }
 
-// "Running" pool target — how many open pool members are kept
-// running-resident (RAM/CPU/process all live) instead of hibernated.
-// With V1's pure-running pool we kept this at POOL_TARGET_DEPTH so every
-// egg stayed up; the trade was zero wake latency at the cost of ~1GB RAM
-// + 4 vCPU per egg.
-//
-// Measured 2026-05-15 on the v1 substrate (welld 1.0.0, admission control
-// live, sealed+hibernated eggs): /hibernate completes in 0.60s, /wake
-// returns SSH-ready in 0.55s. The old "wake takes ~2-3s" comment that
-// motivated a running buffer was wildly conservative — half-second wake
-// is invisible against a multi-second birth ritual. The "kills lume /
-// clips every sibling VM" hazard cited for the running-only pool is also
-// gone: it described pre-Pi3 hibernate, before /seal made the state legal
-// and wells's boot-admission gate (WELL_MAX_CONCURRENT_BOOTS) paced wakes.
-//
-// So V1 now ships pure-hibernated: target = 0. Every pool egg is
-// hibernated; claim falls through to a tier-2 egg, the birth flow /wake's
-// it (~0.5s), mother runs the ritual on the already-SSH-ready VM. The
-// running bake path and hibernated→running promote in refillPoolToDepth
-// Pass 1 are kept dormant (target 0 makes both no-ops) so V2's variant
-// pool can re-enable running eggs for latency-sensitive variants without
-// re-introducing the code.
-//
-// Schema note: pool.json still carries `tier: 2 | 4`. tier 4 = running,
-// tier 2 = hibernated. Power state is derived from tier; the numeric
-// field is frozen.
-//
-// V1_RUNNING_POOL_TARGET is now canonical in ./lib/pool — imported above.
-
-// Count running members currently in the pool. Used to decide whether
-// the next bake should produce a running egg or a hibernated one, and
-// whether to promote a hibernated→running egg on refill.
-async function countRunningPoolMembers(): Promise<number> {
-  const file = await loadPool();
-  return file.members.filter(
-    (e) =>
-      e.state === "open" &&
-      e.variant_signature === V1_POOL_VARIANT_SIGNATURE &&
-      (e as any).tier === 4,
-  ).length;
-}
-
-// Count hibernated members in the pool. Used for promote balancing.
-async function countHibernatedPoolMembers(): Promise<number> {
-  const file = await loadPool();
-  return file.members.filter(
-    (e) =>
-      e.state === "open" &&
-      e.variant_signature === V1_POOL_VARIANT_SIGNATURE &&
-      (e as any).tier === 2,
-  ).length;
-}
-
-// Provision a fresh ubuntu-base well into a fully-formed cell, in-place
-// via SSH. Used by bakePoolMember (per-egg path) and reusable for any "turn
-// this raw well into a cell" need. Replaces the old cell-base layered
-// image — see docs/proposals/image-ownership.html for the rationale.
+// Provision a fresh ubuntu-base well into a fully-formed cell, in-place via
+// SSH. Used by cmdBake (to build the reusable cell-base image) and the
+// specials bake (mother/pulse). Since the egg pool was removed (2026-06-17)
+// this is the single provisioning recipe — births fork the cell-base image it
+// produces rather than running it per-cell. See docs/proposals/image-ownership.html.
 //
 // As of wells-stable-2026-05-12h, ubuntu-base ships with:
 //   - bun pre-installed at /usr/local/bin/bun
@@ -4255,186 +4088,6 @@ echo "node-gyp: $(sudo bash -lc 'export HOME=/root; node-gyp --version' 2>&1 | h
   const sync = await wellExecCapture(wellName, `sudo sync && sudo sync`);
   if (!sync.ok) {
     throw new Error(`sync failed: ${sync.stderr.slice(0, 200)}`);
-  }
-}
-
-async function bakePoolMember(): Promise<string> {
-  const baseEnv = await collectCellLlmEnv();
-  if (!baseEnv.CELLS_PROXY_SECRET) throw new Error("CELLS_PROXY_SECRET missing from ~/.cells/secrets.json");
-
-  // Generic egg — no baked identity. The cell's name is imprinted at
-  // birth (ritual step 1); register-site-service.sh passes CELL_NAME to
-  // the site service explicitly. Nothing downstream needs a baked one.
-  const wellName = generatePoolWellName();
-  const env = { ...baseEnv };
-
-  // Decide tier BEFORE create. tier 4 = running-resident (first
-  // V1_RUNNING_POOL_TARGET members); tier 2 = hibernated (the rest).
-  // Hibernated wells need hibernate_ready: true at create so wells's
-  // hibernate gate doesn't refuse later (Piece 3).
-  const runningCount = await countRunningPoolMembers();
-  const tier: 2 | 4 = runningCount < V1_RUNNING_POOL_TARGET ? 4 : 2;
-
-  try {
-    // From ubuntu-base (the wells-team-owned substrate) — NOT cell-base.
-    // The cells-shaped layers (pi, DNA at /root, cells-env.sh, pi binary +
-    // patches) get applied via provisionCellInWell over SSH right after
-    // firstboot. ubuntu user (NOPASSWD sudo) + /home/well/.ssh come
-    // pre-baked from ubuntu-base (wells-stable-2026-05-12h); the agent
-    // sudoes from ubuntu to root.
-    // Post-Piece-3 (2026-05-13): we no longer pass hibernate_ready at
-    // create time (Pi3 deleted that path). Instead, sealWell() is called
-    // after provisionCellInWell to flip the well to a hibernate-legal
-    // disk-only state. ~6-8s cost is paid by /seal instead of /v1/wells.
-    //
-    // Per-step catches just rewrap the underlying error with a "<step>
-    // failed for <well>" prefix so captureBakeFailure can infer the stage.
-    // They do NOT destroy the well — the top-level catch below does that
-    // AFTER forensics capture, which matters for stages like seal where
-    // the failed-state disk.img + qemu PIDs are the diagnostic.
-    try {
-      await directWellCreate(wellName, { fromImage: "ubuntu-base", env });
-    } catch (e) {
-      throw new Error(
-        `bakePoolMember well create failed for '${wellName}': ${e instanceof Error ? e.message : String(e)}`,
-      );
-    }
-    await setWellAuthPublic(wellName);
-    // Pin auto-sleep off for the duration of the bake — welld's watchdog
-    // can otherwise race the bake-time hibernate decision (auto-hibernating
-    // mid-provision is a known failure shape).  We restore the welld default
-    // (auto_sleep_seconds=60) AFTER validation, so the egg lands in the pool
-    // with normal idle-hibernation behavior — if anything wakes it later,
-    // it auto-hibernates on idle instead of pinning warm forever.
-    await disableAutoSleep(wellName);
-
-    // Wait for well-firstboot (identity injection: hostname, machine-id,
-    // ssh host keys, /etc/environment, authorized_keys). Without this,
-    // hibernating mid-firstboot leaves wake-resumed wells in a broken
-    // state and adds ~30s to the first birth.
-    try {
-      await waitForCloudInit(wellName);
-    } catch (e) {
-      throw new Error(
-        `bakePoolMember waitForCloudInit failed for '${wellName}': ${e instanceof Error ? e.message : String(e)}`,
-      );
-    }
-
-    // Per-egg provisioning: lift ubuntu-base → fully-formed cell.
-    try {
-      await provisionCellInWell(wellName);
-    } catch (e) {
-      throw new Error(
-        `bakePoolMember provisioning failed for '${wellName}': ${e instanceof Error ? e.message : String(e)}`,
-      );
-    }
-
-    // Seal the well: halt, restart without cidata, flip hibernate_ready.
-    // Required post-Piece-3 (2026-05-13) — wells's createWell no longer
-    // does this inline. Without /seal, the /hibernate gate refuses every
-    // freshly-baked well. The disk-only steady state captured here is the
-    // POST-provision state, so wake-from-hibernate restores the
-    // provisioned cell — strictly cleaner than pre-Pi3 (where warming
-    // ran inside create, before provisioning had a chance to land).
-    try {
-      await sealWell(wellName);
-    } catch (e) {
-      throw new Error(
-        `bakePoolMember seal failed for '${wellName}': ${e instanceof Error ? e.message : String(e)}`,
-      );
-    }
-
-    // (Bridge readiness was previously asserted here against an in-cell
-    // well-site.service. With the host-bridge architecture, pi is spawned
-    // on-demand via SSH at talk time — there's no in-cell bridge to wait
-    // for. waitForCloudInit above is sufficient: it confirms firstboot
-    // identity injection + SSH readiness, which is everything host-bridge
-    // needs to connect.)
-
-    // Tier decision happened pre-create above. Now act on it: Tier 2 →
-    // hibernate the now-sealed well; Tier 4 → leave running with pi
-    // configured (sealed but live; sleep can still seal-and-hibernate it
-    // later if the user cells sleep's it).
-    if (tier === 2) {
-      const base = process.env.WELL_API_URL ?? "http://127.0.0.1:7878";
-      const hibRes = await fetch(
-        `${base}/v1/wells/${encodeURIComponent(wellName)}/hibernate`,
-        {
-          method: "POST",
-          headers: { Authorization: `Bearer ${await wellsToken()}` },
-        },
-      );
-      if (!hibRes.ok) {
-        throw new Error(
-          `bakePoolMember hibernate failed for '${wellName}': ${hibRes.status} ${(await hibRes.text()).slice(0, 300)}`,
-        );
-      }
-    }
-    // Tier 4: leave the well running with pi pre-configured.
-
-    // Wake-validate round-trip: /hibernate returning 200 only proves the
-    // snapshot was written. It does NOT prove the snapshot wakes back up
-    // into a routable, SSH-able VM. An egg that fails to wake is poison in
-    // the pool — claim picks it blind, birth fails with a stale-IP "no route
-    // to host", and the user thinks the pool's broken even though four good
-    // eggs sit behind it. So the egg has to actually round-trip before we
-    // mark it "open".
-    //
-    // Tier 2: /wake → IP → SSH `true` → /hibernate (back to steady state).
-    // Tier 4: SSH `true` (well never left running; nothing to re-hibernate).
-    try {
-      await validateBakedEgg(wellName, tier);
-    } catch (e) {
-      throw new Error(
-        `bakePoolMember validation failed for '${wellName}': ${e instanceof Error ? e.message : String(e)}`,
-      );
-    }
-
-    // Lift the bake-time pin.  Bake + validate done; the egg can now
-    // follow normal welld idle-hibernation behavior.  Without this the
-    // egg sits in the pool with auto_sleep_seconds=null forever and any
-    // wake (e.g. a future variant-pool promote, traffic, manual /wake)
-    // strands it warm — burning host RAM for an unclaimed pool member.
-    await resetAutoSleepToDefault(wellName);
-
-    await withPoolLock(async () => {
-      const file = await loadPool();
-      file.members.push({
-        id: wellName.slice("egg-".length),
-        well_name: wellName,
-        variant_signature: V1_POOL_VARIANT_SIGNATURE,
-        state: "open",
-        tier,
-        // Runtime-DNA rev baked into this egg — the SAME value stamped onto
-        // /root/.dna-rev in provisionCellInWell (dnaRev is memoized per dir,
-        // so this is one walk). Lets the doctor judge pool staleness from
-        // pool.json with ZERO wakes, and the reconcile stale-rev cull retire
-        // eggs that fell behind without ever waking a hibernated egg.
-        dna_rev: dnaRev(DNA_DIR),
-        born_at: new Date().toISOString(),
-        claimed_at: null,
-        claimed_by: null,
-        max_age_at: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString(),
-      } as any);
-      await savePool(file);
-    });
-
-    return wellName;
-  } catch (e) {
-    // Unified failure path: capture forensics BEFORE destroy so the failed
-    // state (disk.img file handles, lingering qemu PIDs, welld view of the
-    // well) is still inspectable. captureBakeFailure infers the failed stage
-    // from the error message and grabs stage-appropriate diagnostics — see
-    // its body for the seal-specific lsof + Virtualization-PID capture asked
-    // for by wells 2026-05-23.
-    const err = e instanceof Error ? e : new Error(String(e));
-    await captureBakeFailure(wellName, tier, err);
-    if (process.env.CELLS_BAKE_KEEP_FAILURES === "1") {
-      console.warn(`! CELLS_BAKE_KEEP_FAILURES=1 — leaving '${wellName}' alive for inspection`);
-    } else {
-      await directWellDestroy(wellName).catch(() => {});
-    }
-    throw err;
   }
 }
 
@@ -5314,77 +4967,6 @@ async function stripAnthropicKeyFromWell(wellName: string): Promise<void> {
   }
 }
 
-// Claim one open generic egg from the pool. Atomically flips it to
-// "claimed" in pool.json and returns its well-name, tier, and id (the egg
-// hex suffix, which becomes the cell's `hatched_from`). Returns null if the
-// pool is empty — the caller errors out, since birth is pool-only.
-async function claimGenericEgg(
-  cellName: string,
-): Promise<{ wellName: string; tier: 2 | 4; id: string } | null> {
-  let chosen: { wellName: string; tier: 2 | 4; id: string } | null = null;
-  await withPoolLock(async () => {
-    const file = await loadPool();
-    // Prefer running members first — they're instant-consume. Fall
-    // back to a hibernated egg only when no running egg is available.
-    const egg =
-      file.members.find(
-        (e) =>
-          e.state === "open" &&
-          e.variant_signature === V1_POOL_VARIANT_SIGNATURE &&
-          (e as any).tier === 4,
-      ) ??
-      file.members.find(
-        (e) => e.state === "open" && e.variant_signature === V1_POOL_VARIANT_SIGNATURE,
-      );
-    if (!egg) return;
-    egg.state = "claimed";
-    egg.claimed_at = new Date().toISOString();
-    egg.claimed_by = cellName;
-    chosen = {
-      wellName: egg.well_name,
-      tier: ((egg as any).tier ?? 2) as 2 | 4,
-      id: egg.well_name.slice("egg-".length),
-    };
-    await savePool(file);
-  });
-  return chosen;
-}
-
-// Resume an egg to running state. The right endpoint depends on prior state:
-//   - Tier 4, currently running: no-op (already up)
-//   - Tier 4, currently stopped (welld restart killed it): /start
-//   - Tier 2, hibernated: /wake (restores RAM from disk in ~2-3s)
-async function wakePoolMember(wellName: string, tier: 2 | 4 = 2): Promise<void> {
-  const base = process.env.WELL_API_URL ?? "http://127.0.0.1:7878";
-  if (tier === 4) {
-    const info = await fetch(`${base}/v1/wells/${encodeURIComponent(wellName)}`, {
-      headers: { Authorization: `Bearer ${await wellsToken()}` },
-    }).then(r => r.json()).catch(() => null);
-    if (info?.status === "running") return; // already up, no-op
-    // welld bounce stopped the VM — use /start (not /wake, which is for hibernated).
-    const sr = await fetch(`${base}/v1/wells/${encodeURIComponent(wellName)}/start`, {
-      method: "POST",
-      headers: { Authorization: `Bearer ${await wellsToken()}` },
-    });
-    if (!sr.ok) {
-      throw new Error(`start '${wellName}' failed: ${sr.status} ${(await sr.text()).slice(0, 300)}`);
-    }
-    return;
-  }
-  const r = await fetch(
-    `${base}/v1/wells/${encodeURIComponent(wellName)}/wake`,
-    {
-      method: "POST",
-      headers: { Authorization: `Bearer ${await wellsToken()}` },
-    },
-  );
-  if (!r.ok) {
-    throw new Error(
-      `wake '${wellName}' failed: ${r.status} ${(await r.text()).slice(0, 300)}`,
-    );
-  }
-}
-
 // Poll SSH until the well answers a noop, up to timeoutMs. Defence-in-depth
 // behind wells's wake post-condition (welld 42b225d, 2026-05-23): welld's
 // /wake now blocks up to 10s waiting for TCP port 22 to SYN-ACK before
@@ -5419,207 +5001,6 @@ async function waitForSshReady(wellName: string, timeoutMs = 5_000): Promise<voi
   );
 }
 
-// Wake-validate a just-baked egg. Goal: prove the freshly-cooked state can
-// actually be resumed, BEFORE we mark it "open" and let claim hand it out.
-// Mirrors what birth does on claim (wake + ensure IP + SSH-touch) so a pass
-// here is a strong guarantee the next real birth will succeed.
-//
-// Steady state on success:
-//   Tier 2: hibernated (we wake, probe, then re-hibernate).
-//   Tier 4: running (no state change — we only probe SSH).
-// Throws on any failure with a message naming the failed step.
-async function validateBakedEgg(wellName: string, tier: 2 | 4): Promise<void> {
-  const base = process.env.WELL_API_URL ?? "http://127.0.0.1:7878";
-
-  if (tier === 2) {
-    // Wake the just-hibernated egg. wakePoolMember POSTs /wake and waits
-    // for welld to acknowledge — but doesn't itself wait for the VM to be
-    // network-reachable; that's ensureWellHasIp's job below.
-    await wakePoolMember(wellName, 2);
-  }
-
-  // welld must hand us an IP. ensureWellHasIp will cycle (stop/start) if
-  // the well doesn't already have one — same recovery path birth uses.
-  await ensureWellHasIp(wellName);
-
-  // The real proof: SSH a noop. Use the polling probe so a guest that's
-  // still finishing its network init in the ~1-5s after VZ restore
-  // doesn't get incorrectly marked as broken. Only a genuinely wedged
-  // wake (qemu crash, hibernate.bin rot, vmnet anomaly) blows past 15s.
-  await waitForSshReady(wellName);
-
-  if (tier === 2) {
-    // Re-hibernate so the pool member ends up in its expected steady
-    // state — same disk-only snapshot we just validated, ready for the
-    // next /wake. /hibernate failure here is a real failure of the
-    // validation: we know the wake worked, but we can no longer trust
-    // the re-snapshot's wake-ability.
-    const rh = await fetch(`${base}/v1/wells/${encodeURIComponent(wellName)}/hibernate`, {
-      method: "POST",
-      headers: { Authorization: `Bearer ${await wellsToken()}` },
-    });
-    if (!rh.ok) {
-      throw new Error(
-        `post-validate re-hibernate failed: ${rh.status} ${(await rh.text()).slice(0, 200)}`,
-      );
-    }
-  }
-}
-
-// Infer which bakePoolMember stage threw from the rewrapped error message.
-// Every per-step catch in bakePoolMember tags its rethrow with a recognizable
-// "<step> failed" phrase; this just maps phrase → short stage tag so the JSON
-// log groups cleanly.
-function inferBakeFailureStage(msg: string): string {
-  if (/well create failed/i.test(msg)) return "create";
-  if (/waitForCloudInit failed/i.test(msg)) return "firstboot";
-  if (/provisioning failed/i.test(msg)) return "provision";
-  if (/seal failed/i.test(msg)) return "seal";
-  if (/hibernate failed/i.test(msg)) return "hibernate";
-  if (/validation failed/i.test(msg)) return "validate";
-  return "unknown";
-}
-
-// Forensic dump for a bake that failed at any stage. Lands under
-// ~/.cells/logs/bake-failures/<well>-<ts>.json so we can pattern-match across
-// many bakes without standing up a daemon (per the "agent-first, not static
-// services" rule — pattern-watching belongs in pulse or its own agent loop,
-// not in the bake hot path). Best-effort: never throws — the caller is
-// already in a failure branch and needs to clean up.
-//
-// MUST run BEFORE directWellDestroy: stage-specific diagnostics like the seal
-// stage's lsof on disk.img + live com.apple.Virtualization PIDs only have
-// signal while the failed-state files and processes still exist.
-async function captureBakeFailure(
-  wellName: string,
-  tier: 2 | 4,
-  err: Error,
-): Promise<void> {
-  try {
-    const dir = join(homedir(), ".cells", "logs", "bake-failures");
-    await mkdir(dir, { recursive: true });
-    const ts = new Date().toISOString();
-    const stage = inferBakeFailureStage(err.message);
-    const out: Record<string, unknown> = {
-      well_name: wellName,
-      tier,
-      ts,
-      stage,
-      error: err.message,
-      stack: err.stack,
-    };
-
-    // welld's snapshot at failure time — status, IP, age, uuid. Lets us
-    // see whether welld thinks the well is up/down/wedged.
-    try {
-      const base = process.env.WELL_API_URL ?? "http://127.0.0.1:7878";
-      const r = await fetch(`${base}/v1/wells/${encodeURIComponent(wellName)}`, {
-        headers: { Authorization: `Bearer ${await wellsToken()}` },
-      });
-      out.welld_http_status = r.status;
-      out.welld_info = await r.json().catch(() => null);
-    } catch (e) {
-      out.welld_info_err = String(e);
-    }
-
-    // Stage-specific diagnostics. Today: just seal. Wells 2026-05-23 asked
-    // for `lsof -nP <disk.img>` + any live com.apple.Virtualization PIDs at
-    // the moment of "disk still held within 60000ms" to distinguish a halt-
-    // before-VZ-released-handle race from a post-welld-bounce orphan VZ XPC.
-    if (stage === "seal") {
-      const diskImg = `/Users/pete/.lume/${wellName}/disk.img`;
-      try {
-        const lsof = Bun.spawn(["lsof", "-nP", diskImg], { stdout: "pipe", stderr: "pipe" });
-        const o = await new Response(lsof.stdout).text();
-        const e2 = await new Response(lsof.stderr).text();
-        await lsof.exited;
-        out.lsof_disk_img = o.trim() || e2.trim() || "(no output — file may not exist)";
-      } catch (e) {
-        out.lsof_err = String(e);
-      }
-      try {
-        const pg = Bun.spawn(["pgrep", "-fl", "com.apple.Virtualization"], {
-          stdout: "pipe",
-          stderr: "pipe",
-        });
-        out.virtualization_procs = (await new Response(pg.stdout).text()).trim();
-        await pg.exited;
-      } catch (e) {
-        out.virtualization_procs_err = String(e);
-      }
-    }
-
-    const safeStamp = ts.replace(/[:.]/g, "-");
-    const path = join(dir, `${wellName}-${safeStamp}.json`);
-    await writeFile(path, JSON.stringify(out, null, 2) + "\n");
-    console.warn(`! bake-failure log: ${path} (stage=${stage})`);
-  } catch {
-    // Best-effort. Failing to write a log shouldn't escalate.
-  }
-}
-
-// Mark a consumed pool member as "live" (now a cell). Bookkeeping for the pool
-// file — the egg's well is now serving as a cell's backing well.
-async function markPoolMemberLive(wellName: string): Promise<void> {
-  await withPoolLock(async () => {
-    const file = await loadPool();
-    const egg = file.members.find((e) => e.well_name === wellName);
-    if (!egg) return;
-    egg.state = "live";
-    await savePool(file);
-  });
-}
-
-// V1_POOL_TARGET_DEPTH and countOpenPoolMembers() are now canonical in
-// ./lib/pool — imported above.
-
-// Promote a hibernated egg to running. Faster than baking a fresh
-// running egg from scratch: just /wake the well and update its tier
-// marker. The well was created with hibernate_ready: true, but keeping it
-// running (never re-hibernating) is fine — that flag is only consulted by
-// wells when /hibernate is called. Returns true if an egg was promoted.
-async function promoteOneHibernatedToRunning(): Promise<boolean> {
-  type Target = { wellName: string; cellName: string };
-  let target: Target | null = null;
-  await withPoolLock(async () => {
-    const file = await loadPool();
-    const hibernated = file.members.find(
-      (e) =>
-        e.state === "open" &&
-        e.variant_signature === V1_POOL_VARIANT_SIGNATURE &&
-        (e as any).tier === 2,
-    );
-    if (!hibernated) return;
-    target = {
-      wellName: hibernated.well_name,
-      cellName: (hibernated as any).cell_name ?? "cell-" + hibernated.well_name.slice("egg-".length),
-    };
-  });
-  const t = target as Target | null;
-  if (!t) return false;
-
-  // Wake the hibernated egg. /wake restores RAM from disk (~2-3s). After
-  // this the well is in `running` state and we leave it there.
-  try {
-    await wakePoolMember(t.wellName, 2);
-  } catch (e) {
-    console.warn(
-      `! promote hibernated→running failed for ${t.wellName}: ${e instanceof Error ? e.message : String(e)}`,
-    );
-    return false;
-  }
-
-  // Flip the tier marker. From here on, consume + dashboard treat it as running.
-  await withPoolLock(async () => {
-    const file = await loadPool();
-    const egg = file.members.find((e) => e.well_name === t.wellName);
-    if (egg) {
-      (egg as any).tier = 4;
-      await savePool(file);
-    }
-  });
-  return true;
-}
 
 // Is the DNA that auto-heal might push committed (clean)? Gates the
 // AUTOMATIC DNA-rev actions — the reconcile stale-rev cull and the steward's
@@ -5648,328 +5029,6 @@ function dnaTreeClean(): boolean {
     _dnaTreeCleanCache = false;
   }
   return _dnaTreeCleanCache;
-}
-
-// ─── reconcilePool ────────────────────────────────────────────────────
-// Diffs pool.json against welld's actual state. Evicts members welld
-// no longer knows about (W.68 class: pool says open, welld has no bundle)
-// and tier-4 running members welld reports stopped (bobby class: welld
-// bounce stopped the running well, no hibernate.bin to /wake from). Then
-// culls open members above target depth (the pool's only shrink path —
-// refill never removes), and background-triggers refill after eviction.
-//
-// Why this exists: today's bobby stall was state drift — wells bounced
-// to pick up the splites→wells rename, all tier-4 pool VMs went to
-// `stopped`, but cells's pool.json still said open/tier-4. claimV1PoolMember
-// picked the stale entry and downstream timing collapsed. Reconcile is the
-// answer: pool.json reflects welld's truth, not last-known-good.
-//
-// Safe to call frequently. Cheap when pool is healthy (1 HTTP call). Skips
-// eviction when welld is unreachable or /healthz reports degraded — we
-// don't want to nuke the pool during a substrate flap.
-
-type ReconcileReport = {
-  checked_at: string;
-  pool_size_before: number;
-  welld_known: number;
-  evicted: { id: string; well_name: string; reason: string }[];
-  culled: { id: string; well_name: string }[];
-  stale_culled: { id: string; well_name: string; rev: string }[];
-  resealed: { id: string; well_name: string }[];
-  unrecoverable: { id: string; well_name: string; reason: string }[];
-  pool_size_after: number;
-  refill_triggered: boolean;
-  errors: string[];
-};
-
-async function reconcilePool(
-  opts: { silent?: boolean; skipRefill?: boolean } = {},
-): Promise<ReconcileReport> {
-  const report: ReconcileReport = {
-    checked_at: new Date().toISOString(),
-    pool_size_before: 0,
-    welld_known: 0,
-    evicted: [],
-    culled: [],
-    stale_culled: [],
-    resealed: [],
-    unrecoverable: [],
-    pool_size_after: 0,
-    refill_triggered: false,
-    errors: [],
-  };
-
-  const before = await loadPool();
-  report.pool_size_before = before.members.length;
-  if (before.members.length === 0) {
-    report.pool_size_after = 0;
-    return report;
-  }
-
-  const base = process.env.WELL_API_URL ?? "http://127.0.0.1:7878";
-
-  // /healthz: back-off signal. No auth required.
-  let healthz: any = null;
-  try {
-    const h = await fetch(`${base}/healthz`);
-    if (h.ok) healthz = await h.json();
-  } catch (e: any) {
-    report.errors.push(`healthz unreachable: ${e?.message ?? e}`);
-  }
-  if (!healthz) {
-    report.pool_size_after = report.pool_size_before;
-    return report; // welld down — no-op, not a drift signal
-  }
-  if (healthz.degraded === true) {
-    report.errors.push("welld degraded; reconcile skipped");
-    report.pool_size_after = report.pool_size_before;
-    return report;
-  }
-
-  // GET /v1/wells: the authoritative welld view.
-  let welldRows: { name: string; status: string }[] = [];
-  try {
-    const token = await wellsToken();
-    const r = await fetch(`${base}/v1/wells`, {
-      headers: { Authorization: `Bearer ${token}` },
-    });
-    if (!r.ok) {
-      report.errors.push(`/v1/wells → ${r.status}`);
-      report.pool_size_after = report.pool_size_before;
-      return report;
-    }
-    const body = await r.json();
-    welldRows = (Array.isArray(body?.wells) ? body.wells : [])
-      .filter((w: any) => typeof w?.name === "string")
-      .map((w: any) => ({ name: String(w.name), status: String(w.status ?? "") }));
-  } catch (e: any) {
-    report.errors.push(`/v1/wells fetch failed: ${e?.message ?? e}`);
-    report.pool_size_after = report.pool_size_before;
-    return report;
-  }
-  report.welld_known = welldRows.length;
-
-  // Mutate pool.json under lock. Re-read inside the lock to avoid TOCTOU
-  // against a concurrent bake/claim that mutated pool.json after our
-  // outer load above.
-  await withPoolLock(async () => {
-    const file = await loadPool();
-    const plan = planReconcileEvictions(file.members, welldRows);
-    if (plan.evicted.length > 0) {
-      file.members = plan.keep;
-      await savePool(file);
-    }
-    report.evicted = plan.evicted;
-    report.pool_size_after = plan.keep.length;
-  });
-
-  // Cull pass: trim open members above target depth. Refill only ever
-  // *adds* (top up to target), so without a shrink path the pool can only
-  // grow — a stale count or a double-refill lets it run away (it reached
-  // 42 once against a target of 5). Oldest open eggs go first: age is the
-  // best staleness proxy. Never touches claimed/live members — those are
-  // cells, not spare eggs.
-  let cullVictims: PoolMember[] = [];
-  {
-    const file = await loadPool();
-    const open = file.members
-      .filter((m) => m.state === "open" && m.variant_signature === V1_POOL_VARIANT_SIGNATURE)
-      .sort((a, b) => Date.parse(a.born_at) - Date.parse(b.born_at)); // oldest first
-    const excess = open.length - V1_POOL_TARGET_DEPTH;
-    if (excess > 0) cullVictims = open.slice(0, excess);
-  }
-  for (const v of cullVictims) {
-    // Re-check under lock — skip if it got claimed since we picked victims.
-    let stillOpen = false;
-    await withPoolLock(async () => {
-      const m = (await loadPool()).members.find((x) => x.id === v.id);
-      stillOpen = !!m && m.state === "open";
-    });
-    if (!stillOpen) continue;
-    await directWellDestroy(v.well_name).catch(() => {});
-    await withPoolLock(async () => {
-      const f = await loadPool();
-      f.members = f.members.filter((x) => x.id !== v.id);
-      await savePool(f);
-    });
-    report.culled.push({ id: v.id, well_name: v.well_name });
-  }
-  report.pool_size_after -= report.culled.length;
-
-  // Stale-rev cull pass: retire open eggs carrying old platform code so the
-  // pool rotates toward the current runtime DNA instead of handing births a
-  // stale supervisor/lib (the "pre-merge egg ships stale code" class). Gated
-  // on a CLEAN working tree: an uncommitted edit to a sync file would shift
-  // the computed rev and make every committed-rev egg look stale — auto-
-  // evicting the whole pool to chase a dirty tree. Visibility (doctor) still
-  // shows drift on a dirty tree; only the automatic destroy waits for clean.
-  // Capped + floored (cli/lib/reconcile.ts) so a big rev jump rotates over a
-  // few passes and never empties the pool mid-rebake. Refill (below) bakes
-  // the replacements at the current rev.
-  if (dnaTreeClean()) {
-    const currentRev = dnaRev(DNA_DIR);
-    let staleVictims: PoolMember[] = [];
-    {
-      const file = await loadPool();
-      const open = file.members.filter(
-        (m) => m.state === "open" && m.variant_signature === V1_POOL_VARIANT_SIGNATURE,
-      );
-      staleVictims = selectStaleRevCull(open, currentRev, { cap: 2, floor: 2 });
-    }
-    for (const v of staleVictims) {
-      let stillOpen = false;
-      await withPoolLock(async () => {
-        const m = (await loadPool()).members.find((x) => x.id === v.id);
-        stillOpen = !!m && m.state === "open";
-      });
-      if (!stillOpen) continue;
-      await directWellDestroy(v.well_name).catch(() => {});
-      await withPoolLock(async () => {
-        const f = await loadPool();
-        f.members = f.members.filter((x) => x.id !== v.id);
-        await savePool(f);
-      });
-      report.stale_culled.push({ id: v.id, well_name: v.well_name, rev: v.dna_rev ?? "" });
-    }
-    report.pool_size_after -= report.stale_culled.length;
-  }
-
-  // hibernate_ready recheck: covers welld transition-storm clears that
-  // leave a successfully-sealed pool member with hibernate_ready=false
-  // (see the existing note at sealWell's ensureHibernateReady — we
-  // observed this on egg-0f7d66 once, and again on egg-711295
-  // 2026-05-24 after the wells bounce earlier that day).  When this
-  // happens, claim → ensureHibernateReady would re-seal at birth time,
-  // but the egg in the meantime is poison: it can't be hibernated, so
-  // /hibernate-driven flows (sleep, cull, restart) fail against it.
-  // Re-seal here instead, before any of those callers hit it.  Re-seal
-  // throws if the well is genuinely unrecoverable; treat that as an
-  // eviction.
-  {
-    const file = await loadPool();
-    const open = file.members.filter(
-      (m) => m.state === "open" && m.variant_signature === V1_POOL_VARIANT_SIGNATURE,
-    );
-    for (const m of open) {
-      try {
-        const ready = await readHibernateReady(m.well_name);
-        if (!needsSeal(ready)) continue;
-        await sealWell(m.well_name);
-        report.resealed.push({ id: m.id, well_name: m.well_name });
-      } catch (e) {
-        const reason = e instanceof Error ? e.message : String(e);
-        await directWellDestroy(m.well_name).catch(() => {});
-        await withPoolLock(async () => {
-          const f = await loadPool();
-          f.members = f.members.filter((x) => x.id !== m.id);
-          await savePool(f);
-        });
-        report.unrecoverable.push({ id: m.id, well_name: m.well_name, reason });
-        report.pool_size_after -= 1;
-      }
-    }
-  }
-
-  // Background refill — fire and forget, don't make the caller wait.
-  // Trigger when ANY shrink happened (stale eviction, over-target cull,
-  // unrecoverable reseal eviction) so the pool gets back to depth.
-  const shrank =
-    report.evicted.length > 0 ||
-    report.culled.length > 0 ||
-    report.stale_culled.length > 0 ||
-    report.unrecoverable.length > 0;
-  // Single-flight: don't stack a reconcile-triggered refill on top of one
-  // already running (the steward's depth-block fires `cells pool refill`
-  // separately, and a stale-rev cull here would otherwise trigger a second
-  // concurrent bake loop — two refills racing welld). isRefillInFlight()
-  // sees the separate `cells.ts pool refill` process; if one's up, let it
-  // top the pool back up instead of starting a rival.
-  if (shrank && !opts.skipRefill && !(await isRefillInFlight())) {
-    report.refill_triggered = true;
-    refillPoolToDepth().catch((e) => {
-      if (!opts.silent) {
-        console.error(`reconcile-triggered refill failed: ${e?.message ?? e}`);
-      }
-    });
-  }
-
-  if (
-    !opts.silent &&
-    (report.evicted.length > 0 ||
-      report.culled.length > 0 ||
-      report.stale_culled.length > 0 ||
-      report.resealed.length > 0 ||
-      report.unrecoverable.length > 0)
-  ) {
-    const parts: string[] = [];
-    if (report.evicted.length > 0) parts.push(`evicted ${report.evicted.length} stale`);
-    if (report.culled.length > 0) parts.push(`culled ${report.culled.length} over-target`);
-    if (report.stale_culled.length > 0) parts.push(`culled ${report.stale_culled.length} stale-rev`);
-    if (report.resealed.length > 0) parts.push(`resealed ${report.resealed.length}`);
-    if (report.unrecoverable.length > 0) parts.push(`dropped ${report.unrecoverable.length} unrecoverable`);
-    console.error(
-      `pool reconcile: ${parts.join(", ")} member(s); ` +
-        `pool ${report.pool_size_before} → ${report.pool_size_after}` +
-        (report.refill_triggered ? " (refill triggered)" : ""),
-    );
-  }
-  return report;
-}
-
-// Refill the v1 pool to the target depth.
-// Two-pass strategy:
-//   1. Promote hibernated→running until the running count is at
-//      V1_RUNNING_POOL_TARGET. Promote is fast (~3s, just /wake) so the
-//      running buffer replenishes quickly after a consume.
-//   2. Bake new hibernated pool members serially until total pool is at
-//      target. Bake is slower (~30s/egg).
-// Serial bakes are required: wells's mother concurrency limit + welld
-// traffic stability. Returns the number of members baked (does not count
-// promotions).
-// Single-flight wrapper. Fired fire-and-forget from several triggers in
-// possibly-different processes; without coalescing they run concurrent bake
-// loops that oversubscribe the host (the seal-contention root) and overshoot
-// target. A refill that finds another already running SKIPS — the live one
-// already drives the pool to target. See cli/lib/refill-lock.ts.
-async function refillPoolToDepth(target: number = V1_POOL_TARGET_DEPTH): Promise<number> {
-  if (!tryAcquireRefillLock()) {
-    const h = refillLockHolder();
-    console.error(`  (refill already in progress${h?.pid ? ` (pid ${h.pid})` : ""} — skipping)`);
-    return 0;
-  }
-  try {
-    return await refillPoolToDepthInner(target);
-  } finally {
-    releaseRefillLock();
-  }
-}
-
-async function refillPoolToDepthInner(target: number = V1_POOL_TARGET_DEPTH): Promise<number> {
-  // Pass 1: promote hibernated→running until the running count is at
-  // target. Caps at the smaller of (running target, current pool size) —
-  // never promotes more than exists to promote.
-  while (true) {
-    const running = await countRunningPoolMembers();
-    if (running >= V1_RUNNING_POOL_TARGET) break;
-    const hibernated = await countHibernatedPoolMembers();
-    if (hibernated === 0) break;
-    const ok = await promoteOneHibernatedToRunning();
-    if (!ok) break;
-  }
-
-  // Pass 2: bake fresh hibernated pool members until total pool is at
-  // depth target. bakePoolMember() decides the tier internally.
-  let baked = 0;
-  while ((await countOpenPoolMembers()) < target) {
-    try {
-      await bakePoolMember();
-      baked++;
-    } catch (e) {
-      console.warn(`! v1 egg bake failed: ${e instanceof Error ? e.message : String(e)}`);
-      break; // don't loop forever if welld is sick
-    }
-  }
-  return baked;
 }
 
 // Destroy a well directly via the well CLI, bypassing the mother
@@ -6032,16 +5091,8 @@ async function cmdDestroyOne(name: string): Promise<boolean> {
   // kill/birth cycles for cells reusing the same name.
   await removePostwork(name);
 
-  // If this was a hatched cell, the cell's well IS the egg's well.
-  // It just got destroyed above, so the pool.json entry is now stale.
-  // Remove it so `cells pool list` doesn't show a phantom "live" entry.
-  if (killedCell?.hatched_from) {
-    await withPoolLock(async () => {
-      const f = await loadPool();
-      f.members = f.members.filter((e) => e.id !== killedCell.hatched_from);
-      await savePool(f);
-    });
-  }
+  // (No pool.json to clean — the cell's well `egg-<hatched_from>` was
+  // destroyed above; there's no separate pool entry anymore.)
 
   // Journal the teardown. Birth appends a `born` line via mother's
   // cell-create prompt; mirror that here so the activity log stays a
@@ -7430,147 +6481,6 @@ async function cmdUnscheduleHostBridge() {
   if (existsSync(hostBridgePlistPath())) {
     await unlink(hostBridgePlistPath());
     console.log(`✓ removed ${hostBridgePlistPath()}`);
-  } else {
-    console.log("(no plist found)");
-  }
-  console.log("✓ unscheduled");
-}
-
-// ───── pool refill — on-birth, no scheduled loop ─────
-//
-// The pool refills itself: every successful `cells birth` claims one egg
-// and fires a background refillPoolToDepth() that bakes the pool back to
-// V1_POOL_TARGET_DEPTH. One birth, one egg.
-//
-// There is deliberately NO scheduled refiller. The old launchd loop
-// (`cells schedule-pool-refill`, every 10 min) raced the on-birth refill
-// — both read a stale count and each baked a full batch — and with no
-// cull the pool only grew. It ran away to 42 against a target of 5.
-// `cmdSchedulePoolRefill` now refuses; `cmdUnschedulePoolRefill` stays so
-// an existing install can still be torn down.
-
-const POOL_REFILL_LABEL = "com.pete.cells-pool-refill";
-
-function eggRefillPlistPath(): string {
-  return join(homedir(), "Library/LaunchAgents", `${POOL_REFILL_LABEL}.plist`);
-}
-
-async function cmdSchedulePoolRefill() {
-  console.error(
-    "refused: there is no scheduled pool refiller by design.\n" +
-      "  Refill is on-birth — each `cells birth` tops the pool back up by one.\n" +
-      "  A periodic refiller raced the on-birth refill and ran the pool away\n" +
-      "  to 42 (target 5). If a stale plist is still installed, remove it with\n" +
-      "  `cells unschedule-pool-refill`.",
-  );
-  process.exit(1);
-}
-
-async function cmdUnschedulePoolRefill() {
-  const uid = process.getuid?.() ?? 501;
-  await Bun.spawn(["launchctl", "bootout", `gui/${uid}/${POOL_REFILL_LABEL}`], {
-    stdin: "ignore",
-    stdout: "inherit",
-    stderr: "inherit",
-  }).exited;
-  if (existsSync(eggRefillPlistPath())) {
-    await unlink(eggRefillPlistPath());
-    console.log(`✓ removed ${eggRefillPlistPath()}`);
-  } else {
-    console.log("(no plist found)");
-  }
-  console.log("✓ unscheduled");
-}
-
-// `cells schedule-pool-reconcile` installs a launchd plist that runs
-// `cells pool reconcile` every 5 minutes. Eager defense against state
-// drift (welld bounces, manual lume hand-stops, etc) — works even when
-// no one is running cells commands. Cheap when pool is healthy.
-
-const POOL_RECONCILE_LABEL = "com.pete.cells-pool-reconcile";
-
-function poolReconcilePlistPath(): string {
-  return join(homedir(), "Library/LaunchAgents", `${POOL_RECONCILE_LABEL}.plist`);
-}
-
-function buildPoolReconcilePlist(): string {
-  const bunBin = `${homedir()}/.bun/bin/bun`;
-  const cellsCli = join(REPO_ROOT, "cli", "cells.ts");
-  const logsDir = join(homedir(), ".cells", "logs");
-  const path = `${homedir()}/.bun/bin:${homedir()}/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin`;
-  return `<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-  <key>Label</key>
-  <string>${POOL_RECONCILE_LABEL}</string>
-  <key>ProgramArguments</key>
-  <array>
-    <string>${bunBin}</string>
-    <string>${cellsCli}</string>
-    <string>pool</string>
-    <string>reconcile</string>
-  </array>
-  <key>WorkingDirectory</key>
-  <string>${REPO_ROOT}</string>
-  <key>EnvironmentVariables</key>
-  <dict>
-    <key>PATH</key>
-    <string>${path}</string>
-    <key>HOME</key>
-    <string>${homedir()}</string>
-  </dict>
-  <key>StartInterval</key>
-  <integer>300</integer>
-  <key>StandardOutPath</key>
-  <string>${logsDir}/pool-reconcile.log</string>
-  <key>StandardErrorPath</key>
-  <string>${logsDir}/pool-reconcile.err</string>
-  <key>RunAtLoad</key>
-  <false/>
-</dict>
-</plist>
-`;
-}
-
-async function cmdSchedulePoolReconcile() {
-  const logsDir = join(homedir(), ".cells", "logs");
-  await mkdir(logsDir, { recursive: true });
-  await mkdir(dirname(poolReconcilePlistPath()), { recursive: true });
-  await writeFile(poolReconcilePlistPath(), buildPoolReconcilePlist());
-  console.log(`✓ wrote plist: ${poolReconcilePlistPath()}`);
-
-  const uid = process.getuid?.() ?? 501;
-  await Bun.spawn(["launchctl", "bootout", `gui/${uid}/${POOL_RECONCILE_LABEL}`], {
-    stdin: "ignore",
-    stdout: "ignore",
-    stderr: "ignore",
-  }).exited;
-  const proc = Bun.spawn(["launchctl", "bootstrap", `gui/${uid}`, poolReconcilePlistPath()], {
-    stdin: "ignore",
-    stdout: "inherit",
-    stderr: "inherit",
-  });
-  const code = await proc.exited;
-  if (code !== 0) {
-    console.error("✗ launchctl bootstrap failed");
-    process.exit(1);
-  }
-  console.log(`✓ scheduled: pool reconcile every 5 minutes`);
-  console.log(`  logs: ${logsDir}/pool-reconcile.log (stdout), pool-reconcile.err (stderr)`);
-  console.log(`  unschedule with: cells unschedule-pool-reconcile`);
-}
-
-async function cmdUnschedulePoolReconcile() {
-  const uid = process.getuid?.() ?? 501;
-  await Bun.spawn(["launchctl", "bootout", `gui/${uid}/${POOL_RECONCILE_LABEL}`], {
-    stdin: "ignore",
-    stdout: "inherit",
-    stderr: "inherit",
-  }).exited;
-  if (existsSync(poolReconcilePlistPath())) {
-    await unlink(poolReconcilePlistPath());
-    console.log(`✓ removed ${poolReconcilePlistPath()}`);
   } else {
     console.log("(no plist found)");
   }
@@ -8979,257 +7889,6 @@ async function cmdSync(name?: string) {
 // Re-exported here for the existing intra-file callers.
 import { wellNameForCell } from "./lib/resolve";
 
-// ───── pool CLI ─────
-//
-// `cells pool create [--model=X --extensions=A,B --packages=C,D]`  — pre-warm a
-//                                                            new pool member
-// `cells pool list`                                          — show pool
-// `cells pool cull <id>`                                     — destroy a
-//                                                            pool member by id
-// `cells pool refill`                                        — bake pool up to depth
-// `cells pool drain`                                         — destroy all open members
-// `cells pool reconcile`                                     — diff pool.json vs welld;
-//                                                            evict stale entries
-//
-// `--thinking` and `--channels` are deliberately NOT accepted at pool-member
-// bake. Pool members are stock; thinking and channels are applied at hatch
-// (per cell). Trying to pass them here errors.
-
-async function cmdPool(args: string[]) {
-  const sub = args[0];
-  if (sub === "list") {
-    await cmdPoolList();
-    return;
-  }
-  if (sub === "cull") {
-    if (!args[1]) {
-      console.error("usage: cells pool cull <id>");
-      process.exit(1);
-    }
-    await cmdPoolCull(args[1]);
-    return;
-  }
-  if (sub === "refill") {
-    await cmdPoolRefill();
-    return;
-  }
-  if (sub === "drain") {
-    await cmdPoolDrain(args.slice(1));
-    return;
-  }
-  if (sub === "reconcile") {
-    await cmdPoolReconcile();
-    return;
-  }
-  if (sub === "bake-v1") {
-    // V1.STEP3 manual control: bake one v1 generic egg, hibernated, ready
-    // for the next cmdCreateV1Fast to consume. Refill normally happens
-    // async after consumption; this command is a one-shot for testing
-    // and pool seeding.
-    console.log("baking one v1 egg…");
-    const t0 = Date.now();
-    const wellName = await bakePoolMember();
-    // Look up the tier we just assigned for accurate logging.
-    const pool = await loadPool();
-    const tier = (pool.members.find((e) => e.well_name === wellName) as any)?.tier ?? 2;
-    const state = tier === 4 ? "running" : "hibernated";
-    console.log(`✓ egg '${wellName}' ${state} (${((Date.now() - t0) / 1000).toFixed(1)}s)`);
-    return;
-  }
-  // Baking is an explicit verb. `bake` is the clear name; `create` is kept
-  // as a back-compat alias. NOT the no-arg default — a bare `cells pool`
-  // (or `cells egg`) used to fall through here and silently spin up a VM,
-  // so any status-style invocation grew the pool by one. Bare now shows
-  // status (docs/BACKLOG.md "cells pool / cells egg with no args …").
-  if (sub === "bake" || sub === "create") {
-    await cmdPoolCreate(args.slice(1));
-    return;
-  }
-  if (sub === undefined || sub === "status") {
-    await cmdPoolList();
-    return;
-  }
-  console.error(`unknown pool subcommand: ${sub}`);
-  console.error(`usage: cells pool [status|list|bake|cull|refill|drain|reconcile]`);
-  console.error(`       (bare 'cells pool' shows status; 'cells pool bake' bakes one egg)`);
-  process.exit(1);
-}
-
-// `cells pool create` / `cells egg` — bake one generic egg into the pool.
-// The pool is uniform: every egg is identical (variant_signature
-// "v1-generic"); the cell's model / extensions / channels are applied at
-// birth by the ritual, not baked. bakePoolMember does the well-create +
-// provision + seal + tier decision + pool.json push. Any --model /
-// --extensions / --packages args are vestigial — ignored with a warning.
-async function cmdPoolCreate(args: string[]) {
-  if (args.length > 0) {
-    console.warn(`note: 'cells pool create' args are ignored — the pool is uniform (one generic egg shape)`);
-  }
-  console.log(`baking a generic pool egg…`);
-  const wellName = await bakePoolMember();
-  console.log(`✓ egg ${wellName} registered as open`);
-}
-
-async function cmdPoolList() {
-  // Lazy reconcile: cheap defense against state drift since the last
-  // command. Silent on success; logs only when it actually evicted.
-  await reconcilePool({ silent: false }).catch(() => { /* don't fail list on reconcile error */ });
-  const file = await loadPool();
-  if (file.members.length === 0) {
-    console.log("(no members in pool)");
-    return;
-  }
-  // Two axes, never conflated: `standing` is pool membership (open =
-  // unclaimed, claimed/live = taken by a birth); `power` is the VM's
-  // power state (running in RAM vs hibernated on disk, from tier).
-  console.log("id      standing  power       variant                                                    age       claimed_by");
-  console.log("------  --------  ----------  ---------------------------------------------------------  --------  -----------");
-  for (const e of file.members) {
-    const id = e.id.padEnd(6);
-    const standing = e.state.padEnd(8);
-    const power = ((e as any).tier === 4 ? "running" : "hibernated").padEnd(10);
-    const sig = e.variant_signature.padEnd(57).slice(0, 57);
-    const age = fmtAge(e.born_at).padEnd(8);
-    const by = e.claimed_by ?? "—";
-    console.log(`${id}  ${standing}  ${power}  ${sig}  ${age}  ${by}`);
-  }
-}
-
-// `cells pool reconcile` — explicit drift sweep. Same logic as the
-// lazy guards but verbose by default so the operator can see what got
-// evicted and what didn't.
-async function cmdPoolReconcile() {
-  const report = await reconcilePool({ silent: true });
-  console.log(`checked_at:        ${report.checked_at}`);
-  console.log(`pool_size_before:  ${report.pool_size_before}`);
-  console.log(`welld_known:       ${report.welld_known}`);
-  console.log(`pool_size_after:   ${report.pool_size_after}`);
-  console.log(`refill_triggered:  ${report.refill_triggered}`);
-  if (report.evicted.length === 0) {
-    console.log("evicted:           (none — pool is in sync)");
-  } else {
-    console.log(`evicted (${report.evicted.length}):`);
-    for (const e of report.evicted) {
-      console.log(`  ${e.id}  ${e.well_name}  ← ${e.reason}`);
-    }
-  }
-  if (report.culled.length === 0) {
-    console.log("culled:            (none — pool at or under target depth)");
-  } else {
-    console.log(`culled (${report.culled.length} over-target):`);
-    for (const c of report.culled) {
-      console.log(`  ${c.id}  ${c.well_name}`);
-    }
-  }
-  // Stale-rev culls are destructive (eggs carrying old platform DNA get
-  // destroyed + rebaked at current rev) — surface them, never silently.
-  if (report.stale_culled.length === 0) {
-    console.log("stale-rev culled:  (none — open eggs at current DNA rev)");
-  } else {
-    console.log(`stale-rev culled (${report.stale_culled.length} — old DNA, rebaking at current):`);
-    for (const c of report.stale_culled) {
-      console.log(`  ${c.id}  ${c.well_name}  ← rev ${c.rev || "?"}`);
-    }
-  }
-  if (report.errors.length > 0) {
-    console.log("errors:");
-    for (const err of report.errors) console.log(`  ${err}`);
-  }
-}
-
-async function cmdPoolCull(eggId: string) {
-  const file = await loadPool();
-  const egg = file.members.find((e) => e.id === eggId);
-  if (!egg) {
-    console.error(`egg '${eggId}' not found in registry`);
-    console.error(`run 'cells pool list' to see available ids`);
-    process.exit(1);
-  }
-
-  // Cull is direct-well-destroy — no mother in the loop. Eggs have no
-  // CF worker, no Slack channel, no vault dir, no pulse state — there's
-  // nothing for mother to orchestrate. directWellDestroy is idempotent
-  // (404 = success).
-  console.log(`culling egg ${egg.well_name} (id: ${egg.id})`);
-  const ok = await directWellDestroy(egg.well_name);
-
-  // Always remove the pool.json entry — even if well destroy failed,
-  // the entry is stale and Pete can manually `well destroy` later.
-  await withPoolLock(async () => {
-    const f = await loadPool();
-    f.members = f.members.filter((e) => e.id !== eggId);
-    await savePool(f);
-  });
-
-  if (ok) {
-    console.log(`✓ egg ${eggId} culled and removed from registry`);
-  } else {
-    console.warn(`! egg ${eggId} removed from registry, but well destroy was uncertain — verify with 'well list'`);
-  }
-}
-
-// ───── pool refill / drain — pool maintenance CLI ─────
-//
-// `cells pool refill` brings the pool back to V1_POOL_TARGET_DEPTH.
-// Idempotent: returns immediately if the pool is already full, logs each
-// bake otherwise. The V1 pool is uniform (one generic egg shape,
-// variant_signature "v1-generic"), so there is no variant fan-out — just
-// a single depth target.
-//
-// `cells pool drain` culls every open egg in the registry. Useful before
-// re-baking cell-base or before quitting wells. Idempotent.
-
-async function cmdPoolRefill() {
-  // Lazy reconcile first: don't bake against stale state. Pass
-  // skipRefill so we don't trigger a recursive refill before our own
-  // bake pass runs.
-  await reconcilePool({ silent: false, skipRefill: true }).catch(() => { /* don't fail refill on reconcile error */ });
-
-  const current = await countOpenPoolMembers();
-  if (current >= V1_POOL_TARGET_DEPTH) {
-    console.log(`pool at target depth (${current}/${V1_POOL_TARGET_DEPTH})`);
-    return;
-  }
-  console.log(`refilling pool: ${current} → ${V1_POOL_TARGET_DEPTH}…`);
-  const baked = await refillPoolToDepth();
-  console.log(`✓ baked ${baked} egg(s); pool now at ${await countOpenPoolMembers()}/${V1_POOL_TARGET_DEPTH}`);
-}
-
-async function cmdPoolDrain(args: string[]) {
-  const yes = args.includes("-y") || args.includes("--yes");
-  const file = await loadPool();
-  const openEggs = file.members.filter((e) => e.state === "open");
-
-  if (openEggs.length === 0) {
-    console.log("(no open pool members to drain)");
-    return;
-  }
-
-  if (!yes) {
-    console.log(`about to cull ${openEggs.length} open egg${openEggs.length === 1 ? "" : "s"}:`);
-    for (const e of openEggs) {
-      console.log(`  ${e.id}  ${e.variant_signature}`);
-    }
-    console.log(`\nrun with -y to confirm`);
-    return;
-  }
-
-  let culled = 0;
-  for (const e of openEggs) {
-    console.log(`culling ${e.well_name} (id: ${e.id})`);
-    const ok = await directWellDestroy(e.well_name);
-    await withPoolLock(async () => {
-      const f = await loadPool();
-      f.members = f.members.filter((x) => x.id !== e.id);
-      await savePool(f);
-    });
-    if (ok) culled++;
-    else console.warn(`! ${e.id} registry-removed but well destroy was uncertain`);
-  }
-
-  console.log(`✓ drained ${culled}/${openEggs.length} egg${openEggs.length === 1 ? "" : "s"}`);
-}
-
 // ───── bake — produce a forkable cell-base image ─────
 //
 // `cells bake [--name=cell-base]` spins up a fresh well, runs the full
@@ -9313,98 +7972,22 @@ async function cmdBake(opts: BakeOpts) {
     //     cell user, /root home, cell sudoers, ubuntu→cell delegation, and
     //     /root/.ssh/authorized_keys. Cells-side useradd is no-op now.
 
-    // 3. Push DNA — cells-specific package.json, .pi/, scripts/, site/, etc.
-    console.log(`→ push DNA → /root`);
-    await pushLocalDirToWell(sourceName, DNA_DIR, "/root");
-
-    // 3b. Write the per-cell tmux config template (placeholders for cell
-    //     name + bg/fg color get filled in at birth time, step 3b of the
-    //     mother skill). The template lives in the cells repo so we don't
-    //     ship it via DNA — DNA is the agent's data, this is its terminal.
-    console.log(`→ write /root/.tmux.conf template`);
-    const tmuxConf = await readFile(join(REPO_ROOT, "scripts/cell-tmux.conf"), "utf-8");
-    // Write as root via tee. Avoids quoting hell — tmux conf contains
-    // single quotes (in comments and bind-key strings) that would fight
-    // any `bash -c '...'` wrapping.
-    const writeTmux = await wellExecCapture(
-      sourceName,
-      `sudo tee /root/.tmux.conf >/dev/null <<'__TMUX_EOF__'\n${tmuxConf}\n__TMUX_EOF__`,
-    );
-    if (!writeTmux.ok) {
-      throw new Error(`write tmux conf failed: ${writeTmux.stderr.slice(0, 200)}`);
-    }
-
-    // 4a. Install pi globally. Wells's ubuntu-25.10-base used to ship pi
-    //     pre-installed, but the -10g rebake (2026-05-10) dropped it to keep
-    //     the base minimal. Cells owns its agent stack — pi belongs in our
-    //     bake recipe, not in wells's substrate. npm install -g lands the
-    //     binary at /usr/local/bin/pi and modules at /usr/lib/node_modules/.
-    //     Also bun for the well user (cells's CLI uses bun; pi tooling does
-    //     too in places). Bun's installer is a one-liner curl|bash that
-    //     drops a tarball at ~/.bun. Both are best-effort idempotent.
-    console.log(`→ install pi globally + bun for root`);
-    const installTools = await wellExecCapture(
-      sourceName,
-      `set -euo pipefail
-sudo npm install -g @mariozechner/pi-coding-agent
-# Bun for root: the agent runs as root (HOME=/root), so install into
-# /root/.bun. cells-env.sh puts /root/.bun/bin on the cell's PATH.
-if [ ! -x /root/.bun/bin/bun ]; then
-  sudo bash -lc 'export HOME=/root; curl -fsSL https://bun.sh/install | bash'
-fi
-echo "pi: $(/usr/bin/pi --version 2>&1 | head -1 || /usr/local/bin/pi --version 2>&1 | head -1 || echo MISSING)"
-echo "bun: $(/root/.bun/bin/bun --version 2>&1 | head -1 || echo MISSING)"`,
-    );
-    if (!installTools.ok) {
-      throw new Error(`install pi+bun failed: ${installTools.stderr.slice(0, 400) || installTools.stdout.slice(0, 400)}`);
-    }
-
-    // 4b. Patch the just-installed pi (anthropic baseUrl → proxy.cells.md,
-    //    codex extractAccountId neutralized, adaptive thinking unclamped).
-    //    Global install lands at /usr/lib/node_modules/@mariozechner/... —
-    //    root-owned. Run the patch script with sudo so sed -i works there.
-    console.log(`→ apply pi patches`);
-    const patch = await wellExecCapture(
-      sourceName,
-      `sudo bash /root/scripts/apply-pi-patches.sh`,
-    );
-    if (!patch.ok) {
-      throw new Error(`apply-pi-patches failed: ${patch.stderr.slice(0, 400) || patch.stdout.slice(0, 400)}`);
-    }
-
-    // 5. System-wide env shim at /etc/profile.d/cells-env.sh (replaces the
-    //    old per-user ~/.bashrc.d/ shims). /etc/profile.d is sourced by
-    //    every login shell automatically — no .profile dance, no per-user
-    //    install, survives any /home rinse, works for both `well` and
-    //    `cell` users.
-    console.log(`→ write /etc/profile.d/cells-env.sh`);
-    await bakeWriteProfileD(sourceName);
-
-    // 7. Make /root/bin/cells executable. /root/bin is on root's PATH
-    //    via /etc/profile.d/cells-env.sh, so no symlink needed.
-    const linkRes = await wellExecCapture(
-      sourceName,
-      `sudo chmod +x /root/bin/cells`,
-    );
-    if (!linkRes.ok) {
-      throw new Error(`cells bin chmod failed: ${linkRes.stderr.slice(0, 200) || linkRes.stdout.slice(0, 200)}`);
-    }
-
-    // 7c. (REMOVED) well-site.service install. Bridge logic moved to the
-    //     host-side daemon (cli/host-bridge.ts) which SSHs into the cell
-    //     and spawns pi on demand. Cells become "just a Linux VM with pi
-    //     installed" — no in-cell server. See plan: fizzy-wobbling-globe.md.
-
-    // 7b. Force fs journal commit before save. Empirically (2026-05-10)
-    //     wells's server-side `stop+save` can hard-kill the guest before
-    //     ext4's commit=30 timer fires, dropping unsync'd writes. /etc/passwd
-    //     survives (PAM fsyncs) but our /root tree, /etc/profile.d shim,
-    //     and pi-patch sed-edits do not. Explicit `sync` here flushes.
-    console.log(`→ sync filesystem before save`);
-    const syncRes = await wellExecCapture(sourceName, `sudo sync && sudo sync`);
-    if (!syncRes.ok) {
-      throw new Error(`sync failed: ${syncRes.stderr.slice(0, 200)}`);
-    }
+    // 3-9. Provision: lift the ubuntu base into a complete cell — DNA push,
+    //      tmux template, /root deps, all four harness binaries
+    //      (pi + pi-web-access + codex + hermes; claude ships in the base),
+    //      node-gyp, pi patches, the /etc/profile.d env shim, /root/bin/cells,
+    //      ownership normalization, the dna-rev stamp, and a final fs sync.
+    //
+    //      This is the SAME recipe a real cell gets — the image births fork
+    //      from is byte-identical to a hand-baked cell. Previously cmdBake
+    //      carried its own inline recipe that drifted badly behind
+    //      provisionCellInWell (no codex/hermes/node-gyp/pi-web-access/dna-rev).
+    //      Unified 2026-06-17 alongside the egg-pool teardown (cold-boot
+    //      substrate, docs/proposals in the wells repo): one provisioning path,
+    //      one source of truth. With the pool gone, provisionCellInWell's only
+    //      caller is this bake.
+    console.log(`→ provision cell-base (DNA + 4 harnesses + node-gyp + patches + sync)`);
+    await provisionCellInWell(sourceName);
     // --no-save: bail before the wells-side rinse fires. Used to debug the
     // recipe's interaction with rinse — source stays alive with full
     // identity bits so we can ssh in and audit state pre-rinse.
@@ -10122,10 +8705,6 @@ switch (sub) {
   case "unschedule-pi-patches": await cmdUnschedulePiPatches(); break;
   case "schedule-host-bridge":  await cmdScheduleHostBridge(); break;
   case "unschedule-host-bridge":await cmdUnscheduleHostBridge(); break;
-  case "schedule-pool-refill":   await cmdSchedulePoolRefill(); break;
-  case "unschedule-pool-refill": await cmdUnschedulePoolRefill(); break;
-  case "schedule-pool-reconcile":   await cmdSchedulePoolReconcile(); break;
-  case "unschedule-pool-reconcile": await cmdUnschedulePoolReconcile(); break;
   case "refresh":               await cmdRefresh(rest); break;
   case "refresh-extensions":    await cmdRefreshExtensions(rest); break;
   case "heartbeat":             await cmdHeartbeat(rest); break;
@@ -10136,8 +8715,6 @@ switch (sub) {
   case "exec":               await cmdExec(needName(rest, "exec"), rest.slice(1)); break;
   case "secret":             await cmdSecret(rest); break;
   case "see":                await cmdSee(needName(rest, "see")); break;
-  case "pool":               await cmdPool(rest); break;
-  case "egg":                await cmdPool(rest); break;  // deprecated alias
   case "bake":               await cmdBake(parseBakeArgs(rest)); break;
   case "menubar":            await cmdMenubar(rest); break;
   default:
@@ -10158,7 +8735,6 @@ switch (sub) {
     console.log("                                     --channels=slack:staff   (bind the Slack channel to the cell's 'staff' session, not main)");
     console.log("                                     --slack-channel=C0123456789  (legacy: bind to existing channel by ID)");
     console.log("                                     --seed=<text>            (first message auto-sent post-birth; default greeting on, --seed=off disables)");
-    console.log("                                     --no-pool                (skip open-egg lookup, force slow birth — testing/perf-baseline)");
     console.log("                              no flags = interactive TUI; any flag = non-interactive (defaults fill the rest)");
     console.log("  cells talk <name> [msg]     interactive bridge chat (no msg) or one-shot (with msg).");
     console.log("                              Reply streams in this terminal AND mirrors to Slack — same session as Slack.");
@@ -10188,9 +8764,6 @@ switch (sub) {
     console.log("  cells see <name>            open https://<name>.cells.md in the browser");
     console.log("  cells schedule-pi-patches   install launchd watcher (re-applies pi patches when pi-ai is reinstalled)");
     console.log("  cells unschedule-pi-patches remove launchd watcher");
-    console.log("  cells unschedule-pool-refill remove a stale pool-refill launchd plist (refill is on-birth now)");
-    console.log("  cells schedule-pool-reconcile   install launchd plist (pool reconcile every 5min)");
-    console.log("  cells unschedule-pool-reconcile remove pool reconcile launchd plist");
     console.log("  cells refresh <name|--all> [--dry-run] [--verify]");
     console.log("                              update a LIVE cell's infrastructure from current DNA");
     console.log("  cells refresh-extensions <name|--all> [ext...] [--restart] [--remove]");

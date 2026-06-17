@@ -25,7 +25,7 @@ import { join } from "node:path";
 import { existsSync, readFileSync, mkdirSync, openSync, writeSync } from "node:fs";
 import { getAdapter, type HarnessAdapter, type AdapterHost } from "../dna/cells/base/lib/harness-adapters";
 import { loadRegistrySafe } from "./lib/registry";
-import { loadPool } from "./lib/pool";
+import { wellNameForCell } from "./lib/resolve";
 
 const PORT = Number(process.env.HOST_BRIDGE_PORT ?? 7880);
 const WELL_API = process.env.WELL_API_URL ?? "http://127.0.0.1:7878";
@@ -81,25 +81,18 @@ type CellTarget = {
 };
 
 async function resolveCellTarget(cellName: string): Promise<CellTarget | null> {
-  // cells.json → hatched_from short id; pool.json → well_name. For cells
-  // without a hatched_from entry (cold-fork path), the well-name equals
-  // the cell-name.
+  // Well-name resolution is centralized in lib/resolve.ts#wellNameForCell:
+  // specials → cells-<name>, hatched cells → egg-<hatched_from>, else the
+  // cell-name (legacy/cold-fork). Pre-2026-06-17 a hatched cell indirected
+  // through pool.json; with the egg pool gone the binding reconstructs from
+  // hatched_from directly.
   let wellName = cellName;
   let harness = "pi";
   try {
     const reg = await loadRegistrySafe();
     const cell = reg.cells.find((c) => c.name === cellName);
     if (typeof cell?.harness === "string") harness = cell.harness;
-    // Specials (mother, pulse) live in deterministic wells (cells-<name>) —
-    // no hatched_from, so resolve directly.
-    if (cell?.special) {
-      wellName = `cells-${cellName}`;
-    } else if (cell?.hatched_from) {
-      // loadPool owns the eggs.json→pool.json migration — no local fallback.
-      const file = await loadPool();
-      const member = file.members.find((e) => e.id === cell.hatched_from);
-      if (member?.well_name) wellName = member.well_name;
-    }
+    wellName = await wellNameForCell(cellName);
   } catch {
     /* fall through with wellName = cellName */
   }

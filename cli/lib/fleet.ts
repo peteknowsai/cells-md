@@ -15,8 +15,6 @@ import { readFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { type Cell, loadRegistrySafe } from "./registry";
-import { type PoolMember, parsePoolFile } from "./pool";
-import { POOL_PATH } from "./paths";
 
 const WELL_API = process.env.WELL_API_URL ?? "http://127.0.0.1:7878";
 
@@ -56,14 +54,14 @@ type WellRow = {
 
 // ── Pure logic (no IO) ────────────────────────────────────────────────────
 
-// Cell → well-name. Same rules as lib/resolve.ts#wellNameForCell, but pure:
-// the caller passes the already-loaded pool members so the cockpit resolves
-// the whole fleet in-memory instead of re-reading the pool once per cell.
-export function wellNameFor(cell: Pick<Cell, "name" | "special" | "hatched_from">, members: PoolMember[]): string {
+// Cell → well-name. Same rules as lib/resolve.ts#wellNameForCell, but pure.
+// A hatched cell lives in well `egg-<hatched_from>` (the hex id IS the
+// well-name suffix). Pre-2026-06-17 this looked up pool.json; with the egg
+// pool gone (cold-boot substrate) the binding reconstructs directly.
+export function wellNameFor(cell: Pick<Cell, "name" | "special" | "hatched_from">): string {
   if (cell.special) return `cells-${cell.name}`;
   if (!cell.hatched_from) return cell.name;
-  const m = members.find((e) => e.id === cell.hatched_from);
-  return m?.well_name ?? cell.name;
+  return `egg-${cell.hatched_from}`;
 }
 
 // Friendly model token from a fallback chain entry. Entries look like
@@ -207,14 +205,6 @@ export function fleetCounts(cells: FleetCell[]): FleetCounts {
 
 // ── IO ─────────────────────────────────────────────────────────────────
 
-async function loadPoolSafe(): Promise<PoolMember[]> {
-  try {
-    return parsePoolFile(await readFile(POOL_PATH, "utf-8")).members;
-  } catch {
-    return [];
-  }
-}
-
 // GET welld /dashboard/data. Returns null (not []) on any failure so the
 // caller can distinguish "welld unreachable → power unknown" from "welld up,
 // zero wells". Short timeout: the cockpit polls this and must stay snappy.
@@ -241,7 +231,7 @@ async function fetchWells(): Promise<WellRow[] | null> {
 export type FleetSnapshot = { cells: FleetCell[]; welldReachable: boolean };
 
 export async function loadFleet(): Promise<FleetSnapshot> {
-  const [reg, members, wells] = await Promise.all([loadRegistrySafe(), loadPoolSafe(), fetchWells()]);
+  const [reg, wells] = await Promise.all([loadRegistrySafe(), fetchWells()]);
   const welldReachable = wells !== null;
   const byWell = new Map<string, WellRow>((wells ?? []).map((w) => [w.name, w]));
 
@@ -250,7 +240,7 @@ export async function loadFleet(): Promise<FleetSnapshot> {
     // artifact — keep it out of the fleet view until it's promoted to alive.
     .filter((c) => c.status !== "warming")
     .map((c) => {
-    const wellName = wellNameFor(c, members);
+    const wellName = wellNameFor(c);
     const well = byWell.get(wellName);
     return {
       name: c.name,

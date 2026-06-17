@@ -39,17 +39,16 @@ function cell(name: string, over: Partial<FleetCell> = {}): FleetCell {
 
 describe("wellNameFor", () => {
   test("special cell → cells-<name>", () => {
-    expect(wellNameFor({ name: "mother", special: true }, [])).toBe("cells-mother");
+    expect(wellNameFor({ name: "mother", special: true })).toBe("cells-mother");
   });
-  test("pool-hatched cell → the pool member's well_name", () => {
-    const members = [{ id: "c5e25a", well_name: "egg-c5e25a", variant_signature: "", state: "live", born_at: "", claimed_at: null, claimed_by: "delta-market", max_age_at: "" } as any];
-    expect(wellNameFor({ name: "delta-market", hatched_from: "c5e25a" }, members)).toBe("egg-c5e25a");
+  test("hatched cell → egg-<hatched_from>", () => {
+    expect(wellNameFor({ name: "delta-market", hatched_from: "c5e25a" })).toBe("egg-c5e25a");
   });
-  test("hatched_from with no matching pool member → falls back to cell name", () => {
-    expect(wellNameFor({ name: "ghost", hatched_from: "deadbe" }, [])).toBe("ghost");
+  test("hatched_from is reconstructed unconditionally (no pool lookup)", () => {
+    expect(wellNameFor({ name: "ghost", hatched_from: "deadbe" })).toBe("egg-deadbe");
   });
   test("legacy cell (no hatched_from, not special) → cell name", () => {
-    expect(wellNameFor({ name: "bob" }, [])).toBe("bob");
+    expect(wellNameFor({ name: "bob" })).toBe("bob");
   });
 });
 

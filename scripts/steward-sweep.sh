@@ -12,8 +12,6 @@
 #   - well-site inactive / :8080 dead      → systemctl restart well-site
 #   - no `site` service definition         → scripts/register-site-service.sh
 #   - guest clock skew                     → chrony makestep fix + step + sync
-#   - pool below target depth              → detached `cells pool refill`
-#   - stale-rev pool eggs (old DNA)        → `cells pool reconcile` (cull+refill, clean-tree-gated)
 #   - running cell behind current DNA      → `cells refresh <cell>` (≤3/sweep, clean-tree-gated)
 #   - proxy / host-bridge unreachable      → launchctl kickstart
 #   - welld unhealthy                      → ALERT ONLY (never bounce the substrate)
@@ -102,49 +100,29 @@ while IFS=$'\t' read -r name well status reasons; do
 done < <(echo "$J1" | jq -r '.cells[] | select(.status != "ok") | [.name, .well, .status, (.reasons | join("; "))] | @tsv')
 
 # ── pool depth ──────────────────────────────────────────────────────
-OPEN=$(echo "$J1" | jq -r '.pool.open')
-TARGET=$(echo "$J1" | jq -r '.pool.target')
-if [ "$OPEN" -lt "$TARGET" ] 2>/dev/null; then
-  if pgrep -f "cells.ts pool refill" > /dev/null; then
-    FIXED+=("pool refill already in flight ($OPEN/$TARGET)")
-  else
-    mkdir -p "$HOME/.cells/logs"
-    nohup bun cli/cells.ts pool refill >> "$HOME/.cells/logs/pool-refill.log" 2>&1 &
-    FIXED+=("pool refill started ($OPEN/$TARGET open)")
-  fi
-fi
+# (Removed 2026-06-17 — no egg pool. Births cold-fork the `cell-base` image on
+#  demand, so there's no pre-baked stock to keep topped up.)
 
-# ── DNA-rev auto-heal (Phases 2 + 3) ────────────────────────────────
-# Pool eggs carrying old DNA get culled + rebaked at the current rev; running
-# cells behind the current rev get refreshed. BOTH gate on a CLEAN working
-# tree: a dirty tree's rev reflects uncommitted edits, so acting would chase
-# or push unfinished code (the doctor still SHOWS the drift — visibility is
-# never gated). On a dirty tree WITH drift, emit ONE paused alert rather than
-# a misleading "fixed" line for a reconcile that no-op'd.
+# ── DNA-rev auto-heal — refresh running cells behind current DNA ─────
+# Running cells behind the current rev get refreshed. Gates on a CLEAN working
+# tree: a dirty tree's rev reflects uncommitted edits, so acting would chase or
+# push unfinished code (the doctor still SHOWS the drift — visibility is never
+# gated). On a dirty tree WITH drift, emit ONE paused alert.
+# (The old pool stale-rev cull is gone with the egg pool — cold births always
+#  fork the current `cell-base` image, so there's no pre-baked stock to drift.)
 TREE_CLEAN=$(echo "$J1" | jq -r '.dna.tree_clean')
-POOL_STALE=$(echo "$J1" | jq -r '.dna.pool.stale // 0')
 mapfile -t STALE_CELLS < <(echo "$J1" | jq -r '.dna.stale_cells[]?' 2>/dev/null)
 
 if [ "$TREE_CLEAN" != "true" ]; then
-  if { [ -n "$POOL_STALE" ] && [ "$POOL_STALE" != "0" ]; } || [ "${#STALE_CELLS[@]}" -gt 0 ]; then
-    ALERTS+=("DNA auto-heal PAUSED — ${POOL_STALE:-0} stale-rev egg(s) + ${#STALE_CELLS[@]} stale cell(s), but the cells working tree is dirty. Commit DNA changes to let the steward cull/refresh.")
+  if [ "${#STALE_CELLS[@]}" -gt 0 ]; then
+    ALERTS+=("DNA auto-heal PAUSED — ${#STALE_CELLS[@]} stale cell(s), but the cells working tree is dirty. Commit DNA changes to let the steward refresh.")
   fi
 else
-  # Phase 2 — pool rotation. reconcile culls stale-rev eggs (capped, never
-  # empties the pool) and tops it back up; its refill single-flights against
-  # an in-flight `cells pool refill` (the depth block above) so no double bake.
-  if [ -n "$POOL_STALE" ] && [ "$POOL_STALE" != "0" ]; then
-    if bun cli/cells.ts pool reconcile >/dev/null 2>&1; then
-      FIXED+=("pool reconcile ran ($POOL_STALE stale-rev egg(s) — cull+refill toward current DNA)")
-    else
-      ALERTS+=("pool reconcile failed (stale-rev eggs remain)")
-    fi
-  fi
-  # Phase 3 — refresh running cells behind the current rev. Cap 3/sweep so a
-  # fleet-wide jump rotates over a few sweeps rather than restarting every
-  # supervisor at once. `cells refresh` re-stamps /root/.dna-rev only on the
-  # healthy branch (a rollback leaves it correctly still-stale). stale_cells
-  # is running-only — this never wakes a sleeper.
+  # Refresh running cells behind the current rev. Cap 3/sweep so a fleet-wide
+  # jump rotates over a few sweeps rather than restarting every supervisor at
+  # once. `cells refresh` re-stamps /root/.dna-rev only on the healthy branch
+  # (a rollback leaves it correctly still-stale). stale_cells is running-only —
+  # this never wakes a sleeper.
   n=0
   for cell in "${STALE_CELLS[@]}"; do
     [ -z "$cell" ] && continue

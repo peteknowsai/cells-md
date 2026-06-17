@@ -1,5 +1,12 @@
 # Birth-to-greeting perf
 
+> **Note (2026-06-17 — cold-boot substrate):** the warm egg pool was removed. Births
+> now always cold-fork the pre-provisioned `cell-base` image — there is no "warm" path,
+> so the cold-vs-warm tables below are **historical**. `scripts/perf-birth.sh` (which
+> drained/refilled the pool per run) was retired with it. Cold birth to ssh-ready is
+> ~3.5s, noise against the ~95s mother ritual. See the wells repo's
+> `docs/proposals/cold-boot-substrate.html`.
+
 The wedge metric for cells. Two related measurements:
 
 - **`alive_ms`** — from `cells birth` invocation to the cell being registered as `alive` in `~/.cells/cells.json` (deterministic Phase A complete; WS handle available). Captured in `~/.cells/logs/perf/birth.jsonl` per-birth.

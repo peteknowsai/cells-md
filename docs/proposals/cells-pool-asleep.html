@@ -17,6 +17,10 @@
   <h1>Pool — pure-asleep</h1>
   <p class="subtitle">Why the egg pool stops running running VMs. The capacity wall, the half-second wake, the one-line change.</p>
 
+  <div class="callout" style="border-left:4px solid #d65454;background:#fce8e8;">
+    <p><strong>⚠️ SUPERSEDED — 2026-06-17.</strong> The egg pool described here was <strong>deleted</strong>. Measurement showed a cold boot to ssh-ready (~3.5s) is noise against the ~95s mother-ritual birth, so a pool of cold eggs buys ~3% on birth latency while carrying the entire refill/eviction/seal machinery (and its bug class). Births now cold-fork a pre-provisioned <code>cell-base</code> image on demand; live-cell hibernation is unchanged. Kept as a historical record of the warm-pool rationale. See the joint design: the wells repo's <code>docs/proposals/cold-boot-substrate.html</code>.</p>
+  </div>
+
   <div class="callout">
     <div class="label">Status — 2026-05-15 · shipped on <code>feature/pool-asleep</code></div>
     <p><strong>The V1 egg pool is now pure-asleep — every pool egg is a hibernated VM, ~0 RAM, ~0 CPU.</strong> <code>V1_HOT_POOL_TARGET</code> flipped from 10 → 0. End-to-end verified: a real <code>cells birth</code> consumed an asleep egg through the until-now-untested cold-claim path, woke it in 0.55 s, mother ran the full ritual on the now-running VM. Birth wall-time 94.7 s (cold-consume) — within the measured envelope for any birth. Pool RAM held by 12 warm eggs: was ~10 GB awake, now 0.</p>
