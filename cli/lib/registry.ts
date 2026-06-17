@@ -95,7 +95,7 @@ export function upsertBirthingCell(cells: Cell[], entry: Omit<Cell, "status">): 
 }
 
 // Promote a warming cell to "alive", patching any fields the birth retry loop
-// changed (e.g. hatched_from points at the final egg). No-op if name absent.
+// changed (e.g. `well`, which a retry recreates). No-op if name absent.
 export function promoteCell(cells: Cell[], name: string, patch: Partial<Cell> = {}): Cell[] {
   return cells.map((c) => (c.name === name ? { ...c, ...patch, status: "alive" as const } : c));
 }

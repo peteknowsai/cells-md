@@ -60,7 +60,7 @@ const HOME = process.env.HOME ?? "/root";
 const HOST_WELL = process.env.HOST_WELL_URL ?? "http://host.well:7879";
 
 // Harness baked at birth — pi | claude-code | codex. Read from status.json
-// (bake-egg writes it). Defaults to pi for safety.
+// (imprint-cell.sh writes it). Defaults to pi for safety.
 function readHarness(): string {
   try {
     const j = JSON.parse(readFileSync(`${HOME}/.pi/status.json`, "utf8"));
@@ -135,7 +135,7 @@ const SESSION_DIR = `${HOME}/.pi/agent/sessions/root-${NAME}`;
 const SESSION_FILE = `${SESSION_DIR}/main.jsonl`;
 mkdirSync(SESSION_DIR, { recursive: true });
 
-// claude-code / codex resume ids captured at birth (bake-egg.sh). Empty
+// claude-code / codex resume ids captured at birth (imprint-cell.sh). Empty
 // string if missing — the harness will start a fresh session on spawn and
 // the supervisor logs a warning. Read fresh at every use, NOT cached in a
 // module const: a session swap (minting a new main after a wedge) used to

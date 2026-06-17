@@ -27,9 +27,10 @@ DHCP, IP allocation, checkpoint/restore, hibernate/wake — all wells. Cells own
 `/seal`-consumer). If a fix wants to touch VM plumbing, it belongs in the wells repo,
 not here. Operate cells via the `cells` CLI, not the `well` CLI.
 
-There is **no egg pool** as of 2026-06-17: births cold-fork the pre-provisioned
+There is **no pool** as of 2026-06-17: births cold-fork the pre-provisioned
 `cell-base` image on demand (~3.5s boot — noise against the ~95s mother ritual), so
-the pool/refill/eviction/seal machinery is gone. See the wells repo's
+the pool/refill/eviction/seal machinery is gone, and the old `egg-<hex>` well names
+went with it — a cell's well is now `cells-<name>`. See the wells repo's
 `docs/proposals/cold-boot-substrate.html` for the joint design.
 
 ## Runtime & commands
@@ -57,7 +58,7 @@ dna/        The genome every cell inherits at birth — base anatomy, specials, 
 colonies/   Multi-cell colony recipes (e.g. jurypool)
 projects/   Reference colonies under construction (jury)
 proto/      Experimental/retired prototypes — pulse moved out into dna/specials/pulse
-scripts/    Birth, egg-bake, deploy, channel-bind, acceptance, harden, eval scripts
+scripts/    Birth, cell-base bake, deploy, channel-bind, acceptance, harden, eval scripts
 docs/       Design docs (HTML-primary), proposals, architectural-decisions, backlog
 state/      Local state — state/memory/ holds the fleet activity log
 ```
@@ -71,7 +72,7 @@ state/      Local state — state/memory/ holds the fleet activity log
 - **host-bridge.ts** — Mac↔VM bridge (SSH relay, exec, TCP fwd).
 - **birth-ui.tsx** — interactive birth prompts (React via Ink).
 - **lib/** — tested units: `channels.ts`, `hibernate-ready.ts`, `resolve.ts`
-  (cell→well binding — `egg-<hatched_from>`), `secrets.ts`, `pulse-owner.ts`.
+  (cell→well binding — reads the stored `well`, defaulting to `cells-<name>`), `secrets.ts`, `pulse-owner.ts`.
 - **worker/** — per-cell Cloudflare Worker + Durable Object (the `<name>.cells.md`
   presence that survives hibernation), plus slack/email/front workers.
 
@@ -146,7 +147,7 @@ guide a human through designing a multi-cell colony.
   hermes secondary.
 - Agent-first, not static services: recurring/background work is an agent in a loop,
   not a systemd unit or cron job. A new daemon in a design is a smell.
-- Don't commit baked eggs, VM images, or other large generated artifacts.
+- Don't commit the baked cell-base image, VM images, or other large generated artifacts.
 
 ## Where to look
 

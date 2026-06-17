@@ -10,8 +10,8 @@ irreversible.
 
 The user-facing cell name is not always the same as the underlying well
 name. Slow-birth cells use the same name for both. Hatched cells live on a
-permanent egg well (e.g. `egg-sonnet-67706a`) and the cell name is just a
-local alias. You MUST resolve the well first.
+permanent well (named `cells-<name>`, or a legacy `egg-<hex>`) and the cell
+name is just a local alias. You MUST resolve the well first.
 
 1. Call `cell_resolve` with `name: $1`. Read the result:
    - `well_name=<X>` → use `<X>` as the well name in step 2.
@@ -19,8 +19,8 @@ local alias. You MUST resolve the well first.
      step 2 and call `report_outcome` with `success: true, message: "no
      registry entry for $1 — well cleanup skipped"`. Local cleanup is
      handled by the CLI.
-   - "well likely already destroyed" (egg entry missing) → skip step 2 and
-     call `report_outcome` with `success: true, message: "egg well for $1
+   - "well likely already destroyed" (registry entry missing) → skip step 2 and
+     call `report_outcome` with `success: true, message: "well for $1
      already gone"`.
 
 2. Call `well_destroy` with `name: <resolved well name>`.

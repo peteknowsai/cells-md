@@ -108,7 +108,7 @@ done < <(echo "$J1" | jq -r '.cells[] | select(.status != "ok") | [.name, .well,
 # tree: a dirty tree's rev reflects uncommitted edits, so acting would chase or
 # push unfinished code (the doctor still SHOWS the drift — visibility is never
 # gated). On a dirty tree WITH drift, emit ONE paused alert.
-# (The old pool stale-rev cull is gone with the egg pool — cold births always
+# (The old pool stale-rev cull is gone with the pool — cold births always
 #  fork the current `cell-base` image, so there's no pre-baked stock to drift.)
 TREE_CLEAN=$(echo "$J1" | jq -r '.dna.tree_clean')
 mapfile -t STALE_CELLS < <(echo "$J1" | jq -r '.dna.stale_cells[]?' 2>/dev/null)

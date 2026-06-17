@@ -474,7 +474,7 @@ export class CellAgent {
     // dropping — sent_at and expires_at share the sender's clock, so their
     // difference is the intended timeout regardless of skew. The old
     // unconditional drop silently ate every `cells talk --await` from a
-    // skewed well (advisor-pete, 356s behind, 2026-06-11 — the bake-egg
+    // skewed well (advisor-pete, 356s behind, 2026-06-11 — the imprint-cell.sh
     // makestep fix this check trusted had never actually applied: stock
     // chrony.conf ships `makestep 1 3`, so the append-if-absent guard never
     // fired). Expiry still applies later, while the envelope sits in the

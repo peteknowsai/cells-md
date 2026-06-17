@@ -54,14 +54,14 @@ fi
 # a plain login-shell PATH.
 export PATH="\$HOME/.bun/bin:/root/bin:/root/.local/bin:\$PATH"
 
-# Cell identity. The substrate hostname is the well's egg-id (e.g.
-# egg-403c69) — unfriendly and *not* the cell name. The real name is the
+# Cell identity. The substrate hostname is the well's name (e.g.
+# cells-zero-advisor-pete, or a legacy egg-403c69) — *not* the cell name. The real name is the
 # first heading of the harness entrypoint: AGENTS.md (pi) or CLAUDE.md
 # (claude-code/codex/hermes), sed'd in at birth. \`cells talk\` builds
 # reply_to = https://\$CELL_NAME.cells.md/inbox/append from this, so every
 # shell — including the non-interactive bash -lc that runs \`cells talk\` —
 # must have CELL_NAME set, not just interactive tmux logins. Without this
-# the reply routes to https://egg-XXXXXX.cells.md and 404s.
+# the reply routes to the wrong host (the well name, not the cell) and 404s.
 if [ -z "\${CELL_NAME:-}" ]; then
   CELL_NAME=\$(sed -n '1s/^# //p' /root/AGENTS.md 2>/dev/null)
   [ -z "\$CELL_NAME" ] && CELL_NAME=\$(sed -n '1s/^# //p' /root/CLAUDE.md 2>/dev/null)

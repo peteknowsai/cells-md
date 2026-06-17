@@ -5,7 +5,7 @@
  * (gpt-5.5 low) so conversation stays snappy, and reaches for this tool when
  * a question deserves deep thinking. The tool shells out to `claude -p
  * --model opus` ON THIS BOX — the claude-code harness binary baked into
- * every egg — which rides the Mac proxy on the Claude Max sub. That keeps
+ * every cell — which rides the Mac proxy on the Claude Max sub. That keeps
  * the Max policy intact (Max is claude-code-only): the cell *chats* on the
  * ChatGPT sub and *researches* through the claude binary.
  *

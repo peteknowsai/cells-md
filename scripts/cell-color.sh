@@ -12,7 +12,7 @@
 # DUAL LOCATION: this file is duplicated at dna/cells/base/scripts/cell-color.sh
 # so it lands at /root/scripts/cell-color.sh on every cell via the DNA push at
 # birth (cli/cells.ts calls it cell-side). The repo-root copy is for Mac-side
-# callers (scripts/bake-egg.sh, mother's mac_exec tool). Keep the two in sync.
+# callers (scripts/imprint-cell.sh, mother's mac_exec tool). Keep the two in sync.
 #
 # Palette is hand-tuned — saturated enough to be distinguishable, with
 # fg chosen for legible contrast (no "compute luminance" math).

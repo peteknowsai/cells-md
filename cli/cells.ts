@@ -2455,7 +2455,7 @@ async function cmdDoctorJson() {
   // DNA drift: current runtime-DNA rev vs what live cells carry (from the
   // probe's dna_rev, running only). tree_clean gates the steward's
   // auto-refresh — see dnaTreeClean(). The steward consumes
-  // .dna.stale_cells + .dna.tree_clean. (No pool eggs to judge anymore.)
+  // .dna.stale_cells + .dna.tree_clean. (No pool to judge anymore.)
   const dna = summarizeDnaDrift({
     currentRev: dnaRev(DNA_DIR),
     treeClean: dnaTreeClean(),
@@ -2741,7 +2741,7 @@ async function cmdDoctor() {
     // 8b. DNA drift — does each live cell carry the current runtime DNA?
     // Reuses the transport probe's dna_rev (no extra round-trips). A stale
     // running cell self-heals on the steward's next sweep (when the tree is
-    // clean). Informational here — never a hard fail. (No pool eggs anymore.)
+    // clean). Informational here — never a hard fail. (No pool anymore.)
     try {
       const drift = summarizeDnaDrift({
         currentRev: dnaRev(DNA_DIR),
@@ -2794,9 +2794,9 @@ async function cmdDoctor() {
   }
 
   // 10. Orphan wells — welld VMs that nothing in cells owns. The signature of a
-  // half-finished birth (classically `bake-egg.sh` run outside `cells birth`,
+  // half-finished birth (classically `imprint-cell.sh` run outside `cells birth`,
   // the wrapper that owns warming-register → promote): a configured well left
-  // running, its egg consumed from the pool, never written to cells.json. It
+  // running but never written to cells.json. It
   // "looks born" but is absent from `cells list`, holding RAM/disk no command
   // reaps. Advisory only — the known set below is GENEROUS (every naming
   // convention a real cell's well could carry, warming cells included) so a live
@@ -2812,10 +2812,10 @@ async function cmdDoctor() {
       const body: any = await wr.json();
       const welldWells = (Array.isArray(body?.wells) ? body.wells : [])
         .map((w: any) => String(w?.name ?? "")).filter(Boolean);
-      // The registry AND pool.json are both load-bearing: without either we
-      // can't tell an owned cell/egg from an orphan. They throw on a malformed
-      // file — DO NOT swallow that into an empty set, because then every real
-      // cell/egg welld reports would be flagged an orphan and the operator told
+      // The registry is load-bearing: without it we can't tell an owned cell
+      // from an orphan. It throws on a malformed file — DO NOT swallow that
+      // into an empty set, because then every real cell welld reports would be
+      // flagged an orphan and the operator told
       // to destroy valid wells (a state-file glitch becoming data loss). Skip
       // the check loudly instead.
       let known: string[] | null = null;
@@ -2839,7 +2839,7 @@ async function cmdDoctor() {
         if (orphans.length === 0) {
           console.log(`\norphan wells:  ${green}none${reset} ${dim}(every welld VM is a registered cell)${reset}`);
         } else {
-          console.log(`\norphan wells:  ${red}${orphans.length}${reset} ${dim}— welld VMs nothing in cells owns (half-finished birth? bake-egg.sh run outside \`cells birth\`?):${reset}`);
+          console.log(`\norphan wells:  ${red}${orphans.length}${reset} ${dim}— welld VMs nothing in cells owns (half-finished birth? imprint-cell.sh run outside \`cells birth\`?):${reset}`);
           for (const w of orphans) {
             console.log(`  ${red}${w}${reset} ${dim}— unowned. If confirmed orphan (not a birth in flight), destroy the well via welld.${reset}`);
           }
@@ -2889,7 +2889,7 @@ type CreateOpts = {
   project?: string;     // fleet-grouping label recorded in the registry (see `cells agents`)
   brief?: string;       // freeform brief (compiled to config + seed purpose); triggers preview
   yes?: boolean;        // --yes: skip the brief preview/confirm
-  dryRun?: boolean;     // --dry-run/--plan: print the resolved birth plan and exit (no egg)
+  dryRun?: boolean;     // --dry-run/--plan: print the resolved birth plan and exit (no cell created)
 };
 
 // Vocabulary the brief compiler recognizes as config tokens. Models come from
@@ -3287,7 +3287,7 @@ async function cmdCreate(name: string | undefined, opts: CreateOpts): Promise<vo
     thinking = "medium";
   }
   if (opts.noPool) {
-    console.warn(`note: --no-pool is deprecated and ignored — there is no egg pool (every birth cold-forks the cell-base image)`);
+    console.warn(`note: --no-pool is deprecated and ignored — there is no pool (every birth cold-forks the cell-base image)`);
   }
 
   // ── 3. Build the config blob handed to mother ──
@@ -3302,9 +3302,9 @@ async function cmdCreate(name: string | undefined, opts: CreateOpts): Promise<vo
     packages,
     channels,
     chain,
-    // Runtime-DNA rev at birth time. bake-egg.sh re-overlays current DNA
-    // onto the claimed egg, then stamps this onto /root/.dna-rev so a cell
-    // born from a stale egg reads as CURRENT (the overlay made it current).
+    // Runtime-DNA rev at birth time. imprint-cell.sh re-overlays current DNA
+    // onto the forked cell, then stamps this onto /root/.dna-rev so a cell
+    // born from a stale base reads as CURRENT (the overlay made it current).
     // Computed Mac-side from the same working tree the overlay tars.
     dna_rev: dnaRev(DNA_DIR),
   };
@@ -3315,8 +3315,8 @@ async function cmdCreate(name: string | undefined, opts: CreateOpts): Promise<vo
 
   // ── 3.5 Preview the resolved plan ──
   // A brief inferred config, so show exactly what will run and confirm before
-  // spending an egg — the "trade speed for visibility" rule birth lives by.
-  // --dry-run prints the plan and exits (no egg) regardless of TTY; otherwise
+  // creating a cell — the "trade speed for visibility" rule birth lives by.
+  // --dry-run prints the plan and exits (no cell created) regardless of TTY; otherwise
   // the confirm is shown only for a brief on a TTY, and --yes skips it.
   if (opts.dryRun || (opts.brief && !opts.yes && process.stdout.isTTY)) {
     const seedText = opts.seedOff ? "(none)" : (opts.seed ?? DEFAULT_SEED);
@@ -3343,7 +3343,7 @@ async function cmdCreate(name: string | undefined, opts: CreateOpts): Promise<vo
   // No pool anymore (cold-boot substrate, 2026-06-17 — see the wells repo's
   // docs/proposals/cold-boot-substrate.html). Each birth forks a fresh well
   // from the pre-provisioned `cell-base` image (APFS clonefile, sub-ms)
-  // instead of claiming a pre-baked hibernated egg. The heavy provisioning
+  // instead of claiming a pre-baked hibernated cell from a pool. The heavy provisioning
   // (DNA + four harnesses + node-gyp + pi patches) was paid ONCE at
   // `cells bake` time and is baked into the image — birth only forks +
   // imprints. The well is named after the cell — `cells-<name>` — matching
@@ -3422,9 +3422,9 @@ async function cmdCreate(name: string | undefined, opts: CreateOpts): Promise<vo
   // One locked read-modify-write: reap any warming orphans from a hard-crashed
   // prior birth, then register this cell. withRegistryLock keeps a concurrent
   // operator write (cells model/kill/...) from clobbering the warming entry.
-  // The egg is already claimed + booted + SSH-ready by here, so a registry-lock
-  // failure must SWEEP it, not strand a running VM with no registry entry
-  // (reconcile never reclaims a "claimed" pool member that welld still knows).
+  // The cell's well is already created + booted + SSH-ready by here, so a
+  // registry-lock failure must SWEEP it, not strand a running VM with no
+  // registry entry.
   try {
     await mutateRegistry((cells) => upsertBirthingCell(cullStaleWarming(cells, Date.now()), warmingEntry));
   } catch (e) {
@@ -3441,7 +3441,7 @@ async function cmdCreate(name: string | undefined, opts: CreateOpts): Promise<vo
   // outcome guards via the never-returning exit). Order matters: roll the
   // warming entry back FIRST (critical — a leaked "warming" entry causes
   // phantom cells / a 403 on the next birth of the same name), THEN reclaim
-  // the egg as best-effort, so a pool-lock/disk error inside sweepWell can
+  // the cell's well as best-effort, so a disk error inside sweepWell can
   // never strand the warming entry. Reads cellWell at call-time (a retry may
   // have reassigned it).
   const cleanupFailedBirth = async () => {
@@ -3457,7 +3457,7 @@ async function cmdCreate(name: string | undefined, opts: CreateOpts): Promise<vo
   // or, for legacy single-harness specials, "<provider>/<model>:<thinking>"
   // (treated as pi). The orchestrator walks the chain: try harness #1,
   // and on a pre-flight failure (no outcome written) sweep + reclaim a
-  // fresh egg and try the next. An outcome with success=false is the
+  // fresh well and try the next. An outcome with success=false is the
   // ritual's own verdict — accepted as-is, no fallover.
   //
   // Legacy gate CELLS_USE_MOTHER_CELL=1 still routes through cells-mother
@@ -3524,15 +3524,15 @@ async function cmdCreate(name: string | undefined, opts: CreateOpts): Promise<vo
       const { harness: motherHarness } = parseChainEntry(motherChain[attempt]!);
       const which = motherHarness ?? "pi";
       if (attempt > 0) {
-        console.warn(`! retrying birth with mother harness '${which}' (fresh egg)`);
+        console.warn(`! retrying birth with mother harness '${which}' (fresh well)`);
         let fresh: Awaited<ReturnType<typeof claimAndReady>> = null;
         try {
           await sweepWell(cellWell);
           fresh = await claimAndReady();
         } catch (e) {
-          // sweepWell/claimAndReady can throw on a pool-lock/disk error — don't
+          // sweepWell/claimAndReady can throw on a disk error — don't
           // let that leak the warming entry; fall into the !fresh rollback.
-          console.error(`birth failed: retry egg prep threw: ${e instanceof Error ? e.message : String(e)}`);
+          console.error(`birth failed: retry well prep threw: ${e instanceof Error ? e.message : String(e)}`);
         }
         if (!fresh) {
           console.error(`birth failed: could not create a fresh cell for retry`);
@@ -3831,7 +3831,7 @@ async function sealWell(wellName: string): Promise<void> {
 // while cidata is mounted. sealWell does the halt + disk-only restart that
 // drops the cidata mount and flips the flag — so birth seals once per cell
 // here (confirmed w/ wells 2026-06-17). /seal is therefore retained as the
-// per-cell warming primitive: the pool era called it once per egg, now it's
+// per-cell warming primitive: the pool era called it once per pooled VM, now it's
 // once per cell — a big reduction, but not to zero. sealWell throws on failure;
 // the caller sweeps the cell and fails the birth rather than registering a cell
 // the hibernation system can never manage.
@@ -3913,9 +3913,9 @@ async function collectCellLlmEnv(): Promise<Record<string, string>> {
                             // and openai-codex/gpt-5.5 (via proxy.cells.md/codex)
     // ANTHROPIC_API_KEY deliberately NOT baked: no harness uses a direct paid
     // Anthropic key anymore (pi + claude-code both ride the Max sub via the
-    // proxy). Leaving it out keeps the paid credential off every pool egg for
+    // proxy). Leaving it out keeps the paid credential off every cell for
     // its whole lifetime; stripAnthropicKeyFromWell is the belt-and-suspenders
-    // sweep for any older egg that still carries it.
+    // sweep for any older cell that still carries it.
     "OPENAI_API_KEY",       // openai/* non-codex (direct)
     "GEMINI_API_KEY",       // google/gemini-* (direct)
     "EXA_API_KEY",          // web_search tool
@@ -3929,7 +3929,7 @@ async function collectCellLlmEnv(): Promise<Record<string, string>> {
 
 // Provision a fresh ubuntu-base well into a fully-formed cell, in-place via
 // SSH. Used by cmdBake (to build the reusable cell-base image) and the
-// specials bake (mother/pulse). Since the egg pool was removed (2026-06-17)
+// specials bake (mother/pulse). Since the pool was removed (2026-06-17)
 // this is the single provisioning recipe — births fork the cell-base image it
 // produces rather than running it per-cell. See docs/proposals/image-ownership.html.
 //
@@ -3995,7 +3995,7 @@ echo "pi: $(sudo bash -lc 'export HOME=/root; pi --version' 2>&1 | head -1 || ec
   if (!piInstall.ok) {
     throw new Error(`pi install failed: ${(piInstall.stderr + piInstall.stdout).slice(-600)}`);
   }
-  // 5b. codex harness bake — install the `codex` CLI so every generic egg
+  // 5b. codex harness bake — install the `codex` CLI so every generic cell
   //     ships the codex harness alongside pi. (claude-code's `claude` CLI
   //     ships in the wells base image; codex does not, so cells bakes it.)
   //     Pinned: codex's `exec --json` event format moves fast — pin to the
@@ -4010,7 +4010,7 @@ echo "codex: $(sudo bash -lc 'export HOME=/root; codex --version' 2>&1 | head -1
     throw new Error(`codex install failed: ${(codexInstall.stderr + codexInstall.stdout).slice(-600)}`);
   }
   // 5c. hermes harness bake — install Nous Research's hermes-agent so every
-  //     generic egg ships the hermes harness alongside pi/claude/codex.
+  //     generic cell ships the hermes harness alongside pi/claude/codex.
   //     hermes isn't in the wells base image; cells bakes it with Nous's own
   //     installer (uv-based). --skip-setup skips the interactive wizard,
   //     --skip-browser skips the Playwright/Chromium download. Pinned to a
@@ -4028,12 +4028,12 @@ echo "hermes: $(sudo bash -lc 'export HOME=/root; hermes --version' 2>&1 | head 
   // 5d. node-gyp bake — Stoolap-backed market cells (zero-<market>) mint their
   //     on-cell store via the @stoolap/node NAPI module, whose npm/bun install
   //     runs `node-gyp rebuild` to compile a small bridge before dlopen'ing
-  //     libstoolap.so. The egg ships cc/make/python3/node/bun but NOT node-gyp,
+  //     libstoolap.so. cell-base ships cc/make/python3/node/bun but NOT node-gyp,
   //     so the store mint dies at birth without it. Bake it globally so the
   //     bridge compiles with no extra build+network step on the birth hot path.
-  //     Pinned to 12.x: node-gyp 13 declares engines ^22.22.2, but the egg
+  //     Pinned to 12.x: node-gyp 13 declares engines ^22.22.2, but cell-base
   //     ships Node 22.11.0 (bakeInstallSystemTools); 12.x needs >=22.9.0 —
-  //     compatible. Bump this alongside the egg's NODE_VERSION.
+  //     compatible. Bump this alongside cell-base's NODE_VERSION.
   const nodeGypInstall = await wellExecCapture(
     wellName,
     `set -euo pipefail
@@ -4067,8 +4067,8 @@ echo "node-gyp: $(sudo bash -lc 'export HOME=/root; node-gyp --version' 2>&1 | h
   // 8c. Stamp the runtime-DNA rev this overlay landed at (cli/lib/dna-rev.ts).
   //     pushLocalDirToWell above just copied DNA_DIR; the rev fingerprints
   //     the same tree, so this records exactly what's on disk. The doctor
-  //     compares it against the repo's current rev; reconcile culls stale
-  //     open eggs; the steward refreshes stale running cells. Best-effort:
+  //     compares it against the repo's current rev; the steward refreshes
+  //     stale running cells. Best-effort:
   //     a `cells doctor`/steward degrades to "unknown" on a missing stamp,
   //     so don't let an echo failure tank a bake against Pete's 100% bar.
   const dnaStamp = await wellExecCapture(
@@ -4395,14 +4395,14 @@ async function cmdBirthSpecial(rawArgs: string[]): Promise<void> {
 // single rollback-on-throw guard (the warming entry is registered before this
 // runs). Every step is idempotent, so --rebuild needs no special-casing here.
 async function bakeSpecial(spec: SpecialSpec, specialChain: string[]): Promise<void> {
-  // 2. Auth env for in-well pi (CELLS_PROXY_SECRET, etc.) — same shape as pool eggs.
+  // 2. Auth env for in-well pi (CELLS_PROXY_SECRET, etc.) — same shape as a baked cell.
   const baseEnv = await collectCellLlmEnv();
   if (!baseEnv.CELLS_PROXY_SECRET) {
     throw new Error("CELLS_PROXY_SECRET missing from ~/.cells/secrets.json");
   }
   const env = { ...baseEnv, CELL_NAME: spec.name };
 
-  // 3. Create the well (named, not egg-<hex>). A create failure can
+  // 3. Create the well (named cells-<name>). A create failure can
   //    leave a partial bundle dir in welld's state dir — best-effort
   //    destroy so we don't leak it (same abort shape as steps 4/5).
   console.log(`  creating well ${spec.wellName}…`);
@@ -4483,7 +4483,7 @@ async function bakeSpecial(spec: SpecialSpec, specialChain: string[]): Promise<v
   // 6b. Write /root/.pi/status.json with the chosen harness. The cell
   //     supervisor (dna/cells/base/site/server.ts) reads this on boot to
   //     pick which harness to spawn for the always-on session — without
-  //     it the supervisor falls back to "pi". bake-egg.sh writes this for
+  //     it the supervisor falls back to "pi". imprint-cell.sh writes this for
   //     pool births; specials skip that path so we write it here.
   const statusJson = JSON.stringify({ harness: spec.harness, channels: [] });
   const statusWrite = await wellExecCapture(
@@ -4598,7 +4598,7 @@ for f in AGENTS.md CLAUDE.md SOUL.md IDENTITY.md CELLS.md CONTACTS.md HEARTBEAT.
 done
 [ -f .tmux.conf ] && sudo sed -i "s|__CELL_BG__|${bg}|g; s|__CELL_FG__|${fg}|g" .tmux.conf || true
 # A claude-code special boots straight from .claude/settings.json. The pool path
-# (bake-egg.sh) fills the model/effort placeholders there, but specials skip that
+# (imprint-cell.sh) fills the model/effort placeholders there, but specials skip that
 # path — so a literal __MODEL__/__THINKING__ would leave an unrunnable config and
 # wedge the supervisor. Substitute opus/high here (cells model adjusts post-birth);
 # a no-op when the DNA already ships a concrete file (e.g. pulse).
@@ -4629,10 +4629,10 @@ echo "name-subst: $(grep -lc __NAME__ AGENTS.md CLAUDE.md SOUL.md package.json .
   }
 
   // A claude-code MOTHER needs a captured main session, the same as a normal
-  // claude-code pool cell gets from bake-egg.sh: site/server.ts resumes
+  // claude-code pool cell gets from imprint-cell.sh: site/server.ts resumes
   // /root/.cell/claude-main-session so conversation survives a well-site restart
   // and agent-comms forks (`cells talk <mother>`) carry context. The special
-  // bake skips bake-egg.sh, so capture it here — warm up `claude --print` once
+  // bake skips imprint-cell.sh, so capture it here — warm up `claude --print` once
   // and cache the session id. BEST-EFFORT: a transient miss must NOT fail the
   // birth (that would trade continuity for reliability — the wrong way against
   // a 100% bar), so we warn and move on; she falls back to a fresh first turn,
@@ -4942,7 +4942,7 @@ async function ensureWellHasIp(wellName: string): Promise<void> {
 }
 
 // Strip the real ANTHROPIC_API_KEY out of a well's /etc/environment.
-// The generic egg bakes every provider key in (it's harness-agnostic —
+// The generic cell bakes every provider key in (it's harness-agnostic —
 // see collectCellLlmEnv), but claude-code and codex cells reach their LLM
 // only through proxy.cells.md and never touch the paid Anthropic key.
 // Left baked in, it's a latent secret on a coding-agent VM with no
@@ -5010,8 +5010,8 @@ async function waitForSshReady(wellName: string, timeoutMs = 5_000): Promise<voi
 // dna/specials/<name> on top of base, so uncommitted special runtime files
 // would be pushed by an auto-refresh of a stale special (mother/pulse). The
 // rev itself is base-only, but the clean GATE must cover everything a refresh
-// would write. (Slightly conservative for the pool cull — a dirty special
-// tree pauses generic-egg culling too — but pausing on any uncommitted DNA is
+// would write. (Slightly conservative — a dirty special tree pauses the
+// steward's cell refresh too — but pausing on any uncommitted DNA is
 // the safe direction.) Memoized — the tree doesn't change mid-run.
 let _dnaTreeCleanCache: boolean | null = null;
 function dnaTreeClean(): boolean {
@@ -5890,8 +5890,8 @@ async function streamCellBridge(name: string, opts: StreamOpts): Promise<void> {
 // (not throws) on any failure so the caller falls through to the cloud
 // path without surprise.
 //
-// IMPORTANT: hatched cells have cell_name != well_name (egg pool wells
-// keep their original `egg-<harness>-<hash>` name). Welld dispatches by
+// IMPORTANT: hatched cells have cell_name != well_name (the well is
+// `cells-<name>`, or a legacy `egg-<hex>`). Welld dispatches by
 // well name, so we resolve the well-name first via wellNameForCell.
 async function tryConnectLocalWelld(name: string, secret: string): Promise<WebSocket | null> {
   // First try the host-bridge daemon (cli/host-bridge.ts) on :7880. It
@@ -7978,7 +7978,7 @@ async function cmdBake(opts: BakeOpts) {
     //      from is byte-identical to a hand-baked cell. Previously cmdBake
     //      carried its own inline recipe that drifted badly behind
     //      provisionCellInWell (no codex/hermes/node-gyp/pi-web-access/dna-rev).
-    //      Unified 2026-06-17 alongside the egg-pool teardown (cold-boot
+    //      Unified 2026-06-17 alongside the pool teardown (cold-boot
     //      substrate, docs/proposals in the wells repo): one provisioning path,
     //      one source of truth. With the pool gone, provisionCellInWell's only
     //      caller is this bake.

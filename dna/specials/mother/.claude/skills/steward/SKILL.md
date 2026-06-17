@@ -39,9 +39,8 @@ failure class sit silently.
      (e.g. an OOM alert on a cell that just got resized is stale history
      aging out of the 48h window — say so), append one line of judgment
      to `state/memory/steward.log` via `mac_exec`.
-   - **DNA drift** (fix class added with `dna_rev`): the sweep auto-culls
-     stale-rev pool eggs (refilling at current DNA) and refreshes running
-     cells behind the current platform code — both only when the cells
+   - **DNA drift** (fix class added with `dna_rev`): the sweep refreshes
+     running cells behind the current platform code — only when the cells
      repo's working tree is CLEAN. Judgment cues:
      - A `"...working tree is dirty — commit DNA changes..."` alert means
        Pete (or you, on his behalf) left uncommitted DNA edits on the Mac:

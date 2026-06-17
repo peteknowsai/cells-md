@@ -112,7 +112,7 @@ describe("revState", () => {
 });
 
 describe("summarizeDnaDrift", () => {
-  it("buckets pool eggs and lists only running-stale cells for the steward", () => {
+  it("buckets DNA revs and lists only running-stale cells for the steward", () => {
     const s = summarizeDnaDrift({
       currentRev: "cur",
       treeClean: true,

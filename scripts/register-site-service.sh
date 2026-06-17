@@ -8,8 +8,8 @@
 # Usage: scripts/register-site-service.sh <cell-name> [well-name]
 #
 # For slow-birth cells, well name == cell name (omit the second arg).
-# For hatched cells, the well name is the eggs permanent well
-# (e.g. egg-sonnet-67706a) — different from the cell name. The CELL_NAME
+# For hatched cells, the well name (cells-<name>, or a legacy egg-<hex>)
+# differs from the cell name. The CELL_NAME
 # env var passed into server.ts is always the user-facing cell name;
 # the well API call targets the well name.
 set -euo pipefail
