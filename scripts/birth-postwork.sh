@@ -12,7 +12,7 @@
 # stays usable for talk, but worker traffic 404s or channels never bind
 # and no one notices.
 #
-# Usage: birth-postwork.sh <NAME> <EGG_WELL> <BLOB_JSON>
+# Usage: birth-postwork.sh <NAME> <WELL> <BLOB_JSON>
 #
 # Designed to be wrapped in nohup by the birth skill — never blocks the
 # birth declaration, never fails the parent. The full stdout/stderr
@@ -21,9 +21,9 @@
 
 set -uo pipefail
 
-NAME="${1:?usage: $0 <NAME> <EGG_WELL> <BLOB_JSON>}"
-EGG_WELL="${2:?usage: $0 <NAME> <EGG_WELL> <BLOB_JSON>}"
-BLOB_JSON="${3:?usage: $0 <NAME> <EGG_WELL> <BLOB_JSON>}"
+NAME="${1:?usage: $0 <NAME> <WELL> <BLOB_JSON>}"
+CELL_WELL="${2:?usage: $0 <NAME> <WELL> <BLOB_JSON>}"
+BLOB_JSON="${3:?usage: $0 <NAME> <WELL> <BLOB_JSON>}"
 
 REPO="${CELLS_REPO:-$HOME/Projects/cells}"
 STATUS_DIR="$HOME/.cells/postwork"
@@ -38,9 +38,9 @@ now() { date -Iseconds; }
 # atomic (tmp + rename).
 jq -n \
   --arg cell "$NAME" \
-  --arg well "$EGG_WELL" \
+  --arg well "$CELL_WELL" \
   --arg started "$(now)" \
-  '{cell: $cell, egg_well: $well, started_at: $started, completed_at: null, steps: {}}' \
+  '{cell: $cell, well: $well, started_at: $started, completed_at: null, steps: {}}' \
   > "$STATUS_FILE"
 
 # Update one step's slot in the JSON. Atomic via tmp + rename.
@@ -96,12 +96,12 @@ FAILURES=0
 
 cd "$REPO"
 
-run_step site_service bash scripts/register-site-service.sh "$NAME" "$EGG_WELL"
-run_step well_url_public well url update --auth public -s "$EGG_WELL"
-run_step worker_deploy bash scripts/deploy-cell-worker.sh "$NAME" "$EGG_WELL"
+run_step site_service bash scripts/register-site-service.sh "$NAME" "$CELL_WELL"
+run_step well_url_public well url update --auth public -s "$CELL_WELL"
+run_step worker_deploy bash scripts/deploy-cell-worker.sh "$NAME" "$CELL_WELL"
 run_step channels_bind bash scripts/bind-cell-channels.sh "$NAME" "$BLOB_JSON"
-run_step harness_update bash scripts/update-cell-harness.sh "$EGG_WELL" "$BLOB_JSON"
-run_step checkpoint well checkpoint create -s "$EGG_WELL" --comment "born-$NAME"
+run_step harness_update bash scripts/update-cell-harness.sh "$CELL_WELL" "$BLOB_JSON"
+run_step checkpoint well checkpoint create -s "$CELL_WELL" --comment "born-$NAME"
 
 # Final stamp — completed_at lets the dashboard tell "postwork still in
 # flight" from "postwork done, some steps failed".

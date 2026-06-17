@@ -12,8 +12,9 @@ You have been handed four things:
 - **`$1`** — the **birthId** (correlation id). Pass it verbatim to
   `report_outcome` at the end. The cells CLI is long-polling for this.
 - **`$2`** — the cell's name.
-- **`$3`** — the well name of a claimed generic egg from the pool, already
-  running and waiting. This is your starting material; you do not create it.
+- **`$3`** — the cell's well name (`cells-<name>`), already created by the
+  cells CLI as a cold-fork of the `cell-base` image — running and waiting.
+  This is your starting material; you do not create it.
 - **`$4`** — the config blob: JSON describing how this cell is configured
   (`harness`, `model`, `provider`, `thinking`, `extensions`, `packages`,
   `channels`, `chain`).
@@ -21,11 +22,11 @@ You have been handed four things:
 **Start by reading `docs/birthing-ritual.html`** (use the `read` tool with that
 relative path — your cwd is /root, which is where the file lives). Then run
 the ritual top to bottom. Don't read it twice; don't ask Pete questions;
-don't verify the egg exists by probing — just *use* it.
+don't verify the well exists by probing — just *use* it.
 
 **Tool mapping** (the ritual uses three tools, all already wired):
-- `well_exec({wellName: "<egg>", script: "..."})` — runs on the egg. Note
-  the SSH user is `well`, NOT root, so prefix file writes to `/root/*`
+- `well_exec({wellName: "<well>", script: "..."})` — runs on the cell's well.
+  Note the SSH user is `well`, NOT root, so prefix file writes to `/root/*`
   with `sudo`. Example: `sudo sed -i 's/__NAME__/<name>/g' /root/AGENTS.md`.
 - `mac_exec({script: "bash scripts/cell-color.sh <name>"})` — wherever the
   ritual says `bash …` (Mac-side script). cwd is the cells repo.
@@ -35,7 +36,7 @@ don't verify the egg exists by probing — just *use* it.
 The ritual's "end-test" (step 8) tells you what to check before declaring
 success. If any *critical* check fails, call `report_outcome` with
 `success: false` and a one-line message naming the failing step. The CLI
-will sweep the egg on a failed outcome — that's fine, fresh egg next time.
+will sweep the well on a failed outcome — that's fine, fresh well next time.
 
 **After the birth ritual reports success** — and only on success — append one
 line to `state/memory/project_cells_activity.md` via `mac_exec`:

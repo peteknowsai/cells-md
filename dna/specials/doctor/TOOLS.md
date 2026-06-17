@@ -15,7 +15,7 @@
 - Kill any process — even one that looks stuck. (If a birth pid has been hung for 30min, you capture and push; Pete decides whether to kill.)
 - `git commit`, `git push`, or any source-tree write.
 - Wake or sleep cells.
-- Re-bake eggs, reconcile the pool, or touch the egg directory.
+- Re-bake the `cell-base` image or touch substrate state.
 
 ## Useful inventory
 

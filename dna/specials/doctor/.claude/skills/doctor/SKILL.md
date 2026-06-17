@@ -58,7 +58,7 @@ Capture:
 - `lsof ~/.cells/mother/mother.lock 2>/dev/null` — who holds the lock
 - `ls -lt ~/.cells/mother/.claude/projects/*/` — newest mother session
 - Tail last 200 lines of the newest mother JSONL — what is mother stuck on
-- `well list 2>&1` — which egg is being claimed, what state it's in
+- `well list 2>&1` — which well is being born into, what state it's in
 
 Push: `birth-hang pid=<X> elapsed=<Ys> — mother lock <held|free>. <findings path>`
 

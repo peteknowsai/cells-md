@@ -30,8 +30,7 @@
 // platform file on this cell → genuine, uniformly-fixable staleness.
 //
 // Pure logic (path predicate, hash) is separated from IO (disk walk) so the
-// fingerprint is unit-testable against in-memory file maps. Mirrors the
-// registry.ts / reconcile.ts split.
+// fingerprint is unit-testable against in-memory file maps.
 
 import { createHash } from "node:crypto";
 import { readdirSync, readFileSync } from "node:fs";

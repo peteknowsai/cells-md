@@ -294,30 +294,25 @@ export default function (pi: any) {
     name: "cell_resolve",
     label: "Resolve cell to well",
     description:
-      "Resolve a user-facing cell name to its underlying well name. Slow-birth cells use the same name for both. Hatched cells live on a permanent egg well (e.g. 'egg-sonnet-67706a') named differently from the cell. ALWAYS call this before well_destroy / well_exec / well_push when you only know the cell name — the well API rejects cell-name lookups for hatched cells.",
+      "Resolve a user-facing cell name to its underlying well name. The mapping is data-driven: every cell record carries its `well` (set at birth — `cells-<name>`); cells missing the field default to the `cells-<name>` namespace convention. Legacy cells were backfilled with their real well (e.g. a `egg-<hex>` from the retired pool era). ALWAYS call this before well_destroy / well_exec / well_push when you only know the cell name — the well API rejects cell-name lookups when cell name ≠ well name.",
     parameters: Type.Object({
       name: Type.String({ description: "Cell name (user-facing identity)." }),
     }),
     async execute(_id: string, params: { name: string }) {
       const cellsPath = join(homedir(), ".cells", "cells.json");
-      // Pool members moved from eggs.json ({eggs:[...]}) to pool.json
-      // ({members:[...]}) — read the current file first, keep the legacy
-      // one as a fallback for ancient state dirs.
-      const poolPath = join(homedir(), ".cells", "pool.json");
-      const eggsPath = join(homedir(), ".cells", "eggs.json");
       try {
         if (!existsSync(cellsPath)) {
           return {
             content: [
               {
                 type: "text",
-                text: `cell_resolve: registry not found at ${cellsPath}. Falling back: well_name=${params.name}`,
+                text: `cell_resolve: registry not found at ${cellsPath}. Falling back: well_name=cells-${params.name}`,
               },
             ],
           };
         }
         const reg = JSON.parse(readFileSync(cellsPath, "utf8")) as {
-          cells: Array<{ name: string; hatched_from?: string; status?: string; special?: boolean }>;
+          cells: Array<{ name: string; well?: string }>;
         };
         const cell = reg.cells.find((c) => c.name === params.name);
         if (!cell) {
@@ -330,65 +325,14 @@ export default function (pi: any) {
             ],
           };
         }
-        if (cell.special) {
-          // Specials (mother, pulse) live in deterministic cells-<name> wells.
-          return {
-            content: [
-              {
-                type: "text",
-                text: `cell_resolve: cell '${params.name}' is a special. well_name=cells-${params.name}`,
-              },
-            ],
-          };
-        }
-        if (!cell.hatched_from) {
-          return {
-            content: [
-              {
-                type: "text",
-                text: `cell_resolve: cell '${params.name}' is slow-birth. well_name=${params.name}`,
-              },
-            ],
-          };
-        }
-        let egg: { id: string; well_name: string } | undefined;
-        if (existsSync(poolPath)) {
-          const pool = JSON.parse(readFileSync(poolPath, "utf8")) as {
-            members: Array<{ id: string; well_name: string }>;
-          };
-          egg = pool.members.find((e) => e.id === cell.hatched_from);
-        }
-        if (!egg && existsSync(eggsPath)) {
-          const eggs = JSON.parse(readFileSync(eggsPath, "utf8")) as {
-            eggs: Array<{ id: string; well_name: string }>;
-          };
-          egg = eggs.eggs.find((e) => e.id === cell.hatched_from);
-        }
-        if (!existsSync(poolPath) && !existsSync(eggsPath)) {
-          return {
-            content: [
-              {
-                type: "text",
-                text: `cell_resolve: cell '${params.name}' references egg ${cell.hatched_from} but neither ${poolPath} nor ${eggsPath} exists. Cannot resolve well.`,
-              },
-            ],
-          };
-        }
-        if (!egg) {
-          return {
-            content: [
-              {
-                type: "text",
-                text: `cell_resolve: cell '${params.name}' references egg ${cell.hatched_from} but no such egg in pool.json (or legacy eggs.json). well likely already destroyed.`,
-              },
-            ],
-          };
-        }
+        // Mirrors cli/lib/resolve.ts#wellNameForCell: the stored `well`, else
+        // the `cells-<name>` namespace default (specials + new cells).
+        const wellName = cell.well ?? `cells-${params.name}`;
         return {
           content: [
             {
               type: "text",
-              text: `cell_resolve: cell '${params.name}' is hatched from egg ${egg.id}. well_name=${egg.well_name}`,
+              text: `cell_resolve: cell '${params.name}'. well_name=${wellName}`,
             },
           ],
         };

@@ -7,8 +7,6 @@
  * CELLS_PROXY_SECRET she already holds for LLM calls).
  *
  * Endpoints owned by proxy.ts's handleBridgeProxy:
- *   POST /bridge/pool/claim     → claim a warm egg
- *   POST /bridge/pool/sweep     → destroy half-born egg + refill
  *   POST /bridge/registry/read  → ~/.cells/cells.json
  *   POST /bridge/registry/write → overwrite cells.json
  *   POST /bridge/well/ssh       → well exec a script
@@ -63,34 +61,6 @@ const WELL_TOOLS_PRESENT = fsExistsSync(
 );
 
 export default function (pi: any) {
-  pi.registerTool({
-    name: "pool_claim",
-    label: "Claim a warm egg",
-    description:
-      "Claim a generic warm egg from the cells pool, marking it for the named cell. Returns {wellName, tier, id}, or 503 if no warm egg is available (refill is async — retry after a few seconds).",
-    parameters: Type.Object({
-      cellName: Type.String({ description: "Cell name (kebab-case)." }),
-    }),
-    async execute(_id: string, params: { cellName: string }) {
-      const r = await bridgePost("/pool/claim", { cellName: params.cellName });
-      return { content: [{ type: "text", text: fmt(`pool_claim ${params.cellName}`, r) }] };
-    },
-  });
-
-  pi.registerTool({
-    name: "pool_sweep",
-    label: "Sweep half-born egg",
-    description:
-      "Destroy a half-born well + drop it from the pool + trigger an async refill. Use only after a birth has failed (otherwise you waste a baked egg).",
-    parameters: Type.Object({
-      wellName: Type.String({ description: "egg-<hex> well name to destroy." }),
-    }),
-    async execute(_id: string, params: { wellName: string }) {
-      const r = await bridgePost("/pool/sweep", { wellName: params.wellName });
-      return { content: [{ type: "text", text: fmt(`pool_sweep ${params.wellName}`, r) }] };
-    },
-  });
-
   pi.registerTool({
     name: "registry_read",
     label: "Read cells registry",
