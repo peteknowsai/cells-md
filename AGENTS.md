@@ -13,7 +13,7 @@ Claude Max / ChatGPT subscriptions instead of API billing.
 Three layers, top to bottom:
 
 - **cells** (this repo) — the agent layer: the CLI, the birth ritual, agent-to-agent
-  channels, per-cell Cloudflare presence, the egg pool.
+  channels, per-cell Cloudflare presence, the `cell-base` image bake.
 - **wells** (`~/Projects/wells`, separate repo) — the substrate: a `welld` daemon that
   owns the stateful Linux VMs ("wells") cells live in.
 - **the harness** — the coding agent inside each cell: **pi**, **claude-code**,
@@ -22,10 +22,15 @@ Three layers, top to bottom:
 ### The wells/cells boundary — a hard rule
 
 Cells **never** reaches below the wells REST API (`127.0.0.1:7878`). VM networking,
-DHCP, IP allocation, checkpoint/restore, sealing — all wells. Cells owns the pool,
-reconcile, birth ritual, and `/seal`-consumer logic. If a fix wants to touch VM
-plumbing, it belongs in the wells repo, not here. Operate cells via the `cells` CLI,
-not the `well` CLI.
+DHCP, IP allocation, checkpoint/restore, hibernate/wake — all wells. Cells owns the
+`cell-base` image bake, the birth ritual, and live-cell hibernate-legality (the
+`/seal`-consumer). If a fix wants to touch VM plumbing, it belongs in the wells repo,
+not here. Operate cells via the `cells` CLI, not the `well` CLI.
+
+There is **no pool** as of 2026-06-17: births cold-fork the pre-provisioned
+`cell-base` image on demand, so the pool/refill/eviction/seal machinery is gone, and
+the old `egg-<hex>` well names went with it — a cell's well is now `cells-<name>`. See
+the wells repo's `docs/proposals/cold-boot-substrate.html` for the joint design.
 
 ## Runtime & commands
 
@@ -41,8 +46,8 @@ bun test dna/cells/base/lib/      # harness-adapter tests
 ```
 
 **Never run bare `bun test`** from the repo root — it sweeps 180+ `node_modules`
-`*.test.ts` files. Real tests live in `cli/lib/*.test.ts` (variant-signature,
-hibernate-ready, reconcile) and `dna/cells/base/lib/harness-adapters.test.ts`.
+`*.test.ts` files. Real tests live in `cli/lib/*.test.ts` (hibernate-ready,
+channels, pulse-owner) and `dna/cells/base/lib/harness-adapters.test.ts`.
 
 ## Repo layout
 
@@ -52,7 +57,7 @@ dna/        The genome every cell inherits at birth — base anatomy, specials, 
 colonies/   Multi-cell colony recipes (e.g. jurypool)
 projects/   Reference colonies under construction (jury)
 proto/      Experimental/retired prototypes — pulse moved out into dna/specials/pulse
-scripts/    Birth, egg-bake, deploy, channel-bind, acceptance, harden, eval scripts
+scripts/    Birth, cell-base bake, deploy, channel-bind, acceptance, harden, eval scripts
 docs/       Design docs (HTML-primary), proposals, architectural-decisions, backlog
 state/      Local state — state/memory/ holds the fleet activity log
 ```
@@ -65,9 +70,9 @@ state/      Local state — state/memory/ holds the fleet activity log
   routes LLM-fallback, handles Slack/email webhooks.
 - **host-bridge.ts** — Mac↔VM bridge (SSH relay, exec, TCP fwd).
 - **birth-ui.tsx** — interactive birth prompts (React via Ink).
-- **lib/** — tested units: `channels.ts`, `variant-signature.ts` (cell config
-  fingerprint), `reconcile.ts` (pool culling), `hibernate-ready.ts`, `resolve.ts`,
-  `secrets.ts`.
+- **lib/** — tested units: `channels.ts`, `hibernate-ready.ts`, `resolve.ts`
+  (cell→well binding — reads the stored `well`, defaulting to `cells-<name>`),
+  `secrets.ts`, `pulse-owner.ts`.
 - **worker/** — per-cell Cloudflare Worker + Durable Object (the `<name>.cells.md`
   presence that survives hibernation), plus slack/email/front workers.
 
@@ -77,7 +82,7 @@ Lifecycle: `birth`/`create`, `birth-special` (mother/pulse), `kill`/`destroy`,
 `sleep`, `wake`, `stop`, `pin`/`unpin`, `checkpoint`.
 Talk: `talk` (ask a peer), `verify` (cross-check a decision across peers), `tui`,
 `shell`, `exec`, `see`.
-Pool: `pool`, `egg`, `bake`, `list`.
+Image: `bake` — (re)build the `cell-base` image births cold-fork (run on DNA/toolchain change).
 Ops: `heartbeat`, `dream`, `sync` (mirror to Obsidian), `refresh-extensions`,
 `channel`/`channels`, `schedule-*`/`unschedule-*` (launchd), `doctor`, `menubar`.
 
@@ -102,7 +107,7 @@ In `dna/cells/base/.{pi,claude}/skills/`:
 - **heartbeat** — how a cell schedules its own recurring work by writing a prose
   schedule into HEARTBEAT.md (a hibernating cell can't wake itself — the heartbeat is
   how it asks).
-- **birth** (claude-code) — turns a claimed generic egg into a configured live cell.
+- **birth** (claude-code) — turns a freshly-forked generic cell into a configured live cell.
 
 Plus pi **extensions** (`dna/cells/base/.pi/extensions/`): `dream`, `memory`,
 `mentality`, `wiki`, `thinking`, `use-max`, `heartbeat-watch`, `codex-proxy`, `self`.
@@ -132,7 +137,7 @@ guide a human through designing a multi-cell colony.
   hermes secondary.
 - Agent-first, not static services: recurring/background work is an agent in a loop,
   not a systemd unit or cron job. A new daemon in a design is a smell.
-- Don't commit baked eggs, VM images, or other large generated artifacts.
+- Don't commit the baked cell-base image, VM images, or other large generated artifacts.
 
 ## Where to look
 
@@ -141,6 +146,6 @@ guide a human through designing a multi-cell colony.
 - **Known issues** — `docs/BACKLOG.md`.
 - **Open decisions for Pete** — `NEEDS_PETE.md` (append a section when a decision
   surfaces).
-- **Runbooks** — `docs/pool.md`, `docs/pulse.md`.
+- **Runbooks** — `docs/pulse.md`.
 - The `cells` and `wells` Claude Code skills carry the deep operational how-to —
   prefer them over rediscovering CLI flags.

@@ -22,7 +22,7 @@
   </div>
 
   <div class="callout info">
-    <p><strong>Live implementation</strong>: <code>dna/specials/mother/.claude/skills/birth/SKILL.md</code> is the canonical short-form ritual the claude-code mother runs. Two Mac-side scripts do the heavy lifting: <code>scripts/bake-egg.sh</code> (phase 1) and <code>scripts/birth-postwork.sh</code> (phase 3). The phases below describe the logical contract; the script source is the authority on what each one actually executes.</p>
+    <p><strong>Live implementation</strong>: <code>dna/specials/mother/.claude/skills/birth/SKILL.md</code> is the canonical short-form ritual the claude-code mother runs. Two Mac-side scripts do the heavy lifting: <code>scripts/imprint-cell.sh</code> (phase 1) and <code>scripts/birth-postwork.sh</code> (phase 3). The phases below describe the logical contract; the script source is the authority on what each one actually executes.</p>
   </div>
 
   <h2>What you're handed</h2>
@@ -75,10 +75,10 @@
   <p>Mother runs three phases in order, per harness. The first two block; the third is backgrounded and observed via <code>~/.cells/postwork/&lt;name&gt;.json</code>. The harness comes from the blob; everything else differs only in which CLI gets pinged for the brain proof.</p>
 
   <h3>Phase 1 · Bake the egg (synchronous)</h3>
-  <p>One Mac-side script — <code>scripts/bake-egg.sh</code> — does every per-cell mutation on the egg: identity substitution, model + thinking + provider + chain, tmux color, status file, extension registration, optional-package toggling, harness-specific config (Anthropic patches, codex / hermes provider keys, claude-code <code>__NAME__</code> in <code>CLAUDE.md</code>). The blob feeds it directly; no per-harness orchestration code on the mother side.</p>
+  <p>One Mac-side script — <code>scripts/imprint-cell.sh</code> — does every per-cell mutation on the egg: identity substitution, model + thinking + provider + chain, tmux color, status file, extension registration, optional-package toggling, harness-specific config (Anthropic patches, codex / hermes provider keys, claude-code <code>__NAME__</code> in <code>CLAUDE.md</code>). The blob feeds it directly; no per-harness orchestration code on the mother side.</p>
   <pre><code># on the Mac, from the cells repo
-bash scripts/bake-egg.sh &lt;egg-well&gt; &lt;name&gt; '&lt;blob-json&gt;'</code></pre>
-  <p>Output ends with <code>BAKE-OK</code>. Anything else is a failure — skip to <a href="#failure">Failure</a>. See <a href="#bake-internals">what bake-egg.sh does internally</a> for the per-substitution detail (useful when debugging the script, not part of mother's job).</p>
+bash scripts/imprint-cell.sh &lt;egg-well&gt; &lt;name&gt; '&lt;blob-json&gt;'</code></pre>
+  <p>Output ends with <code>BAKE-OK</code>. Anything else is a failure — skip to <a href="#failure">Failure</a>. See <a href="#bake-internals">what imprint-cell.sh does internally</a> for the per-substitution detail (useful when debugging the script, not part of mother's job).</p>
 
   <h3>Phase 2 · Prove the brain (synchronous)</h3>
   <p>One <code>well_exec</code> per harness. Each runs the harness's <code>--print</code>-style one-shot mode against a fixed prompt and checks for the harness's success marker on stdout. The cell stays in this phase until the brain answers; if it never answers, birth fails and the egg gets swept.</p>
@@ -119,8 +119,8 @@ disown</code></pre>
 
   <p>Phase 3 failures (worker didn't deploy, channels didn't bind) are <em>not</em> birth failures — the cell is alive and usable. They surface as a <code>postwork.json</code> status of <code>failed:&lt;step&gt;</code>, and <code>cells doctor</code> flags them.</p>
 
-  <h2 id="bake-internals">Appendix · What bake-egg.sh does internally</h2>
-  <p>The detail below is for debugging <code>scripts/bake-egg.sh</code>, not part of mother's job. The script is the authoritative source; this section is a reading guide.</p>
+  <h2 id="bake-internals">Appendix · What imprint-cell.sh does internally</h2>
+  <p>The detail below is for debugging <code>scripts/imprint-cell.sh</code>, not part of mother's job. The script is the authoritative source; this section is a reading guide.</p>
 
   <h3>1 · Imprint identity (every harness)</h3>
   <p>The cell learns its name. <code>__NAME__</code> substituted across the DNA and the tmux color chip. For claude-code, <code>CLAUDE.md</code> is in the substitution set (it's the entrypoint the <code>claude</code> CLI auto-loads from cwd).</p>
@@ -135,7 +135,7 @@ read CBG CFG &lt; &lt;(bash scripts/cell-color.sh &lt;name&gt;)
 sed -i "s|__CELL_BG__|$CBG|g; s|__CELL_FG__|$CFG|g; s|__NAME__|&lt;name&gt;|g" /root/.tmux.conf</code></pre>
 
   <h3>2 · Apply model config (per harness)</h3>
-  <p>The cell's brain is configured from the blob's <code>model</code>, <code>provider</code>, <code>thinking</code>, and <code>chain</code>. Which file gets touched depends on the harness; bake-egg.sh routes accordingly.</p>
+  <p>The cell's brain is configured from the blob's <code>model</code>, <code>provider</code>, <code>thinking</code>, and <code>chain</code>. Which file gets touched depends on the harness; imprint-cell.sh routes accordingly.</p>
   <pre><code># pi — settings.json carries model + provider + thinking + chain
 sed -i 's/__MODEL__/&lt;model&gt;/g'        /root/.pi/settings.json
 sed -i 's/__PROVIDER__/&lt;provider&gt;/g'  /root/.pi/settings.json
@@ -177,7 +177,7 @@ jq --arg p ".pi/extensions/&lt;ext&gt;/index.ts" \
   </ol>
 
   <h2 id="per-harness">Per-harness notes</h2>
-  <p>The three phases are the same for every harness. Differences are confined to phase 2 (the brain-proof CLI invocation, in the table above) and what bake-egg.sh writes during phase 1.</p>
+  <p>The three phases are the same for every harness. Differences are confined to phase 2 (the brain-proof CLI invocation, in the table above) and what imprint-cell.sh writes during phase 1.</p>
   <dl class="kv">
     <dt id="claude-code-branch">claude-code</dt>
     <dd>Phase 1 writes <code>model</code> + <code>effortLevel</code> into <code>/root/.claude/settings.json</code> and substitutes <code>__NAME__</code> in <code>CLAUDE.md</code> (the entrypoint the <code>claude</code> CLI auto-loads from cwd, counterpart to pi's <code>AGENTS.md</code>). Extensions, packages, and cells-side channels don't apply — the claude CLI carries its own agent surface. Phase 2 hits <code>claude --print "say ok"</code> through the proxy (Max subscription token swap happens proxy-side). Phase 3 is the same script as everyone else, minus channel binding.</dd>
@@ -186,7 +186,7 @@ jq --arg p ".pi/extensions/&lt;ext&gt;/index.ts" \
     <dt id="hermes-branch">hermes</dt>
     <dd>Phase 1 writes <code>model.default</code> + <code>agent.reasoning_effort</code> into <code>/root/.hermes/config.yaml</code> and symlinks <code>/root/SOUL.md</code> → <code>$HERMES_HOME/SOUL.md</code> so hermes loads the cell's persona. The <code>providers.cells</code> block points hermes at <code>proxy.cells.md/codex</code> via <code>OPENAI_CODEX_API_KEY</code> — same path codex uses. hermes is not a coding machine; cells doesn't stack extensions / packages / channels onto it (its capability stack comes from hermes itself). Phase 2 hits <code>hermes -z "say ok"</code>. Phase 3: same script, no channel binding. Full background in <code>docs/proposals/hermes-harness.html</code>.</dd>
     <dt id="pi-branch">pi</dt>
-    <dd>Phase 1 writes <code>model</code> + <code>provider</code> + <code>thinking</code> + <code>chain</code> into <code>/root/.pi/settings.json</code>, registers any blob-requested extensions (<code>memory</code>, <code>mentality</code>, <code>wiki</code>, <code>dream</code>), and toggles optional packages (<code>pi-web-access</code>, …). When <code>provider</code> is <code>anthropic</code>, bake-egg.sh also drops <code>/root/.anthropic-direct</code> and applies the proxy patches. Phase 2 hits <code>pi --print "say ok"</code>. Phase 3 is the only branch where <code>channels_bind</code> actually does work (pi cells get Slack / email surfaces via cells-side channels).</dd>
+    <dd>Phase 1 writes <code>model</code> + <code>provider</code> + <code>thinking</code> + <code>chain</code> into <code>/root/.pi/settings.json</code>, registers any blob-requested extensions (<code>memory</code>, <code>mentality</code>, <code>wiki</code>, <code>dream</code>), and toggles optional packages (<code>pi-web-access</code>, …). When <code>provider</code> is <code>anthropic</code>, imprint-cell.sh also drops <code>/root/.anthropic-direct</code> and applies the proxy patches. Phase 2 hits <code>pi --print "say ok"</code>. Phase 3 is the only branch where <code>channels_bind</code> actually does work (pi cells get Slack / email surfaces via cells-side channels).</dd>
   </dl>
   <p>The legacy anchors <code>#codex-branch</code> and <code>#hermes-branch</code> resolve here too, for any docs / chat links that already point at them.</p>
 

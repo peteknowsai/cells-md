@@ -378,10 +378,10 @@ mkdir -p "$(dirname "$F")"
 tmp=$(mktemp)
 jq --argjson ch '${channelsJson.replace(/'/g, "'\\''")}' '.channels = $ch' "$F" > "$tmp" && mv "$tmp" "$F"
 `.trim();
-  // Resolve the cell's well via the shared name→well lookup. Pool-hatched
-  // cells live in `egg-<hex>` wells; specials in `cells-<name>`; legacy
-  // ones in `<name>`. Previously this passed the cell name to `well exec`
-  // directly and failed for hatched cells.
+  // Resolve the cell's well via the shared name→well lookup. Cells live in
+  // `cells-<name>` wells (specials too; legacy cells in `egg-<hex>`).
+  // Previously this passed the cell name to `well exec` directly and failed
+  // for hatched cells.
   const { wellNameForCell } = await import("./resolve");
   const wellName = await wellNameForCell(cell);
   try {

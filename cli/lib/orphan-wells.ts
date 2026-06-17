@@ -1,9 +1,9 @@
 // orphan-wells — detect wells welld knows about that nothing in cells owns.
 //
-// The failure this catches: a half-finished birth, classically `bake-egg.sh`
+// The failure this catches: a half-finished birth, classically `imprint-cell.sh`
 // run standalone instead of through `cells birth` (the wrapper that owns the
-// warming-register → promote dance). The egg gets imprinted + consumed from the
-// pool, a configured well is left running, and the agent reports "born" — but
+// warming-register → promote dance). The cell gets imprinted, a configured
+// well is left running, and the agent reports "born" — but
 // nothing ever wrote it into cells.json. The well "looks born" yet is absent
 // from `cells list`, an orphan holding RAM/disk that no command will ever reap.
 //
@@ -22,7 +22,7 @@ export type OrphanInputs = {
   // (which for legacy cells is their real, pre-cold-boot well name).
   // Over-including here only suppresses orphan reports; it never causes a false one.
   knownWells: string[];
-  // Deprecated — always [] now (the egg pool was removed). A well backing a
+  // Deprecated — always [] now (the pool was removed). A well backing a
   // live cell is covered by knownWells.
   poolWells: string[];
 };

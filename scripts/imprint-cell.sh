@@ -1,19 +1,19 @@
 #!/usr/bin/env bash
-# Imprint a generic egg with the new cell's identity + model config in one
+# Imprint a freshly-forked cell with its identity + model config in one
 # shot. Replaces ~5 small SSH-and-sed calls with one Mac-side script that
 # handles the escaping correctly.
 #
 # Usage:
-#   bake-egg.sh <egg-well> <name> <blob-json>
+#   imprint-cell.sh <well> <name> <blob-json>
 #
 # The blob is the same JSON object birth orchestrator builds (harness,
 # model, provider, thinking, extensions, chain). We parse it here so the
 # LLM caller doesn't need any jq.
 #
-# After this script exits 0, the egg is ready for the end-test (pi --print).
+# After this script exits 0, the cell is ready for the end-test (pi --print).
 set -euo pipefail
 
-EGG_WELL="${1:?egg-well required}"
+CELL_WELL="${1:?well required}"
 NAME="${2:?cell name required}"
 BLOB="${3:?blob JSON required}"
 
@@ -26,7 +26,7 @@ EXTENSIONS=$(echo "$BLOB" | jq -r '.extensions[]? // empty')
 PACKAGES=$(echo "$BLOB" | jq -r '.packages[]? // empty')
 # Runtime-DNA rev (cli/lib/dna-rev.ts), computed Mac-side from the same DNA
 # tree the overlay below tars in. Stamped onto /root/.dna-rev so a cell born
-# from a stale egg reads CURRENT — the re-overlay made it current. Empty if
+# from a stale base reads CURRENT — the re-overlay made it current. Empty if
 # an older caller didn't supply it; the stamp is then skipped (cell reads as
 # "unknown", which the doctor/steward treat as don't-touch, not stale).
 DNA_REV=$(echo "$BLOB" | jq -r '.dna_rev // empty')
@@ -60,12 +60,13 @@ if [ "$HARNESS" = "pi" ]; then
   fi
 fi
 
-# Re-overlay current DNA onto the egg before imprinting it. A pool egg
-# carries the DNA snapshot from when it was baked; by the time it's claimed
-# that snapshot can be stale — the agent-comms code (bin/cells, lib/,
-# site/server.ts), harness configs and skills all move faster than the pool
-# cycles, so a cell hatched from an old egg inherits old DNA. Re-pushing
-# dna/cells/base makes every cell born current regardless of its egg's age.
+# Re-overlay current DNA onto the cell before imprinting it. The cell-base
+# image carries the DNA snapshot from when it was baked; by the time a cell
+# is forked from it that snapshot can be stale — the agent-comms code
+# (bin/cells, lib/, site/server.ts), harness configs and skills all move
+# faster than cell-base is re-baked, so a cell forked from an old base
+# inherits old DNA. Re-pushing dna/cells/base makes every cell born current
+# regardless of the base image's age.
 # tar-extract is overlay-only (it overwrites and adds, never deletes), and
 # the fresh files still carry their __NAME__/__MODEL__/__THINKING__
 # placeholders — the SSH block below does the substitution on these copies.
@@ -74,9 +75,9 @@ fi
 # extracted file — invisible inside the VM and inconsistent with /root. The
 # flag makes tar assign extracted files to the extracting user (root).
 tar czf - -C "$REPO_ROOT/dna/cells/base" . \
-  | well exec -s "$EGG_WELL" -- bash -c 'sudo bash -c "cd /root && tar --no-same-owner -xzf -"'
+  | well exec -s "$CELL_WELL" -- bash -c 'sudo bash -c "cd /root && tar --no-same-owner -xzf -"'
 
-# Single SSH session for everything on the egg.
+# Single SSH session for everything on the cell.
 {
   echo "# ===clock sync ==="
   # chrony defaults to step-only-at-startup. Hibernated wells wake with a
@@ -88,7 +89,7 @@ tar czf - -C "$REPO_ROOT/dna/cells/base" . \
   #
   # REPLACE the stock line, don't append-if-absent: Ubuntu's chrony.conf
   # ships `makestep 1 3` (step only in the first 3 measurements), so the
-  # old `if ! grep makestep` guard never fired and every egg baked through
+  # old `if ! grep makestep` guard never fired and every cell imaged through
   # 2026-06-11 shipped with stock stepping — the advisor-pete CLI-talk
   # outage (envelopes expired-on-arrival at the DO, 356s skew) was this.
   echo "if sudo grep -q '^makestep' /etc/chrony/chrony.conf 2>/dev/null; then"
@@ -138,17 +139,17 @@ tar czf - -C "$REPO_ROOT/dna/cells/base" . \
   # checked out (git mode bits don't always survive every clone/zip path).
   echo "sudo chmod +x /root/bin/* 2>/dev/null || true"
 
-  echo "# ===node-gyp self-heal (stale eggs predating the 5d bake) ==="
-  # Freshly-baked eggs ship node-gyp (provisionCellInWell step 5d), but eggs
-  # baked before that change don't. Stoolap-backed market cells need it to
-  # compile the @stoolap/node NAPI bridge at store-mint. Best-effort + NON-fatal
-  # (unlike the hermes self-heal, which exits 1): a non-market cell never
-  # touches node-gyp, and a market cell's own self-config can still recover —
-  # don't tank a birth over it. Pinned to 12.x to match the bake (node-gyp 13
-  # needs Node >=22.22.2; the egg ships 22.11.0). No-op + no network once the
-  # pool has cycled to node-gyp-bearing eggs.
+  echo "# ===node-gyp self-heal (cells whose base predates the 5d bake) ==="
+  # cell-base now ships node-gyp (provisionCellInWell step 5d), but a cell
+  # forked from an older base won't have it. Stoolap-backed market cells need
+  # it to compile the @stoolap/node NAPI bridge at store-mint. Best-effort +
+  # NON-fatal (unlike the hermes self-heal, which exits 1): a non-market cell
+  # never touches node-gyp, and a market cell's own self-config can still
+  # recover — don't tank a birth over it. Pinned to 12.x to match the bake
+  # (node-gyp 13 needs Node >=22.22.2; cell-base ships 22.11.0). No-op + no
+  # network once cell-base has been re-baked with node-gyp.
   echo "if ! command -v node-gyp >/dev/null 2>&1; then"
-  echo "  echo '  node-gyp missing on this egg — installing…'"
+  echo "  echo '  node-gyp missing on this cell — installing…'"
   echo "  sudo npm install -g node-gyp@12 >/dev/null 2>&1 || echo '  node-gyp install failed (non-fatal)'"
   echo "fi"
 
@@ -195,7 +196,7 @@ tar czf - -C "$REPO_ROOT/dna/cells/base" . \
     echo "PI_SETTINGS_EOF"
     echo "jq . /root/.pi/settings.json > /dev/null"
 
-    # pi + Anthropic runs on the Max sub via proxy.cells.md (the egg's pi-ai
+    # pi + Anthropic runs on the Max sub via proxy.cells.md (the cell's pi-ai
     # already has its Anthropic baseUrl swapped to the proxy by the
     # apply-pi-patches.sh postinstall hook). No /root/.anthropic-direct flag:
     # that flag would restore the direct api.anthropic.com baseUrl, which only
@@ -230,13 +231,13 @@ tar czf - -C "$REPO_ROOT/dna/cells/base" . \
     echo "echo \"  codex main: \$MAIN_TID\""
   elif [ "$HARNESS" = "hermes" ]; then
     echo "# ===hermes settings ==="
-    # Self-heal a stale egg. The egg pool predates the hermes harness, so
-    # pre-merge eggs ship pi/claude/codex but no hermes binary. Install it
-    # on demand; fresh eggs (baked post-merge by bakePoolMember, step 5c)
-    # already have it, so this is a no-op there. Version tag is kept in
-    # sync with that recipe in cli/cells.ts.
+    # Self-heal a cell whose base predates the hermes harness: an older
+    # cell-base ships pi/claude/codex but no hermes binary. Install it on
+    # demand; a current cell-base (provisionCellInWell step 5c) already has
+    # it, so this is a no-op there. Version tag is kept in sync with that
+    # recipe in cli/cells.ts.
     echo "if ! command -v hermes >/dev/null 2>&1; then"
-    echo "  echo '  hermes binary missing on this egg — installing…'"
+    echo "  echo '  hermes binary missing on this cell — installing…'"
     echo "  curl -fsSL https://raw.githubusercontent.com/NousResearch/hermes-agent/v2026.5.16/scripts/install.sh | sudo bash -s -- --skip-setup --skip-browser --branch v2026.5.16"
     echo "fi"
     echo "command -v hermes >/dev/null 2>&1 || { echo 'hermes binary still missing after install'; exit 1; }"
@@ -253,7 +254,7 @@ tar czf - -C "$REPO_ROOT/dna/cells/base" . \
 
   echo "# ===supervisor refresh ==="
   # The DNA overlay replaced site/server.ts + lib/ on disk. If well-site is
-  # already running on this egg it's still holding the pre-overlay code in
+  # already running on this cell it's still holding the pre-overlay code in
   # memory — try-restart picks up the fresh supervisor. No-op if it isn't
   # running (it'll start fresh on the next boot regardless).
   echo "sudo systemctl try-restart well-site.service 2>/dev/null || true"
@@ -262,4 +263,4 @@ tar czf - -C "$REPO_ROOT/dna/cells/base" . \
   echo "sudo mkdir -p /root/.pi"
   echo "echo '{\"harness\":\"$HARNESS\",\"channels\":[]}' | sudo tee /root/.pi/status.json > /dev/null"
   echo "echo BAKE-OK"
-} | well exec -s "$EGG_WELL" -- bash -lc 'bash -es' 2>&1
+} | well exec -s "$CELL_WELL" -- bash -lc 'bash -es' 2>&1

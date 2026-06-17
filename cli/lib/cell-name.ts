@@ -1,5 +1,5 @@
 // Cell-name validation. Names flow into DNS labels (worker subdomains,
-// well names), shell interpolations (bake-egg.sh sed patterns, tar
+// well names), shell interpolations (imprint-cell.sh sed patterns, tar
 // paths), /etc/environment writes, and JSON wire formats. Enforcing
 // DNS-label safety at the cmdCreate boundary is the cheapest place to
 // stop a bad name from reaching any of them — much cheaper than

@@ -1,15 +1,15 @@
 // DNA revision — a content fingerprint over the runtime DNA every cell
-// carries, so "is this egg/cell running current platform code?" becomes a
+// carries, so "is this cell running current platform code?" becomes a
 // comparable fact instead of an invisible one.
 //
-// The problem it closes: DNA is COPIED into eggs (at bake) and cells (at
-// birth/refresh), never referenced at runtime. A code-only DNA change
-// (server.ts, lib/, bin/) therefore reaches no existing egg or cell until
-// something re-bakes or refreshes it — silently. Three incidents in one
-// week came from exactly this (bob's stale supervisor, advisor-pete's
-// missing lib module, a pre-merge egg shipping a stale jobs lane). The rev
-// is stamped at every bake/refresh site and read by `cells doctor`; the
-// reconcile cull and the steward consume it to self-heal.
+// The problem it closes: DNA is COPIED into the cell-base image (at bake) and
+// cells (at birth/refresh), never referenced at runtime. A code-only DNA change
+// (server.ts, lib/, bin/) therefore reaches no existing cell until something
+// re-bakes or refreshes it — silently. Three incidents in one week came from
+// exactly this (bob's stale supervisor, advisor-pete's missing lib module, a
+// pre-merge cell shipping a stale jobs lane). The rev is stamped at every
+// bake/refresh site and read by `cells doctor`; the steward consumes it to
+// self-heal.
 //
 // DOMAIN — the `sync` class from cli/lib/refresh.ts ONLY:
 //   site/server.ts, site/package.json, lib/, bin/, scripts/
@@ -117,8 +117,8 @@ export function _clearDnaRevCache(): void {
 }
 
 // ── drift summary (pure) — shared by `cells doctor`, `doctor --json`, and
-//    (via the json) the steward sweep. Classifies pool eggs and live cells
-//    against the repo's current rev. ──────────────────────────────────────
+//    (via the json) the steward sweep. Classifies live cells against the
+//    repo's current rev. ──────────────────────────────────────────────────
 
 export type RevState = "current" | "stale" | "unknown";
 

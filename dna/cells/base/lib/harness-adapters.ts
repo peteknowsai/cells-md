@@ -902,7 +902,7 @@ const HERMES_SESSION_RPC = "cells-session";
 
 export const hermesAdapter: HarnessAdapter = {
   mode: "persistent",
-  // Launch hermes's TUI-gateway server straight from the egg's hermes venv
+  // Launch hermes's TUI-gateway server straight from the cell's hermes venv
   // (no Ink TUI in the middle). `-u` is mandatory — Python stdout to a pipe
   // is fully buffered, and a buffered gateway never flushes its
   // `gateway.ready` frame, so the handshake would hang. HERMES_PYTHON_SRC_ROOT

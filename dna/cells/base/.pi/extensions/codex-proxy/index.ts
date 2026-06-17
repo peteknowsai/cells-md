@@ -22,9 +22,8 @@
 import { readFileSync } from "node:fs";
 
 // This cell's name — imprinted into package.json at birth (the ritual
-// seds __NAME__). NOT os.hostname(): a pool-born cell keeps its generic
-// egg-XXXXXX well name as the hostname, so the hostname is the well, not
-// the cell.
+// seds __NAME__). NOT os.hostname(): the hostname is the well name
+// (cells-<name>, or a legacy egg-<hex>) — the well, not the cell.
 function cellName(): string {
   try {
     return JSON.parse(readFileSync("/root/package.json", "utf8")).name || "unknown";

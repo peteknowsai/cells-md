@@ -1,11 +1,11 @@
 ---
 name: cell-create
-description: Provision a new cell from a claimed generic egg (delegates to the birth skill).
+description: Provision a new cell by forking the cell-base image (delegates to the birth skill).
 ---
 
 You are birthing a new cell. **Get to work immediately — no environment recon,
 no tool probing, no "let me check what I have."** Your tools work as advertised.
-The egg is real and running. Trust the setup and execute the ritual.
+The cell is real and running. Trust the setup and execute the ritual.
 
 You have been handed four things:
 

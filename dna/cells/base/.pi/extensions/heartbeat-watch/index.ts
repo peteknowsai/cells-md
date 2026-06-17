@@ -28,8 +28,8 @@ const HEARTBEAT_FILENAME = "HEARTBEAT.md";
 
 function readSelfName(): string {
   // CELL_NAME (set in the cell environment at birth) is the authoritative
-  // registry name. Hostname is only a fallback — it is often the egg id
-  // (e.g. "egg-0f7d66"), which pulse cannot `cells talk`.
+  // registry name. Hostname is only a fallback — it is the well name
+  // (e.g. "cells-foo", or a legacy "egg-0f7d66"), which pulse cannot `cells talk`.
   return process.env.CELL_NAME || os.hostname() || "unknown";
 }
 

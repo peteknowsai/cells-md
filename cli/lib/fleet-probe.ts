@@ -157,7 +157,7 @@ export function classifyCellTransport(input: {
   if (g.epoch > 0) {
     const skew = Math.abs(g.epoch - input.macEpochS);
     if (skew > CLOCK_SKEW_WARN_S) {
-      warn(`guest clock skewed ${skew}s from Mac — pre-makestep egg, chrony can't step it`);
+      warn(`guest clock skewed ${skew}s from Mac — pre-makestep cell, chrony can't step it`);
     }
   }
   return { status, reasons };
