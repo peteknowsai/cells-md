@@ -1,6 +1,6 @@
 // Cells menubar — native macOS status item.
 //
-// Polls ~/.cells/cells.json + ~/.cells/pool.json and `well list` every 10s
+// Polls ~/.cells/cells.json and `well list` every 10s
 // and renders a dropdown of cells. Click actions open Ghostty (shell, tui) or
 // the browser (site). Auto-launched by a LaunchAgent installed by
 // `cells menubar install`.
@@ -37,15 +37,6 @@ struct CellsFile: Decodable {
     let cells: [Cell]
 }
 
-struct PoolMember: Decodable {
-    let id: String
-    let well_name: String
-}
-
-struct PoolFile: Decodable {
-    let members: [PoolMember]
-}
-
 enum WellStatus: String {
     case running
     case stopped
@@ -62,22 +53,18 @@ struct EnrichedCell {
 // MARK: - Loaders
 
 func cellsJSONPath() -> String { NSHomeDirectory() + "/.cells/cells.json" }
-func poolJSONPath() -> String  { NSHomeDirectory() + "/.cells/pool.json" }
 
 func loadCells() -> [Cell] {
     guard let data = try? Data(contentsOf: URL(fileURLWithPath: cellsJSONPath())) else { return [] }
     return (try? JSONDecoder().decode(CellsFile.self, from: data).cells) ?? []
 }
 
-func loadPool() -> [PoolMember] {
-    guard let data = try? Data(contentsOf: URL(fileURLWithPath: poolJSONPath())) else { return [] }
-    return (try? JSONDecoder().decode(PoolFile.self, from: data).members) ?? []
-}
-
-func wellNameFor(_ cell: Cell, pool: [PoolMember]) -> String {
+// A hatched cell lives in well `egg-<hatched_from>` (the pool.json indirection
+// was removed 2026-06-17 with the egg pool; mirrors cli/lib/resolve.ts).
+func wellNameFor(_ cell: Cell) -> String {
     if cell.special == true { return "cells-\(cell.name)" }
     guard let h = cell.hatched_from else { return cell.name }
-    return pool.first(where: { $0.id == h })?.well_name ?? cell.name
+    return "egg-\(h)"
 }
 
 // Post-birth log lives at ~/.cells/logs/birth-postwork/<name>.log. We surface
@@ -148,10 +135,9 @@ func loadWellStatuses() -> [String: WellStatus] {
 
 func snapshot() -> [EnrichedCell] {
     let cells = loadCells()
-    let pool = loadPool()
     let statuses = loadWellStatuses()
     let enriched = cells.map { c -> EnrichedCell in
-        let well = wellNameFor(c, pool: pool)
+        let well = wellNameFor(c)
         let status = statuses[well] ?? .unknown
         return EnrichedCell(cell: c, well: well, status: status, postBirth: postBirthStatus(c.name))
     }
