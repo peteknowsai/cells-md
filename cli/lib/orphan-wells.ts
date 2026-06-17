@@ -18,11 +18,12 @@ export type OrphanInputs = {
   // Well names welld reports (GET /v1/wells).
   welldWells: string[];
   // Resolved well names for every registered cell, PLUS generous aliases —
-  // wellNameForCell(name), `cells-<name>`, the bare name, and `egg-<hatched_from>`.
+  // wellNameForCell(name), `cells-<name>`, the bare name, and the stored `well`
+  // (which for legacy cells is their real, pre-cold-boot well name).
   // Over-including here only suppresses orphan reports; it never causes a false one.
   knownWells: string[];
-  // Every pool member's well_name, in ANY state (open spare eggs AND claimed
-  // eggs mid-birth). A well backing a live pool entry is never an orphan.
+  // Deprecated — always [] now (the egg pool was removed). A well backing a
+  // live cell is covered by knownWells.
   poolWells: string[];
 };
 

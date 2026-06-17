@@ -38,17 +38,17 @@ function cell(name: string, over: Partial<FleetCell> = {}): FleetCell {
 }
 
 describe("wellNameFor", () => {
-  test("special cell → cells-<name>", () => {
+  test("cell without a stored well → cells-<name> (namespace convention)", () => {
+    expect(wellNameFor({ name: "zero-advisor-pete" })).toBe("cells-zero-advisor-pete");
+  });
+  test("special → cells-<name>", () => {
     expect(wellNameFor({ name: "mother", special: true })).toBe("cells-mother");
   });
-  test("hatched cell → egg-<hatched_from>", () => {
-    expect(wellNameFor({ name: "delta-market", hatched_from: "c5e25a" })).toBe("egg-c5e25a");
+  test("cell with a stored well → that well (legacy cells keep their real name)", () => {
+    expect(wellNameFor({ name: "delta-market", well: "egg-c5e25a" })).toBe("egg-c5e25a");
   });
-  test("hatched_from is reconstructed unconditionally (no pool lookup)", () => {
-    expect(wellNameFor({ name: "ghost", hatched_from: "deadbe" })).toBe("egg-deadbe");
-  });
-  test("legacy cell (no hatched_from, not special) → cell name", () => {
-    expect(wellNameFor({ name: "bob" })).toBe("bob");
+  test("stored well wins over the default", () => {
+    expect(wellNameFor({ name: "bob", well: "cells-bob" })).toBe("cells-bob");
   });
 });
 

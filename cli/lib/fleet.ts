@@ -2,14 +2,13 @@
 // state it's in" view that the `cells agents` cockpit renders. One place
 // that merges the three Mac-side sources of fleet truth:
 //
-//   registry (~/.cells/cells.json)  → name, harness, model, project, special
-//   pool     (~/.cells/pool.json)   → cell → well-name (egg-<id>) mapping
+//   registry (~/.cells/cells.json)  → name, harness, model, project, special, well
 //   welld    (/dashboard/data)      → live power (running/stopped) + wedge + ip
 //
 // Pure logic (well-name resolution, model shortening, grouping, sorting,
 // age formatting) is separated from IO (loadFleet, fetchWells) so the
 // shaping behavior is unit-testable against plain arrays — no filesystem,
-// no daemon. Mirrors the registry.ts / pool.ts split.
+// no daemon. Mirrors the registry.ts split.
 
 import { readFile } from "node:fs/promises";
 import { homedir } from "node:os";
@@ -54,14 +53,11 @@ type WellRow = {
 
 // ── Pure logic (no IO) ────────────────────────────────────────────────────
 
-// Cell → well-name. Same rules as lib/resolve.ts#wellNameForCell, but pure.
-// A hatched cell lives in well `egg-<hatched_from>` (the hex id IS the
-// well-name suffix). Pre-2026-06-17 this looked up pool.json; with the egg
-// pool gone (cold-boot substrate) the binding reconstructs directly.
-export function wellNameFor(cell: Pick<Cell, "name" | "special" | "hatched_from">): string {
-  if (cell.special) return `cells-${cell.name}`;
-  if (!cell.hatched_from) return cell.name;
-  return `egg-${cell.hatched_from}`;
+// Cell → well-name. Same rule as lib/resolve.ts#wellNameForCell, but pure: read
+// the stored `well`, else default to the `cells-<name>` namespace convention
+// (specials and freshly-born cells alike).
+export function wellNameFor(cell: Pick<Cell, "name" | "special" | "well">): string {
+  return cell.well ?? `cells-${cell.name}`;
 }
 
 // Friendly model token from a fallback chain entry. Entries look like

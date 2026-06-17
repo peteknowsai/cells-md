@@ -28,7 +28,8 @@ let cellsBin: String = {
 
 struct Cell: Decodable {
     let name: String
-    let hatched_from: String?
+    let well: String?            // stored well name (cells-<name>; legacy cells keep their real name)
+    let hatched_from: String?    // legacy marker, no longer used for resolution
     let special: Bool?
     let harness: String?
 }
@@ -59,12 +60,11 @@ func loadCells() -> [Cell] {
     return (try? JSONDecoder().decode(CellsFile.self, from: data).cells) ?? []
 }
 
-// A hatched cell lives in well `egg-<hatched_from>` (the pool.json indirection
-// was removed 2026-06-17 with the egg pool; mirrors cli/lib/resolve.ts).
+// Cell → well-name. Mirrors cli/lib/resolve.ts: read the stored `well`, else
+// default to the `cells-<name>` namespace convention (specials + new cells).
+// Legacy cells were backfilled with their real well name, so no derivation here.
 func wellNameFor(_ cell: Cell) -> String {
-    if cell.special == true { return "cells-\(cell.name)" }
-    guard let h = cell.hatched_from else { return cell.name }
-    return "egg-\(h)"
+    return cell.well ?? "cells-\(cell.name)"
 }
 
 // Post-birth log lives at ~/.cells/logs/birth-postwork/<name>.log. We surface
