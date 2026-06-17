@@ -184,8 +184,9 @@ function nameFor(combo: Combo, ts: Date): string {
 type ChannelsFile = { version: 1; bindings: Record<string, { cell: string; kind: string; createdAt: string }> };
 
 // Resolve a cell to the well it runs on. With the egg pool gone (cold-boot
-// substrate, 2026-06-17) a hatched cell lives in `egg-<hatched_from>` — the
-// canonical resolver reconstructs that directly (no pool.json indirection).
+// substrate, 2026-06-17) the mapping is data-driven: the canonical resolver
+// reads the cell's stored `well` (`cells-<name>`), defaulting to the
+// `cells-<name>` namespace convention — no pool.json indirection.
 const wellForCell = wellNameForCell;
 
 async function loadChannels(): Promise<ChannelsFile> {
@@ -521,8 +522,8 @@ async function birthOne(name: string, combo: Combo): Promise<BirthRecord> {
   const wantsSlack = combo.channels.includes("slack");
   const reg = await loadRegistry();
   const regEntry = reg.cells.find((c) => c.name === name);
-  // Birth claims a generic egg — the cell's well is the egg's well_name,
-  // not the cell name. Resolve it before any well-layer check.
+  // A cell's well (`cells-<name>`) is not the same string as the cell name.
+  // Resolve it before any well-layer check.
   const wellName = await wellForCell(name);
   const well = await wellCheck(wellName);
   // Deep verify of chain on the well. Only attempt when the well is
@@ -617,7 +618,7 @@ async function directWellDestroyCli(name: string): Promise<{ ok: boolean }> {
 async function killOne(name: string, reason: KillRecord["reason"]): Promise<KillRecord> {
   const args = ["kill", name, "--yes"];
   const cmd = `cells ${args.join(" ")}`;
-  // Resolve the egg well BEFORE the kill — afterwards the registry entry is
+  // Resolve the well BEFORE the kill — afterwards the registry entry is
   // gone and the cell→well mapping with it.
   const wellName = await wellForCell(name);
   const t0 = Date.now();

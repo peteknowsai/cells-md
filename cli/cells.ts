@@ -79,7 +79,7 @@ const MOTHER_ROOT = join(SPECIALS_DIR, "mother");
 const PULSE_ROOT = join(SPECIALS_DIR, "pulse");
 const DNA_DIR = join(DNA_ROOT, "cells/base");
 // REGISTRY_DIR + REGISTRY_PATH are canonical in ./lib/paths — imported
-// above. Pool paths live there too; pool.ts owns the pool functions.
+// above.
 const CONFIG_PATH = join(REGISTRY_DIR, "config.json");
 const MOTHER_LOCK_PATH = join(REGISTRY_DIR, "mother.lock");
 
@@ -5052,9 +5052,10 @@ async function directWellDestroy(name: string): Promise<boolean> {
 async function cmdDestroyOne(name: string): Promise<boolean> {
   // Teardown is pure deterministic CLI work — no mother. Birth routes
   // through mother because configuring a cell is open-ended; killing one
-  // isn't. We resolve the well locally (wellNameForCell reads cells.json +
-  // pool.json — the same lookup mother's old cell-destroy prompt did via
-  // cell_resolve), destroy it via the well CLI, then sweep local state.
+  // isn't. We resolve the well locally (wellNameForCell reads the cell's
+  // stored `well` from cells.json — the same lookup mother's old
+  // cell-destroy prompt did via cell_resolve), destroy it via the well CLI,
+  // then sweep local state.
   const wellName = await wellNameForCell(name);
   const destroyOk = await directWellDestroy(wellName);
 

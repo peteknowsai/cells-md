@@ -201,7 +201,7 @@ const runCells = (args: string[], opts?: { timeoutMs?: number }) => runCmd(["cel
 
 // ───── reading state ─────
 
-// Registry + pool reads and cell→well resolution come from the canonical
+// Registry reads and cell→well resolution come from the canonical
 // cli/lib modules (findCell, wellNameForCell) — the same code the live CLI
 // uses, so this eval exercises the real resolution path rather than a
 // drifting hand-rolled copy.
