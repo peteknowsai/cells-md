@@ -6,7 +6,7 @@ The exhaustive surface. For workflows and gotchas, see `SKILL.md` next to this f
 
 | Command | What it does |
 |---|---|
-| `cells birth <name> [flags]` | Provision a new cell (alias: `create`). Claims a generic egg, configures it via mother's birthing ritual. No flags → interactive picker; any flag → non-interactive. |
+| `cells birth [<project>] <name> [flags]` | Provision a new cell (alias: `create`). Cold-forks a fresh well (`cells-<name>`) from the `cell-base` image, configures it via mother's birthing ritual. `cells birth <project> <name>` attributes it to the project's mother (`<project>-mother`) if registered, else the global mother. No flags → interactive picker; any flag → non-interactive. |
 | `cells talk <name> [msg]` | Interactive bridge chat (no msg) or one-shot (with msg). Routes through host-bridge → SSH → harness. `talk mother` opens mother's Pi TUI and passes pi flags through (`-c`, `-r`, `--session=`, `-p`, …). |
 | `cells kill <name>... [--yes]` | Destroy cells (alias: `destroy`). Deterministic — `well destroy --force` + local sweep. `--all-but <name>...` kills everything except the listed cells. Always pass `--yes` in scripts. |
 | `cells list` | List known cells (name, model, birthday). |
@@ -20,13 +20,12 @@ The exhaustive surface. For workflows and gotchas, see `SKILL.md` next to this f
 | `cells sync [name]` | Pull cell markdown into `~/Obsidian/cells/` (default: all + mother). |
 | `cells dream <name\|mother\|--all>` | Run dream/memory consolidation. |
 | `cells doctor` | Inspect mother OAuth state + proxy health (run when cells act 401-y). |
-| `cells pool <subcmd>` | Manage the egg pool — see below (alias `egg` is deprecated). |
-| `cells bake [--name=cell-base] [--force]` | Bake the base image (one-time, ~5min). |
+| `cells bake [--name=cell-base] [--force] [--no-verify]` | (Re)build the `cell-base` image births cold-fork from (one-time / on DNA-toolchain change, ~few min). See below. |
 | `cells channel <args>` | Channel binding ops (alias: `channels`). See below. |
 | `cells refresh-extensions <args>` | Re-sync a cell's extensions from the DNA. |
 | `cells heartbeat <args>` | Heartbeat ops — pulse digest, schedule, recent fires. |
 | `cells pi` | Open the mother Pi TUI (alias for `cells talk mother`). |
-| `cells schedule-* / unschedule-*` | Install/remove launchd jobs: `pi-patches`, `host-bridge`, `pulse`, `pool-reconcile`. `schedule-pool-refill` is retired — it now refuses; `unschedule-pool-refill` stays, to remove a stale plist. |
+| `cells schedule-* / unschedule-*` | Install/remove launchd jobs: `pi-patches`, `host-bridge`, `pulse`. (The old `pool-refill`/`pool-reconcile` jobs are gone with the pool — `schedule-pool-refill` refuses; `unschedule-pool-refill` stays only to remove a stale plist if one lingers.) |
 
 ## `cells birth` flags
 
@@ -39,24 +38,19 @@ The exhaustive surface. For workflows and gotchas, see `SKILL.md` next to this f
 | `--packages=` | subset of `pi-web-access`, … | `pi` only. |
 | `--channels=` | subset of `slack`, `email` | `pi` only. `slack` auto-creates `#cells-<name>`, binds, deploys the worker. |
 | `--seed=<text>` | text, or `off` | First message auto-sent post-birth. Default greeting on; `--seed=off` disables (use this in scripts). |
-| `--no-pool` | — | Deprecated no-op (back-compat for scripts). |
+| `--no-pool` | — | Deprecated no-op (the pool is gone; flag kept for back-compat so old scripts don't error). |
 
-## `cells pool` subcommands
+## The `cell-base` image (`cells bake`)
+
+There is **no egg pool** (removed 2026-06-17 — cold-boot substrate; joint design in the wells repo's `docs/proposals/cold-boot-substrate.html`). Every birth cold-forks a fresh well (`cells-<name>`) from a single pre-baked image, `cell-base` — an APFS clonefile (sub-ms), then configured by the ritual. Birth never installs anything.
 
 | Command | What it does |
 |---|---|
-| `cells pool list` | Show pool members + states. |
-| `cells pool refill` | Bake fresh generic eggs up to the target depth (`V1_POOL_TARGET_DEPTH = 5`). |
-| `cells pool drain [-y]` | Destroy all `open` (unclaimed) members. `-y` to confirm. |
-| `cells pool create` | Bake one generic egg. Args are ignored — the V1 pool is uniform (all eggs are `variant_signature: v1-generic`). `cells pool` no-args is an alias. |
-| `cells pool cull <id>` | Destroy one pool member by short id. |
-| `cells pool reconcile` | Diff `pool.json` vs welld; evict stale entries (welld-unknown, or tier-4 reporting non-running) **and cull** `open` members above target depth, oldest first. Never touches `claimed`/`live`. |
+| `cells bake` | (Re)build `cell-base`: create a temp well from the lean `ubuntu-25.10-base` → `provisionCellInWell` (DNA + all 4 harnesses + node-gyp + pi patches) → save as the `cell-base` image → fork-verify. The ONLY step that runs the heavy install. |
+| `cells bake --force` | Overwrite an existing `cell-base`. |
+| `cells bake --no-verify` | Skip the post-save fork test (faster, riskier). |
 
-Pool member fields are orthogonal — two axes, never conflated (the old `warm`/`hot`/`cold` trio collided three temperature words across both axes; retired):
-- **`state`** (standing) — `open` (built, claimable) → `claimed` (in-flight birth) → `live` (now a cell, kept as a breadcrumb) → `culling` (being destroyed). `pool.json`'s old `state:"warm"` is migrated to `open` on read.
-- **`tier`** (power) — `4` (running VM, in RAM, instant claim) or `2` (hibernated VM, ~0.5s wake on claim). V1 ships pure-hibernated: every `open` member is tier 2. `V1_RUNNING_POOL_TARGET = 0`.
-
-Pool RAM cost: ~0 (every asleep egg released its host VZ XPC process). vCPU cost: ~0. Disk cost: ~1.5 GB per asleep egg (RAM image + base disk).
+Re-bake after editing `dna/cells/base/` or bumping a harness / node-gyp / toolchain pin — new births fork the image as-is. Live cells drift separately; the steward refreshes them with `cells refresh`.
 
 ## `cells channel` subcommands
 
@@ -72,7 +66,7 @@ Pool RAM cost: ~0 (every asleep egg released its host VZ XPC process). vCPU cost
 ```
 cells talk <name>
   → host-bridge :7880          (ws://127.0.0.1:7880/agent?cell=<name>, Bearer CELLS_PROXY_SECRET)
-      → resolveCellTarget: cells.json hatched_from → pool.json well_name → welld for IP
+      → resolveCellTarget: cells.json `well` (cells-<name>, via lib/resolve.ts) → welld for IP
       → ssh ubuntu@<ip> → sudo to root (HOME=/root) → HarnessAdapter spawns the harness
           piAdapter         → pi --mode rpc        (JSON-RPC over stdio, persistent)
           claudeCodeAdapter → claude --print       (stream-json over stdio, persistent)
@@ -82,12 +76,14 @@ cells talk <name>
                                                     addressed by a gateway session id)
       → translates harness events ↔ the talk CLI's pi-shaped event protocol
 
-cells birth <name>
-  → cmdCreate: resolve config → JSON blob → reconcilePool → claimGenericEgg
-      → wakePoolMember (~0.55s for tier-2) → ensureWellHasIp → stripAnthropicKey (if claude-code/codex)
-      → runPiWithOutcome("cell-create", [name, eggWell, blob])
-          → mother (pi -p, cwd dna/specials/mother) reads docs/birthing-ritual.html, follows it
-  → on success: markPoolMemberLive, registry push, prewarmHostBridge, refillPoolToDepth, talk UX
+cells birth [<project>] <name>
+  → cmdCreate: resolve config → JSON blob → claimAndReady (cold-fork cell-base → cells-<name> well)
+      → ensureWellHasIp → ensureHibernateReady (seal once) → stripAnthropicKey (if claude-code/codex)
+      → walk the global mother's modelChain [claude-code, pi]:
+          claude-code → runClaudeWithOutcome("birth",       [name, well, blob])  (.claude/skills/birth → imprint-cell.sh)
+          pi (fallback)→ runPiWithOutcome("cell-create",     [name, well, blob])  (.pi/prompts/cell-create.md → birthing-ritual.html)
+          (mother runs locally, cwd dna/specials/mother; the well is pre-created and handed in — no pool claim)
+  → on success: registry push (well: cells-<name>), prewarmHostBridge, talk UX
 
 <name>.cells.md (the cell's public page)
   → cells DNS → per-cell Worker (Bearer-gated control plane + open public site route)
@@ -115,7 +111,6 @@ LLM routing (all roads go through proxy.cells.md or a direct key)
 | `md.cells.welld` | `:7878` | Substrate primitives — well create/destroy/exec/checkpoint/hibernate. Wells team's domain. |
 | `com.pete.cells-host-bridge` | `:7880` | Spawns the harness over SSH on `cells talk`; one session per cell, 30 min idle TTL. |
 | `com.pete.cells-proxy` | `proxy.cells.md` (via cloudflared) | Subscription LLM proxy — swaps `CELLS_PROXY_SECRET` for the real Max / codex OAuth tokens. |
-| `com.pete.cells-pool-reconcile` | — | Reconciles `pool.json` vs welld + culls excess every 5 min (available; not auto-installed). |
 | `com.pete.cells-tunnel` | `*.cells.md` (cloudflared) | Public DNS for `proxy.cells.md` and the per-cell Workers. |
 
 Restart any of them after editing its `.ts`: `launchctl kickstart -k gui/$(id -u)/<service>`.
@@ -124,8 +119,7 @@ Restart any of them after editing its `.ts`: `launchctl kickstart -k gui/$(id -u
 
 | Path | Contents |
 |---|---|
-| `~/.cells/cells.json` | The cell registry — `{name, status, harness, hatched_from, modelChain, created_at, …}`. |
-| `~/.cells/pool.json` | Pool members — `{id, well_name, variant_signature, state, tier, born_at, claimed_at, claimed_by, max_age_at}`. Lock: `~/.cells/.pool.lock`. |
+| `~/.cells/cells.json` | The cell registry — `{name, status, harness, well, project, modelChain, created_at, …}`. `well` is the cell→well mapping (`cells-<name>`; legacy cells backfilled with their `egg-<hex>`). `hatched_from` may persist on old records as a legacy marker — not used for resolution. |
 | `~/.cells/channels.json` | Channel bindings (slack/email → cell). |
 | `~/.cells/secrets.json` | `CELLS_PROXY_SECRET`, `DEEPSEEK_API_KEY`, `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `CLOUDFLARE_ACCOUNT_ID`, `CLOUDFLARE_API_TOKEN`, Slack tokens. **Never commit; never paste raw.** |
 | `~/.cells/config.json` | `{well_public_base: "cells.md", …}`. |
@@ -137,13 +131,13 @@ Restart any of them after editing its `.ts`: `launchctl kickstart -k gui/$(id -u
 
 | Path | Contents |
 |---|---|
-| `cli/cells.ts` | The CLI — `cmdCreate` (birth), `cmdDestroyOne` (kill), `cmdPool`, `cmdTalk`, `streamCellBridge`, `runPiWithOutcome`, pool internals (`bakePoolMember`, `claimGenericEgg`, `wakePoolMember`, `refillPoolToDepth`, `reconcilePool`). |
+| `cli/cells.ts` | The CLI — `cmdCreate` (birth), `cmdDestroyOne` (kill), `cmdBake`, `cmdTalk`, `streamCellBridge`, `runClaudeWithOutcome` / `runPiWithOutcome` (the mother-harness chain), `claimAndReady` (cold-fork the well), `provisionCellInWell` (the bake recipe). |
 | `cli/host-bridge.ts` | The talk daemon — `CellSession`, `HarnessAdapter` (`piAdapter` / `claudeCodeAdapter` / `codexAdapter` / `hermesAdapter`), `resolveCellTarget`. |
 | `cli/proxy.ts` | The subscription proxy — harness-agnostic. Handles Anthropic Max + ChatGPT-codex OAuth refresh. |
 | `cli/worker/cell/` | Per-cell Cloudflare Worker (Bearer control plane + public site route) + Durable Object (`handleSitePublish`, `serveSite`, channel inbox). |
 | `cli/lib/channels.ts` | Slack/email channel binding logic. |
-| `cli/lib/reconcile.ts` | Pool eviction planner — pure logic, no IO; testable kernel of `reconcilePool`. |
-| `dna/cells/base/` | The generic egg DNA — `AGENTS.md`/`CLAUDE.md` (harness entrypoints), `SOUL.md`/`CELLS.md`/`TOOLS.md` (identity), `.pi/` + `.claude/` + `.codex/` config (placeholder templates), `site/`, `scripts/`, `bin/publish-image`. |
+| `cli/lib/resolve.ts` | Cell→well resolver (`wellNameForCell`): the stored `well`, else `cells-<name>`. The single source of truth for the mapping. |
+| `dna/cells/base/` | The generic cell DNA baked into `cell-base` — `AGENTS.md`/`CLAUDE.md` (harness entrypoints), `SOUL.md`/`CELLS.md`/`TOOLS.md` (identity), `.pi/` + `.claude/` + `.codex/` config (placeholder templates), `site/`, `scripts/`, `bin/publish-image`. |
 | `dna/specials/mother/` | Mother — `.pi/prompts/cell-create.md` + `cell-destroy.md`, `.pi/skills/birth/`, `state/memory/`. |
 | `docs/birthing-ritual.html` | The ritual mother follows — one branch per harness: claude-code `c1`–`c7`, codex `x1`–`x7`, hermes `h1`–`h7` (plus the pi branch). |
 | `scripts/eval-birth.ts` | Targeted birth eval (one combo × N, asserts loudly). |
@@ -152,7 +146,7 @@ Restart any of them after editing its `.ts`: `launchctl kickstart -k gui/$(id -u
 
 ## DNA placeholders
 
-The generic egg ships these tokens; the birthing ritual substitutes them per-cell:
+The `cell-base` image ships these tokens; the birthing ritual substitutes them per-cell:
 
 | Placeholder | Becomes | Where |
 |---|---|---|
@@ -170,7 +164,7 @@ Wells's boot-admission gate (delivered welld 1.0.0, 2026-05-15) paces `create`/`
 
 - **Knob**: `WELL_MAX_CONCURRENT_BOOTS` (default 3) — boots in flight cap. Auto-collapses to 1 when committed vCPU exceeds `WELL_BOOT_VCPU_RATIO × host_cores` (default ratio 2).
 - **Observability**: `curl -s http://127.0.0.1:7878/healthz | jq .boot_gate` → `{inFlight, waiting, limit}`. `waiting > 0` is expected under load — boots queue and self-pace. Not a fault.
-- **Cells doesn't pace its own bakes** — fires them at the gate and lets wells pace. After making the pool pure-hibernated, the gate auto-relaxed (less CPU pressure).
+- **Cells doesn't pace its own boots** — fires `create`/`wake` at the gate and lets wells pace. A birth burst self-paces; parked boots just wait.
 
 ## Comms with the wells team
 
