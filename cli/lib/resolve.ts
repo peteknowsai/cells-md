@@ -4,13 +4,14 @@
 //
 // Mapping rules (matches what cmdShell/cmdTui/cmdTalk have done all along):
 //   - special (mother, pulse)  → `cells-<name>`     (deterministic well)
-//   - pool-hatched cell        → pool entry's well_name (egg-<hex>)
+//   - hatched cell             → `egg-<hatched_from>` (the hex id IS the
+//                                well-name suffix)
 //   - no registry entry        → return the input name (caller decides)
 //   - registry entry, no hatched_from
 //     and not special           → return the input name (legacy / pre-pool cells)
 
 import { readFile } from "node:fs/promises";
-import { REGISTRY_PATH, POOL_PATH } from "./paths";
+import { REGISTRY_PATH } from "./paths";
 
 // Reads here are intentionally tolerant (readJson swallows a missing or
 // corrupt file): wellNameForCell degrades to returning the input name
@@ -22,11 +23,6 @@ type RegistryCell = {
   hatched_from?: string;
   special?: boolean;
   harness?: string;
-};
-
-type PoolMember = {
-  id: string;
-  well_name: string;
 };
 
 async function readJson<T>(path: string, fallback: T): Promise<T> {
@@ -44,7 +40,9 @@ export async function wellNameForCell(name: string): Promise<string> {
   if (!cell) return name;
   if (cell.special) return `cells-${name}`;
   if (!cell.hatched_from) return name;
-  const pool = await readJson<{ members?: PoolMember[] }>(POOL_PATH, {});
-  const member = (pool.members ?? []).find((e) => e.id === cell.hatched_from);
-  return member?.well_name ?? name;
+  // A hatched cell lives in well `egg-<hatched_from>`: birth generates the
+  // well name `egg-<hex>` and stores the hex as `hatched_from`, so the binding
+  // reconstructs directly. Pre-2026-06-17 this indirected through pool.json;
+  // with the egg pool gone (cold-boot substrate) there's no file to read.
+  return `egg-${cell.hatched_from}`;
 }
