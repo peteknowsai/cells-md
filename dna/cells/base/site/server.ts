@@ -45,7 +45,7 @@ import {
 import { TalkPool } from "../lib/talk-pool";
 import { MIME, collectSiteFiles } from "../lib/site-files";
 import {
-  buildJobScript, extractJobResult, freshWatchState, jobPaths, jobUnitName,
+  buildJobScript, CANCEL_REASON, extractJobResult, freshWatchState, isTerminal, jobPaths, jobUnitName,
   JOBS_DIR, parseJobRecord, parseMainPid, sessionTargetHonorable, summarize, watchdogTick,
   WATCH_TICK_MS, type JobRecord, type WatchState,
 } from "../lib/jobs";
@@ -531,6 +531,28 @@ async function killJobRun(rec: JobRecord): Promise<void> {
   // Legacy (pre-unit setsid) records only: the pid/pgid IS the handle.
   if (rec.pgid) { try { process.kill(-rec.pgid, "SIGKILL"); } catch {} }
   if (rec.pid) { try { process.kill(rec.pid, "SIGKILL"); } catch {} }
+}
+
+// Operator cancel (`cells jobs cancel <id>`). The kill switch we lacked the
+// night three identical drain jobs thrashed a 1 GB cell and relaunched on
+// every wake: nothing flipped their records terminal, so adoptJobs kept
+// re-dispatching them. This is that missing transition.
+//
+// Order matters. Delete from runningJobs FIRST so a watchdog tick landing in
+// killJobRun's ~3s wait can't read the still-"running" record, see the dead
+// process, and fire a "vanished → retry" against the very job we're killing
+// (the watchdog's own kill path deletes synchronously for the same reason).
+// Then kill the live run and finalize as failed/cancelled — finalizeJob writes
+// the terminal record, re-adds to unnotifiedDones, and sends job_done so the
+// DO view clears too. adoptJobs then treats it as inert forever.
+async function cancelJob(rec: JobRecord): Promise<void> {
+  runningJobs.delete(rec.id);
+  await killJobRun(rec);
+  // It may have finished on its own inside the kill window — honor a real
+  // completion over the cancel (same guard the watchdog uses).
+  const p = jobPaths(JOBS_DIR, rec.id);
+  if (existsSync(p.exit)) { finalizeFromFiles(rec); return; }
+  finalizeJob(rec, { ok: false, text: "cancelled by operator", reason: CANCEL_REASON, exitCode: null });
 }
 
 // A `job` frame arrived over the bridge. Durable-write-then-ack: the job
@@ -1407,6 +1429,25 @@ const server = Bun.serve({
           timer,
         });
       });
+    }
+
+    // POST /jobs/<id>/cancel — operator kill switch (`cells jobs cancel`).
+    // Bearer-gated like the rest of /jobs. Flips the record terminal, kills the
+    // live run, and acks the DO; idempotent on an already-terminal job.
+    if (req.method === "POST" && url.pathname.startsWith("/jobs/") && url.pathname.endsWith("/cancel")) {
+      if (!SECRET || req.headers.get("authorization") !== `Bearer ${SECRET}`) {
+        return new Response("unauthorized", { status: 401 });
+      }
+      const id = url.pathname.slice("/jobs/".length, -"/cancel".length);
+      if (!JOB_ID_RE.test(id)) return new Response("bad job id", { status: 400 });
+      const rec = loadJobRecord(id);
+      if (!rec) return new Response("unknown job", { status: 404 });
+      if (isTerminal(rec.status)) {
+        return Response.json({ id, status: rec.status, reason: rec.reason ?? "", cancelled: false, note: "already terminal" });
+      }
+      await cancelJob(rec);
+      const after = loadJobRecord(id) ?? rec;
+      return Response.json({ id, status: after.status, reason: after.reason ?? "", cancelled: true });
     }
 
     // /jobs — job-lane status, read from the durable job files. /jobs/<id>

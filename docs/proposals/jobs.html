@@ -78,6 +78,27 @@ cells jobs delta-market
 </section>
 
 <section>
+  <h2>Cancelling a job</h2>
+  <pre><code>cells jobs &lt;cell&gt; cancel &lt;job-id&gt;
+✓ cancelled 01KVCB1D... — now failed: cancelled (operator). It won't relaunch on wake.</code></pre>
+  <p>The kill switch the lane shipped without. The durable record under
+  <code>/root/state/jobs/&lt;id&gt;.json</code> is what <code>adoptJobs</code> re-reads on every
+  well-site boot — so a job that was merely <code>pkill</code>'d, with its record left at
+  <code>running</code>, gets re-watched and the watchdog respawns it on the next wake. (Caught live
+  when three identical "drain the queue" jobs thrashed a 1&nbsp;GB cell and kept resurrecting across
+  a cold-stop&rarr;wake.) Without a cancel, clearing them meant hand-editing job files on the cell.</p>
+  <p>Cancel is the missing terminal transition. <code>POST /jobs/&lt;id&gt;/cancel</code> on the
+  cell-local supervisor: <strong>delete from the watchdog first</strong> (so a tick landing inside the
+  ~3s kill window can't fire a "vanished&nbsp;&rarr;&nbsp;retry" against the job being cancelled),
+  kill the run (unit&nbsp;+&nbsp;tmux socket), then <code>finalizeJob</code> stamps
+  <code>failed</code>&nbsp;/&nbsp;<code>reason: cancelled (operator)</code> and acks the DO over the
+  existing <code>job_done</code> path. A terminal record is inert: <code>adoptJobs</code> never
+  relaunches it. The command wakes a sleeping cell first — the record lives on the cell's filesystem,
+  so the transition has to happen there. Idempotent on an already-terminal job; honors a real
+  completion that lands inside the kill window.</p>
+</section>
+
+<section>
   <h2>Path of a job</h2>
   <ol>
     <li><strong>Submit (Mac, &lt;1s):</strong> <code>cells run &lt;name&gt; "&lt;task&gt;"</code>

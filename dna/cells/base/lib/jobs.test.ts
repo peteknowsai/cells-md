@@ -7,8 +7,10 @@
 import { describe, expect, test } from "bun:test";
 import {
   buildJobScript,
+  CANCEL_REASON,
   extractJobResult,
   freshWatchState,
+  isTerminal,
   jobPaths,
   jobUnitName,
   leashLimitTicks,
@@ -152,6 +154,28 @@ describe("transient units", () => {
     for (const bad of ["", "0", "1", "abc", "MainPID="]) {
       expect(parseMainPid(bad)).toBeNull();
     }
+  });
+});
+
+describe("cancel", () => {
+  test("isTerminal: a cancel no-ops on done/failed, acts on queued/running", () => {
+    // The cancel route short-circuits on terminal records (idempotent) and
+    // adoptJobs treats them as inert — both lean on this one predicate.
+    expect(isTerminal("done")).toBe(true);
+    expect(isTerminal("failed")).toBe(true);
+    expect(isTerminal("queued")).toBe(false);
+    expect(isTerminal("running")).toBe(false);
+  });
+  test("a cancel lands as a failed record carrying the operator reason", () => {
+    // finalizeJob stamps status=failed + reason=CANCEL_REASON; round-tripping
+    // through parseJobRecord proves adoptJobs will read it back as terminal.
+    const cancelled = parseJobRecord(JSON.stringify({
+      id: "01JXTEST01", created_at: "2026-06-18T00:00:00Z", status: "failed",
+      harness: "claude-code", timeout_seconds: 3600, attempts: 2, reason: CANCEL_REASON,
+    }));
+    expect(cancelled).not.toBeNull();
+    expect(isTerminal(cancelled!.status)).toBe(true);
+    expect(cancelled!.reason).toBe(CANCEL_REASON);
   });
 });
 

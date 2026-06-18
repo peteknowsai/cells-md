@@ -5,6 +5,24 @@ Newest at top. Clear an item when it's done (git history keeps the record).
 
 ---
 
+## Jobs lane: `adoptJobs` flushes all queued jobs concurrently on wake
+
+On every well-site boot, `adoptJobs()` (dna/cells/base/site/server.ts) iterates
+every `queued` record and calls `startJobAttempt` on each with no concurrency
+gate — N queued jobs all spawn at once. Caught 2026-06-17 when three identical
+"drain the pendingZeros queue" jobs woke together on a 4 vCPU / 1 GB cell
+(zero-delta-co-market) and swap-thrashed it to load 23–32; none finished. The
+right fix for that *workflow* is upstream — burst-y per-event work should
+accumulate in a product-side queue and be drained by the agent on a pulse
+heartbeat (≤1 drain in flight), not fired as one `cells run` per event. So this
+is a latent footgun with **no current customer**: it only bites a cell that
+genuinely wakes with 2+ queued heavy jobs. If such a workload appears, the cheap
+backstop is a soft per-cell cap (or RAM-aware admission) in `adoptJobs` /
+`handleJobFrame` — queue beyond the cap instead of spawning. `cells jobs cancel`
+(shipped) handles the cleanup half; this is the prevention half. Don't build a
+coalesce-key/dedup layer for it — that's machinery for a burst the heartbeat
+model deletes at the source.
+
 ## A cell's worker can lag the jobs lane → `cells run` now self-heals it
 
 A `cells run` job is rejected if the cell's `<cell>.cells.md` Worker predates
