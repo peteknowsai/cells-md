@@ -1571,6 +1571,10 @@ async function isWellServing(wellName: string): Promise<boolean> {
 
 async function cmdJobs(cellName: string, rest: string[]): Promise<void> {
   await requireCell(cellName);
+  // `cells jobs <cell> cancel <job-id>` — operator kill switch. Routed here
+  // (rather than a top-level verb) to keep the cell-first shape `cells jobs
+  // <cell> …` consistent with the list/detail forms.
+  if (rest[0] === "cancel") { await cmdJobsCancel(cellName, rest.slice(1)); return; }
   const jobId = rest.find((a) => !a.startsWith("--")) ?? "";
   // The id is interpolated into a root `bash -lc` on the cell (the awake
   // path curls http://127.0.0.1:8080/jobs/<id>). Constrain it to the job-id
@@ -1648,6 +1652,65 @@ async function cmdJobs(cellName: string, rest: string[]): Promise<void> {
     console.log(`${rec.id}  ${String(rec.status).padEnd(7)}  ${rec.created_at}${rec.summary ? `  ${String(rec.summary).split("\n")[0].slice(0, 100)}` : ""}`);
   }
   console.log(`\n(cell asleep — DO status view; wake it for full detail + results)`);
+}
+
+// `cells jobs <cell> cancel <job-id>` — the operator kill switch. A wedged or
+// unwanted job's durable record under /root/state/jobs/ is what adoptJobs
+// re-reads on every wake, so neutralizing it requires the cell's own
+// supervisor: this hits the cell-local POST /jobs/<id>/cancel, which flips the
+// record terminal, kills the live run, and acks the DO. The cell must be awake
+// to touch its filesystem — wake it if it's asleep (the cancel route deletes
+// the job from the watchdog before killing, so the wake's own re-adoption
+// can't race a retry against the very job we're cancelling).
+async function cmdJobsCancel(cellName: string, rest: string[]): Promise<void> {
+  const jobId = rest.find((a) => !a.startsWith("--")) ?? "";
+  if (!jobId) { console.error("usage: cells jobs <cell> cancel <job-id>"); process.exit(1); }
+  if (!/^[0-9A-Za-z][0-9A-Za-z_-]{7,39}$/.test(jobId)) {
+    console.error(`! invalid job id: ${jobId}`); process.exit(1);
+  }
+  const wellName = await wellNameForCell(cellName);
+  if (!wellName) { console.error(`! no well bound to ${cellName}`); process.exit(1); }
+
+  if (!(await isWellServing(wellName))) {
+    console.log(`waking ${cellName} to cancel ${jobId}…`);
+    await $`well start -s ${wellName}`;
+    // well "running" precedes the supervisor's :8080 by a beat — poll /health.
+    let up = false;
+    for (let i = 0; i < 40; i++) {
+      const probe = await wellExecCapture(
+        wellName,
+        `curl -s -o /dev/null -w '%{http_code}' --max-time 3 http://127.0.0.1:8080/health`,
+        { user: "root" },
+      );
+      if (probe.ok && probe.stdout.trim() === "200") { up = true; break; }
+      await new Promise((r) => setTimeout(r, 1000));
+    }
+    if (!up) { console.error(`! ${cellName} woke but its supervisor never answered :8080`); process.exit(1); }
+  }
+
+  // No -f: let curl exit 0 on a 4xx so we can read the body + status code and
+  // report "unknown job" / "already terminal" precisely.
+  const r = await wellExecCapture(
+    wellName,
+    `curl -s -w '\\nHTTP:%{http_code}' -X POST --max-time 10 ` +
+      `-H "Authorization: Bearer $CELLS_PROXY_SECRET" http://127.0.0.1:8080/jobs/${jobId}/cancel`,
+    { user: "root" },
+  );
+  if (!r.ok) { console.error(`! could not reach ${cellName}'s supervisor: ${r.stderr.trim() || "no response"}`); process.exit(1); }
+  const lines = r.stdout.split("\nHTTP:");
+  const code = (lines.pop() ?? "").trim();
+  const body = lines.join("\nHTTP:");
+  if (code !== "200") {
+    console.error(`! cancel rejected (HTTP ${code}): ${body.trim().slice(0, 200)}`); process.exit(1);
+  }
+  let j: any = null;
+  try { j = JSON.parse(body); } catch {}
+  if (!j) { console.error(`! unexpected response: ${body.trim().slice(0, 200)}`); process.exit(1); }
+  if (j.cancelled === false) {
+    console.log(`• ${jobId} is already ${j.status}${j.reason ? ` (${j.reason})` : ""} — nothing to cancel`);
+  } else {
+    console.log(`✓ cancelled ${jobId} — now ${j.status}${j.reason ? `: ${j.reason}` : ""}. It won't relaunch on wake.`);
+  }
 }
 
 // `cells verify` — fan out a decision to N peers in parallel, return their

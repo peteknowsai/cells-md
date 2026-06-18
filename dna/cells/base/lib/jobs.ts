@@ -13,6 +13,19 @@
 
 export type JobStatus = "queued" | "running" | "done" | "failed";
 
+// Reason stamped on a record when an operator cancels it (`cells jobs cancel`).
+// A cancel reuses the "failed" terminal status — adoptJobs treats any terminal
+// record as inert, so the distinction is purely for the human reading `cells
+// jobs`. Keeping it a constant means the CLI and supervisor agree on the label.
+export const CANCEL_REASON = "cancelled (operator)";
+
+// A record in a terminal state never spawns again: adoptJobs skips it, the
+// watchdog drops it, and a cancel on it is a no-op. The single predicate both
+// the supervisor's cancel route and the boot-time adopter reason about.
+export function isTerminal(status: JobStatus): boolean {
+  return status === "done" || status === "failed";
+}
+
 // The durable job record — /root/state/jobs/<id>.json, the source of truth.
 // state/ is a `cells refresh` never-path, so these survive both refresh
 // pushes and rollbacks.
