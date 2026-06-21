@@ -104,6 +104,7 @@ cells project delta-market none
     <li><code>cli/agents-ui.tsx</code> — the Ink view. Render + navigate + retag + regroup inline; attach/talk/birth handed back to the launcher. Mirrors <code>birth-ui.tsx</code>'s render/unmount pattern.</li>
     <li><code>cli/cells.ts</code> — <code>cmdAgents</code> (the launcher loop), <code>cmdProject</code> (shell retag), the <code>--project</code> birth flag, and the <code>agents</code>/<code>fleet</code>/<code>project</code> dispatch.</li>
     <li><code>cli/lib/registry.ts</code> — the new optional <code>project</code> field on <code>Cell</code>.</li>
+    <li><code>cli/menubar/swift/main.swift</code> — the native macOS status item. Polls <code>cells.json</code> + <code>well&nbsp;list</code> every 10s; a <strong>Projects ▸</strong> submenu filters the list to selected projects (multi-select, persisted to <code>~/.cells/menubar/filter.json</code>; global operators stay pinned). <code>cells menubar install</code> builds + loads the LaunchAgent.</li>
   </ul>
 
   <h2 id="next">Not yet — the honest backlog</h2>
@@ -111,7 +112,6 @@ cells project delta-market none
     <li><strong>Live activity line per cell.</strong> A cell reports a one-line "what I'm doing" on each turn (written to its <code>&lt;name&gt;.cells.md</code> push state or a status file), so the cockpit can show it — and split <code>awake</code> into <em>working</em> vs <em>idle</em>. Agent-first: the cell pushes, the cockpit reads. No poller.</li>
     <li><strong>Peek panel.</strong> <code>space</code> currently round-trips into a full talk session; a true in-view peek (last output + reply box, like <code>claude agents</code>) would keep you in the grid.</li>
     <li><strong>Async birth.</strong> <code>n</code> blocks on the birth (mother serializes births anyway — one at a time). A "warming" row that fills in when the birth lands would match the dispatch-and-watch feel.</li>
-    <li><strong>Native menubar tie-in.</strong> Surface the same fleet/project state in the macOS menubar app.</li>
   </ul>
 
 </div>

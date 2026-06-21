@@ -2,8 +2,9 @@
 //
 // Polls ~/.cells/cells.json and `well list` every 10s
 // and renders a dropdown of cells. Click actions open Ghostty (shell, tui) or
-// the browser (site). Auto-launched by a LaunchAgent installed by
-// `cells menubar install`.
+// the browser (site). A "Projects" submenu filters the list to selected
+// projects (multi-select, persisted to ~/.cells/menubar/filter.json). Auto-
+// launched by a LaunchAgent installed by `cells menubar install`.
 
 import AppKit
 import Foundation
@@ -32,6 +33,7 @@ struct Cell: Decodable {
     let hatched_from: String?    // legacy marker, no longer used for resolution
     let special: Bool?
     let harness: String?
+    let project: String?         // fleet-grouping label (see `cells project`); "" / nil = unassigned
 }
 
 struct CellsFile: Decodable {
@@ -131,6 +133,43 @@ func loadWellStatuses() -> [String: WellStatus] {
     return map
 }
 
+// MARK: - Project filter
+//
+// Which projects to show. Persisted to ~/.cells/menubar/filter.json as
+// {"projects": ["zero","kdice"]} so a toggle survives restarts. Empty (or
+// missing) = show everything. The global operators (mother/pulse — special,
+// no project) stay pinned regardless of the filter; project-scoped cells
+// (including zero-mother/zero-pulse) obey it. See rebuildMenu for the rule.
+
+func filterPath() -> String { NSHomeDirectory() + "/.cells/menubar/filter.json" }
+
+struct FilterFile: Codable { var projects: [String] }
+
+func loadFilter() -> Set<String> {
+    guard let data = try? Data(contentsOf: URL(fileURLWithPath: filterPath())),
+          let f = try? JSONDecoder().decode(FilterFile.self, from: data) else { return [] }
+    return Set(f.projects.filter { !$0.isEmpty })
+}
+
+func saveFilter(_ set: Set<String>) {
+    let dir = NSHomeDirectory() + "/.cells/menubar"
+    try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+    let f = FilterFile(projects: set.sorted())
+    guard let data = try? JSONEncoder().encode(f) else { return }
+    try? data.write(to: URL(fileURLWithPath: filterPath()))
+}
+
+func toggleProject(_ p: String) {
+    var set = loadFilter()
+    if set.contains(p) { set.remove(p) } else { set.insert(p) }
+    saveFilter(set)
+}
+
+// A cell's project label, normalized: trimmed, "" for unassigned.
+func projectOf(_ cell: Cell) -> String {
+    return (cell.project ?? "").trimmingCharacters(in: .whitespaces)
+}
+
 // MARK: - Snapshot
 
 func snapshot() -> [EnrichedCell] {
@@ -191,6 +230,10 @@ final class CellAction: NSObject {
 // Strong references for closure-bearing targets — NSMenuItem.target is weak.
 var actionHolder: [CellAction] = []
 
+// Set by the app delegate so a filter toggle can force an immediate rebuild
+// instead of waiting for the next 10s timer tick.
+var requestRefresh: () -> Void = {}
+
 func menuItem(_ title: String, action: (() -> Void)? = nil, key: String = "") -> NSMenuItem {
     let item = NSMenuItem(title: title, action: nil, keyEquivalent: key)
     if let a = action {
@@ -232,29 +275,89 @@ func buildSubmenu(for entry: EnrichedCell) -> NSMenu {
     return m
 }
 
+// The "Projects" submenu: "Show all" plus a checkmark per known project.
+// Multi-select — checking zero AND kdice shows both. Toggling persists to
+// filter.json and forces an immediate rebuild.
+func buildProjectsSubmenu(allProjects: [String], filter: Set<String>) -> NSMenu {
+    let m = NSMenu()
+
+    let all = menuItem("Show all") { saveFilter([]); requestRefresh() }
+    all.state = filter.isEmpty ? .on : .off
+    m.addItem(all)
+
+    if !allProjects.isEmpty {
+        m.addItem(.separator())
+        for p in allProjects {
+            let item = menuItem(p) { toggleProject(p); requestRefresh() }
+            item.state = filter.contains(p) ? .on : .off
+            m.addItem(item)
+        }
+    }
+    return m
+}
+
 func rebuildMenu(_ menu: NSMenu, statusButton: NSStatusBarButton) {
     menu.removeAllItems()
     actionHolder.removeAll(keepingCapacity: true)
 
     let entries = snapshot()
-    let aliveCount = entries.filter { $0.status == .running }.count
+    let filter = loadFilter()
+
+    // Every project that has at least one (non-operator) cell, unioned with any
+    // currently-selected projects so a stale selection can still be unchecked.
+    var projSet = Set<String>()
+    for e in entries where !(e.cell.special ?? false) {
+        let p = projectOf(e.cell)
+        if !p.isEmpty { projSet.insert(p) }
+    }
+    projSet.formUnion(filter)
+    let allProjects = projSet.sorted()
+
+    // Global operators (special, no project — i.e. mother/pulse) are the
+    // fleet's core and always show. Project-scoped operators (zero-mother,
+    // zero-pulse) and regular cells obey the filter, so "only kdice" really
+    // means kdice. An empty filter shows everything.
+    let visible = entries.filter { e in
+        let p = projectOf(e.cell)
+        if e.cell.special == true && p.isEmpty { return true }
+        if filter.isEmpty { return true }
+        return filter.contains(p)
+    }
+    let aliveCount = visible.filter { $0.status == .running }.count
+
     // Monochrome icon + count. SF Symbol marked as a template image so AppKit
     // auto-tints it white/black to match the menubar appearance — no manual
-    // dark/light handling needed.
-    if let img = NSImage(systemSymbolName: "circle.hexagongrid.fill",
-                         accessibilityDescription: "cells") {
+    // dark/light handling needed. A filter funnel replaces the grid when a
+    // project filter is hiding cells.
+    let iconName = filter.isEmpty ? "circle.hexagongrid.fill"
+                                  : "line.3.horizontal.decrease.circle.fill"
+    if let img = NSImage(systemSymbolName: iconName, accessibilityDescription: "cells") {
         img.isTemplate = true
         statusButton.image = img
         statusButton.imagePosition = .imageLeading
     }
     statusButton.title = " \(aliveCount)"
 
-    if entries.isEmpty {
-        let empty = NSMenuItem(title: "no cells", action: nil, keyEquivalent: "")
+    // Project filter control — only shown once there's at least one project to
+    // filter by (or a filter is active). Lives at the top, doubling as a
+    // status line for the current filter.
+    if !allProjects.isEmpty || !filter.isEmpty {
+        let label = filter.isEmpty
+            ? "Projects: all"
+            : "Projects: \(filter.sorted().joined(separator: ", "))"
+        let projItem = NSMenuItem(title: label, action: nil, keyEquivalent: "")
+        projItem.submenu = buildProjectsSubmenu(allProjects: allProjects, filter: filter)
+        menu.addItem(projItem)
+        menu.addItem(.separator())
+    }
+
+    if visible.isEmpty {
+        let msg = filter.isEmpty ? "no cells" : "no cells in filter"
+        let empty = NSMenuItem(title: msg, action: nil, keyEquivalent: "")
         empty.isEnabled = false
         menu.addItem(empty)
     } else {
-        for e in entries {
+        for e in visible {
             let item = NSMenuItem(title: e.cell.name, action: nil, keyEquivalent: "")
             // Compose the row: cell name in the default menu font, then a
             // small green " running" suffix when the well is up. Hibernated
@@ -300,6 +403,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         let menu = NSMenu()
         statusItem.menu = menu
+        // Let filter toggles force an immediate rebuild rather than waiting for
+        // the next timer tick.
+        requestRefresh = { [weak self] in self?.refresh() }
         refresh()
         // Tick on the main run loop so menu updates happen on the main thread.
         timer = Timer.scheduledTimer(withTimeInterval: REFRESH_SECONDS, repeats: true) { [weak self] _ in
