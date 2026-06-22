@@ -6,6 +6,7 @@ import {
   classifyOAuthRoute,
   anthropicRouteVerdict,
   gateCacheNeedsReload,
+  isInvalidGrant,
 } from "./proxy-oauth";
 
 // Convenience: the block shape ensurePreamble emits for the preamble.
@@ -280,5 +281,24 @@ describe("gateCacheNeedsReload", () => {
 
   it("miss within the floor → no reload (bounds unknown-caller disk reads)", () => {
     expect(gateCacheNeedsReload(T, T + 500, false, TTL, FLOOR)).toBe(false);
+  });
+});
+
+describe("isInvalidGrant", () => {
+  it("detects Anthropic's 400 invalid_grant body (the one that failed silently)", () => {
+    const body = '{"error": "invalid_grant", "error_description": "Refresh token not found or invalid"}';
+    expect(isInvalidGrant(body)).toBe(true);
+  });
+
+  it("detects invalid_grant regardless of JSON shape / casing", () => {
+    expect(isInvalidGrant('{"error":"INVALID_GRANT"}')).toBe(true);
+    expect(isInvalidGrant("error=invalid_grant&foo=bar")).toBe(true);
+  });
+
+  it("does not flag transient errors as revocation", () => {
+    expect(isInvalidGrant('{"error": "server_error"}')).toBe(false);
+    expect(isInvalidGrant("Too Many Requests")).toBe(false);
+    expect(isInvalidGrant("<unreadable>")).toBe(false);
+    expect(isInvalidGrant("")).toBe(false);
   });
 });

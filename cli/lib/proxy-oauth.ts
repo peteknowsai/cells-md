@@ -116,3 +116,13 @@ export function gateCacheNeedsReload(
   if (!nameFound && age > missFloorMs) return true; // maybe just-registered
   return false;
 }
+
+// A dead OAuth refresh token comes back as an `invalid_grant` error — but the
+// HTTP status is provider-specific: Anthropic returns 400, others 401. Match
+// the error code in the response body so a revoked token is recognized
+// regardless of status and never mistaken for a transient error. (Anthropic's
+// 400 invalid_grant slipping through a 401-only check is what let a revoked
+// token fail silently for 2.5 days.)
+export function isInvalidGrant(body: string): boolean {
+  return /invalid_grant/i.test(body);
+}
