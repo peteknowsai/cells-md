@@ -46,6 +46,17 @@ if [ -n "\${CELLS_PROXY_SECRET:-}" ]; then
   export OPENAI_CODEX_API_KEY="\$CELLS_PROXY_SECRET"
   unset ANTHROPIC_API_KEY
 fi
+# Disable Claude Code's self-updater fleet-wide. The agent runs as root (root-
+# cell migration), so claude's interactive auto-updater CAN write the root-owned
+# npm global — and it does: during an in-cell claude-code birth it self-updates
+# the baked native install (e.g. 2.1.185 → .186) into /usr/lib/node_modules,
+# leaving NO \`claude\` on PATH and a half-installed package. That bricked every
+# claude-code birth. cells owns claude's version via cell-base rebakes, not in-
+# cell self-update — so turn the updater off everywhere claude starts. Set as an
+# env var (present at process startup, the only reliable point) AND in the DNA
+# .claude/settings.json env block.
+export DISABLE_AUTOUPDATER=1
+
 # /root/bin on PATH for the cells CLI. Bun is installed for root at
 # /root/.bun (= \$HOME/.bun, since the agent runs as root) and also ships
 # system-wide at /usr/local/bin/bun from ubuntu-base. /root/.local/bin is

@@ -4,7 +4,8 @@
   "skipDangerousModePermissionPrompt": true,
   "env": {
     "ANTHROPIC_BASE_URL": "https://proxy.cells.md",
-    "ANTHROPIC_CUSTOM_HEADERS": "x-cell-name: __NAME__"
+    "ANTHROPIC_CUSTOM_HEADERS": "x-cell-name: __NAME__",
+    "DISABLE_AUTOUPDATER": "1"
   },
   "hooks": {
     "PostToolUse": [
