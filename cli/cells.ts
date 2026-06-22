@@ -23,6 +23,7 @@ import {
 import { ulid } from "./shared/agent-envelope";
 import { needsSeal } from "./lib/hibernate-ready";
 import { SECRETS_PATH, readSecret } from "./lib/secrets";
+import { runAnthropicLogin, mergeAnthropicAuth } from "./lib/anthropic-login";
 import {
   validateCellName,
   isValidCellName,
@@ -183,7 +184,7 @@ const RESERVED_NAMES = new Set([
   "schedule-host-bridge", "unschedule-host-bridge",
   "refresh-extensions", "heartbeat", "pulse",
   "channel", "channels",
-  "menubar",
+  "menubar", "login",
 ]);
 
 type SelectOption = {
@@ -2314,6 +2315,87 @@ async function cmdUnpin(name: string) {
   console.log(`✓ ${name} unpinned (auto-sleep ${DEFAULT_AUTO_SLEEP_SECONDS}s)`);
 }
 
+// ───── login ─────
+//
+// `cells login` re-auths the fleet's Anthropic Max OAuth — the credential the
+// proxy reads from ~/.pi/agent/auth.json. This is THE recovery path when the
+// proxy goes `needs_login`/`degraded` (a revoked/expired refresh token). It
+// runs the same OAuth flow pi's `/login` does, writes auth.json, clears the
+// needs-login flag, restarts the proxy, and verifies health is green — so the
+// operator never has to know the credential lives behind "pi".
+const AUTH_JSON_PATH = join(homedir(), ".pi/agent/auth.json");
+const PROXY_LAUNCH_LABEL = "com.pete.cells-proxy";
+
+async function cmdLogin(args: string[]): Promise<void> {
+  const provider = (args[0] ?? "anthropic").toLowerCase();
+  if (provider === "codex" || provider === "openai-codex") {
+    console.log("cells login currently does Anthropic (Claude Max) only.");
+    console.log("For codex, run `/login codex` inside `cells pi` for now.");
+    return;
+  }
+  if (provider !== "anthropic" && provider !== "claude" && provider !== "max") {
+    console.error(`unknown provider '${provider}' — usage: cells login [anthropic]`);
+    process.exit(1);
+  }
+
+  const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+  let creds;
+  try {
+    creds = await runAnthropicLogin({
+      openBrowser: (url) => { Bun.spawn(["open", url], { stdout: "ignore", stderr: "ignore" }); },
+      promptManual: () => rl.question("> "),
+      log: (m) => console.log(m),
+    });
+  } catch (e) {
+    console.error(`\n✗ login failed: ${e instanceof Error ? e.message : e}`);
+    process.exit(1);
+  } finally {
+    rl.close();
+  }
+
+  // Merge into auth.json (preserving codex etc.) and write atomically at 0600.
+  let existing: Record<string, unknown> | null = null;
+  if (existsSync(AUTH_JSON_PATH)) {
+    try { existing = JSON.parse(await readFile(AUTH_JSON_PATH, "utf-8")); }
+    catch (e) { console.error(`✗ existing auth.json unreadable: ${e}`); process.exit(1); }
+  }
+  await mkdir(dirname(AUTH_JSON_PATH), { recursive: true });
+  const tmp = `${AUTH_JSON_PATH}.tmp`;
+  await writeFile(tmp, JSON.stringify(mergeAnthropicAuth(existing, creds), null, 2), { mode: 0o600 });
+  await rename(tmp, AUTH_JSON_PATH);
+  console.log(`✓ wrote fresh Anthropic token to ${AUTH_JSON_PATH}`);
+
+  // Clear the stale needs-login flag (login succeeded) so health/doctor heal.
+  const flag = join(homedir(), ".cells", "auth-needs-login");
+  if (existsSync(flag)) { await unlink(flag).catch(() => {}); }
+
+  // Restart the proxy so it drops the in-memory "revoked" state and re-reads
+  // the fresh token (the auto-refresh won't fire for hours given new headroom).
+  const uid = process.getuid?.() ?? 0;
+  console.log("Restarting the proxy…");
+  await Bun.spawn(["launchctl", "kickstart", "-k", `gui/${uid}/${PROXY_LAUNCH_LABEL}`], {
+    stdout: "ignore", stderr: "ignore",
+  }).exited;
+
+  // Verify health goes green.
+  let healthy = false;
+  for (let i = 0; i < 15; i++) {
+    await Bun.sleep(2000);
+    try {
+      const res = await fetch("https://proxy.cells.md/_proxy/health", { signal: AbortSignal.timeout(5000) });
+      const h: any = await res.json();
+      if (h?.anthropic?.expires_in_min > 0 && h?.anthropic?.needs_login === false) {
+        console.log(`✓ proxy green — Anthropic token valid for ~${Math.round(h.anthropic.expires_in_min / 60)}h, needs_login:false`);
+        healthy = true;
+        break;
+      }
+    } catch { /* proxy still restarting */ }
+  }
+  if (!healthy) {
+    console.log("⚠ token written, but proxy health didn't confirm green yet — check `cells doctor` in a minute.");
+  }
+}
+
 // ───── menubar ─────
 //
 // Native macOS status item, built from cli/menubar/swift/main.swift. No
@@ -2652,7 +2734,7 @@ async function cmdDoctor() {
   // 1. auth.json on disk
   const authPath = join(homedir(), ".pi/agent/auth.json");
   if (!existsSync(authPath)) {
-    console.log(`${red}✗ no ${authPath}${reset} — run pi /login`);
+    console.log(`${red}✗ no ${authPath}${reset} — run \`cells login\``);
     process.exit(1);
   }
   let auth: any;
@@ -2664,7 +2746,7 @@ async function cmdDoctor() {
   }
   const ant = auth.anthropic;
   if (!ant?.access || !ant?.refresh) {
-    console.log(`${red}✗ auth.json has no anthropic OAuth tokens${reset} — run pi /login`);
+    console.log(`${red}✗ auth.json has no anthropic OAuth tokens${reset} — run \`cells login\``);
     process.exit(1);
   }
   const remainingMin = Math.round((ant.expires - Date.now()) / 60000);
@@ -2677,7 +2759,7 @@ async function cmdDoctor() {
   const flagPath = join(homedir(), ".cells/auth-needs-login");
   if (existsSync(flagPath)) {
     const ts = (await readFile(flagPath, "utf-8")).trim();
-    console.log(`${red}⚠ auth-needs-login flag set at ${ts}${reset} — refresh token revoked, run pi /login`);
+    console.log(`${red}⚠ auth-needs-login flag set at ${ts}${reset} — refresh token revoked, run \`cells login\``);
   }
 
   // 3. Proxy health
@@ -8917,6 +8999,7 @@ switch (sub) {
   case "see":                await cmdSee(needName(rest, "see")); break;
   case "bake":               await cmdBake(parseBakeArgs(rest)); break;
   case "menubar":            await cmdMenubar(rest); break;
+  case "login":              await cmdLogin(rest); break;
   default:
     console.log("usage:");
     console.log("  cells pi                    open the mother Pi TUI (alias: cells talk mother)");
@@ -8954,6 +9037,7 @@ switch (sub) {
     console.log("  cells dream <name|mother|--all>  run dream consolidation on a cell, the mother, or all");
     console.log("  cells sync [name]           pull cell markdown into ~/Obsidian/cells/ (default: all + mother)");
     console.log("  cells doctor                inspect mother OAuth state + proxy health (run when cells act 401-y)");
+    console.log("  cells login                 re-auth the fleet's Anthropic Max OAuth (the proxy's token); run when doctor/health says needs_login");
     console.log("  cells shell <name>          drop into a bash shell on a cell (separate tmux from the agent; Ctrl+D exits)");
     console.log("  cells exec <name> [--] <cmd>  run a command as root on a cell, non-interactively (HOME=/root, cells-env sourced)");
     console.log("  cells secret set <cell[,…]> <KEY> [--from-env VAR|--from-file PATH|--stdin]");

@@ -23,7 +23,7 @@ do when something looks wrong.
 - On refresh-endpoint revocation (genuine — `401`, **or `400 invalid_grant`**,
   which is what Anthropic actually returns for a dead refresh token): a Mac
   notification fires and a flag file lands at `~/.cells/auth-needs-login`. Pete
-  `/login`s pi to recover; the next healthy refresh removes the flag.
+  runs **`cells login`** to recover; the next healthy refresh removes the flag.
 
 ## Background: how Anthropic OAuth works
 
@@ -186,9 +186,10 @@ see this often, something is wrong with the backoff logic.
 **3. `auth-needs-login` flag exists (or `last_refresh.outcome === "revoked"` /
 `needs_login: true` / `degraded: true` in proxy-health), doctor warns.**
 The refresh token has been genuinely revoked — reported whether Anthropic
-returns `401` or `400 invalid_grant`. Run pi `/login`, re-authorize Anthropic,
-fresh tokens land in `auth.json`. The proxy's next timer tick sees fresh tokens,
-succeeds, and removes the flag (or you can `rm ~/.cells/auth-needs-login`).
+returns `401` or `400 invalid_grant`. Run **`cells login`**: it runs the
+Anthropic OAuth in your browser, writes fresh tokens to `auth.json`, clears the
+flag, restarts the proxy, and verifies health is green — one command, no pi TUI.
+(`cells login` *is* the same OAuth flow pi's `/login` runs — `cli/lib/anthropic-login.ts`.)
 
 ### Manual refresh probe
 
@@ -205,8 +206,11 @@ curl -s -X POST https://platform.claude.com/v1/oauth/token \
 - HTTP 200 with `access_token` + `refresh_token` → all good.
 - HTTP 429 → rate-limited; wait 10 min and retry.
 - HTTP 401, **or HTTP 400 with `{"error":"invalid_grant"}`** → refresh token
-  revoked; `/login` needed. (Anthropic uses 400 invalid_grant in practice — the
+  revoked; run `cells login`. (Anthropic uses 400 invalid_grant in practice — the
   proxy treats both as revocation.)
+
+  ⚠️ This probe **consumes** the refresh token (it rotates on use). Don't run it
+  right after a fresh `cells login` — it'll invalidate the token you just minted.
 
 (Don't hammer this manually — it counts toward our rate-limit budget
 just like the proxy does.)
