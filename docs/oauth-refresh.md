@@ -20,9 +20,10 @@ do when something looks wrong.
   logic stays dormant.
 - On upstream `/v1/messages` 401: the proxy forces a refresh and
   retries the original request once.
-- On refresh-endpoint 401 (genuine revocation, ≈ months apart): a Mac
-  notification fires and a flag file lands at
-  `~/.cells/auth-needs-login`. Pete `/login`s pi when convenient.
+- On refresh-endpoint revocation (genuine — `401`, **or `400 invalid_grant`**,
+  which is what Anthropic actually returns for a dead refresh token): a Mac
+  notification fires and a flag file lands at `~/.cells/auth-needs-login`. Pete
+  `/login`s pi to recover; the next healthy refresh removes the flag.
 
 ## Background: how Anthropic OAuth works
 
@@ -100,9 +101,10 @@ Timer (every 5 min):
   if (expires_ms - now > 60m)   → skip
   → POST refresh_token to /v1/oauth/token
 
-  on 200: write new access+refresh atomically to auth.json
+  on 200: write new access+refresh atomically to auth.json; remove the flag
   on 429: blocked_until_ms = now + 10m, log
-  on 401: notify human, write ~/.cells/auth-needs-login flag, log
+  on revoked (401 OR any status whose body says invalid_grant):
+          notify human, write ~/.cells/auth-needs-login flag, log
   on other: log; next tick retries
 ```
 
@@ -157,7 +159,7 @@ diagnostic for "cells acting weird."
 |---|---|
 | `~/.pi/agent/auth.json` | OAuth access + refresh tokens (managed by proxy) |
 | `~/.cells/secrets.json`  | Shared secret for cells→proxy auth, plus OpenAI/DeepSeek keys |
-| `~/.cells/auth-needs-login` | Flag file: presence means refresh got 401, `/login` needed |
+| `~/.cells/auth-needs-login` | Flag file: presence means refresh saw a revocation (401 or 400 invalid_grant), `/login` needed. Removed automatically on the next healthy refresh. |
 | `cli/proxy.ts` | Refresh manager + Anthropic forwarder + dashboard |
 
 ## Operations
@@ -181,11 +183,12 @@ Anthropic is currently rate-limiting our refresh endpoint. Wait for
 `blocked_until` to pass; the next 5-min timer tick will retry. If you
 see this often, something is wrong with the backoff logic.
 
-**3. `auth-needs-login` flag exists, doctor warns about it.**
-The refresh token has been genuinely revoked. Run pi `/login`,
-re-authorize Anthropic, fresh tokens land in `auth.json`. The proxy's
-next timer tick will see fresh tokens, succeed, and the flag clears
-on its own (or you can `rm ~/.cells/auth-needs-login`).
+**3. `auth-needs-login` flag exists (or `last_refresh.outcome === "revoked"` /
+`needs_login: true` / `degraded: true` in proxy-health), doctor warns.**
+The refresh token has been genuinely revoked — reported whether Anthropic
+returns `401` or `400 invalid_grant`. Run pi `/login`, re-authorize Anthropic,
+fresh tokens land in `auth.json`. The proxy's next timer tick sees fresh tokens,
+succeeds, and removes the flag (or you can `rm ~/.cells/auth-needs-login`).
 
 ### Manual refresh probe
 
@@ -201,7 +204,9 @@ curl -s -X POST https://platform.claude.com/v1/oauth/token \
 
 - HTTP 200 with `access_token` + `refresh_token` → all good.
 - HTTP 429 → rate-limited; wait 10 min and retry.
-- HTTP 401 → refresh token revoked; `/login` needed.
+- HTTP 401, **or HTTP 400 with `{"error":"invalid_grant"}`** → refresh token
+  revoked; `/login` needed. (Anthropic uses 400 invalid_grant in practice — the
+  proxy treats both as revocation.)
 
 (Don't hammer this manually — it counts toward our rate-limit budget
 just like the proxy does.)
@@ -235,3 +240,33 @@ takeaways, captured here so we don't re-derive them under pressure:
    cleared.** Anthropic's rate-limit windows are around 10 min. If
    things heal without intervention in roughly that window, that's
    the signature.
+
+## Lessons learned (2026-06-22 silent-revocation incident)
+
+The proxy's Anthropic refresh token went invalid ~Jun-19. For **2.5 days**
+every Max/claude-code birth failed (zero-mother stalled on its first model turn
+→ watchdog SIGKILL) with **zero signal** — `/_proxy/health` said
+`needs_login: false`. Codex was unaffected, so only Max-harness cells were hit.
+
+1. **Revocation is `400 invalid_grant`, not `401`.** This doc (and the code)
+   assumed a revoked refresh token returns 401. Anthropic actually returns
+   **HTTP 400** with `{"error":"invalid_grant"}`. The 401-only branch let it
+   fall through to a generic "log and retry" error — no flag, no notification,
+   no `needs_login`. Fix: match the `invalid_grant` error code in the body
+   regardless of status (`isInvalidGrant`, `cli/lib/proxy-oauth.ts`), and treat
+   both providers' refreshers the same way.
+
+2. **The flag was write-once, never cleared.** The success path wrote a
+   `~/.cells/auth-needs-login.cleared` sibling that nothing reads — the real
+   flag persisted, so once tripped, `needs_login` would have stuck true forever.
+   Fix: a healthy refresh now `unlink`s the flag. Loud on break, silent on heal.
+
+3. **Health must derive from state, not just a flag file.** `needs_login` now
+   also reflects `last_refresh.outcome === "revoked"`, and `/_proxy/health`
+   exposes a `degraded` boolean per provider — so a failed refresh shows up the
+   instant it happens, not only after a side-effect write lands.
+
+4. **Separate OAuth stores cut both ways (see lesson 4 above).** The proxy
+   reading pi's `auth.json` — not Claude Code's live credential — is *by design*
+   (single refresh owner). The bug was never the separation; it was that the
+   divergence was **silent**. The fix makes it loud, not shared.

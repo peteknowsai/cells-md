@@ -47,7 +47,7 @@
 //   - See docs/oauth-refresh.md for the full architecture, contract, and
 //     ops playbook.
 
-import { readFile, writeFile, rename, mkdir } from "node:fs/promises";
+import { readFile, writeFile, rename, mkdir, unlink } from "node:fs/promises";
 import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
@@ -58,7 +58,7 @@ import { isValidCellName } from "./lib/cell-name";
 import { pulseOwner } from "./lib/pulse-owner";
 import { loadRegistry, loadRegistrySafe, saveRegistry, withRegistryLock, isStaleWarming, type Cell, type Registry } from "./lib/registry";
 import { cellRows, type CellRow } from "./lib/status-rows";
-import { ensurePreamble, classifyOAuthRoute, anthropicRouteVerdict, gateCacheNeedsReload } from "./lib/proxy-oauth";
+import { ensurePreamble, classifyOAuthRoute, anthropicRouteVerdict, gateCacheNeedsReload, isInvalidGrant } from "./lib/proxy-oauth";
 import { latestOpusFrom, normalizeAnthropicModel } from "./lib/model-normalizer";
 import { firstByteTimeoutStream, requestWantsStream } from "./lib/stream-timeout";
 
@@ -188,7 +188,7 @@ const AUTH_NEEDS_LOGIN_FLAG = join(homedir(), ".cells", "auth-needs-login");
 
 let blockedUntilMs = 0;
 let inFlight: Promise<void> | null = null;
-let lastRefresh: { at: number; outcome: "ok" | "429" | "401" | "error"; detail?: string } | null = null;
+let lastRefresh: { at: number; outcome: "ok" | "429" | "revoked" | "error"; detail?: string } | null = null;
 
 // Cache of valid client bearers. Always includes SHARED_SECRET (cells use this
 // via ANTHROPIC_AUTH_TOKEN). Also includes the *current* anthropic OAuth access
@@ -262,15 +262,17 @@ async function performRefresh(): Promise<void> {
     return;
   }
 
-  if (res.status === 401) {
-    lastRefresh = { at: Date.now(), outcome: "401" };
-    notifyHumanForLogin().catch(() => {});
-    console.error(`[refresh] 401 — refresh token rejected. /login required.`);
-    return;
-  }
-
   if (!res.ok) {
     const body = await res.text().catch(() => "<unreadable>");
+    // Revocation arrives as 401 OR 400 invalid_grant (Anthropic uses the
+    // latter). Either way the only recovery is /login, so treat both as
+    // "revoked": notify + drop the flag so it can never go silent.
+    if (res.status === 401 || isInvalidGrant(body)) {
+      lastRefresh = { at: Date.now(), outcome: "revoked", detail: `${res.status}: ${body.slice(0, 200)}` };
+      notifyHumanForLogin().catch(() => {});
+      console.error(`[refresh] refresh token revoked (${res.status}). /login required.`);
+      return;
+    }
     lastRefresh = { at: Date.now(), outcome: "error", detail: `${res.status}: ${body.slice(0, 200)}` };
     console.error(`[refresh] unexpected ${res.status}: ${body.slice(0, 200)}`);
     return;
@@ -289,10 +291,10 @@ async function performRefresh(): Promise<void> {
   };
   await atomicWriteAuth(newAuth);
   lastRefresh = { at: Date.now(), outcome: "ok" };
-  // Successful refresh clears any stale "needs login" flag.
-  await Bun.file(AUTH_NEEDS_LOGIN_FLAG).exists().then(async (e) => {
-    if (e) await Bun.write(AUTH_NEEDS_LOGIN_FLAG + ".cleared", `${new Date().toISOString()}\n`).catch(() => {});
-  }).catch(() => {});
+  // A healthy refresh heals the signal: remove the flag so doctor/health stop
+  // reporting needs_login (it reads the flag's mere existence — a sibling
+  // ".cleared" marker it never looks at left needs_login stuck true forever).
+  if (existsSync(AUTH_NEEDS_LOGIN_FLAG)) await unlink(AUTH_NEEDS_LOGIN_FLAG).catch(() => {});
   console.log(`[refresh] ok in ${Date.now() - startedAt}ms; access expires ${new Date(newAuth.anthropic.expires).toISOString()}`);
 }
 
@@ -345,7 +347,7 @@ const CODEX_NEEDS_LOGIN_FLAG = join(homedir(), ".cells", "codex-needs-login");
 
 let codexBlockedUntilMs = 0;
 let codexInFlight: Promise<void> | null = null;
-let lastCodexRefresh: { at: number; outcome: "ok" | "429" | "401" | "error"; detail?: string } | null = null;
+let lastCodexRefresh: { at: number; outcome: "ok" | "429" | "revoked" | "error"; detail?: string } | null = null;
 
 async function performCodexRefresh(): Promise<void> {
   if (Date.now() < codexBlockedUntilMs) {
@@ -394,15 +396,15 @@ async function performCodexRefresh(): Promise<void> {
     return;
   }
 
-  if (res.status === 401) {
-    lastCodexRefresh = { at: Date.now(), outcome: "401" };
-    notifyCodexLoginNeeded().catch(() => {});
-    console.error(`[codex-refresh] 401 — refresh token rejected. /login codex required.`);
-    return;
-  }
-
   if (!res.ok) {
     const body = await res.text().catch(() => "<unreadable>");
+    // Same revocation handling as anthropic: 401 or invalid_grant → /login.
+    if (res.status === 401 || isInvalidGrant(body)) {
+      lastCodexRefresh = { at: Date.now(), outcome: "revoked", detail: `${res.status}: ${body.slice(0, 200)}` };
+      notifyCodexLoginNeeded().catch(() => {});
+      console.error(`[codex-refresh] refresh token revoked (${res.status}). /login codex required.`);
+      return;
+    }
     lastCodexRefresh = { at: Date.now(), outcome: "error", detail: `${res.status}: ${body.slice(0, 200)}` };
     console.error(`[codex-refresh] unexpected ${res.status}: ${body.slice(0, 200)}`);
     return;
@@ -426,9 +428,7 @@ async function performCodexRefresh(): Promise<void> {
   };
   await atomicWriteAuth(newAuth);
   lastCodexRefresh = { at: Date.now(), outcome: "ok" };
-  await Bun.file(CODEX_NEEDS_LOGIN_FLAG).exists().then(async (e) => {
-    if (e) await Bun.write(CODEX_NEEDS_LOGIN_FLAG + ".cleared", `${new Date().toISOString()}\n`).catch(() => {});
-  }).catch(() => {});
+  if (existsSync(CODEX_NEEDS_LOGIN_FLAG)) await unlink(CODEX_NEEDS_LOGIN_FLAG).catch(() => {});
   console.log(
     `[codex-refresh] ok in ${Date.now() - startedAt}ms; access expires ${new Date(newAuth["openai-codex"]!.expires).toISOString()}`,
   );
@@ -734,24 +734,34 @@ async function handleApiProxy(req: Request): Promise<Response> {
   if (url.pathname === "/_proxy/health") {
     try {
       const { access, expiresMs } = await readAccessToken();
+      const antExpiresMin = Math.round((expiresMs - Date.now()) / 60000);
+      // needs_login is true if the flag is on disk OR the last refresh was a
+      // revocation — so health is honest the instant a refresh fails, not only
+      // after the flag write. degraded = unusable now (revoked, or access
+      // expired with no working refresh behind it).
+      const antNeedsLogin = existsSync(AUTH_NEEDS_LOGIN_FLAG) || lastRefresh?.outcome === "revoked";
       const anthropic = {
         access_prefix: access.slice(0, 20),
-        expires_in_min: Math.round((expiresMs - Date.now()) / 60000),
+        expires_in_min: antExpiresMin,
         last_refresh: lastRefresh,
         blocked_until: blockedUntilMs > Date.now() ? new Date(blockedUntilMs).toISOString() : null,
-        needs_login: existsSync(AUTH_NEEDS_LOGIN_FLAG),
+        needs_login: antNeedsLogin,
+        degraded: antNeedsLogin || antExpiresMin < 0,
       };
       let codex: Record<string, unknown> = { configured: false };
       try {
         const c = await readCodexAuth();
+        const codexExpiresMin = Math.round((c.expiresMs - Date.now()) / 60000);
+        const codexNeedsLogin = existsSync(CODEX_NEEDS_LOGIN_FLAG) || lastCodexRefresh?.outcome === "revoked";
         codex = {
           configured: true,
           access_prefix: c.access.slice(0, 20),
           account_id: c.accountId,
-          expires_in_min: Math.round((c.expiresMs - Date.now()) / 60000),
+          expires_in_min: codexExpiresMin,
           last_refresh: lastCodexRefresh,
           blocked_until: codexBlockedUntilMs > Date.now() ? new Date(codexBlockedUntilMs).toISOString() : null,
-          needs_login: existsSync(CODEX_NEEDS_LOGIN_FLAG),
+          needs_login: codexNeedsLogin,
+          degraded: codexNeedsLogin || codexExpiresMin < 0,
         };
       } catch (e) {
         codex = { configured: false, error: String(e) };
