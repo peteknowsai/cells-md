@@ -316,7 +316,7 @@ async function refreshIfNeeded(force = false): Promise<void> {
 }
 
 async function notifyHumanForLogin(): Promise<void> {
-  const msg = "OAuth refresh token revoked. Run /login in pi to recover.";
+  const msg = "OAuth refresh token revoked. Run `cells login` to recover.";
   // Mac notification — best effort; ignore if osascript not available.
   Bun.spawn(["osascript", "-e", `display notification "${msg}" with title "cells: auth needs attention"`], {
     stdout: "ignore",
