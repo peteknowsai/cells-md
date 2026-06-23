@@ -40,6 +40,7 @@ import { pulseOwner, projectScheduledCells } from "./lib/pulse-owner";
 import { loadPostworkSummary, removePostwork, type PostworkSummary } from "./lib/postwork";
 import { compileBrief, type BriefVocab } from "./lib/brief";
 import { REGISTRY_DIR } from "./lib/paths";
+import { defaultMemoryForBirth } from "./lib/well-memory";
 import {
   loadRegistry,
   mutateRegistry,
@@ -177,7 +178,7 @@ const RESERVED_NAMES = new Set([
   // Names that collide with tmux/well plumbing.
   "tmux", "shell", "agent", "pi", "sprite", "well", "localhost",
   // Names that collide with cells subcommands.
-  "create", "birth", "talk", "list", "sleep", "stop", "wake",
+  "create", "birth", "talk", "list", "sleep", "stop", "wake", "resize",
   "checkpoint", "destroy", "kill", "dream", "tui", "sync", "doctor",
   "schedule-pi-patches", "unschedule-pi-patches",
   "schedule-host-bridge", "unschedule-host-bridge",
@@ -2314,6 +2315,53 @@ async function cmdUnpin(name: string) {
   console.log(`✓ ${name} unpinned (auto-sleep ${DEFAULT_AUTO_SLEEP_SECONDS}s)`);
 }
 
+// `cells resize <name> --memory=<size>` — change a live cell's VM RAM.
+//
+// VZ.framework pins memorySize at boot, so there is no live grow: the well must
+// be stopped, the bundle config rewritten (welld PATCH /v1/wells/{name}), then
+// started — a few seconds of downtime. Disk + identity are preserved, so this
+// is strictly better than a re-birth. Use it when a cell outgrows its size
+// (e.g. a claude-code/Opus cell OOMing a 1GB box); set the birth default with
+// --memory or per-harness policy (lib/well-memory.ts) for new cells.
+async function cmdResize(name: string, args: string[]) {
+  const memFlag = args.find((a) => a.startsWith("--memory="));
+  const memory = memFlag?.slice("--memory=".length).trim();
+  if (!memory || !/^\d+(\.\d+)?\s*(M|G|MB|GB|MiB|GiB)?$/i.test(memory)) {
+    console.error(`usage: cells resize <name> --memory=<size>   (e.g. --memory=4GB)`);
+    process.exit(1);
+  }
+  await requireCell(name);
+  const wellName = await wellNameForCell(name);
+  const base = process.env.WELL_API_URL ?? "http://127.0.0.1:7878";
+  console.log(`resizing ${name} → ${memory} (VZ pins RAM at boot, so: stop → patch → start) …`);
+  // A HIBERNATING well 409s the resize — its saved RAM image pins the memory
+  // size, and a plain `well stop` won't discard it. Wake it first so a cold
+  // stop actually clears the saved state. No-op (ignored) if it's already
+  // running or cold-stopped.
+  await $`well start -s ${wellName}`.nothrow();
+  // Then cold-stop: welld refuses a resize on a running well (409,
+  // activity-detection — it won't yank a live guest).
+  await $`well stop -s ${wellName}`;
+  try {
+    const r = await fetch(`${base}/v1/wells/${encodeURIComponent(wellName)}`, {
+      method: "PATCH",
+      headers: {
+        Authorization: `Bearer ${await wellsToken()}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ memory }),
+    });
+    if (!r.ok) {
+      throw new Error(`welld PATCH memory failed: ${r.status} ${(await r.text()).slice(0, 200)}`);
+    }
+  } finally {
+    // Always bring it back up, even if the PATCH failed — never leave the
+    // operator with a stopped cell.
+    await $`well start -s ${wellName}`;
+  }
+  console.log(`✓ ${name} resized to ${memory} and restarted (disk + identity preserved)`);
+}
+
 // ───── menubar ─────
 //
 // Native macOS status item, built from cli/menubar/swift/main.swift. No
@@ -3034,6 +3082,7 @@ type CreateOpts = {
   slackChannel?: string;
   seed?: string;        // first message auto-sent post-birth (default: introduce-yourself)
   seedOff?: boolean;    // true if --seed=off — no seed greeting
+  memory?: string;      // --memory=<size> (e.g. "2GB"): VM RAM. Default is per-harness (claude-code gets more — see lib/well-memory); welld default otherwise.
   noPool?: boolean;     // deprecated no-op — birth is pool-only now (parsed for back-compat)
   project?: string;     // fleet-grouping label recorded in the registry (see `cells agents`)
   brief?: string;       // freeform brief (compiled to config + seed purpose); triggers preview
@@ -3089,6 +3138,15 @@ function parseCreateArgs(args: string[]): { name: string | undefined; opts: Crea
         process.exit(1);
       }
       opts.model = v as ModelKey;
+    } else if (a.startsWith("--memory=")) {
+      const v = a.slice("--memory=".length).trim();
+      // Sprites-shaped size string (welld validates precisely; this just
+      // catches obvious typos). e.g. "2GB", "512MB", "4G".
+      if (!/^\d+(\.\d+)?\s*(M|G|MB|GB|MiB|GiB)?$/i.test(v)) {
+        console.error(`bad --memory '${v}' — expected a size like 2GB, 4GB, or 512MB`);
+        process.exit(1);
+      }
+      opts.memory = v;
     } else if (a.startsWith("--extensions=")) {
       const v = a.slice("--extensions=".length);
       const parts = v ? v.split(",").map((s) => s.trim()).filter(Boolean) : [];
@@ -3513,7 +3571,15 @@ async function cmdCreate(name: string | undefined, opts: CreateOpts): Promise<vo
       // at bake time): public auth so the cell's /agent WS passes, and
       // firstboot identity injection (machine-id, hostname, ssh host keys)
       // re-runs on the clone and must complete before mother imprints.
-      await directWellCreate(wellName, { fromImage: "cell-base", env: await collectCellLlmEnv() });
+      await directWellCreate(wellName, {
+        fromImage: "cell-base",
+        env: await collectCellLlmEnv(),
+        // Per-harness VM RAM: claude-code cells grow RSS over a long session
+        // and OOM a 1GB box (kdice-opus). --memory overrides; pi/codex inherit
+        // welld's default. The cell-base image is baked at 1GB, but `memory`
+        // on create overrides it for the fork.
+        memory: opts.memory ?? defaultMemoryForBirth(opts.harness, opts.model),
+      });
       await setWellAuthPublic(wellName);
       await waitForCloudInit(wellName);
       await ensureWellHasIp(wellName);
@@ -3903,7 +3969,7 @@ async function cmdCreate(name: string | undefined, opts: CreateOpts): Promise<vo
 // directWellDestroy.
 async function directWellCreate(
   name: string,
-  opts: { fromImage: string; env?: Record<string, string> },
+  opts: { fromImage: string; env?: Record<string, string>; memory?: string },
 ): Promise<void> {
   const body: Record<string, unknown> = {
     name,
@@ -3912,6 +3978,9 @@ async function directWellCreate(
   if (opts.env && Object.keys(opts.env).length > 0) {
     body.env = opts.env;
   }
+  // welld sizes the VM from `memory` (sprites-shaped, e.g. "2GB"); omitting it
+  // takes welld's default. Overrides the forked image's baked size.
+  if (opts.memory) body.memory = opts.memory;
   // Note: pre-Piece-3 (2026-05-12) we passed hibernate_ready: true here to
   // trigger inline warming. Pi3 (2026-05-13) deleted that path — wells's
   // createWell no longer accepts the field. Use sealWell() after
@@ -8895,6 +8964,7 @@ switch (sub) {
   case "wake":       await cmdWake(needName(rest, "wake")); break;
   case "pin":        await cmdPin(needName(rest, "pin")); break;
   case "unpin":      await cmdUnpin(needName(rest, "unpin")); break;
+  case "resize":     await cmdResize(needName(rest, "resize"), rest); break;
   case "checkpoint": await cmdCheckpoint(needName(rest, "checkpoint")); break;
   case "kill":
   case "destroy":    await cmdDestroy(rest); break;
@@ -8935,6 +9005,7 @@ switch (sub) {
     console.log("                                     --channels=slack:staff   (bind the Slack channel to the cell's 'staff' session, not main)");
     console.log("                                     --slack-channel=C0123456789  (legacy: bind to existing channel by ID)");
     console.log("                                     --seed=<text>            (first message auto-sent post-birth; default greeting on, --seed=off disables)");
+    console.log("                                     --memory=<size>          (VM RAM, e.g. 4GB; default per-harness — claude-code gets more)");
     console.log("                              no flags = interactive TUI; any flag = non-interactive (defaults fill the rest)");
     console.log("  cells talk <name> [msg]     interactive bridge chat (no msg) or one-shot (with msg).");
     console.log("                              Reply streams in this terminal AND mirrors to Slack — same session as Slack.");
@@ -8950,6 +9021,7 @@ switch (sub) {
     console.log("  cells sleep <name>          hibernate a cell — releases VM RAM, wakes on inbound traffic");
     console.log("  cells stop <name>           cold-stop a cell — explicit reset/recovery (use sleep for normal pause)");
     console.log("  cells wake <name>           wake a hibernated or stopped cell");
+    console.log("  cells resize <name> --memory=<size>   change a cell's VM RAM (stop→patch→start; e.g. --memory=4GB)");
     console.log("  cells checkpoint <name>     snapshot a cell's filesystem");
     console.log("  cells dream <name|mother|--all>  run dream consolidation on a cell, the mother, or all");
     console.log("  cells sync [name]           pull cell markdown into ~/Obsidian/cells/ (default: all + mother)");
