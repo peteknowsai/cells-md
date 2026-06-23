@@ -11,6 +11,10 @@ describe("CELLS_ENV_SH_BODY — rendered shim", () => {
     expect(CELLS_ENV_SH_BODY).toContain("for _sf in /etc/cells.secrets.d/*");
   });
 
+  test("disables Claude Code's auto-updater (it bricks claude-code births — bumps the baked native install into a broken npm global)", () => {
+    expect(CELLS_ENV_SH_BODY).toContain("export DISABLE_AUTOUPDATER=1");
+  });
+
   test("app-secret block is sourced BEFORE the proxy-secret re-export (collision guarantee)", () => {
     const appIdx = CELLS_ENV_SH_BODY.indexOf("/etc/cells.secrets.d");
     const proxyIdx = CELLS_ENV_SH_BODY.indexOf("ANTHROPIC_OAUTH_TOKEN");

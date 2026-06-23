@@ -5,6 +5,26 @@ Newest at top. Clear an item when it's done (git history keeps the record).
 
 ---
 
+## Wells `ubuntu-base` ships an old npm `claude` that shadows the native install
+
+Surfaced 2026-06-22 while fixing the claude-code-birth brick (the auto-updater
+fix, this same change). The wells `ubuntu-base` image has changed since the
+Jun-17 cell-base bake: it now ships `claude` as an **old npm global**
+(`/usr/bin/claude` → `@anthropic-ai/claude-code@2.1.148`). A fresh `cells bake`
+inherits it, and the bake leaves the newer **native** install
+(`~/.local/share/claude/versions/2.1.186`) **without its `~/.local/bin/claude`
+symlink** — so the old npm 2.1.148 wins on PATH. claude still *works* (verified:
+`claude --print` returns), so births are unblocked, but cells run an old version
+instead of the clean native layout healthy old-base cells have (native 2.1.185
+on `~/.local/bin/claude`, no `/usr/bin/claude` at all).
+
+This is **substrate-entangled**: the `/usr/bin/claude` npm install comes from
+`ubuntu-base`, not from cells (`provisionCellInWell` never installs claude). The
+right fix is wells's — `ubuntu-base` should ship the native installer (or none,
+letting cells own it) — OR a cells-side bake step that runs a clean
+`claude install latest` so the native symlink wins. Raised with the wells team
+2026-06-22. Don't paper over it with a PATH hack before the base image is sorted.
+
 ## Jobs lane: `adoptJobs` flushes all queued jobs concurrently on wake
 
 On every well-site boot, `adoptJobs()` (dna/cells/base/site/server.ts) iterates
