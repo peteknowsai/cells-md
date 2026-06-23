@@ -7,9 +7,9 @@
     "postinstall": "bash scripts/apply-pi-patches.sh"
   },
   "devDependencies": {
-    "@mariozechner/pi-ai": "^0.72.0",
-    "@mariozechner/pi-coding-agent": "^0.72.0",
-    "@mariozechner/pi-tui": "^0.72.0",
+    "@earendil-works/pi-ai": "^0.79.0",
+    "@earendil-works/pi-coding-agent": "^0.79.0",
+    "@earendil-works/pi-tui": "^0.79.0",
     "@sinclair/typebox": "^0.34.49",
     "@types/bun": "latest"
   }

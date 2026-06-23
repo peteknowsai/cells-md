@@ -37,58 +37,76 @@ update_one() {
   local h="$1"
   case "$h" in
     pi)
-      # cell-base bakes pi as @mariozechner/pi-coding-agent (the last release before the
-      # upstream rename) at /usr/bin/pi via npm --prefix /usr. This step makes
-      # /usr/bin/pi the renamed @earendil-works build — WITHOUT removing the
-      # @mariozechner package files.
+      # cell-base now bakes @earendil-works/pi-coding-agent directly (the upstream
+      # @mariozechner → @earendil-works rename, settled 2026-05-07). A freshly-
+      # forked cell therefore already has a current /usr/bin/pi at fork. This step
+      # only (a) keeps a LIVE cell current between bakes, and (b) migrates any
+      # pre-rename cell (still baked @mariozechner) onto @earendil-works.
       #
-      # Why not `npm uninstall @mariozechner` (the old behavior): bundled pi
-      # extensions (pi-web-access) import @mariozechner/pi-coding-agent, and
-      # they're installed host-provided (NOT declared deps), so they resolve
-      # @mariozechner by node parent-walk. When pi — now @earendil, living in
-      # /usr/lib — resolves those imports from its OWN location, the only copy it
-      # can reach is /usr/lib/node_modules/@mariozechner. The old uninstall
-      # deleted exactly that, leaving a dangling
-      # .../@mariozechner/pi-coding-agent/dist/cli/file-processor.js that
-      # intermittently ENOENT'd ~23s into a multi-tool job (homezero, 2026-06-13).
+      # NON-DESTRUCTIVE — the load-bearing change (Zero, 2026-06-22): never
+      # `rm -f /usr/bin/pi`. The old approach removed the bin first, then ran a
+      # multi-minute `npm install` (node-gyp native build), leaving /usr/bin/pi
+      # ABSENT for 9-16 min and racing birth's Phase B to `exit 127 / pi: command
+      # not found`. Instead install with `--force`: npm overwrites the `pi` bin in
+      # place (atomic symlink swap) whether the incumbent is @mariozechner or
+      # @earendil — there is no absent window.
       #
-      # Both packages ship a `pi` bin, so a plain `npm install @earendil` EEXISTs
-      # on /usr/bin/pi. Free just the bin symlink (not the package) and install
-      # @earendil over it: @earendil owns the bin, @mariozechner's library files
-      # stay put for the extensions to resolve. Verified on a fresh cell —
-      # @mariozechner resolves from the /usr/lib pi anchor again post-swap.
+      # IDEMPOTENT + skip-if-current: if /usr/bin/pi already resolves into
+      # @earendil-works at the registry-latest version, skip the reinstall so a
+      # just-baked cell (and every 30-min steward sweep) doesn't redo the node-gyp
+      # compile. We never `npm uninstall @mariozechner` — on an old cell its libs
+      # stay put for any bundled extension that parent-walk-resolves them; a clean
+      # @earendil cell simply has none, so there is nothing to keep.
       #
       # set -o pipefail in the REMOTE shell so a failed npm install isn't masked
-      # by the `| tail` exit status (the outer pipefail doesn't reach inside
-      # `bash -lc`). A masked failure would let postwork report OK with pi stale.
-      # Each well-exec failure MUST propagate via `|| return 1` — with `set -e`
-      # dropped (so the best-effort dormant loop can continue past a flake), the
-      # function's exit status would otherwise be whatever its LAST command
-      # returned. The `rm -f /usr/bin/pi` here makes a masked npm failure
-      # actively dangerous (binary removed, not replaced), so guard it explicitly.
-      echo "updating pi on $CELL_WELL (→ @earendil-works, keeping @mariozechner libs) ..."
-      well exec -s "$CELL_WELL" -- bash -lc "set -o pipefail; sudo bash -c 'rm -f /usr/bin/pi; npm --prefix /usr install -g @earendil-works/pi-coding-agent' 2>&1 | tail -10" \
-        || { echo "PI-INSTALL-FAIL: @earendil install failed on $CELL_WELL — /usr/bin/pi may be missing" >&2; return 1; }
-      # Confirm the install actually produced a runnable pi (the rm+install could
-      # report ok yet leave no usable binary) — the @mariozechner check below is
-      # NOT a proxy for this (it tests the RETAINED lib, present regardless).
+      # by the `| tail` exit status; the `|| return 1` propagates it (the dormant
+      # loop runs without set -e, so the function's status would otherwise be the
+      # last command's).
+      echo "updating pi on $CELL_WELL (→ @earendil-works, non-destructive) ..."
+      well exec -s "$CELL_WELL" -- bash -lc '
+        set -o pipefail
+        want=$(npm view @earendil-works/pi-coding-agent version 2>/dev/null || true)
+        real=$(readlink -f "$(command -v pi)" 2>/dev/null || true)
+        have=$(pi --version 2>/dev/null | grep -oE "[0-9]+\.[0-9]+\.[0-9]+" | head -1 || true)
+        if printf "%s" "$real" | grep -q "@earendil-works/pi-coding-agent" && [ -n "$want" ] && [ "$have" = "$want" ]; then
+          echo "PI-SKIP: /usr/bin/pi already @earendil-works $have (latest) — no reinstall"
+        else
+          echo "PI-UPGRADE: have=${have:-none} via=${real:-none} -> @earendil-works@${want:-latest}"
+          sudo npm --prefix /usr install -g --force @earendil-works/pi-coding-agent@latest 2>&1 | tail -15
+        fi' \
+        || { echo "PI-INSTALL-FAIL: @earendil-works install failed on $CELL_WELL — pi may be stale" >&2; return 1; }
+      # Confirm a runnable pi (install could report ok yet leave no usable binary).
       well exec -s "$CELL_WELL" -- bash -lc "command -v pi >/dev/null && pi --version >/dev/null 2>&1 && echo PI-BIN-OK" \
         || { echo "PI-BIN-FAIL: /usr/bin/pi not runnable after install on $CELL_WELL" >&2; return 1; }
-      # The reinstall lands a PRISTINE pi-ai — the proxy baseUrl, fallback-chain,
-      # codex, and adaptive-thinking patches are gone. Reapply them or an
-      # Anthropic-on-Max cell silently reverts to direct api.anthropic.com (and,
-      # with the paid key now stripped, breaks). apply-pi-patches.sh searches
-      # both npm scopes, so it patches @earendil and the retained @mariozechner.
+      # pi 0.79+ (the @earendil rename) gates project .pi/settings.json behind a
+      # workspace-trust decision; a non-interactive cell path (pi --print / jobs /
+      # talk / heartbeat) resolves UNTRUSTED by default, so pi would silently
+      # IGNORE the cell's own extensions/modelChain/provider/thinking. Set the
+      # GLOBAL defaultProjectTrust=always (merge-preserving). New cells bake this
+      # in via DNA's .pi/agent/settings.json, but `cells refresh` deliberately
+      # never rewrites .pi/agent/ (NEVER_PATHS), so the steward sweep must plant
+      # it on pre-rename cells. base64-piped to dodge nested-quoting; idempotent.
+      echo "ensuring pi project-trust (defaultProjectTrust=always) on $CELL_WELL ..."
+      PI_TRUST_B64=$(printf '%s' 'set -e
+d="${PI_CODING_AGENT_DIR:-/root/.pi/agent}"
+f="$d/settings.json"
+mkdir -p "$d"
+if [ -s "$f" ] && jq -e . "$f" >/dev/null 2>&1; then
+  jq ". + {defaultProjectTrust: \"always\"}" "$f" > "$f.tmp" && mv "$f.tmp" "$f"
+else
+  printf "%s\n" "{\"defaultProjectTrust\": \"always\"}" > "$f"
+fi
+chown root:root "$f"' | base64 | tr -d '\n')
+      well exec -s "$CELL_WELL" -- bash -lc "echo $PI_TRUST_B64 | base64 -d | sudo bash" \
+        || { echo "PI-TRUST-FAIL: could not set defaultProjectTrust on $CELL_WELL" >&2; return 1; }
+      # A fresh install lands a PRISTINE pi-ai — the proxy baseUrl, codex, and
+      # adaptive-thinking patches are gone. Reapply or an Anthropic-on-Max cell
+      # silently reverts to direct api.anthropic.com. apply-pi-patches.sh searches
+      # both scopes, so it patches @earendil (and any retained @mariozechner libs);
+      # idempotent, so it is a cheap no-op on the PI-SKIP path.
       echo "re-applying pi patches on $CELL_WELL ..."
       well exec -s "$CELL_WELL" -- bash -lc "set -o pipefail; sudo bash /root/scripts/apply-pi-patches.sh 2>&1 | tail -5" \
         || { echo "PI-PATCH-FAIL: apply-pi-patches.sh failed on $CELL_WELL — pi may revert to direct api.anthropic.com" >&2; return 1; }
-      # Verify the exact failure mode is closed: the file that ENOENT'd
-      # (@mariozechner/pi-coding-agent's file-processor.js) still resolves from
-      # pi's own /usr/lib location after the swap. Deterministic — no model call,
-      # no flakiness. Loud failure beats a silently-broken multi-tool path.
-      echo "verifying bundled-extension package resolution on $CELL_WELL ..."
-      well exec -s "$CELL_WELL" -- bash -lc "[ -f /usr/lib/node_modules/@mariozechner/pi-coding-agent/dist/cli/file-processor.js ] && echo PI-PKG-OK" \
-        || { echo "PI-PKG-FAIL: @mariozechner libs missing after swap — bundled extensions (pi-web-access) may ENOENT mid-job on $CELL_WELL" >&2; return 1; }
       ;;
     claude-code)
       echo "updating claude-code on $CELL_WELL ..."
