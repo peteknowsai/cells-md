@@ -4182,8 +4182,8 @@ echo "bun: $(bun --version 2>&1 | head -1 || echo MISSING)"`,
   const piInstall = await wellExecCapture(
     wellName,
     `set -euo pipefail
-sudo npm install -g @mariozechner/pi-coding-agent
-sudo bash -lc 'export HOME=/root; cd /root && pi install -l npm:pi-web-access'
+sudo npm install -g @earendil-works/pi-coding-agent
+sudo bash -lc 'export HOME=/root; cd /root && pi install -l --approve npm:pi-web-access'
 echo "pi: $(sudo bash -lc 'export HOME=/root; pi --version' 2>&1 | head -1 || echo MISSING)"`,
   );
   if (!piInstall.ok) {
@@ -8415,12 +8415,12 @@ async function bakeRunBunInstall(name: string): Promise<void> {
 export PATH="$HOME/.bun/bin:/usr/local/bin:$PATH"
 cd /root
 bun install --frozen-lockfile
-sudo npm install -g @mariozechner/pi-coding-agent@latest
+sudo npm install -g @earendil-works/pi-coding-agent@latest
 # Sanity-check pi + pre-load the default extension. Both run under
 # sudo + HOME=/root so the extension lands in /root/.pi/ — the tree the
 # live cell reads. A bare invocation here runs as the well user and
 # would install pi-web-access to /home/well/.pi/, invisible to the cell.
-which pi >/dev/null && sudo bash -lc 'export HOME=/root; pi --version && pi install -l npm:pi-web-access'
+which pi >/dev/null && sudo bash -lc 'export HOME=/root; pi --version && pi install -l --approve npm:pi-web-access'
 chmod +x /root/bin/cells
 ln -sf /root/bin/cells ~/.local/bin/cells`);
   if (!r.ok) {

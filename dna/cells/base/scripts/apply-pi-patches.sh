@@ -32,11 +32,12 @@ fi
 # is the project root), the user's global bun cache, AND the system npm
 # global install paths (where wells's ubuntu-25.10-base ships pi as of
 # 2026-05-09 — pi pre-installed via `npm install -g`, not bun -g).
-# Both npm scopes: cell-base bakes @mariozechner/pi-coding-agent; the post-birth
-# harness update (scripts/update-cell-harness.sh) swaps it for the renamed
-# upstream @earendil-works/pi-coding-agent. Patches must apply to whichever
-# scope is present, or the proxy baseUrl + fallback patches silently vanish
-# after the update (a freshly-installed package is pristine).
+# Both npm scopes: cell-base now bakes the renamed upstream
+# @earendil-works/pi-coding-agent directly. Pre-rename live cells still carry
+# @mariozechner until the steward sweep (scripts/update-cell-harness.sh) migrates
+# them, so we keep searching both. Patches must apply to whichever scope is
+# present, or the proxy baseUrl + fallback patches silently vanish after any
+# (re)install (a freshly-installed package is pristine).
 SEARCH_ROOTS=(
   "./node_modules/@mariozechner"
   "$HOME/.bun/install/global/node_modules/@mariozechner"
