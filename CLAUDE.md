@@ -1,5 +1,11 @@
 # CLAUDE.md — working on the `cells` repo
 
+> **⚠️ LEGACY — cells and wells are retired (Pete, 2026-07-28).** This code is no
+> longer active; the fleet model was replaced by flue (HomeZero's agent runtime) and
+> the `~/Projects/wells` repo this file references no longer exists on disk. The repo
+> stays at this path only because LaunchAgents and hardcoded paths still point here.
+> Don't operate, extend, or ship from this repo; treat everything below as historical.
+
 This file is for an agent working **on the cells codebase** on Pete's Mac. It is not
 the prompt a cell runs with — that's `dna/cells/base/CELLS.md`.
 
